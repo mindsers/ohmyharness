@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.12.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.13.0`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -21,28 +21,25 @@ architecture is built for and not yet a thing anybody has done.
 
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
-This release is about a deletion you can check, and a name that cannot be a
-path. [`omh sNN rm`](docs/commands.md#omh-snn-rm--and-what-it-refuses-to-take-with-it)
-drops a session branch whose work is already on trunk under another sha — a
-squash merge — and names the commit it landed as, because a deletion justified
-by *it is already on trunk* is only checkable if omh says where. A squash that
-resolved a conflict, a difference that is only whitespace, and a read omh could
-not take all keep the branch, which is the one direction this is allowed to be
-wrong in.
+This release is about running the harnesses their makers ship now, and about
+Codex. Every pin moved to its current release — Claude Code 2.1.274, Codex
+0.154.0, oh-my-pi 18.2.3, opencode 1.18.31 — and each adapter was re-read
+against it, which found two claims the new releases broke: Claude Code's native
+builds search through `Bash`, so `graph-first` is named as dropped rather than
+shipped to fire on nothing, and opencode logs in with `/connect`.
 
-A **harness name is a name, not a path.** `..` in the word every command that
-names a harness takes — or in the `.harness` marker a session leaves on disk —
-could name an adapter file outside the catalogue, and omh loaded it: its
-`install` became a `RUN` line in a host `docker build` and its `bin` became the
-sandbox's argv. The rule is held by the field rather than checked at the door,
-so the credential directory keyed on it is the same rule — and a launch now
-mounts the credentials of the adapter it *resolved* rather than of the word
-that found it. A `--dry-run` launch writes nothing, where it used to seed the
-credential store before the flag was read. And a read omh could not take is
-named rather than answered as though it had looked: an unreadable catalogue
-disowned an editor omh ships, an unreadable credential directory started the
-agent logged out and exited 0, and an unreadable `worktrees/` made `omh s`
-print *no sessions* over sessions that were there.
+**Codex you can log in to, and see into.** The pinned Codex's only sign-in
+waited for a browser redirect inside the sandbox, where no browser arrives.
+[`omh auth codex`](docs/accounts.md#a-login-that-cannot-finish-in-a-sandbox)
+now takes a device code, or `--import` copies the login this machine already
+has — read in full before anything is written, and offered only where there is
+one to copy. Codex runs omh's hooks, rendered into the system layer it trusts
+without a hash, and `omh sNN` reads its rollouts for what the agent did. An
+[`account`](docs/accounts.md#keyed-by-harness-not-by-provider) can name one
+harness's login — `omh set account codex:work` — where it used to be one name
+every harness had to share. And two more reads that could not look now say
+so: an unreadable `worktrees/` no longer makes `omh s` print *no sessions*, and
+a graph entry `omh sNN rm` could not drop is no longer reported gone.
 
 [What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 
@@ -534,7 +531,7 @@ whether anything reads it. That gap is what `doctor` closes.
 | **`sbx` backend** | the spike ran (against `sbx` 0.39.0) and the backend was rewritten from what it measured — image delivery, the stage-and-symlink model for file mounts and guest paths, label-free session reuse. It is **opt-in** (`runtime = "sbx"`), and `auto` never picks it. What remains is the full live `omh doctor --harness claude` acceptance and a doctor row for its setup prerequisites; Docker is still the only end-to-end-verified runtime. |
 | **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](docs/design/decisions.md) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |
 | **`--dry-run` everywhere** | it runs everything and writes nothing on the commands that can answer it. `init` and the session verbs refuse the flag instead — each has to compute what it *would* do, and a preview that guessed would be worse than none. |
-| **Other harnesses** | `opencode`, `omp` and `codex` pass `doctor`, but only `claude` has been driven for real work. |
+| **Other harnesses** | `opencode`, `omp` and `codex` pass `doctor`, but only `claude` has been driven for real work. Codex's hooks and transcripts were measured against a stub model, not a logged-in session, and whether its own sandbox runs inside omh's container is not yet known. |
 
 Known rough edges: the graph store is shared across sessions of one repo, so an
 agent can query another session's graph (mitigated, not prevented);
