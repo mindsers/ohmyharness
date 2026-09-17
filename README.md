@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.13.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.13.1`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -40,6 +40,14 @@ harness's login — `omh set account codex:work` — where it used to be one nam
 every harness had to share. And two more reads that could not look now say
 so: an unreadable `worktrees/` no longer makes `omh s` print *no sessions*, and
 a graph entry `omh sNN rm` could not drop is no longer reported gone.
+
+**`0.13.1` fixes two launches 0.13.0 broke.** opencode died on start —
+`EACCES` creating `~/.local/state` under a directory the image had left to root
+— and Codex's interactive app could not save that it trusts `/work`, because
+omh mounted a file where Codex rewrites its own config. Codex now finds `/work`
+trusted and its config writable, and
+[`omh doctor`](docs/troubleshooting.md#omh-doctor) asks first whether the
+harness starts at all, which every other row it has would have missed.
 
 [What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 
