@@ -38,7 +38,7 @@ It is announced once, at launch, rather than silently swallowed:
 
 ```console
 $ omh new codex
-omh: codex on omh/s01 — dropped 2 hooks, 3 subagents (unsupported)
+codex on omh/s02 — dropped 0 commands, 0 subagents (unsupported); dropped hooks: graph-first (no `search` tool), graph-read (no `read` tool)
 ```
 
 The capability classes are: `rules`, `skills`, `mcp`, `commands`, `subagents`,

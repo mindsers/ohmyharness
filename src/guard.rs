@@ -881,6 +881,95 @@ mod rendered {
         );
     }
 
+    /// Every guard rendered for Codex, then run through `sh` the way Codex
+    /// runs a hook, against the payload Codex 0.154.0 sends for an
+    /// `apply_patch` — measured with a stub model making the call. The file is
+    /// only in the patch text, so this is also the proof that
+    /// `[capabilities.hooks.fields-by-tool.edit]` reads it out.
+    #[test]
+    fn every_guard_renders_and_blocks_on_codex() {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
+        let binding = adapter
+            .supports(Capability::Hooks)
+            .expect("codex has hooks");
+        let sources = vec![PathBuf::from(HOOKS)];
+        let doc = crate::render::document(
+            Capability::Hooks,
+            binding,
+            &sources,
+            &crate::render::RenderContext {
+                own: &crate::base::Own::default(),
+                repo: &crate::settings::RepoPolicy::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .unwrap();
+        for name in ["tdd-guard", "config-guard"] {
+            assert!(
+                !doc.dropped.iter().any(|d| d.name == name),
+                "{name}: expected to render, got dropped: {:?}",
+                doc.dropped
+            );
+        }
+        let table: toml::Table = toml::from_str(&doc.body).unwrap();
+        let commands: Vec<String> = table["hooks"]["PreToolUse"]
+            .as_array()
+            .expect("PreToolUse groups")
+            .iter()
+            .filter(|g| g.get("matcher").and_then(|m| m.as_str()) == Some("apply_patch"))
+            .flat_map(|g| g["hooks"].as_array().unwrap().clone())
+            .map(|h| h["command"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!commands.is_empty(), "no edit guard in {}", doc.body);
+
+        let dir = repo_with("foo.go", "foo_test.go");
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Update File: foo.go\n@@\n-x\n+package foo\n*** End Patch\n"
+            },
+        });
+        let denied = |dir: &Path| {
+            commands.iter().any(|command| {
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .current_dir(dir)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let _ = child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(payload.to_string().as_bytes());
+                let out = child.wait_with_output().unwrap();
+                assert!(
+                    out.status.success(),
+                    "guard exited {:?}: {}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                String::from_utf8_lossy(&out.stdout).contains(r#""permissionDecision":"deny""#)
+            })
+        };
+        assert!(
+            denied(dir.path()),
+            "an untouched test file must block on codex"
+        );
+
+        std::fs::write(dir.path().join("foo_test.go"), "changed").unwrap();
+        assert!(
+            !denied(dir.path()),
+            "a dirty test file must not block on codex"
+        );
+    }
+
     /// Registers every `pi.on(event, handler)` the module makes and invokes
     /// the one matching `event_name`, returning what the handler returned as
     /// JSON — or `THREW: …`. The same reasoning as `render.rs`'s opencode
@@ -925,14 +1014,17 @@ try {{
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// codex has no hooks capability at all (`adapters/codex.toml`), so the
-    /// launcher gives up the whole capability rather than naming one hook —
-    /// that path is exercised in `container.rs`. What belongs to this guard
-    /// specifically is that codex is not silently offered the option: there
-    /// is no `[capabilities.hooks]` table to render against.
+    /// A guard on Codex is a hook in the **system** layer, the one Codex runs
+    /// as managed. In `~/.codex/config.toml` it would run only once Codex had
+    /// recorded a `trusted_hash` for it — measured: the same hook fired from
+    /// `/etc/codex` and not from `~/.codex` — so a guard there would be
+    /// installed, reported, and never consulted.
     #[test]
-    fn codex_has_no_hooks_capability_to_render_against() {
+    fn codex_guards_live_where_codex_runs_them_untrusted() {
         let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
-        assert!(adapter.supports(Capability::Hooks).is_none());
+        let binding = adapter
+            .supports(Capability::Hooks)
+            .expect("codex has hooks");
+        assert_eq!(binding.path, "/etc/codex/config.toml");
     }
 }

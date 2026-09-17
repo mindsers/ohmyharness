@@ -328,14 +328,18 @@ than a plain property, so `$OMH_TOOL_FILE` needed a per-tool override —
 `[capabilities.hooks.fields-by-tool.edit]` in `adapters/omp.toml` — instead
 of the shared field map every other tool reads. Known gap: a single `edit`
 call can batch edits across several files, and `$OMH_TOOL_FILE` only ever
-names the first one a batched call touches. Dropped by name on codex, which
-has no hooks capability at all. A dropped guard is announced at launch,
-never silently downgraded to a nudge.
+names the first one a batched call touches. Codex (`permissionDecision:
+"deny"`) is the same shape in reverse: `apply_patch` carries the path only in
+the patch text, so `$OMH_TOOL_FILE` reads the first `*** Update File:` header —
+the same first-file gap — and a patch the model runs *through the shell*
+reaches hooks as `Bash`, which an `edit` guard does not see. Codex's hooks are
+rendered into `/etc/codex/config.toml`, the layer Codex runs without asking for
+a trusted hash. A dropped guard is announced at launch, never silently
+downgraded to a nudge.
 
 **Every hook's decision is logged**, not only a guard's. Whether a hook fired,
-stayed silent or refused, on every harness that can log at all (claude,
-opencode, omp — codex again excepted, for the same reason), is read back per
-session — see `omh sNN` in [commands.md](commands.md). `omh eject` carries
+stayed silent or refused, on every harness with hooks (claude, codex,
+opencode, omp), is read back per session — see `omh sNN` in [commands.md](commands.md). `omh eject` carries
 none of it.
 
 ## `[use]` — what this repo takes from your catalogue

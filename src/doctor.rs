@@ -1633,7 +1633,7 @@ pub fn checks(
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
                 Expect::Mentions(server_names(&sources, repo)?)
             }
-            Render::ClaudeSettings => Expect::NonEmptyFile,
+            Render::ClaudeSettings | Render::CodexHooks => Expect::NonEmptyFile,
             // A program gets a stronger check than a config file, not a weaker
             // one: that it parses, and that the hooks omh did not drop are in it.
             //

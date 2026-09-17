@@ -9302,6 +9302,58 @@ fn importing_hooks_writes_them_into_this_repo() {
     );
 }
 
+/// Codex keeps its hooks in `config.toml`, beside its MCP servers and its own
+/// trust records, as TOML tables in Claude Code's shape. Importing them reads
+/// that file — not as JSON — and leaves the rest of it alone.
+#[test]
+fn importing_codex_hooks_reads_its_toml() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"model = "gpt-5.5"
+
+[mcp_servers.docs]
+command = "npx"
+
+[[hooks.Stop]]
+hooks = [{ type = "command", command = "cargo test" }]
+
+[[hooks.PostToolUse]]
+matcher = "apply_patch"
+hooks = [{ type = "command", command = "cargo fmt" }]
+
+[hooks.state."user:PostToolUse:0:0"]
+trusted_hash = "sha256:abc"
+"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "codex",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let test = fx
+        .repo_hook("turn-end-cargo")
+        .expect("the Stop hook, imported");
+    assert!(test.contains("cargo test"), "got: {test}");
+    let fmt = fx
+        .repo_hook("after-tool-cargo")
+        .expect("the PostToolUse hook, imported");
+    assert!(
+        fmt.contains("cargo fmt") && fmt.contains("edit"),
+        "got: {fmt}"
+    );
+}
+
 /// **Copy, never move.** Adopting omh is not a migration somebody cannot back
 /// out of: the harness they were using keeps working exactly as it did.
 ///
@@ -9901,6 +9953,45 @@ fn a_build_asks_docker_to_remove_the_tags_it_replaced() {
 }
 
 // ── omh eject ───────────────────────────────────────────────────────────────
+
+/// A path outside both the checkout and the harness's home lands under
+/// `system/`, not under `home/`. Codex's hooks go in `/etc/codex/config.toml`;
+/// ejected to `home/etc/…` they read as a dotfile, and a dotfile at
+/// `~/etc/codex` is read by nothing.
+#[test]
+fn a_system_path_ejects_under_system() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors", "hooks"]);
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"demo":{"command":"demo-server"}}}"#,
+    )
+    .unwrap();
+    let used = sb.omh(&["use", "hooks", "config-guard"]);
+    assert!(
+        used.status.success(),
+        "{}",
+        String::from_utf8_lossy(&used.stderr)
+    );
+    let out = sb.home.join("ejected");
+
+    let ran = sb.omh(&["eject", "codex", "--to", out.to_str().unwrap()]);
+
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        out.join("system/etc/codex/config.toml").is_file(),
+        "codex's hooks under system/"
+    );
+    assert!(!out.join("home/etc").exists(), "and not as a dotfile");
+    assert!(
+        out.join("home/.codex/config.toml").is_file(),
+        "while its home config still lands under home/"
+    );
+}
 
 /// The exit. Write out the raw per-harness config and step aside.
 ///

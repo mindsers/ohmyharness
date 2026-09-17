@@ -145,6 +145,32 @@ pub fn document(
             doc.dropped = dropped;
             Ok(doc)
         }
+        Render::CodexHooks => {
+            let mut hooks = merge_hooks(sources, own, repo)?;
+            let mut dropped = suppressed_by_probe(&mut hooks, resolves);
+            // Codex rejects `additionalContext` at `Stop` as invalid output, so
+            // an injection there would reach nobody — and it is the binding's
+            // one template, so the binding cannot say so itself.
+            hooks.retain(|name, h| {
+                let speaks_at_turn_end =
+                    h.on == hook::Event::TurnEnd && matches!(h.action, hook::Action::Inject { .. });
+                if speaks_at_turn_end {
+                    dropped.push(hook::Dropped {
+                        name: name.clone(),
+                        wanted: "way to inject text at the end of a turn".into(),
+                    });
+                }
+                !speaks_at_turn_end
+            });
+            let (rendered, unspellable) = translate(&hooks, binding, tools, log)?;
+            dropped.extend(unspellable);
+            let rendered_hooks = rendered.keys().cloned().collect();
+            Ok(Document {
+                body: codex_hooks(&rendered, binding)?,
+                dropped,
+                rendered_hooks,
+            })
+        }
         Render::OmpPlugin => {
             let mut hooks = merge_hooks(sources, own, repo)?;
             let mut dropped = suppressed_by_probe(&mut hooks, resolves);
@@ -1283,6 +1309,120 @@ fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
     }))
 }
 
+/// [`parse_hooks`] for the document shape `format` names.
+///
+/// Codex's tables are Claude Code's JSON in TOML, so they are read into the
+/// same value and through the same reader — with the rest of `config.toml`
+/// (`mcp_servers`, `hooks.state`) left alone — and a command omh wrapped for
+/// Codex is unwrapped, so a round trip returns the hook and not the wrapper.
+pub fn parse_hooks_as(
+    format: Render,
+    raw: &str,
+    vocab: &hook::Vocabulary,
+) -> Result<(BTreeMap<String, hook::Hook>, Vec<hook::Dropped>)> {
+    match format {
+        Render::CodexHooks => {
+            let table: toml::Table = toml::from_str(raw).context("parsing codex config.toml")?;
+            let mut hooks = table
+                .get("hooks")
+                .and_then(toml::Value::as_table)
+                .cloned()
+                .unwrap_or_default();
+            // Codex's per-hook trust records, not hooks.
+            hooks.remove("state");
+            let mut json = serde_json::to_value(&hooks).context("reading codex hooks")?;
+            for group in json
+                .as_object_mut()
+                .into_iter()
+                .flat_map(|events| events.values_mut())
+                .filter_map(serde_json::Value::as_array_mut)
+                .flatten()
+            {
+                for handler in group
+                    .get_mut("hooks")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(command) = handler.get_mut("command") {
+                        if let Some(inner) = command.as_str().and_then(codex_unguard) {
+                            *command = inner.into();
+                        }
+                    }
+                }
+            }
+            parse_hooks(&serde_json::json!({ "hooks": json }).to_string(), vocab)
+        }
+        _ => parse_hooks(raw, vocab),
+    }
+}
+
+/// Codex's `[[hooks.<Event>]]` tables, each command inside [`codex_guard`].
+fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> Result<String> {
+    #[derive(Serialize)]
+    struct Handler<'a> {
+        r#type: &'a str,
+        command: String,
+    }
+    #[derive(Serialize)]
+    struct Group<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        matcher: Option<&'a str>,
+        hooks: Vec<Handler<'a>>,
+    }
+    #[derive(Serialize)]
+    struct Doc<'a> {
+        hooks: BTreeMap<&'a str, Vec<Group<'a>>>,
+    }
+    let turn_end = binding
+        .events
+        .get(&hook::Event::TurnEnd)
+        .map(String::as_str);
+    let mut doc = Doc {
+        hooks: BTreeMap::new(),
+    };
+    for h in hooks.values() {
+        doc.hooks.entry(&h.event).or_default().push(Group {
+            matcher: (!h.matcher.is_empty()).then_some(h.matcher.as_str()),
+            hooks: vec![Handler {
+                r#type: "command",
+                command: codex_guard(&h.command, Some(h.event.as_str()) == turn_end),
+            }],
+        });
+    }
+    toml::to_string(&doc).context("rendering codex hooks")
+}
+
+/// A hook command as Codex must run it.
+///
+/// **No exit status of 2.** Codex reads 2 as a verdict at every moment — it
+/// blocks a call, replaces a tool's output, and at `Stop` continues the turn,
+/// which it was measured doing 3,630 times until killed. omh's verdicts are
+/// JSON on stdout, so a 2 is only ever a command's own failure (`make` exits 2)
+/// and becomes a 1: a failed hook, which Codex reports and carries on from.
+///
+/// **At `Stop`, stdout goes to stderr.** Codex parses a `Stop` hook's stdout
+/// as a verdict and fails the hook on plain text, and the only thing omh sends
+/// there is a `run`'s own output. Everywhere else stdout is kept: an injection
+/// and a refusal *are* their stdout.
+///
+/// The command sits on lines of its own, so a trailing comment in it cannot
+/// swallow the status handling. [`codex_unguard`] is the inverse.
+fn codex_guard(command: &str, turn_end: bool) -> String {
+    let redirect = if turn_end { CODEX_STDERR } else { "" };
+    format!("(\n{command}\n){redirect}{CODEX_STATUS}")
+}
+
+const CODEX_STDERR: &str = " >&2";
+const CODEX_STATUS: &str = "; s=$?; [ \"$s\" -eq 2 ] && s=1; exit $s";
+
+/// The command [`codex_guard`] wrapped, or `None` for one omh did not write.
+fn codex_unguard(command: &str) -> Option<&str> {
+    let body = command.strip_prefix("(\n")?.strip_suffix(CODEX_STATUS)?;
+    let body = body.strip_suffix(CODEX_STDERR).unwrap_or(body);
+    body.strip_suffix("\n)")
+}
+
 /// Read a harness's own hook configuration back into omh's words.
 ///
 /// The inverse of [`claude_settings`], and the rule `parse` already follows for
@@ -1480,6 +1620,197 @@ mod tests {
     use super::*;
 
     use std::io::Write;
+
+    // ── codex ───────────────────────────────────────────────────────────────
+
+    fn codex() -> crate::adapter::Adapter {
+        crate::adapter::Adapter::find(
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters")),
+            "codex",
+        )
+        .unwrap()
+    }
+
+    /// Codex's hook document for `hooks`, rendered from a directory of them.
+    fn codex_document(hooks: &[(&str, &str)]) -> Document {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in hooks {
+            std::fs::write(dir.path().join(format!("{name}.json")), body).unwrap();
+        }
+        let adapter = codex();
+        document(
+            Capability::Hooks,
+            adapter.supports(Capability::Hooks).unwrap(),
+            &[dir.path().to_path_buf()],
+            &RenderContext {
+                own: &crate::base::Own::default(),
+                repo: &crate::settings::RepoPolicy::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// The commands a Codex document runs at `event`.
+    fn codex_commands(body: &str, event: &str) -> Vec<(Option<String>, String)> {
+        let table: toml::Table = toml::from_str(body).unwrap();
+        table["hooks"]
+            .get(event)
+            .and_then(|e| e.as_array())
+            .into_iter()
+            .flatten()
+            .flat_map(|group| {
+                let matcher = group
+                    .get("matcher")
+                    .and_then(|m| m.as_str())
+                    .map(String::from);
+                group["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |h| {
+                        assert_eq!(h["type"].as_str(), Some("command"));
+                        (matcher.clone(), h["command"].as_str().unwrap().to_string())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn run_codex_hook(command: &str) -> std::process::Output {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    }
+
+    /// `[[hooks.<Event>]]` tables, a `matcher` only where the hook narrows —
+    /// the shape Codex was measured running from `/etc/codex/config.toml`.
+    #[test]
+    fn codex_hooks_render_into_the_tables_codex_reads() {
+        let doc = codex_document(&[
+            (
+                "fmt",
+                r#"{"on":"after-tool","tools":["edit"],"run":"cargo fmt"}"#,
+            ),
+            ("tests", r#"{"on":"turn-end","run":"cargo test"}"#),
+        ]);
+        let after = codex_commands(&doc.body, "PostToolUse");
+        assert_eq!(after.len(), 1, "{}", doc.body);
+        assert_eq!(after[0].0.as_deref(), Some("apply_patch"));
+        assert!(after[0].1.contains("cargo fmt"), "{}", doc.body);
+        let stop = codex_commands(&doc.body, "Stop");
+        assert_eq!(stop.len(), 1, "{}", doc.body);
+        assert_eq!(stop[0].0, None, "no matcher on a hook that does not narrow");
+    }
+
+    /// Codex rejects `additionalContext` at `Stop` as invalid output, so the
+    /// text would reach nobody. Dropped by name, like any moment a harness
+    /// cannot speak at.
+    #[test]
+    fn an_injection_at_turn_end_is_dropped_on_codex() {
+        let doc = codex_document(&[("nudge", r#"{"on":"turn-end","inject":"hello"}"#)]);
+        let dropped: Vec<_> = doc.dropped.iter().filter(|d| d.name == "nudge").collect();
+        assert_eq!(dropped.len(), 1, "{:?}", doc.dropped);
+        assert!(
+            dropped[0].wanted.contains("end of a turn"),
+            "{:?}",
+            dropped[0]
+        );
+        assert!(codex_commands(&doc.body, "Stop").is_empty(), "{}", doc.body);
+    }
+
+    /// No Codex hook exits 2. Codex reads 2 as a verdict at every moment: it
+    /// blocks a call, replaces a tool's output — and at `Stop` it continues
+    /// the turn, which Codex was measured doing 3,630 times until killed.
+    /// `make` exits 2 on a failure, so a `run` of it would loop forever.
+    /// omh's own verdicts are JSON; a 2 is only ever an accident.
+    #[test]
+    fn a_codex_hook_never_exits_two() {
+        let doc = codex_document(&[
+            (
+                "before",
+                r#"{"on":"before-tool","tools":["shell"],"run":"exit 2"}"#,
+            ),
+            ("stop", r#"{"on":"turn-end","run":"exit 2"}"#),
+            ("other", r#"{"on":"after-tool","run":"exit 7"}"#),
+        ]);
+        for event in ["PreToolUse", "Stop"] {
+            let (_, command) = &codex_commands(&doc.body, event)[0];
+            assert_eq!(
+                run_codex_hook(command).status.code(),
+                Some(1),
+                "{event}: {command}"
+            );
+        }
+        let (_, command) = &codex_commands(&doc.body, "PostToolUse")[0];
+        assert_eq!(
+            run_codex_hook(command).status.code(),
+            Some(7),
+            "any other failure keeps its own status"
+        );
+    }
+
+    /// A `Stop` hook's stdout is parsed as a verdict, and plain text there
+    /// fails the hook. A `run` at `turn-end` — `cargo test` — prints plenty, so
+    /// its stdout goes to stderr, where Codex shows it and parses nothing.
+    #[test]
+    fn a_turn_end_run_prints_nothing_codex_would_parse() {
+        let doc = codex_document(&[("tests", r#"{"on":"turn-end","run":"echo ran"}"#)]);
+        let (_, command) = &codex_commands(&doc.body, "Stop")[0];
+        let out = run_codex_hook(command);
+        assert!(out.status.success(), "{command}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{command}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("ran"));
+    }
+
+    /// And an injection keeps its stdout, which *is* its protocol.
+    #[test]
+    fn a_codex_injection_still_speaks_on_stdout() {
+        let doc = codex_document(&[("nudge", r#"{"on":"session-start","inject":"hello"}"#)]);
+        let (_, command) = &codex_commands(&doc.body, "SessionStart")[0];
+        let out = run_codex_hook(command);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "hello");
+    }
+
+    /// Rendered for Codex, read back as the same hooks — the rule every hook
+    /// render follows, through the wrapper this one adds.
+    #[test]
+    fn codex_hooks_survive_a_round_trip() {
+        let hooks = [
+            ("tests", r#"{"on":"turn-end","run":"cargo test"}"#),
+            (
+                "fmt",
+                r#"{"on":"after-tool","tools":["edit"],"run":"cargo fmt"}"#,
+            ),
+            (
+                "sh",
+                r#"{"on":"before-tool","tools":["shell"],"run":"echo 'a | b'"}"#,
+            ),
+        ];
+        let doc = codex_document(&hooks);
+        let adapter = codex();
+        let vocab =
+            hook::Vocabulary::of(adapter.supports(Capability::Hooks).unwrap(), &adapter.tools)
+                .unwrap();
+        let (back, residue) = parse_hooks_as(Render::CodexHooks, &doc.body, &vocab).unwrap();
+        assert!(residue.is_empty(), "{residue:?}");
+        let recovered: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = back
+            .values()
+            .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
+            .collect();
+        let mine: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = hooks
+            .iter()
+            .map(|(n, b)| hook::Hook::parse(b, n).unwrap())
+            .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
+            .collect();
+        assert_eq!(recovered, mine);
+    }
 
     // ── reading a harness's hooks back ──────────────────────────────────────
 

@@ -657,7 +657,7 @@ pub(crate) fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
         let Ok(vocab) = hook::Vocabulary::of(binding, &adapter.tools) else {
             continue;
         };
-        let (found, residue) = match render::parse_hooks(&raw, &vocab) {
+        let (found, residue) = match render::parse_hooks_as(binding.render, &raw, &vocab) {
             Ok(v) => v,
             Err(e) => {
                 out.push(format!(
@@ -762,7 +762,7 @@ pub(crate) fn import_hooks(
 
     let vocab = hook::Vocabulary::of(binding, &adapter.tools)
         .with_context(|| format!("reading {harness}'s vocabulary backwards"))?;
-    let (found, residue) = render::parse_hooks(&raw, &vocab)?;
+    let (found, residue) = render::parse_hooks_as(binding.render, &raw, &vocab)?;
 
     let manifest = base::Manifest::load_dir(&paths.base())?;
     // Every hook name the manifest owns, whether or not its feature is on

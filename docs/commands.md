@@ -930,9 +930,10 @@ The transcript is mounted per session under `~/.omh`, so reading it never
 reaches into the container. A harness that does not record a transcript omh can
 read says **activity not recorded** rather than a fabricated empty session, and
 a transcript omh opens and cannot parse says **could not read** — never *0
-turns*. Cost is summed per model from a dated price table; a model omh has no
-price for reports its tokens and **cost unknown**, never `$0`. All of it is in
-`--json`.
+turns*. Claude Code's transcripts and Codex's rollouts are both read; for
+Codex, cached input counts once, as a cache read. Cost is summed per model from
+a dated price table; a model omh has no price for — every Codex model, today —
+reports its tokens and **cost unknown**, never `$0`. All of it is in `--json`.
 
 ### `omh sNN` shows which hooks fired
 
@@ -956,8 +957,8 @@ session — `graph-read` narrows to `Read`, so it is checked far more often than
 it has anything to say. A hook that rendered and never once fired is named
 under **dormant**, not omitted — silence there would read exactly like the
 hook was never part of the launch. A harness with no hooks capability at all
-(codex, today) says **not recorded**, never `0 fired`: that would misleadingly
-read as guards that ran and found nothing. `omh eject` carries none of this —
+says **not recorded**, never `0 fired`: that would misleadingly read as guards
+that ran and found nothing. `omh eject` carries none of this —
 the wrapper that writes it is spliced in only when a real launch is staging
 the events file, never into a config handed to you.
 

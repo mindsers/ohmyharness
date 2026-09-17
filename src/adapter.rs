@@ -329,6 +329,16 @@ pub enum Render {
     /// emit different programs from the same maps, which is exactly what a
     /// `render` names.
     OmpPlugin,
+    /// Codex `[[hooks.<Event>]]` tables, for the **system** config layer.
+    ///
+    /// Claude Code's shape in TOML, with two differences the renderer owns.
+    /// Codex runs a hook from the user or project layer only once a
+    /// `trusted_hash` for it is recorded, and runs one from the system layer
+    /// (`/etc/codex/config.toml`) as managed — so omh's hooks go there, and
+    /// yours in `~/.codex` keep Codex's own trust. And Codex takes a shell
+    /// exit status of 2 as a verdict at every moment, which at `Stop` it
+    /// honours forever: see `codex_hooks`.
+    CodexHooks,
 }
 
 /// A harness or editor name, checked to be a name rather than a path.
@@ -885,6 +895,16 @@ mod tests {
         assert_eq!(mcp.ready.as_deref(), Some("enabled"));
     }
 
+    /// Codex writes a rollout per session under `$CODEX_HOME/sessions`, dated
+    /// directories deep — measured in 0.154.0 as
+    /// `sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl` — and `omh sNN` reads
+    /// what it can only from a transcripts mount.
+    #[test]
+    fn codex_transcripts_are_where_codex_writes_them() {
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        assert_eq!(codex.transcripts.as_deref(), Some("$HOME/.codex/sessions"));
+    }
+
     /// Codex's skills land beside its own, not over them.
     ///
     /// Codex installs its system skills into `~/.codex/skills/.system`, and a
@@ -1320,10 +1340,6 @@ install="x""#,
             binding.path.ends_with("config.toml"),
             "into the file codex reads: {}",
             binding.path
-        );
-        assert!(
-            codex.tools.is_empty(),
-            "codex declares no hooks, so no tool vocabulary"
         );
     }
 
