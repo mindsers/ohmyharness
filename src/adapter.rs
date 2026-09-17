@@ -863,6 +863,28 @@ mod tests {
         );
     }
 
+    /// `verify` without `ready`, or `ready` without `verify`, is a check
+    /// `omh doctor` skips without a word — it runs only when both are set.
+    /// And codex's pair is the one measured: `codex mcp list` reports a server
+    /// its config holds as `enabled`.
+    #[test]
+    fn verify_and_ready_come_as_a_pair() {
+        for adapter in Adapter::load_dir(Path::new(REAL)).unwrap() {
+            for (cap, binding) in &adapter.capabilities {
+                assert_eq!(
+                    binding.verify.is_some(),
+                    binding.ready.is_some(),
+                    "{} {cap:?}: half a check is no check",
+                    adapter.name
+                );
+            }
+        }
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        let mcp = codex.supports(Capability::Mcp).expect("codex has mcp");
+        assert_eq!(mcp.verify.as_deref(), Some("codex mcp list"));
+        assert_eq!(mcp.ready.as_deref(), Some("enabled"));
+    }
+
     /// Codex's skills land beside its own, not over them.
     ///
     /// Codex installs its system skills into `~/.codex/skills/.system`, and a

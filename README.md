@@ -504,7 +504,7 @@ checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go
   ✓  rules            /work/CLAUDE.md
   ✓  skills           /home/agent/.claude/skills
   ✓  mcp              /work/.mcp.json
-  ✓  mcp-loaded       /work (claude mcp list)
+  ✓  mcp-loaded       /work (claude mcp list: Connected)
   ✓  commands         /home/agent/.claude/commands
   ✓  subagents        /home/agent/.claude/agents
   ✓  hooks            /home/agent/.claude/settings.json

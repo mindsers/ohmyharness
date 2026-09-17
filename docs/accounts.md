@@ -85,8 +85,8 @@ Codex's default sign-in opens a browser and waits for the redirect on
 arrives. Two ways round it:
 
 - **Device code.** In `omh auth codex`, choose *Sign in with Device Code*:
-  Codex prints a URL and a one-time code to enter in any browser, and polls
-  for the result itself — no redirect has to reach the sandbox.
+  Codex prints a URL and a one-time code to enter in any browser, so no
+  redirect has to reach the sandbox.
 - **Import.** If you are already logged in on this machine, copy that login:
 
   ```console
@@ -96,14 +96,25 @@ arrives. Two ways round it:
   ```
 
 `--import` copies the adapter's `token` files and nothing else — not the config
-directory around them, which holds boot noise and omh's own mounts. Every file
-is checked before any is written, the copies are `0600`, and a harness whose
-login is not a file (omp keeps its credentials in SQLite) is refused rather
-than half-copied.
+directory around them, which also holds your config, skills and history, and
+omh stages those separately. Every file is read before anything is written;
+each is staged at `0600` and renamed into place only once all are staged, so a
+file omh cannot read, or a write that fails, leaves the account as it was. A
+harness whose login is not a file (omp keeps its credentials in SQLite) is
+refused.
 
-It is a copy, not a link. From then on the account and the host each hold a
-login of their own, and each refreshes it on its own. A later login on the
-host does not reach the account; import again, or log in with a device code.
+It only finds a login kept in that file. Claude Code on macOS keeps its login
+in the Keychain, and a harness can be pointed at another home by its own
+environment variable (`CODEX_HOME`); in either case `--import` says what it
+looked at and finds nothing. That is also why a launch offers `--import` only
+when there is a login there to copy.
+
+**It is a copy of one login, not a second one.** An API key is a key, and two
+copies of it work side by side. An OAuth login is a refresh chain: when the
+provider replaces the refresh token on each use, whichever copy refreshes
+second is holding a spent one and is logged out. If the host and the sandbox
+both need to stay logged in, give the sandbox its own login with a device
+code. A later login on the host does not reach the account either way.
 
 ## What stops a launch
 

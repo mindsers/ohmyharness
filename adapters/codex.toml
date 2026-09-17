@@ -34,15 +34,16 @@ render = "concat"
 # `~/.codex/AGENTS.md`.
 import = "$HOME/.codex/AGENTS.md"
 
-# `~/.agents/skills`, not `~/.codex/skills`. Codex still reads the latter, as a
-# deprecated location, but installs its own system skills into
+# `~/.agents/skills`, not `~/.codex/skills`. Codex still reads the latter — "deprecated
+# user skills location", `ext/skills/src/host_roots.rs` at `rust-v0.154.0` — but installs its own system skills into
 # `~/.codex/skills/.system` — and omh's read-only mount over the directory hid
 # them without a word. Measured in the 0.154.0 image with
 # `codex debug prompt-input`: mounted there, a staged skill loaded and
 # `imagegen` was gone; mounted here, both loaded.
 #
 # Imported from the old location, which is where a Codex that predates the
-# move kept yours.
+# move kept yours. Skills already in `~/.agents/skills` on the host are not
+# imported — that directory is not Codex's alone; opencode reads it too.
 [capabilities.skills]
 path   = "$HOME/.agents/skills"
 render = "dir"
@@ -52,9 +53,11 @@ import = "$HOME/.codex/skills"
 # servers live under `[mcp_servers.<name>]` tables — which is why this renders
 # with `codex-toml` rather than the `mcp-json` the other harnesses use.
 #
-# `codex mcp list` answers without a login and prints a `Status` column. Its
-# `enabled` is read off the parsed config and never starts the server — a
-# server pointing at a command that does not exist is `enabled` too — so this
+# `codex mcp list` answers without a login (`omh doctor` runs it with no
+# account) and prints a `Status` column. Its `enabled` comes from the parsed
+# config — `format_mcp_status` in `codex-rs/cli/src/mcp_cmd.rs` at
+# `rust-v0.154.0` — and a server pointing at a command that does not exist is
+# `enabled` too, so this
 # proves Codex *read* the file omh mounted, not that the server runs. Weaker
 # than Claude's `Connected`, and still the question `omh doctor` could not ask
 # before: whether the file is anything Codex opens.

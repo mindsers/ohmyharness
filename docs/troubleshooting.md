@@ -123,10 +123,11 @@ That is the harness genuinely not supporting the feature, not omh losing it.
 
 ### Codex says "Login using `codex login` and then run this command again"
 
-Codex 0.5.0 — the pin omh shipped before 0.154.0 — has only a browser
-sign-in, and it waits for the redirect inside the sandbox, where your browser
-never arrives. So `omh auth codex` cannot finish, and a launch starts logged
-out. `omh upgrade` moves the pin, then either:
+That line is Codex 0.5.0's, the pin omh shipped before 0.154.0. Its
+`codex login` signs in through a browser redirect that waits inside the
+sandbox, where your browser never arrives, so `omh auth codex` could not
+finish that way and a launch started logged out. Update omh, run
+`omh upgrade` to move the pin, then either:
 
 ```console
 $ omh auth codex                     # choose "Sign in with Device Code"

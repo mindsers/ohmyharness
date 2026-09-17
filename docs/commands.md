@@ -296,10 +296,11 @@ $ omh auth claude --name personal
 $ omh auth claude --name work
 ```
 
-`--import` copies the login this machine already has instead, and starts no
-sandbox. It copies the adapter's `token` files, so it works for a harness
-whose login is a file (claude, codex, opencode) and is refused for one whose
-login is not (omp):
+`--import` copies the login this machine already has instead, and needs no
+container runtime. It copies the adapter's `token` files, so it works only
+where the harness keeps its login in that file on this machine too — Codex by
+default does; Claude Code on macOS keeps it in the Keychain, so there it finds
+nothing to copy. A harness with no `token` file (omp) is refused:
 
 ```console
 $ omh auth codex --name work --import
