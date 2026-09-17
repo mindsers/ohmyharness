@@ -137,6 +137,15 @@ $ omh auth codex --import            # or copy the login this machine has
 With `account` set for the repo, use that name: `omh auth codex --name <it>`.
 See [Accounts](accounts.md#a-login-that-cannot-finish-in-a-sandbox).
 
+### Codex says "Failed to set trust for /work … failed to persist config.toml"
+
+omh 0.13.0 mounted its MCP servers over `~/.codex/config.toml`, and Codex
+rewrites that file itself — here to save that it trusts `/work` — by renaming a
+temporary file over it, which a mounted file refuses. Update omh and run
+`omh upgrade`: the servers move to `/etc/codex/managed_config.toml`,
+`~/.codex/config.toml` is the account's own again, and `/etc/codex/config.toml`
+already trusts `/work`, so Codex does not ask.
+
 ### I logged in, but the next session is logged out
 
 The token was written somewhere that does not persist. `omh doctor` names it:

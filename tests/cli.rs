@@ -9988,8 +9988,8 @@ fn a_system_path_ejects_under_system() {
     );
     assert!(!out.join("home/etc").exists(), "and not as a dotfile");
     assert!(
-        out.join("home/.codex/config.toml").is_file(),
-        "while its home config still lands under home/"
+        out.join("system/etc/codex/managed_config.toml").is_file(),
+        "and its MCP servers, in the other system file Codex reads"
     );
 }
 

@@ -420,9 +420,11 @@ pub fn plan(
             Capability::Hooks => {
                 !sources.is_empty()
                     || !opts.omh.hooks.is_empty()
-                    || adapter
-                        .supports(cap)
-                        .is_some_and(|b| b.render == Render::ClaudeSettings)
+                    // Codex's system config likewise carries the trust without
+                    // which `/work` is prompted about and its rules skipped.
+                    || adapter.supports(cap).is_some_and(|b| {
+                        matches!(b.render, Render::ClaudeSettings | Render::CodexHooks)
+                    })
             }
             _ => !sources.is_empty(),
         };
@@ -1727,6 +1729,56 @@ mod tests {
         assert_eq!(
             doc["enableAllProjectMcpServers"], true,
             "the mcp document would be listed and never loaded: {doc}"
+        );
+    }
+
+    /// Codex's system config ships with every launch, hooks or none, because it
+    /// is where `/work` is trusted. Untrusted — or unset, which is what the
+    /// interactive app then asks about and cannot save — Codex was measured
+    /// skipping `/work/AGENTS.md`, omh's rules with it, and asking before every
+    /// command.
+    #[test]
+    fn codex_trusts_the_worktree_even_when_a_repo_runs_no_hooks() {
+        let fx = fixture();
+        std::fs::remove_dir_all(fx.paths.root.join("hooks")).unwrap();
+        let profile = Profile::resolve(&fx.paths);
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
+        let (_, repo) = decided_from(&fx);
+        let p = plan(
+            &fx.paths,
+            &profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: Default::default(),
+                repo,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new("/etc/codex/config.toml"))
+            .expect("no hooks is not the same as no system config");
+        let doc: toml::Table = std::fs::read_to_string(&mount.host)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            doc["projects"]["/work"]["trust_level"].as_str(),
+            Some("trusted"),
+            "{doc}"
         );
     }
 

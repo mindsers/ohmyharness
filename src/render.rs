@@ -1371,14 +1371,29 @@ fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> R
         hooks: Vec<Handler<'a>>,
     }
     #[derive(Serialize)]
+    struct Trust {
+        trust_level: &'static str,
+    }
+    #[derive(Serialize)]
     struct Doc<'a> {
+        projects: BTreeMap<&'static str, Trust>,
         hooks: BTreeMap<&'a str, Vec<Group<'a>>>,
     }
     let turn_end = binding
         .events
         .get(&hook::Event::TurnEnd)
         .map(String::as_str);
+    // The worktree, trusted. Unset, Codex's interactive app asks and saves the
+    // answer to `~/.codex/config.toml`; untrusted, Codex was measured skipping
+    // `/work/AGENTS.md` — omh's rules — and asking before every command. The
+    // repo is the one you chose to run a session on.
     let mut doc = Doc {
+        projects: BTreeMap::from([(
+            crate::container_workdir(),
+            Trust {
+                trust_level: "trusted",
+            },
+        )]),
         hooks: BTreeMap::new(),
     };
     for h in hooks.values() {
@@ -1766,6 +1781,24 @@ mod tests {
         assert!(out.status.success(), "{command}");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{command}");
         assert!(String::from_utf8_lossy(&out.stderr).contains("ran"));
+    }
+
+    /// The system config trusts `/work`, whatever hooks there are — see
+    /// `container::codex_trusts_the_worktree_even_when_a_repo_runs_no_hooks`.
+    #[test]
+    fn codex_hooks_document_trusts_the_worktree() {
+        for doc in [
+            codex_document(&[]),
+            codex_document(&[("tests", r#"{"on":"turn-end","run":"cargo test"}"#)]),
+        ] {
+            let table: toml::Table = doc.body.parse().unwrap();
+            assert_eq!(
+                table["projects"]["/work"]["trust_level"].as_str(),
+                Some("trusted"),
+                "{}",
+                doc.body
+            );
+        }
     }
 
     /// And an injection keeps its stdout, which *is* its protocol.
