@@ -1393,8 +1393,10 @@ follows from the key**, not from a flag you have to remember.
 
 ```
 omh set <key> <value> [--local|--save]
+omh set account <harness>:<name>      an account for one harness alone
 omh set <feature> on|off
 omh unset <key> [--local|--save]
+omh unset account <harness>           drop that harness's own account
 omh unset <feature>                   let omh's own default decide again
 ```
 

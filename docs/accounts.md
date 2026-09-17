@@ -20,6 +20,38 @@ Which account a session uses is a **project-level setting**, resolved through
 the [usual two layers](configuration.md#settings-and-their-two-layers) — because that is
 how it genuinely varies. This repo is work; that one is personal.
 
+One name usually fits every harness. When it does not — accounts are captured
+per harness, so a name one has may be one another lacks — name an account for
+one harness with `<harness>:<name>`:
+
+```console
+$ omh set account mine
+omh: `mine` is captured for claude
+$ omh new codex
+omh: no account `mine` for codex
+  captured: work
+  omh set account codex:<name>   one for codex alone
+$ omh set account codex:work
+omh: `work` is captured for codex
+$ omh info --repo
+settings
+  account  mine        ← shared
+  account  codex:work  ← shared
+```
+
+`account` stays one string until a harness differs, then becomes a table whose
+`default` is the name for every other harness:
+
+```toml
+[account]
+default = "mine"
+codex = "work"
+```
+
+A harness's own entry wins at whatever layer it is set. A plain
+`omh set account <name>` sets `default`; `omh unset account codex` takes back
+codex's entry, and the table goes back to one string once no harness differs.
+
 ```
 ~/.omh/creds/<harness>/<account>/
 ```

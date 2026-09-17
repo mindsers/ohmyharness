@@ -131,7 +131,8 @@ pub fn resolve_with_home(
     if let Some(name) = configured {
         if !available.iter().any(|a| a == name) {
             anyhow::bail!(
-                "no account `{name}` for {harness}\n  captured: {}",
+                "no account `{name}` for {harness}\n  captured: {}\n  \
+                 omh set account {harness}:<name>   one for {harness} alone",
                 available.join(", ")
             );
         }
@@ -240,6 +241,12 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         }
     }
     Ok(())
+}
+
+/// The account a launch of this harness is configured with, if any — its own
+/// entry in `[account]`, or the one name for every harness.
+pub fn configured(paths: &Paths, adapter: &Adapter) -> Result<Option<String>> {
+    crate::config::account_for(paths, adapter.name.as_str())
 }
 
 /// Resolve for an actual launch.

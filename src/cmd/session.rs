@@ -380,7 +380,7 @@ pub(crate) fn attach(
     carry_in(&paths, &session, ctx)?;
     let _ = idle::touch(&paths.runs(), &session.id);
 
-    let configured = crate::policy_value(&paths, "account");
+    let configured = auth::configured(&paths, &adapter)?;
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &adapter, &a));
     if let Some(account_dir) = &account {
@@ -2006,7 +2006,7 @@ pub(crate) fn run(
 
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
-    let configured = crate::policy_value(&paths, "account");
+    let configured = auth::configured(&paths, &adapter)?;
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &adapter, &a));
     if account.is_none() {

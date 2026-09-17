@@ -357,7 +357,7 @@ pub(crate) fn doctor_cmd(
         // evidence a token survives the mount, and it was being skipped for anyone
         // with a second account. The remedy the resolver prints names `-a` — the
         // flag this was discarding.
-        let configured = crate::policy_value(&paths, "account");
+        let configured = auth::configured(&paths, &adapter)?;
         let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
             .map(|a| auth::dir(&paths, &adapter, &a));
 

@@ -384,15 +384,16 @@ mod tests {
         // floor could absorb — and a number nobody updates is a number that
         // stops meaning anything.
         //
-        // `- 1` because the scan reads *literals* at the two call shapes above,
-        // so a key resolved by matching on a `Setting`'s own field instead is
-        // legitimately invisible to it. `ca_cert` is read that way.
+        // `- 2` because the scan reads *literals* at the two call shapes above,
+        // so a key resolved another way is legitimately invisible to it:
+        // `ca_cert`, matched on a `Setting`'s own field, and `account`, which
+        // `config::account_for` reads as a string or a per-harness table.
         //
         // Written without naming either call shape: this comment sits inside
         // the file the scan reads, and spelling one out here made the scan
         // match its own prose and report a key called `name`.
         assert!(
-            read.len() >= KEYS.len() - 1,
+            read.len() >= KEYS.len() - 2,
             "the scan found only {read:?} of {} keys — it is no longer finding \
              the call sites it was written to read",
             KEYS.len()

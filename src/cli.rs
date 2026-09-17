@@ -372,6 +372,14 @@ pub(crate) enum Cmd {
     Unset {
         /// Which setting to drop, or which feature to stop switching.
         key: String,
+        /// For `account`: the harness whose own account to drop, leaving the
+        /// one for every other harness.
+        ///
+        /// A second bare word, where omh's rule is a flag
+        /// (`the_optional_second_word_is_named_rather_than_positional`). The
+        /// exception is deliberate: it mirrors `omh set account codex:work`,
+        /// and only `account` accepts it — for any other key it is refused.
+        harness: Option<String>,
         /// Drop it from the committed file only.
         #[arg(long, conflicts_with = "local")]
         save: bool,
