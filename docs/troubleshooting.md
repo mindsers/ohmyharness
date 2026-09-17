@@ -151,6 +151,14 @@ temporary file over it, which a mounted file refuses. Update omh and run
 `~/.codex/config.toml` is the account's own again, and `/etc/codex/config.toml`
 already trusts `/work`, so Codex does not ask.
 
+### Codex says "could not find bubblewrap on PATH", and commands fail with `bwrap: No permissions to create a new namespace`
+
+Codex runs each command inside its own bubblewrap sandbox, which cannot start
+inside omh's container. omh 0.13.1 and earlier left it on, so every shell
+command and every file edit failed. Update omh and run `omh upgrade`: Codex's
+sandbox is turned off in `/etc/codex/config.toml`, and omh's container is the
+sandbox.
+
 ### I logged in, but the next session is logged out
 
 The token was written somewhere that does not persist. `omh doctor` names it:
