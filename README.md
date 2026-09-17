@@ -441,13 +441,16 @@ the agent uses rather than something merely installed:
 | Hook | When | Cost | Buys |
 |---|---|---|---|
 | `graph-orient` | session start | 2.3 KB | modules, layers, boundaries, entry points |
-| `graph-first` | before Grep/Glob | 243 B | structural questions in one call |
+| `graph-first` | before a search² | 243 B | structural questions in one call |
 | `graph-read` | before Read | 0 unless it speaks | **1,511 bytes** for one symbol, not the whole module |
 | `graph-refresh` | end of turn | 0.14s | a graph describing the code as it is *now* |
 
 They are nudges, never walls: grep is right for a literal string, and a hook that
 blocks correct work gets disabled. `graph-read` stays silent unless a symbol
 lookup would genuinely be cheaper.
+
+² No shipped harness names a search tool today — Claude Code searches through
+`Bash` since its native builds — so every launch reports `graph-first` as dropped.
 
 ```console
 $ omh graph

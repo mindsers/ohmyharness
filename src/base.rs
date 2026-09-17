@@ -1953,22 +1953,78 @@ command = "c"
     /// suite prove the translation as well as the hook — and the shipped
     /// adapter is the one whose maps have to be right.
     fn rendered(name: &str) -> crate::hook::Rendered {
-        let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let binding = adapter
-            .supports(crate::adapter::Capability::Hooks)
-            .expect("claude has hooks");
-        match crate::hook::render(name, &hook(name).hook, binding, &adapter.tools, None).unwrap() {
+        match render_for_claude(name) {
             crate::hook::Outcome::Rendered(r) => r,
             crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
         }
     }
 
-    /// Every shipped hook, rendered for the shipped adapter.
+    fn render_for_claude(name: &str) -> crate::hook::Outcome {
+        let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter
+            .supports(crate::adapter::Capability::Hooks)
+            .expect("claude has hooks");
+        crate::hook::render(name, &hook(name).hook, binding, &adapter.tools, None).unwrap()
+    }
+
+    /// Hooks narrowed to `search`, which no shipped harness spells.
+    ///
+    /// Claude was the last: its native builds search through `Bash`. These
+    /// hooks still ship — the base set is the record of them — and every
+    /// launch names them as dropped.
+    const UNSPELLED: &[&str] = &["graph-first"];
+
+    /// `graph-first` as the harness it was written for received it: Claude's
+    /// vocabulary with the `search` spelling it had before 2.1.
+    ///
+    /// Not a claim about any shipped adapter — that is
+    /// [`no_shipped_harness_can_spell_search`]. What this keeps honest is the
+    /// hook's own text, for whichever harness can carry it next.
+    fn rendered_with_search(name: &str) -> crate::hook::Rendered {
+        let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter
+            .supports(crate::adapter::Capability::Hooks)
+            .expect("claude has hooks");
+        let mut tools = adapter.tools.clone();
+        tools.insert(crate::hook::Tool::Search, "Grep|Glob".into());
+        match crate::hook::render(name, &hook(name).hook, binding, &tools, None).unwrap() {
+            crate::hook::Outcome::Rendered(r) => r,
+            crate::hook::Outcome::Dropped(d) => panic!("cannot express {d}"),
+        }
+    }
+
+    /// Every shipped hook claude can carry, rendered for the shipped adapter.
     fn all_rendered() -> Vec<(&'static str, crate::hook::Rendered)> {
         hooks()
             .into_iter()
+            .filter(|h| !UNSPELLED.contains(&h.name))
             .map(|h| (h.name, rendered(h.name)))
             .collect()
+    }
+
+    /// The hooks left out of [`all_rendered`] are left out because claude
+    /// drops them, and for no other reason.
+    ///
+    /// Otherwise `UNSPELLED` is a place to hide a hook every assertion above
+    /// would have caught — and if a harness learns `search` again, this fails
+    /// and the list has to shrink.
+    #[test]
+    fn no_shipped_harness_can_spell_search() {
+        for name in UNSPELLED {
+            match render_for_claude(name) {
+                crate::hook::Outcome::Dropped(d) => assert_eq!(d.wanted, "`search` tool", "{name}"),
+                crate::hook::Outcome::Rendered(_) => {
+                    panic!("claude renders {name} again; take it out of UNSPELLED")
+                }
+            }
+        }
+        for adapter in crate::adapter::Adapter::load_dir(Path::new(ADAPTERS)).unwrap() {
+            assert!(
+                !adapter.tools.contains_key(&crate::hook::Tool::Search),
+                "{} spells search; the hooks in UNSPELLED reach it",
+                adapter.name
+            );
+        }
     }
 
     /// A graph that describes the code as it was when the session started is
@@ -1989,7 +2045,7 @@ command = "c"
     /// and inert.
     #[test]
     fn the_agent_is_pointed_at_the_graph_before_it_greps() {
-        let h = rendered("graph-first");
+        let h = rendered_with_search("graph-first");
         assert_eq!(h.event, "PreToolUse");
         assert!(h.matcher.contains("Grep"), "got: {}", h.matcher);
         assert!(
@@ -2003,7 +2059,7 @@ command = "c"
     /// hook that blocks correct work gets disabled.
     #[test]
     fn the_nudge_never_blocks_the_tool() {
-        let h = rendered("graph-first");
+        let h = rendered_with_search("graph-first");
         for forbidden in ["exit 1", "deny", "block"] {
             assert!(
                 !h.command.contains(forbidden),
@@ -2046,7 +2102,7 @@ command = "c"
     /// agent is deciding, which is where naming it actually lands.
     #[test]
     fn the_nudge_names_the_project_to_query() {
-        let h = rendered("graph-first");
+        let h = rendered_with_search("graph-first");
         assert!(h.command.contains(PROJECT_ENV), "got: {}", h.command);
     }
 

@@ -790,7 +790,8 @@ mod tests {
     }
 
     /// Every path here is a claim about oh-my-pi, read out of its own source at
-    /// the version this adapter was written against — `v17.3.3`, tag-pinned
+    /// the version this adapter was written against — `v17.3.3`, re-read at
+    /// `v18.2.3` for the bump — tag-pinned
     /// rather than `main`, because a doc read off the default branch describes
     /// software nobody is running yet.
     ///
@@ -841,6 +842,22 @@ mod tests {
         assert!(
             !omp.tools.contains_key(&crate::hook::Tool::Search),
             "omp has grep and glob as separate tools; half a claim is worse than none"
+        );
+    }
+
+    /// Claude Code has no search tool to name either, since the native builds.
+    ///
+    /// They replaced `Grep` and `Glob` with an embedded `ugrep` and `bfs`
+    /// the agent reaches through `Bash`, and npm now installs that native
+    /// binary. `search = "Grep|Glob"` matched nothing from then on, so the
+    /// hooks narrowing to `search` shipped and never fired. Absent, they are
+    /// dropped by name, which is the honest version of the same outcome.
+    #[test]
+    fn claude_spells_no_search_tool_it_does_not_have() {
+        let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
+        assert!(
+            !claude.tools.contains_key(&crate::hook::Tool::Search),
+            "native Claude Code searches through Bash; `Grep|Glob` never matches"
         );
     }
 

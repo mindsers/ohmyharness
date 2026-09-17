@@ -4,7 +4,7 @@ bin     = "claude"
 # moves the image tag. Maintainer bumps `version` to the release under test;
 # omh's own build (which needs a container runtime) and `omh doctor` are where
 # a wrong pin is caught, not `cargo test`.
-version = "2.0.14"
+version = "2.1.274"
 install = "npm install -g @anthropic-ai/claude-code@{{version}}"
 # The whole config directory, not the token file: a bind-mounted *file* cannot
 # be replaced by rename, and every tool saves its token by writing a temp file
@@ -27,11 +27,19 @@ login   = "run `/login` inside Claude Code, then exit"
 # per-capability: hooks match on these, the Agent Skills standard carries them
 # in `allowed-tools`, and subagent frontmatter carries them in `tools`. One
 # vocabulary, spelled once.
+#
+# No `search`. The native builds, which npm now installs, replaced `Grep` and
+# `Glob` with an embedded `ugrep` and `bfs` reached through `Bash`, so
+# `Grep|Glob` matched nothing and a hook narrowing to `search` shipped and never
+# fired. Absent, it is dropped by name — as on omp and opencode.
+#
+# `MultiEdit` is no longer a tool either. It stays in the spelling because
+# `omh import hooks` reads matchers back through it, and a matcher someone wrote
+# against an older release still names it.
 [tools]
 edit   = "Edit|Write|MultiEdit"
 read   = "Read"
 shell  = "Bash"
-search = "Grep|Glob"
 
 [capabilities.rules]
 path   = "/work/CLAUDE.md"

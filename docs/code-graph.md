@@ -49,7 +49,7 @@ removed and disabled together.
 | Hook | Fires | Cost | Buys |
 |---|---|---|---|
 | `graph-orient` | `session-start` | 2,300 B per context rebuild | modules, layers, boundaries, entry points |
-| `graph-first` | `before-tool`, `search` | 243 B per grep¹ | structural questions in one call |
+| `graph-first` | `before-tool`, `search`² | 243 B per grep¹ | structural questions in one call |
 | `graph-read` | `before-tool`, `read` | 0 unless it speaks | **1,511 bytes** for one symbol instead of a whole module |
 | `graph-refresh` | `turn-end` | 0.14s per turn | a graph describing the code as it is *now* |
 
@@ -59,6 +59,12 @@ What `session-start` is called inside Claude Code is the adapter's business.
 ¹ For a `ohmyharness-s01`-length project name, which the nudge interpolates
 twice — the figure moves two bytes per character of `<repo>-<session>`.
 Computed from the shipped literals rather than typed in.
+
+² Reaches no shipped harness today. omp and opencode have `grep` and `glob` as
+separate tools, and Claude Code's native builds (2.1.x) have neither — they
+search through `Bash` — so each adapter leaves `search` unspelled and every
+launch names `graph-first` as dropped rather than shipping a hook that never
+fires.
 
 **Kept current.** A session's worktree is not the checkout it started from; it
 holds whatever the agent has since written. Each session indexes its own, and
