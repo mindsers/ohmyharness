@@ -126,13 +126,21 @@ pub fn document(
         // about this repo, it is a rule about which harness you happened to
         // launch.
         Render::ClaudeSettings => {
+            // The servers omh ships and runs, minus those a feature switched
+            // off here — the ones it stages, and the only ones it vouches for.
+            let ours: Vec<&str> = repo
+                .selection
+                .omhs(Capability::Mcp)
+                .into_iter()
+                .filter(|name| !repo.disabled_servers.contains(*name))
+                .collect();
             let mut hooks = merge_hooks(sources, own, repo)?;
             let mut dropped = suppressed_by_probe(&mut hooks, resolves);
             let (rendered, unspellable) = translate(&hooks, binding, tools, log)?;
             dropped.extend(unspellable);
             let rendered_hooks = rendered.keys().cloned().collect();
             Ok(Document {
-                body: claude_settings(&rendered)?,
+                body: claude_settings(&rendered, &ours)?,
                 dropped,
                 rendered_hooks,
             })
@@ -1282,7 +1290,7 @@ const omh_log = (path, hook, decision) => {
 
 "#;
 
-fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
+fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>, ours: &[&str]) -> Result<String> {
     let mut by_event: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
     for h in hooks.values() {
         by_event
@@ -1303,9 +1311,17 @@ fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
     // there is the one omh mounted: the mount covers the worktree's own
     // `.mcp.json`, so this approves omh's rendering of what the profile
     // already decided, not whatever a checkout happened to ship.
+    // Claude asks before every MCP tool call in its default permission mode.
+    // `mcp__<server>` is the rule that allows every tool of one server — the
+    // shape its own binary carries, beside `mcp__<server>__<tool>`. omh's
+    // rules send the agent to the graph first, so without this the first
+    // query of every session waits on a dialog. Yours are not listed: omh
+    // ships and runs its own and cannot vouch for a server it did not.
+    let allow: Vec<String> = ours.iter().map(|name| format!("mcp__{name}")).collect();
     pretty(serde_json::json!({
         "hooks": by_event,
         "enableAllProjectMcpServers": true,
+        "permissions": { "allow": allow },
     }))
 }
 
@@ -1920,7 +1936,7 @@ mod tests {
 
         let (rendered, dropped) = translate(&mine, &binding, &tools, None).unwrap();
         assert!(dropped.is_empty(), "the fixture must render: {dropped:?}");
-        let document = claude_settings(&rendered).unwrap();
+        let document = claude_settings(&rendered, &[]).unwrap();
 
         let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
         let (back, residue) = parse_hooks(&document, &vocab).unwrap();
@@ -2412,6 +2428,58 @@ mod tests {
         assert!(
             v["hooks"]["Stop"].is_array(),
             "and the hooks this file exists for still ship: {}",
+            out.body
+        );
+    }
+
+    /// Claude runs omh's own servers' tools without asking, and yours as
+    /// Claude decides. Codex stopped a real session's first `search_graph` at
+    /// an approval dialog; Claude asks the same way, through
+    /// `permissions.allow`, and omh's rules send the agent to the graph first.
+    #[test]
+    fn the_settings_document_lets_omhs_own_servers_run() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/a.json",
+            r#"{"on":"turn-end","run":"cargo test"}"#,
+        );
+        let adapter = claude_hooks();
+        let owned = crate::selection::Owned::from([(
+            Capability::Mcp,
+            BTreeMap::from([
+                ("codegraph".to_string(), "codegraph".to_string()),
+                ("memory".to_string(), "memory".to_string()),
+            ]),
+        )]);
+        let repo = crate::settings::RepoPolicy {
+            selection: crate::selection::Selection::owning(owned),
+            disabled_servers: ["memory".to_string()].into(),
+            ..Default::default()
+        };
+        let out = document(
+            Capability::Hooks,
+            hooks_binding(&adapter),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &repo,
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
+        let allow = v["permissions"]["allow"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let allow: Vec<&str> = allow.iter().filter_map(|x| x.as_str()).collect();
+        assert_eq!(
+            allow,
+            vec!["mcp__codegraph"],
+            "omh's own, and not the server whose feature is off here: {}",
             out.body
         );
     }

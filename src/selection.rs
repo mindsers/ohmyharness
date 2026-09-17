@@ -216,6 +216,20 @@ impl Selection {
         self.owner(cap, name).is_some()
     }
 
+    /// Every entry of this capability omh owns, in name order.
+    ///
+    /// What a *feature* brings, whatever this repo selected: `[use]` names
+    /// your entries and never omh's. A feature switched off here is still
+    /// owned — the caller that cares (the servers Claude may run unasked)
+    /// checks `disabled_servers` for that.
+    pub fn omhs(&self, cap: Capability) -> Vec<&str> {
+        self.owned
+            .get(&cap)
+            .into_iter()
+            .flat_map(|entries| entries.keys().map(String::as_str))
+            .collect()
+    }
+
     /// The feature that owns `name`, if omh does.
     ///
     /// Public because a refusal is only actionable if it names the switch: the

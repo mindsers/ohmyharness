@@ -86,6 +86,12 @@ path   = "$HOME/.claude/agents"
 render = "dir"
 import = "$HOME/.claude/agents"
 
+# This file also carries `permissions.allow` for omh's own MCP servers —
+# `mcp__<server>`, the rule Claude Code's own binary spells beside
+# `mcp__<server>__<tool>`. Claude asks before every MCP tool call in its
+# default mode, and omh's rules send the agent to the graph first, so the first
+# query of a session would wait on a dialog. Yours are not listed: omh ships
+# and runs its own and cannot vouch for a server it did not.
 [capabilities.hooks]
 path   = "$HOME/.claude/settings.json"
 render = "claude-settings"
