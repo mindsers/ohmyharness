@@ -119,7 +119,8 @@ pub fn document(
                     server.env.extend(env.clone());
                 }
             }
-            Ok(mcp(binding.render, &servers)?.into())
+            let omhs = |name: &str| repo.selection.is_omhs(Capability::Mcp, name);
+            Ok(mcp_approving(binding.render, &servers, &omhs)?.into())
         }
         // Both hook renders suppress before translating, and neither may skip
         // it: a rule applied on one harness and not the other is not a rule
@@ -219,7 +220,23 @@ fn merge_servers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
     Ok(out)
 }
 
+/// [`mcp_approving`] with nothing approved — how the round-trip tests render.
+#[cfg(test)]
 fn mcp(render: Render, servers: &BTreeMap<String, Server>) -> Result<String> {
+    mcp_approving(render, servers, &|_| false)
+}
+
+/// [`mcp`], with the servers whose tools may run without the harness asking.
+///
+/// Only Codex's format carries it: Codex asks before every MCP tool call
+/// unless a server says `default_tools_approval_mode = "approve"`, and a real
+/// session stopped its first `search_graph` there. omh approves the servers it
+/// ships and runs, never yours.
+fn mcp_approving(
+    render: Render,
+    servers: &BTreeMap<String, Server>,
+    approved: &dyn Fn(&str) -> bool,
+) -> Result<String> {
     match render {
         Render::McpJson => pretty(serde_json::json!({ "mcpServers": servers })),
         Render::OpencodeJson => {
@@ -251,6 +268,9 @@ fn mcp(render: Render, servers: &BTreeMap<String, Server>) -> Result<String> {
                 out.push_str(&format!("command = {}\n", toml_str(&s.command)));
                 let args: Vec<String> = s.args.iter().map(|a| toml_str(a)).collect();
                 out.push_str(&format!("args = [{}]\n", args.join(", ")));
+                if approved(name) {
+                    out.push_str("default_tools_approval_mode = \"approve\"\n");
+                }
                 if !s.env.is_empty() {
                     out.push_str(&format!("\n[mcp_servers.{name}.env]\n"));
                     for (k, v) in &s.env {

@@ -94,6 +94,11 @@ import = "$HOME/.codex/skills"
 # file now lives in the account's `~/.codex`, writable. Codex loads servers
 # from the managed file too — measured, `codex mcp list` names them.
 #
+# omh's own servers — the base set's, never yours — carry
+# `default_tools_approval_mode = "approve"`. Without it Codex asked before
+# every call: a real session stopped its first `search_graph` at "Allow the
+# codegraph MCP server to run tool …?".
+#
 # `codex mcp list` answers without a login (`omh doctor` runs it with no
 # account) and prints a `Status` column. Its `enabled` comes from the parsed
 # config — `format_mcp_status` in `codex-rs/cli/src/mcp_cmd.rs` at
