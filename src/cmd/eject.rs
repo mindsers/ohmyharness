@@ -247,23 +247,26 @@ fn refuse_the_checkout(cwd: &Path, paths: &Paths, to: &Path) -> Result<()> {
 ///
 /// - `/work/…` is the checkout, so it lands at the root. These are the files
 ///   you would commit, or put beside the ones you already have.
-/// - everything else is the harness's own home, so it lands under `home/`.
-///   Kept apart deliberately: a reader has to be able to tell "this belongs in
-///   my repo" from "this belongs in my dotfiles" without knowing omh's mount
-///   layout, and flattening them together loses exactly that.
+/// - the harness's own home lands under `home/`.
+/// - anything else is a system path — Codex's hooks, in
+///   `/etc/codex/config.toml` — and lands under `system/`, at its full path.
+///
+/// Kept apart deliberately: a reader has to be able to tell "this belongs in my
+/// repo" from "this belongs in my dotfiles" from "this belongs to the machine"
+/// without knowing omh's mount layout, and flattening them together loses
+/// exactly that.
 fn destinations(binding: &Binding, to: &Path) -> Result<Vec<PathBuf>> {
     std::iter::once(&binding.path)
         .chain(binding.also.iter())
         .map(|target| {
             let expanded = crate::adapter::expand(target, crate::image::GUEST_HOME);
             let s = expanded.to_string_lossy().to_string();
-            Ok(match s.strip_prefix("/work/") {
-                Some(rel) => to.join(rel),
-                None => to.join("home").join(
-                    s.strip_prefix(crate::image::GUEST_HOME)
-                        .unwrap_or(&s)
-                        .trim_start_matches('/'),
-                ),
+            if let Some(rel) = s.strip_prefix("/work/") {
+                return Ok(to.join(rel));
+            }
+            Ok(match expanded.strip_prefix(crate::image::GUEST_HOME) {
+                Ok(rel) => to.join("home").join(rel),
+                Err(_) => to.join("system").join(s.trim_start_matches('/')),
             })
         })
         .collect()

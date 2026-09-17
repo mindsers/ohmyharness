@@ -2721,13 +2721,24 @@ mod tests {
         (dir, paths)
     }
 
-    /// codex has no `[capabilities.hooks]` at all — the first split, and the
-    /// one that must never read as `Seen` with zero counts.
+    /// A harness with no `[capabilities.hooks]` at all — the first split, and
+    /// the one that must never read as `Seen` with zero counts. Every shipped
+    /// adapter has hooks now, so the harness is one written for the test.
     #[test]
     fn a_harness_without_hooks_says_so() {
         let (_dir, paths) = fixture_paths();
-        let codex = crate::adapter::Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
-        let state = read_hooks(&paths, "s01", &Some(codex));
+        let hookless: crate::adapter::Adapter = toml::from_str(
+            r#"
+            name = "hookless"
+            bin = "hookless"
+            install = "x"
+            [capabilities.rules]
+            path = "/work/AGENTS.md"
+            render = "concat"
+            "#,
+        )
+        .unwrap();
+        let state = read_hooks(&paths, "s01", &Some(hookless));
         assert!(
             matches!(&state, report::HooksState::NotRecorded(why) if why.contains("no hooks capability")),
             "{state:?}"

@@ -94,6 +94,9 @@ fn price_of(model: &str) -> Option<(f64, f64)> {
 /// Read a `.jsonl` transcript into a `Summary`.
 pub fn summarise(jsonl: &str) -> Summary {
     let mut s = Summary::default();
+    // A Codex rollout names its model once per turn, in `turn_context`, and
+    // its usage lines after — so the model is carried from one to the next.
+    let mut codex_model = None;
     for line in jsonl.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -103,7 +106,13 @@ pub fn summarise(jsonl: &str) -> Summary {
             s.unreadable += 1;
             continue;
         };
-        read_record(&value, &mut s);
+        // Codex wraps every record in `payload`; Claude Code never does. Read
+        // line by line rather than per file, because a session resumed with
+        // the other harness keeps both in one transcripts directory.
+        match value.get("payload") {
+            Some(payload) => read_codex_record(&value, payload, &mut codex_model, &mut s),
+            None => read_record(&value, &mut s),
+        }
     }
     // Prices, applied once the tokens are summed.
     for (model, usage) in s.usage.iter_mut() {
@@ -171,6 +180,92 @@ fn read_record(value: &serde_json::Value, s: &mut Summary) {
     }
 }
 
+fn str_at<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(|x| x.as_str())
+}
+
+/// Fold one line of a Codex rollout into the summary.
+///
+/// Shapes measured from Codex 0.154.0's `$CODEX_HOME/sessions/**/rollout-*.jsonl`:
+///
+/// - `turn_context` carries the model for the turn.
+/// - `event_msg` / `token_count` carries usage once per model response, as a
+///   running `total_token_usage` and this response's `last_token_usage` — the
+///   latter is summed, the former would count every earlier response again.
+///   `token_usage_record` repeats the same numbers and is not read.
+/// - `response_item` / `function_call` and `custom_tool_call` are the calls the
+///   model made, by the names it used (`exec_command`, `apply_patch`).
+/// - `event_msg` / `item_completed` carries the files: the paths a
+///   `FileChange` changed and the paths a `CommandExecution` read.
+fn read_codex_record(
+    value: &serde_json::Value,
+    payload: &serde_json::Value,
+    model: &mut Option<String>,
+    s: &mut Summary,
+) {
+    match (str_at(value, "type"), str_at(payload, "type")) {
+        (Some("turn_context"), _) => {
+            if let Some(m) = str_at(payload, "model") {
+                *model = Some(m.to_string());
+            }
+        }
+        (Some("event_msg"), Some("token_count")) => {
+            let Some(last) = payload.get("info").and_then(|i| i.get("last_token_usage")) else {
+                return;
+            };
+            s.turns += 1;
+            let tok = |name: &str| last.get(name).and_then(|t| t.as_u64()).unwrap_or(0);
+            let entry = s
+                .usage
+                .entry(model.clone().unwrap_or_else(|| "unknown".into()))
+                .or_default();
+            let cached = tok("cached_input_tokens");
+            // Codex's input count includes the cached part; Claude Code's does
+            // not. Split here so a cached token is counted once, as a read.
+            entry.input += tok("input_tokens").saturating_sub(cached);
+            entry.cache_read += cached;
+            entry.cache_write += tok("cache_write_input_tokens");
+            entry.output += tok("output_tokens");
+        }
+        (Some("response_item"), Some("function_call" | "custom_tool_call")) => {
+            if let Some(name) = str_at(payload, "name") {
+                *s.tools.entry(name.to_string()).or_insert(0) += 1;
+            }
+        }
+        (Some("event_msg"), Some("item_completed")) => {
+            let Some(item) = payload.get("item") else {
+                return;
+            };
+            match str_at(item, "type") {
+                Some("FileChange") => {
+                    for path in item
+                        .get("changes")
+                        .and_then(|c| c.as_object())
+                        .into_iter()
+                        .flatten()
+                    {
+                        s.files.insert(path.0.clone());
+                    }
+                }
+                Some("CommandExecution") => {
+                    for parsed in item
+                        .get("parsed_cmd")
+                        .and_then(|p| p.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(path) = str_at(parsed, "path").filter(|p| !p.is_empty()) {
+                            s.files.insert(path.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +318,70 @@ mod tests {
             "each file once, though a.rs was edited twice"
         );
         assert!(!s.is_unreadable());
+    }
+
+    /// A Codex 0.154.0 rollout, written by `codex exec` against a stub model
+    /// that read a file, patched another and answered — three requests of
+    /// 1,001/2,001/3,001 input tokens (100/200/300 cached) and 12/22/32 output.
+    /// Trimmed of long prompt text; every record kept is as Codex wrote it.
+    const CODEX_ROLLOUT: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/codex-rollout.jsonl"
+    ));
+
+    /// A Codex rollout is read into the same summary a Claude transcript is.
+    #[test]
+    fn a_codex_rollout_is_read_into_what_the_agent_did() {
+        let s = summarise(CODEX_ROLLOUT);
+        assert_eq!(s.unreadable, 0);
+        assert_eq!(s.turns, 3, "one per model response");
+        assert_eq!(s.tools.get("exec_command"), Some(&1));
+        assert_eq!(s.tools.get("apply_patch"), Some(&1));
+        assert_eq!(
+            s.files,
+            ["/work/a.txt".to_string(), "/work/b.txt".to_string()]
+                .into_iter()
+                .collect(),
+            "the file the shell read and the file the patch changed"
+        );
+        let u = &s.usage["gpt-5.5"];
+        assert_eq!(u.output, 12 + 22 + 32);
+        assert_eq!(u.cache_read, 100 + 200 + 300);
+        assert_eq!(
+            u.input,
+            (1001 - 100) + (2001 - 200) + (3001 - 300),
+            "Codex's input count includes the cached part; counted once, as a cache read"
+        );
+        assert_eq!(u.cost, None, "no price omh has, so no cost — not zero");
+    }
+
+    /// Codex records usage twice per response — `token_count` and
+    /// `token_usage_record` — and `total_token_usage` is a running sum. Only
+    /// `last_token_usage`, once per response, adds up to what was spent.
+    #[test]
+    fn a_codex_rollout_counts_each_request_once() {
+        let s = summarise(CODEX_ROLLOUT);
+        let u = &s.usage["gpt-5.5"];
+        assert_eq!(
+            u.input + u.cache_read + u.output,
+            6069,
+            "the rollout's own final total"
+        );
+    }
+
+    /// One session directory can hold both formats — a session resumed with the
+    /// other harness — and each line is read as what it is.
+    #[test]
+    fn claude_and_codex_lines_are_read_side_by_side() {
+        let jsonl = format!(
+            "{}\n{}",
+            assistant("claude-sonnet-4-20260514", 100, 50, &[("Edit", "src/a.rs")]),
+            CODEX_ROLLOUT
+        );
+        let s = summarise(&jsonl);
+        assert_eq!(s.turns, 4);
+        assert_eq!(s.usage["claude-sonnet-4-20260514"].input, 100);
+        assert_eq!(s.usage["gpt-5.5"].output, 66);
     }
 
     /// A transcript omh cannot parse is never reported as an empty session.

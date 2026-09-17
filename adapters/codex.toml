@@ -12,8 +12,17 @@ install = "npm install -g @openai/codex@{{version}}"
 # renaming over it. Codex keeps everything under `~/.codex`.
 creds = ["$HOME/.codex/"]
 
+# Where Codex writes its rollouts — one JSONL per session, under dated
+# directories (`sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`, measured in
+# 0.154.0). omh mounts a per-session directory over it so `omh sNN` can read
+# what the agent did and what it cost; `transcript::read_codex_record` reads it.
+transcripts = "$HOME/.codex/sessions"
+
 # What proves a login: `auth.json` holds the API key or the OAuth tokens Codex
-# writes after `codex login`. A config directory fills with other files on the
+# writes after `codex login` — with Codex's default credential store, `file`.
+# Set to `keyring` (or `auto`, where a keyring exists) it writes no file, so
+# `omh auth codex --import` finds nothing on that host and says so; inside the
+# sandbox there is no keyring, and the default holds. A config directory fills with other files on the
 # first start, so nothing else there distinguishes a login from boot noise.
 token = ["$HOME/.codex/auth.json"]
 
@@ -23,6 +32,28 @@ token = ["$HOME/.codex/auth.json"]
 # on this machine can be copied instead, with `omh auth codex --import`.
 login = "choose `Sign in with Device Code` in Codex, then exit — or run `omh auth codex --import` to copy this machine's login"
 
+# How this harness names the things an agent does, as its hooks see them —
+# measured in the 0.154.0 image with a stub model making real calls. The shell
+# tool is `exec_command` to the model and `Bash` to a hook; an edit is
+# `apply_patch`, which `Edit` and `Write` also match as aliases. A matcher of
+# plain names must equal one exactly (`Ba` does not match `Bash`).
+#
+# No `read`: Codex reads files through the shell. No `search`, for the same
+# reason. Hooks narrowing to either are dropped by name.
+#
+# **A known gap:** an `apply_patch` the model runs *through the shell*
+# (`apply_patch <<'EOF'`) reaches hooks as `Bash`, with the patch inside
+# `command` — an `edit` guard does not see it, and no `after-tool` fires for it.
+[tools]
+edit  = "apply_patch"
+shell = "Bash"
+
+# No `commands`: no loader for a `~/.codex/prompts` directory turns up in
+# Codex 0.154.0's source, and its slash commands migrate to skills
+# (`core-plugins/src/command_migration.rs`). No `subagents`
+# binding either: Codex's roles are `[agents.<role>]` config, not files omh
+# stages.
+#
 # Codex reads `AGENTS.md`, the standard file, and nothing Claude-specific — so
 # there is no `also`, unlike the claude adapter where both names are live.
 [capabilities.rules]
@@ -31,7 +62,10 @@ render = "concat"
 # The **personal** file, never the repo's: `rules::compose` already composes
 # this project's own AGENTS.md into every session, so importing that one would
 # deliver the same prose twice. Codex's user-scope instructions live in
-# `~/.codex/AGENTS.md`.
+# `~/.codex/AGENTS.md`. When `~/.codex/AGENTS.override.md` exists Codex reads
+# it *instead* (measured: only the override reached the prompt), and omh does
+# not import it — a host with one gets its `AGENTS.md` in the sandbox, which
+# is not what that host's Codex reads.
 import = "$HOME/.codex/AGENTS.md"
 
 # `~/.agents/skills`, not `~/.codex/skills`. Codex still reads the latter — "deprecated
@@ -67,3 +101,42 @@ render = "codex-toml"
 import = "$HOME/.codex/config.toml"
 verify = "codex mcp list"
 ready  = "enabled"
+
+# omh's hooks go in the **system** layer, which Codex runs as managed. From the
+# user layer (`~/.codex/config.toml`) a hook runs only once Codex has recorded
+# a `trusted_hash` for it; measured, the same hook fired from `/etc/codex` and
+# not from `~/.codex`. Yours stay in `~/.codex`, under Codex's own trust.
+[capabilities.hooks]
+path   = "/etc/codex/config.toml"
+render = "codex-hooks"
+import = "$HOME/.codex/config.toml"
+
+# Claude Code's names, measured firing in `codex exec`.
+[capabilities.hooks.events]
+session-start = "SessionStart"
+turn-end      = "Stop"
+before-tool   = "PreToolUse"
+after-tool    = "PostToolUse"
+
+# `tool_input` is `{"command": …}` for both tools: the shell command for
+# `Bash`, the whole patch text for `apply_patch`. There is no file path field.
+[capabilities.hooks.fields]
+tool-command = ".tool_input.command"
+
+# `edit`'s file, read out of the patch: its first `*** Update File:`,
+# `*** Add File:` or `*** Delete File:` header. The same posture as omp's
+# `[PATH#TAG]` override — a patch touching several files shows a guard only
+# the first.
+[capabilities.hooks.fields-by-tool.edit]
+tool-file = '.tool_input.command | (capture("\\*\\*\\* (Update|Add|Delete) File: (?<p>[^\\n]+)") | .p)'
+
+# Measured reaching the model as a developer message at `SessionStart`,
+# `PreToolUse` and `PostToolUse`. **Not at `Stop`**, which rejects the key as
+# invalid output — the renderer drops an injection there by name.
+[capabilities.hooks.inject]
+template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","additionalContext":$m}}'"""
+
+# Measured blocking both tools, even with approvals bypassed; the model reads
+# "Command blocked by PreToolUse hook: <reason>".
+[capabilities.hooks.refuse]
+template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","permissionDecision":"deny","permissionDecisionReason":$m}}'"""
