@@ -114,6 +114,11 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
                     .is_some_and(|a| a.iter().any(toml::Value::is_table))
         };
         for (key, value) in &file.rest {
+            // `[account]` is `account` for some harnesses and a `default`,
+            // read by `config::account_for`.
+            if key == "account" && value.is_table() {
+                continue;
+            }
             if is_table_like(value) {
                 // `[toolchain]` is named specifically, because it was omh's own
                 // table and somebody was *told* to write it. It falls into

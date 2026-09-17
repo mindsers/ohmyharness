@@ -1100,6 +1100,24 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
                         owed = false;
                         continue;
                     }
+                    // A hole inside a word — `codex:<name>` — filled in place,
+                    // so the prefix the reader types is still checked.
+                    let mut filled = String::new();
+                    let mut rest = bare;
+                    while let Some(open) = rest.find('<') {
+                        let Some(shut) = rest[open..].find('>') else {
+                            break;
+                        };
+                        filled.push_str(&rest[..open]);
+                        filled.push_str(hole(&rest[open..open + shut + 1]));
+                        rest = &rest[open + shut + 1..];
+                    }
+                    filled.push_str(rest);
+                    if filled != bare && !filled.is_empty() && filled.chars().all(typeable) {
+                        words.push(filled);
+                        owed = false;
+                        continue;
+                    }
                     break;
                 }
                 let word = match bare.split_once('|') {
@@ -1160,12 +1178,12 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("README.md", 56), // + the omh upgrade command in the list
-        ("accounts.md", 5),
+        ("accounts.md", 10),
         ("adapters.md", 1),
         ("code-graph.md", 1),
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
         // then `omh s` and `omh s01 rm` in the landed-branch block
-        ("commands.md", 145),
+        ("commands.md", 147),
         ("configuration.md", 47), // + `omh use hooks tdd-guard`
         ("decisions.md", 1),
         ("editors.md", 4),
@@ -1730,7 +1748,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
     // file while another gains lines is loud, and no floor can see that.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("base/2026.08.toml", 19),
-        ("src/auth.rs", 6),
+        ("src/auth.rs", 7),
         ("src/base.rs", 3),
         ("src/cli.rs", 19), // + the retired --force and --file sentences
         ("src/cmd/auth.rs", 3),

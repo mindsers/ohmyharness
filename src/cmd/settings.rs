@@ -39,7 +39,11 @@ pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
         // unread. `config::values` renders a table as `[name]`.
         tables: mine
             .keys()
-            .filter(|k| *k == &format!("[{}]", config::USE) || *k == &format!("[{}]", config::OMH))
+            .filter(|k| {
+                *k == &format!("[{}]", config::USE)
+                    || *k == &format!("[{}]", config::OMH)
+                    || *k == "[account]"
+            })
             .cloned()
             .collect(),
         unread: mine
@@ -48,6 +52,7 @@ pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
                 key::describes(k).is_none()
                     && *k != &format!("[{}]", config::USE)
                     && *k != &format!("[{}]", config::OMH)
+                    && *k != "[account]"
             })
             .map(|(k, v)| report::Setting {
                 key: k.clone(),
@@ -72,6 +77,7 @@ pub(crate) fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
     let settings = config::policy(&paths)?
         .into_iter()
+        .chain(config::account_rows(&paths)?)
         .map(|s| report::Effective {
             key: s.key,
             value: s.value,
@@ -549,9 +555,40 @@ pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
 /// captured for *some* harness is accepted, because "I only use claude" is
 /// ordinary, and the harnesses are named because `work` is right until the day
 /// you run `omh new opencode`.
+/// `codex:work` as the harness it names and the account, or `work` for every
+/// harness.
+pub(crate) fn account_target(value: &str) -> (Option<&str>, &str) {
+    match value.split_once(':') {
+        Some((harness, name)) => (Some(harness), name),
+        None => (None, value),
+    }
+}
+
+/// Refuse an `account` value that names no harness omh has, or a login that
+/// harness — or, with none named, any harness — does not have.
+pub(crate) fn check_account(paths: &Paths, value: &str, ctx: &out::Ctx) -> Result<()> {
+    let (harness, name) = account_target(value);
+    if let Some(h) = harness {
+        Adapter::find(&paths.adapters(), h)?;
+    }
+    no_account_that_no_login_answers_to(paths, name, harness, ctx)
+}
+
+/// `--harness`-less keys refuse a harness: only `account` is per harness.
+pub(crate) fn only_account_is_per_harness(key: &str, harness: Option<&str>) -> Result<()> {
+    if let Some(h) = harness {
+        anyhow::ensure!(
+            key == "account",
+            "`{key}` is one setting for every harness — `{h}` names nothing here"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn no_account_that_no_login_answers_to(
     paths: &Paths,
     name: &str,
+    harness: Option<&str>,
     ctx: &out::Ctx,
 ) -> Result<()> {
     // Not `.unwrap_or_default()`. The refusal below — "no captured login called
@@ -559,7 +596,11 @@ pub(crate) fn no_account_that_no_login_answers_to(
     // swallowed it was made having opened nothing: an unreadable adapters
     // directory, or one malformed adapter, told a user with the login captured
     // to go and capture it.
-    let adapters = Adapter::load_dir(&paths.adapters())?;
+    // For one harness, only that harness's logins answer.
+    let adapters: Vec<Adapter> = Adapter::load_dir(&paths.adapters())?
+        .into_iter()
+        .filter(|a| harness.is_none_or(|h| a.name.as_str() == h))
+        .collect();
     let mut has: Vec<String> = Vec::new();
     let mut all: Vec<String> = Vec::new();
     for adapter in &adapters {
@@ -736,7 +777,12 @@ pub(crate) fn set(
     // Every layer the rule named, so a write cannot land under a value that
     // outranks it. That is the whole reason the rule returns a list.
     for layer in &reach.layers {
-        let w = config::set(paths, key, value, *layer)?;
+        let w = if key == "account" {
+            let (harness, name) = account_target(value);
+            config::set_account(paths, harness, name, *layer)?
+        } else {
+            config::set(paths, key, value, *layer)?
+        };
         // The one fact separating the safe destination from the dangerous one
         // used to be a five-character infix in an absolute path eighty columns
         // wide. `settings.toml` and `settings.local.toml` do not read as
@@ -823,14 +869,20 @@ pub(crate) fn tracked(layer: config::Layer) -> &'static str {
 pub(crate) fn unset(
     paths: &Paths,
     key: &str,
+    harness: Option<&str>,
     reach: Reach,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let reach = reach.for_removal();
+    // `account codex` reads as codex's account in every sentence below.
+    let what = match harness {
+        Some(h) => format!("{h}'s {key}"),
+        None => key.to_string(),
+    };
     if reach.layers.is_empty() {
         ctx.say(
-            &report::Action::new("setting-absent", format!("{key} is not set in this repo"))
+            &report::Action::new("setting-absent", format!("{what} is not set in this repo"))
                 .data(serde_json::json!({ "key": key, "removed": false })),
         );
         if dry_run {
@@ -843,7 +895,7 @@ pub(crate) fn unset(
                 &report::Action::new(
                     "setting-removal-planned",
                     format!(
-                        "would drop {key} from the {layer} layer ({})",
+                        "would drop {what} from the {layer} layer ({})",
                         tracked(*layer)
                     ),
                 )
@@ -851,7 +903,11 @@ pub(crate) fn unset(
             );
             continue;
         }
-        let removed = config::unset(paths, key, *layer)?;
+        let removed = if key == "account" {
+            config::unset_account(paths, harness, *layer)?
+        } else {
+            config::unset(paths, key, *layer)?
+        };
         ctx.say(
             &report::Action::new(
                 if removed {
@@ -860,9 +916,9 @@ pub(crate) fn unset(
                     "setting-absent"
                 },
                 if removed {
-                    format!("removed {key} from the {layer} layer")
+                    format!("removed {what} from the {layer} layer")
                 } else {
-                    format!("{key} was not set in the {layer} layer")
+                    format!("{what} was not set in the {layer} layer")
                 },
             )
             .data(serde_json::json!({
@@ -880,6 +936,11 @@ pub(crate) fn unset(
     // a named flag it is reachable, since `--save` and `--local` deliberately
     // touch one file. Without one the rule reached every repo layer, so the
     // only survivor left is a personal default, which no repo command writes.
+    // One harness's entry going leaves the shared name in force by design, so
+    // `account` still being set is not news there.
+    if harness.is_some() {
+        return Ok(());
+    }
     if let Some(still) = config::policy(paths)?.into_iter().find(|s| s.key == key) {
         ctx.warn(&format!(
             "`{key}` is still set in the {} layer — {}",

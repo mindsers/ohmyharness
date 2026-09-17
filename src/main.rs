@@ -509,7 +509,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     // check on one spelling of a write is a check somebody
                     // routes around by typing the other.
                     if key == "account" {
-                        cmd::settings::no_account_that_no_login_answers_to(&paths, value, ctx)?;
+                        cmd::settings::check_account(&paths, value, ctx)?;
                     }
                     cmd::settings::set(
                         &paths,
@@ -525,6 +525,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     cmd::settings::unset(
                         &paths,
                         key,
+                        None,
                         cmd::settings::Reach::named(config::Layer::Personal),
                         cli.dry_run,
                         ctx,
@@ -564,15 +565,21 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 }
                 cmd::settings::Names::ASetting | cmd::settings::Names::Neither => {
                     if key == "account" {
-                        cmd::settings::no_account_that_no_login_answers_to(&paths, value, ctx)?;
+                        cmd::settings::check_account(&paths, value, ctx)?;
                     }
                     let reached = cmd::settings::reach(&paths, key, *local, *save)?;
                     cmd::settings::set(&paths, key, value, reached, cli.dry_run, ctx)
                 }
             }
         }
-        Cmd::Unset { key, save, local } => {
+        Cmd::Unset {
+            key,
+            harness,
+            save,
+            local,
+        } => {
             let paths = Paths::discover(&cwd)?;
+            cmd::settings::only_account_is_per_harness(key, harness.as_deref())?;
             match cmd::settings::names(&paths, key, ctx) {
                 cmd::settings::Names::AFeature => cmd::settings::feature_forget(
                     &paths,
@@ -589,7 +596,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 }
                 cmd::settings::Names::ASetting | cmd::settings::Names::Neither => {
                     let reached = cmd::settings::reach(&paths, key, *local, *save)?;
-                    cmd::settings::unset(&paths, key, reached, cli.dry_run, ctx)
+                    cmd::settings::unset(&paths, key, harness.as_deref(), reached, cli.dry_run, ctx)
                 }
             }
         }

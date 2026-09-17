@@ -166,6 +166,179 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
     Ok(resolve(found))
 }
 
+/// The account a launch of `harness` is configured with, if any.
+///
+/// `account` is one string when one name fits every harness, and a table once
+/// one differs:
+///
+/// ```toml
+/// [account]
+/// default = "mine"
+/// codex   = "work"
+/// ```
+///
+/// A harness's own entry wins at whatever layer it is set — it is the more
+/// specific statement. Otherwise the default, the later layer winning as for
+/// every setting. A layer omh cannot read is an error, not "no account": a
+/// launch that read nothing would go ahead logged out.
+pub fn account_for(paths: &Paths, harness: &str) -> Result<Option<String>> {
+    let mut own = None;
+    let mut default = None;
+    for layer in Layer::SETTINGS {
+        let doc = read_doc(&layer.file(paths))?;
+        let Some(item) = doc.get(ACCOUNT) else {
+            continue;
+        };
+        if let Some(name) = item.as_str() {
+            default = Some(name.to_string());
+        } else if let Some(table) = item.as_table_like() {
+            if let Some(name) = table.get(ACCOUNT_DEFAULT).and_then(|i| i.as_str()) {
+                default = Some(name.to_string());
+            }
+            if let Some(name) = table.get(harness).and_then(|i| i.as_str()) {
+                own = Some(name.to_string());
+            }
+        }
+    }
+    Ok(own.or(default))
+}
+
+const ACCOUNT: &str = "account";
+/// The table entry for every harness without its own. No harness is called
+/// `default`: `Adapter::find` would have to load `default.toml`, which omh
+/// ships as your settings template, not an adapter.
+pub const ACCOUNT_DEFAULT: &str = "default";
+
+/// Name an account in one layer, for one harness or as the default.
+///
+/// For one harness, a string becomes a table with the string as its
+/// `default`. As the default, a table keeps its harness entries.
+pub fn set_account(
+    paths: &Paths,
+    harness: Option<&str>,
+    name: &str,
+    layer: Layer,
+) -> Result<Written> {
+    edit_layer(paths, layer, |doc| {
+        let existing = doc
+            .get(ACCOUNT)
+            .and_then(|i| i.as_str())
+            .map(str::to_string);
+        let is_table = doc
+            .get(ACCOUNT)
+            .is_some_and(|i| i.as_table_like().is_some());
+        match (harness, is_table) {
+            (None, false) => doc[ACCOUNT] = toml_edit::value(name),
+            (None, true) => doc[ACCOUNT][ACCOUNT_DEFAULT] = toml_edit::value(name),
+            (Some(h), _) => {
+                if !is_table {
+                    let mut table = toml_edit::Table::new();
+                    if let Some(shared) = existing {
+                        table[ACCOUNT_DEFAULT] = toml_edit::value(shared);
+                    }
+                    // A comment above `account = …` belongs to the setting, so
+                    // it moves above `[account]` rather than going with the line.
+                    if let Some(prefix) = key_prefix(doc) {
+                        table.decor_mut().set_prefix(prefix);
+                    }
+                    doc.remove(ACCOUNT);
+                    doc[ACCOUNT] = toml_edit::Item::Table(table);
+                }
+                doc[ACCOUNT][h] = toml_edit::value(name);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// `[account]` as settings rows, the way they are typed: `account = mine` for
+/// the default, `account = codex:work` for a harness.
+///
+/// `policy` skips tables, so without these a repo that named an account for
+/// one harness showed "nothing set" where its accounts are. A string `account`
+/// is already one of `policy`'s rows and is not repeated here.
+pub fn account_rows(paths: &Paths) -> Result<Vec<Setting>> {
+    let mut rows = Vec::new();
+    for layer in Layer::SETTINGS {
+        let doc = read_doc(&layer.file(paths))?;
+        let Some(table) = doc.get(ACCOUNT).and_then(|i| i.as_table_like()) else {
+            continue;
+        };
+        for (harness, item) in table.iter() {
+            let Some(name) = item.as_str() else { continue };
+            rows.push(Setting {
+                key: ACCOUNT.to_string(),
+                value: if harness == ACCOUNT_DEFAULT {
+                    name.to_string()
+                } else {
+                    format!("{harness}:{name}")
+                },
+                layer,
+                shadows: Vec::new(),
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// The comment and blank lines above `account = …`, if the setting has any.
+fn key_prefix(doc: &toml_edit::DocumentMut) -> Option<String> {
+    doc.as_table()
+        .key(ACCOUNT)
+        .and_then(|k| k.leaf_decor().prefix())
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+}
+
+/// Drop an account from one layer: one harness's entry, or all of it.
+///
+/// A table left holding only `default` goes back to one string, and one left
+/// holding nothing goes. Answers whether there was anything to drop.
+pub fn unset_account(paths: &Paths, harness: Option<&str>, layer: Layer) -> Result<bool> {
+    let path = layer.file(paths);
+    let mut doc = read_doc(&path)?;
+    let changed = match harness {
+        None => doc.remove(ACCOUNT).is_some(),
+        Some(h) => {
+            let Some(table) = doc.get_mut(ACCOUNT).and_then(|i| i.as_table_like_mut()) else {
+                return Ok(false);
+            };
+            if table.remove(h).is_none() {
+                return Ok(false);
+            }
+            let default = table
+                .get(ACCOUNT_DEFAULT)
+                .and_then(|i| i.as_str())
+                .map(str::to_string);
+            match (table.len(), default) {
+                (0, _) => {
+                    doc.remove(ACCOUNT);
+                }
+                (1, Some(name)) => {
+                    let prefix = doc
+                        .get(ACCOUNT)
+                        .and_then(|i| i.as_table())
+                        .and_then(|t| t.decor().prefix())
+                        .and_then(|p| p.as_str())
+                        .map(str::to_string);
+                    doc.remove(ACCOUNT);
+                    doc[ACCOUNT] = toml_edit::value(name);
+                    if let (Some(prefix), Some(mut key)) = (prefix, doc.key_mut(ACCOUNT)) {
+                        key.leaf_decor_mut().set_prefix(prefix);
+                    }
+                }
+                _ => {}
+            }
+            true
+        }
+    };
+    if changed {
+        std::fs::write(&path, doc.to_string())
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(changed)
+}
+
 /// Read a layer's file, distinguishing "this layer declares nothing" from
 /// "this layer could not be read".
 ///
@@ -883,6 +1056,120 @@ mod tests {
             repo: dir.path().join("repo"),
         };
         (dir, paths)
+    }
+
+    // ── account, per harness ────────────────────────────────────────────────
+
+    fn shared(paths: &Paths, body: &str) {
+        let p = Layer::Shared.file(paths);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn shared_body(paths: &Paths) -> String {
+        std::fs::read_to_string(Layer::Shared.file(paths)).unwrap()
+    }
+
+    /// One string is every harness's account; a table names some harnesses
+    /// and keeps `default` for the rest.
+    #[test]
+    fn an_account_resolves_per_harness() {
+        let (_d, paths) = fixture();
+        shared(&paths, "account = \"mine\"\n");
+        assert_eq!(
+            account_for(&paths, "codex").unwrap().as_deref(),
+            Some("mine")
+        );
+
+        shared(&paths, "[account]\ndefault = \"mine\"\ncodex = \"work\"\n");
+        assert_eq!(
+            account_for(&paths, "codex").unwrap().as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            account_for(&paths, "claude").unwrap().as_deref(),
+            Some("mine")
+        );
+
+        shared(&paths, "[account]\ncodex = \"work\"\n");
+        assert_eq!(
+            account_for(&paths, "claude").unwrap(),
+            None,
+            "no default, no account"
+        );
+    }
+
+    /// A harness's own entry wins at whatever layer it is set; the default
+    /// follows the usual rule, the later layer winning.
+    #[test]
+    fn a_harness_entry_wins_over_a_default_in_a_later_layer() {
+        let (_d, paths) = fixture();
+        shared(&paths, "[account]\ncodex = \"work\"\n");
+        let local = Layer::Local.file(&paths);
+        std::fs::write(&local, "account = \"mine\"\n").unwrap();
+        assert_eq!(
+            account_for(&paths, "codex").unwrap().as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            account_for(&paths, "claude").unwrap().as_deref(),
+            Some("mine")
+        );
+    }
+
+    /// A file that will not parse is an error, not "no account" — a launch
+    /// that read nothing would go ahead logged out.
+    #[test]
+    fn an_unreadable_account_is_an_error() {
+        let (_d, paths) = fixture();
+        shared(&paths, "account = [\n");
+        assert!(account_for(&paths, "codex").is_err());
+    }
+
+    /// Setting for one harness turns the string into a table with the string
+    /// as its `default`; a plain name then sets the default.
+    #[test]
+    fn setting_an_account_for_one_harness_keeps_the_default() {
+        let (_d, paths) = fixture();
+        shared(&paths, "# ours\naccount = \"mine\"\n");
+
+        set_account(&paths, Some("codex"), "work", Layer::Shared).unwrap();
+        let doc: toml::Table = shared_body(&paths).parse().unwrap();
+        assert_eq!(doc["account"]["default"].as_str(), Some("mine"));
+        assert_eq!(doc["account"]["codex"].as_str(), Some("work"));
+        assert!(shared_body(&paths).contains("# ours"), "comments survive");
+
+        set_account(&paths, None, "other", Layer::Shared).unwrap();
+        let doc: toml::Table = shared_body(&paths).parse().unwrap();
+        assert_eq!(doc["account"]["default"].as_str(), Some("other"));
+        assert_eq!(doc["account"]["codex"].as_str(), Some("work"));
+    }
+
+    /// Unsetting one harness goes back to a string once only `default` is
+    /// left, and to nothing once nothing is.
+    #[test]
+    fn unsetting_the_last_harness_goes_back_to_one_string() {
+        let (_d, paths) = fixture();
+        shared(&paths, "[account]\ndefault = \"mine\"\ncodex = \"work\"\n");
+
+        assert!(unset_account(&paths, Some("codex"), Layer::Shared).unwrap());
+        let doc: toml::Table = shared_body(&paths).parse().unwrap();
+        assert_eq!(
+            doc["account"].as_str(),
+            Some("mine"),
+            "{}",
+            shared_body(&paths)
+        );
+
+        assert!(
+            !unset_account(&paths, Some("codex"), Layer::Shared).unwrap(),
+            "nothing for codex"
+        );
+
+        shared(&paths, "[account]\ncodex = \"work\"\n");
+        assert!(unset_account(&paths, Some("codex"), Layer::Shared).unwrap());
+        let doc: toml::Table = shared_body(&paths).parse().unwrap();
+        assert!(!doc.contains_key("account"), "{}", shared_body(&paths));
     }
 
     /// Content, which now has one tier and a half: the catalogue, and the

@@ -5140,6 +5140,115 @@ fn setting_an_account_refuses_a_name_no_login_answers_to() {
     );
 }
 
+/// A repo whose `account` names one harness's login can still launch another.
+///
+/// Accounts are captured per harness and the setting was one name for all of
+/// them, so a repo set to its claude account refused `omh new codex` until an
+/// account of the same name existed for codex too. `codex:work` names an
+/// account for one harness; `account` becomes a table with the shared name as
+/// its `default`, and goes back to one string when no harness differs.
+#[test]
+fn an_account_can_be_set_for_one_harness() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+    sb.account("claude", "mine");
+    sb.account("codex", "work");
+    let ok = |args: &[&str]| {
+        let out = sb.omh(args);
+        assert!(
+            out.status.success(),
+            "`omh {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    let account = || -> toml::Value {
+        let raw = std::fs::read_to_string(sb.repo.join(".omh/settings.toml")).unwrap();
+        raw.parse::<toml::Table>().unwrap()["account"].clone()
+    };
+    ok(&["set", "account", "mine"]);
+    assert_eq!(account(), toml::Value::String("mine".into()));
+
+    // The setting names claude's login, so codex has none by that name.
+    let refused = sb.omh(&["s01", "--dry-run", "resume", "codex"]);
+    assert!(!refused.status.success(), "codex has no `mine`");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("codex:<name>"),
+        "and the refusal names the way out: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    // Named for codex, and only for codex: the string becomes a table.
+    ok(&["set", "account", "codex:work"]);
+    let table = account();
+    assert_eq!(table["default"].as_str(), Some("mine"), "{table}");
+    assert_eq!(table["codex"].as_str(), Some("work"), "{table}");
+
+    let codex = ok(&["s01", "--dry-run", "--json", "resume", "codex"]);
+    assert!(
+        String::from_utf8_lossy(&codex.stdout).contains("creds/codex/work"),
+        "codex launches with its own account: {}",
+        String::from_utf8_lossy(&codex.stdout)
+    );
+    let claude = ok(&["s01", "--dry-run", "--json", "resume", "claude"]);
+    assert!(
+        String::from_utf8_lossy(&claude.stdout).contains("creds/claude/mine"),
+        "and claude keeps the default: {}",
+        String::from_utf8_lossy(&claude.stdout)
+    );
+
+    // Both show where settings are listed, the way they are typed.
+    let info = ok(&["info", "--repo"]);
+    let said = String::from_utf8_lossy(&info.stdout).to_string();
+    assert!(
+        said.contains("codex:work") && said.contains("mine"),
+        "`omh info --repo` lists both: {said}"
+    );
+
+    // Only `account` takes a harness.
+    let other = sb.omh(&["unset", "runtime", "codex"]);
+    let said = String::from_utf8_lossy(&other.stderr).to_string();
+    assert!(!other.status.success(), "`runtime` has no harness: {said}");
+    assert!(said.contains("one setting for every harness"), "{said}");
+
+    // A plain name now sets the default, and keeps codex's.
+    ok(&["set", "account", "mine"]);
+    assert_eq!(account()["codex"].as_str(), Some("work"));
+
+    // A name that harness has no login for is refused, naming the harness.
+    let typo = sb.omh(&["set", "account", "codex:mine"]);
+    let said = String::from_utf8_lossy(&typo.stderr).to_string();
+    assert!(!typo.status.success(), "codex has no `mine`: {said}");
+    assert!(said.contains("codex") && said.contains("work"), "{said}");
+
+    // And a harness omh does not have.
+    let nosuch = sb.omh(&["set", "account", "nosuch:work"]);
+    assert!(!nosuch.status.success(), "no harness called `nosuch`");
+
+    // Unset takes back one harness, and the table goes back to one string.
+    let unset = ok(&["unset", "account", "codex"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&unset.stdout),
+        String::from_utf8_lossy(&unset.stderr)
+    );
+    assert!(said.contains("codex"), "says whose account went: {said}");
+    assert!(
+        !said.contains("still set"),
+        "the shared name staying is what was asked for, not a warning: {said}"
+    );
+    assert_eq!(account(), toml::Value::String("mine".into()));
+    let again = sb.omh(&["s01", "--dry-run", "resume", "codex"]);
+    assert!(
+        !again.status.success(),
+        "codex is back to the shared `mine`"
+    );
+    ok(&["s01", "--dry-run", "resume", "claude"]);
+}
+
 /// A session scopes a session verb, and nothing else.
 ///
 /// `memory remember` was the one exception, and it did not earn it: the id
