@@ -3053,9 +3053,12 @@ mod tests {
             .expect("claude has hooks");
         crate::base::hooks()
             .into_iter()
-            .map(|h| {
+            .filter_map(|h| {
                 match crate::hook::render(h.name, &h.hook, binding, &adapter.tools, log).unwrap() {
-                    crate::hook::Outcome::Rendered(r) => (h.name, r.command),
+                    crate::hook::Outcome::Rendered(r) => Some((h.name, r.command)),
+                    // Claude spells no `search` since its native builds, so a
+                    // hook narrowed to it is dropped — and nothing else may be.
+                    crate::hook::Outcome::Dropped(d) if d.wanted == "`search` tool" => None,
                     crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
                 }
             })

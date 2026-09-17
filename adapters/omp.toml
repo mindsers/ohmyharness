@@ -12,13 +12,13 @@ bin  = "omp"
 # this tag's release, cross-checked by downloading `omp-linux-arm64` and
 # `omp-linux-x64` independently and hashing them rather than trusting the sums
 # file alone — the two agreed.
-version = "17.3.3"
-install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo b2e8ae942cbd8aee2cabea62c96166753ca9b258c1314897ab81ef8f18fd090e ;; *) echo 25d642d35cf07a6b94336da94fa6d69b7a0a8b2f1b865ccf92e770ba37aaa606 ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
+version = "18.2.3"
+install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo 37e21b463e16a541d20a94ae422b554ef59fc3e41cc7e275d2759f66041ca5ef ;; *) echo f85bdfb4a763d3399ddd18413f880b26b36da765aa75bd5fcc7d252239c7f17a ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
 
 # Per-`uname -m` SHA-256 of the release binary — `omp-linux-arm64` and
-# `omp-linux-x64` from `v17.3.3`. Inline, so it stays a top-level key rather
+# `omp-linux-x64` from `v18.2.3`. Inline, so it stays a top-level key rather
 # than swallowing the keys below it into a `[checksums]` section.
-checksums = { x86_64 = "25d642d35cf07a6b94336da94fa6d69b7a0a8b2f1b865ccf92e770ba37aaa606", aarch64 = "b2e8ae942cbd8aee2cabea62c96166753ca9b258c1314897ab81ef8f18fd090e" }
+checksums = { x86_64 = "f85bdfb4a763d3399ddd18413f880b26b36da765aa75bd5fcc7d252239c7f17a", aarch64 = "37e21b463e16a541d20a94ae422b554ef59fc3e41cc7e275d2759f66041ca5ef" }
 
 # The whole directory, and it has to be: omp keeps credentials in **SQLite**
 # (`auth_credentials`, `auth_credential_blocks` in `agent.db`), and a bind-
@@ -49,7 +49,7 @@ run = "omp usage --json"
 ready = "accountId"
 
 # How this harness names the things an agent does. Verified against
-# `docs/tools/*.md` at v17.3.3: `bash` takes `command`, `read` takes `path`.
+# `docs/tools/*.md` at v18.2.3: `bash` takes `command`, `read` takes `path`.
 #
 # No `search`: omp has `grep` and `glob` as separate tools and omh's vocabulary
 # has one word for both, so a hook narrowing to `search` is dropped by name
@@ -171,7 +171,7 @@ tool-command = "command"
 # threw `event.input?.match is not a function` the first time it actually
 # ran. That string contains one or more `[PATH#TAG]` sections rather than a
 # plain path at all: confirmed against `docs/tools/edit.md` in the pinned
-# v17.3.3 source tree — "One or more `[PATH#TAG]` sections containing
+# v18.2.3 source tree — "One or more `[PATH#TAG]` sections containing
 # hashline operations", TAG being "four-uppercase-hex". This reads the first
 # section's PATH.
 #

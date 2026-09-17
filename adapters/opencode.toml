@@ -1,13 +1,15 @@
 name    = "opencode"
 bin     = "opencode"
 # Pinned; see claude.toml. Maintainer bumps `version` to the release under test.
-version = "0.6.7"
+version = "1.18.31"
 install = "npm install -g opencode-ai@{{version}}"
 creds   = ["$HOME/.local/share/opencode/"]
 # What proves a login: a harness fills its config dir just by starting.
 token   = ["$HOME/.local/share/opencode/auth.json"]
 
-login   = "run `/login` inside opencode, then exit"
+# `/connect`, not `/login`: 1.18.31 has no `/login` (its TUI registers
+# `provider.connect` with `slashName: "connect"`).
+login   = "run `/connect` inside opencode, then exit"
 
 [capabilities.rules]
 path   = "/work/AGENTS.md"

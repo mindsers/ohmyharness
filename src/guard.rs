@@ -818,7 +818,7 @@ mod rendered {
 
     /// Every guard rendered for omp, then actually run through `node`
     /// against a realistic `edit` payload — `[PATH#TAG]` sections, the shape
-    /// `docs/tools/edit.md` documents for oh-my-pi v17.3.3, not a
+    /// `docs/tools/edit.md` documents for oh-my-pi v17.3.3 and v18.2.3, not a
     /// hand-invented one. `[capabilities.hooks.fields-by-tool.edit]` in
     /// `adapters/omp.toml` is what makes this render instead of drop; before
     /// it existed, both guards were dropped by name here.
