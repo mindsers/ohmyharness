@@ -3,21 +3,19 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.12.0`. This release is about a deletion you can check,
-and a name that cannot be a path.
-[`omh sNN rm`](commands.md#omh-snn-rm--and-what-it-refuses-to-take-with-it)
-drops a session branch whose work a squash merge already landed on trunk, and
-names the commit it landed as; anything short of that proof keeps the branch.
-A harness name is checked to be a name rather than a path, so `..` in the word
-a command takes — or in the marker a session left on disk — can no longer reach
-an adapter file outside the catalogue, and the check is held by the field the
-credential directory is keyed on rather than at the door. A `--dry-run` launch
-writes nothing, and a read omh could not take is named rather than answered as
-though it had looked — an unreadable catalogue used to disown an editor omh
-ships, an unreadable credential directory to start the agent logged out, and an
-unreadable `worktrees/` to make `omh s` report no sessions at all.
-[Which hooks fired](commands.md#omh-snn-shows-which-hooks-fired) and the opt-in
-[guards](configuration.md#guards-and-their-bypass) arrived in 0.11.0,
+**Status: early.** `0.13.0`. This release is about running the harnesses
+their makers ship now, and about Codex. Every pin moved to its current release
+and each adapter was re-read against it; the two claims that broke were fixed
+rather than carried. [`omh auth codex`](accounts.md#a-login-that-cannot-finish-in-a-sandbox)
+finishes — a device code, or `--import` of the login this machine has — Codex
+runs omh's hooks, `omh sNN` reads its rollouts, and an
+[`account`](accounts.md#keyed-by-harness-not-by-provider) can name one
+harness's login with `codex:work`. An unreadable `worktrees/` no longer reads as
+no sessions. [`omh sNN rm`](commands.md#omh-snn-rm--and-what-it-refuses-to-take-with-it)
+that can tell a squash already landed a branch, and harness names that cannot
+be paths, arrived in 0.12.0,
+[which hooks fired](commands.md#omh-snn-shows-which-hooks-fired) and the opt-in
+[guards](configuration.md#guards-and-their-bypass) in 0.11.0,
 [`omh upgrade`](commands.md#omh-upgrade) and the checks `omh sNN commit` runs
 before landing in 0.10.0, the [silent failures](design/roadmap.md)
 closed in 0.8.0, the [command surface](design/profile.md) landed in 0.7.0 and
