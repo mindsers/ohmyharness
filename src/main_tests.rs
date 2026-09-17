@@ -1160,12 +1160,12 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("README.md", 56), // + the omh upgrade command in the list
-        ("accounts.md", 4),
+        ("accounts.md", 5),
         ("adapters.md", 1),
         ("code-graph.md", 1),
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
         // then `omh s` and `omh s01 rm` in the landed-branch block
-        ("commands.md", 144),
+        ("commands.md", 145),
         ("configuration.md", 47), // + `omh use hooks tdd-guard`
         ("decisions.md", 1),
         ("editors.md", 4),
@@ -1730,7 +1730,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
     // file while another gains lines is loud, and no floor can see that.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("base/2026.08.toml", 19),
-        ("src/auth.rs", 2),
+        ("src/auth.rs", 5),
         ("src/base.rs", 3),
         ("src/cli.rs", 19), // + the retired --force and --file sentences
         ("src/cmd/auth.rs", 3),

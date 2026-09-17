@@ -243,6 +243,22 @@ pub fn resolve_for_launch(
     resolve(paths, adapter, configured).map(Some)
 }
 
+/// What a launch with no account says before handing over to the harness.
+///
+/// Starting logged out stays allowed — the harness prompts — but that prompt
+/// names the harness's own login, which may be one that cannot finish in a
+/// sandbox. Codex's did: `codex login` waits on the container's loopback.
+/// `--import` is offered only where a login is a file omh can copy.
+pub fn logged_out(adapter: &Adapter) -> String {
+    let harness = &adapter.name;
+    let import = if adapter.token.is_empty() {
+        String::new()
+    } else {
+        format!(", or `omh auth {harness} --import` to copy this machine's")
+    };
+    format!("no {harness} account — starting logged out. `omh auth {harness}` to log in{import}")
+}
+
 /// Does this file hold more than what `prepare` put there?
 ///
 /// Read as bytes, and an unreadable file counts as *present*: a credential omh
@@ -410,6 +426,64 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Copy a login the host already holds into an account, without a sandbox.
+///
+/// For a harness whose login cannot finish inside one — an OAuth redirect to a
+/// port on the container's loopback, which the host's browser never reaches —
+/// and for anyone already logged in on this machine. Returns the host files it
+/// copied.
+///
+/// Only the adapter's `token` files, never the `creds` directory around them:
+/// a config directory holds boot noise and omh's own mounts, and copying it
+/// would bring both along and call the result a login. A harness with no
+/// `token` files keeps its login somewhere a copy cannot prove, so it is
+/// refused rather than guessed at.
+///
+/// Every file is checked before any is written, so a host missing one of two
+/// leaves the account as it was.
+pub fn import(
+    adapter: &Adapter,
+    account_dir: &std::path::Path,
+    host_home: &std::path::Path,
+) -> Result<Vec<PathBuf>> {
+    use std::os::unix::fs::PermissionsExt;
+    let harness = &adapter.name;
+    if adapter.token.is_empty() {
+        anyhow::bail!(
+            "{harness} keeps its login where omh cannot copy it — no file on its \
+             own proves one — so there is nothing to import; run `omh auth {harness}`"
+        );
+    }
+    let pairs: Vec<(PathBuf, PathBuf)> = adapter
+        .token
+        .iter()
+        .map(|t| {
+            let relative = t.trim_end_matches('/').trim_start_matches("$HOME/");
+            (host_home.join(relative), account_dir.join(relative))
+        })
+        .collect();
+    let missing: Vec<String> = pairs
+        .iter()
+        .filter(|(host, _)| !holds_content(host))
+        .map(|(host, _)| format!("    {}", host.display()))
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "no {harness} login on this machine to import — nothing in:\n{}",
+            missing.join("\n")
+        );
+    }
+    for (host, account) in &pairs {
+        if let Some(parent) = account.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(host, account)
+            .with_context(|| format!("copying {} to {}", host.display(), account.display()))?;
+        std::fs::set_permissions(account, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(pairs.into_iter().map(|(host, _)| host).collect())
+}
+
 /// Did the login complete? Pure so the decision can be tested apart from the
 /// process that produced it.
 pub fn login_outcome(runtime_ok: bool, unfilled: &[PathBuf]) -> Result<()> {
@@ -511,6 +585,152 @@ mod tests {
         assert!(
             !decided_by_files(&omp()),
             "so omh must not report this as a captured login on the files alone"
+        );
+    }
+
+    // ── importing a host login ──────────────────────────────────────────────
+
+    fn codex() -> Adapter {
+        Adapter::find(Path::new(ADAPTERS), "codex").unwrap()
+    }
+
+    /// A login as Codex writes it with an API key — measured, not invented, and
+    /// not `{}`, which is the placeholder `holds_content` reads as no login.
+    const CODEX_LOGIN: &str = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#;
+
+    fn host_with(file: &str, content: &str) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+        home
+    }
+
+    #[test]
+    fn a_host_login_lands_in_the_named_account() {
+        let (_d, paths) = fixture();
+        let home = host_with(".codex/auth.json", CODEX_LOGIN);
+        let account = dir(&paths, &codex(), "work");
+        prepare(&codex(), &account, GUEST_HOME).unwrap();
+
+        let copied = import(&codex(), &account, home.path()).unwrap();
+
+        assert_eq!(copied, vec![home.path().join(".codex/auth.json")]);
+        assert_eq!(
+            std::fs::read_to_string(account.join(".codex/auth.json")).unwrap(),
+            CODEX_LOGIN
+        );
+        assert!(is_captured(&paths, &codex(), "work"));
+        assert_eq!(
+            accounts(&paths, &codex()).unwrap(),
+            vec!["work"],
+            "into the account named, and no other"
+        );
+    }
+
+    /// A token is a secret; the copy is readable by its owner alone, whatever
+    /// the host file's mode was.
+    #[test]
+    fn an_imported_token_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, paths) = fixture();
+        let home = host_with(".codex/auth.json", CODEX_LOGIN);
+        std::fs::set_permissions(
+            home.path().join(".codex/auth.json"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let account = dir(&paths, &codex(), "work");
+        prepare(&codex(), &account, GUEST_HOME).unwrap();
+
+        import(&codex(), &account, home.path()).unwrap();
+
+        let mode = std::fs::metadata(account.join(".codex/auth.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// Nothing to import is a refusal that says where omh looked, and leaves
+    /// no account behind that reads as captured.
+    #[test]
+    fn a_host_that_never_logged_in_imports_nothing() {
+        let (_d, paths) = fixture();
+        let home = tempfile::tempdir().unwrap();
+        let account = dir(&paths, &codex(), "work");
+        prepare(&codex(), &account, GUEST_HOME).unwrap();
+
+        let err = import(&codex(), &account, home.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(".codex/auth.json"), "names the path: {err}");
+        assert!(!is_captured(&paths, &codex(), "work"));
+    }
+
+    /// The placeholder `prepare` writes is not a login on the host either — an
+    /// omh-prepared directory mounted somewhere would otherwise import as one.
+    #[test]
+    fn a_placeholder_on_the_host_is_not_a_login() {
+        let (_d, paths) = fixture();
+        let home = host_with(".codex/auth.json", "{}");
+        let account = dir(&paths, &codex(), "work");
+        prepare(&codex(), &account, GUEST_HOME).unwrap();
+
+        assert!(import(&codex(), &account, home.path()).is_err());
+        assert!(!is_captured(&paths, &codex(), "work"));
+    }
+
+    /// A login in two files, one of them missing on the host, leaves the
+    /// account as it was — half a login is not a login, and a copied half would
+    /// overwrite a working account's file with one that no longer matches.
+    #[test]
+    fn half_a_login_imports_nothing() {
+        let (_d, paths) = fixture();
+        let two: Adapter = toml::from_str(
+            r#"
+            name = "two"
+            bin = "two"
+            install = "x"
+            creds = ["$HOME/.two/"]
+            token = ["$HOME/.two/a.json", "$HOME/.two/b.json"]
+            [capabilities.rules]
+            path = "/work/AGENTS.md"
+            render = "concat"
+            "#,
+        )
+        .unwrap();
+        let home = host_with(".two/a.json", CODEX_LOGIN);
+        let account = dir(&paths, &two, "work");
+        prepare(&two, &account, GUEST_HOME).unwrap();
+
+        let err = import(&two, &account, home.path()).unwrap_err().to_string();
+
+        assert!(err.contains(".two/b.json"), "names what is missing: {err}");
+        assert!(
+            !account.join(".two/a.json").exists(),
+            "and wrote neither file"
+        );
+    }
+
+    /// A harness whose login is not a file cannot be copied as one. omp keeps
+    /// credentials in SQLite beside boot noise; copying the directory would
+    /// import settings and telemetry and call it a login.
+    #[test]
+    fn a_login_that_is_not_a_file_cannot_be_imported() {
+        let (_d, paths) = fixture();
+        let home = host_with(".omp/agent/agent.db", "SQLite format 3\0…");
+        let account = dir(&paths, &omp(), "work");
+
+        let err = import(&omp(), &account, home.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("omp"), "names the harness: {err}");
+        assert!(
+            !account.join(".omp/agent/agent.db").exists(),
+            "and copies nothing"
         );
     }
 

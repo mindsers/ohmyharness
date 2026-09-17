@@ -78,10 +78,43 @@ JSON Parse error: Unexpected EOF
 
 A placeholder is recognised as one, so it never counts as a login.
 
+## A login that cannot finish in a sandbox
+
+Codex's default sign-in opens a browser and waits for the redirect on
+`127.0.0.1:1455` — inside the container, where the host's browser never
+arrives. Two ways round it:
+
+- **Device code.** In `omh auth codex`, choose *Sign in with Device Code*:
+  Codex prints a URL and a one-time code to enter in any browser, and polls
+  for the result itself — no redirect has to reach the sandbox.
+- **Import.** If you are already logged in on this machine, copy that login:
+
+  ```console
+  $ omh auth codex --name work --import
+  `work` captured for codex
+    copied from /Users/you/.codex/auth.json
+  ```
+
+`--import` copies the adapter's `token` files and nothing else — not the config
+directory around them, which holds boot noise and omh's own mounts. Every file
+is checked before any is written, the copies are `0600`, and a harness whose
+login is not a file (omp keeps its credentials in SQLite) is refused rather
+than half-copied.
+
+It is a copy, not a link. From then on the account and the host each hold a
+login of their own, and each refreshes it on its own. A later login on the
+host does not reach the account; import again, or log in with a device code.
+
 ## What stops a launch
 
 - **Not being logged in is fine.** The harness prompts, which is what you want
-  before your first `omh auth`.
+  before your first `omh auth`. omh says so first, because the harness's prompt
+  names the harness's own login, and that login may be one that cannot finish
+  in a sandbox:
+
+  ```
+  omh: no codex account — starting logged out. `omh auth codex` to log in, or `omh auth codex --import` to copy this machine's
+  ```
 - **An account you named and do not have** stops it. Running with no credentials
   produces a session that is logged out for reasons nothing explains.
 - **Two identities and no stated preference** stops it too. Guessing would send

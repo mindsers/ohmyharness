@@ -2009,6 +2009,9 @@ pub(crate) fn run(
     let configured = crate::policy_value(&paths, "account");
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &adapter, &a));
+    if account.is_none() {
+        ctx.warn(&auth::logged_out(&adapter));
+    }
     if let Some(account_dir) = &account {
         // The mountpoints have to exist before docker binds over them — which
         // is staging, and is why this is not a third reading of the flag.

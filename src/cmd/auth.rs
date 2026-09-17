@@ -9,21 +9,20 @@ use crate::out;
 use crate::profile::{Paths, Profile};
 use crate::session::Session;
 use crate::{auth, container, image, memory, persist, report, runtime};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::process::Command;
 
-/// Run the harness's own login inside a sandbox, with this account's credential
-/// files bind-mounted writable. There is no separate capture step: the login
-/// writes straight through to the host.
+/// Capture an account: run the harness's own login in a sandbox, or with
+/// `--import` copy the login this machine already holds.
 pub(crate) fn auth_cmd(
     cwd: &std::path::Path,
     harness: &str,
     account: &str,
+    import: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let profile = Profile::resolve(&paths);
     let adapter = Adapter::find(&paths.adapters(), harness)?;
 
     if adapter.creds.is_empty() {
@@ -37,29 +36,99 @@ pub(crate) fn auth_cmd(
     let already = auth::is_captured(&paths, &adapter, account);
     auth::prepare(&adapter, &account_dir, "/home/agent")?;
 
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    // `--import` copies what the host already holds and starts nothing: a
+    // login that cannot finish in a sandbox is the reason it exists.
+    let imported = if import {
+        let home = dirs::home_dir().context("no home directory")?;
+        Some(auth::import(&adapter, &account_dir, &home)?)
+    } else {
+        login_in_sandbox(&paths, &adapter, account, &account_dir, already, ctx)?;
+        None
+    };
+    let all = auth::accounts(&paths, &adapter)?;
+    // What the files can and cannot settle. For a harness naming `token` files
+    // an empty `unfilled` *is* the login; for one that keeps credentials
+    // somewhere omh cannot stat it means only that nothing is obviously
+    // missing, and saying "captured" there announced a login to users who had
+    // opened the harness, run nothing and quit.
+    let decided = auth::decided_by_files(&adapter);
+    let mut action = if decided {
+        report::Action::new(
+            "account-captured",
+            format!("`{account}` captured for {harness}"),
+        )
+    } else {
+        report::Action::new(
+            "account-recorded",
+            format!("`{account}` recorded for {harness} — login not confirmed"),
+        )
+        .note(format!(
+            "{harness} keeps its credentials where omh cannot read them, so only \
+             {harness} can say whether the login took"
+        ))
+        .next(format!("omh doctor --harness {harness}"))
+    };
+    // A copy, not a link: the account and the host each hold their own login
+    // from here on, and a later login on the host does not reach this one.
+    if let Some(from) = &imported {
+        let from: Vec<String> = from.iter().map(|p| p.display().to_string()).collect();
+        action = action.note(format!("copied from {}", from.join(", ")));
+    }
+    action = action.data(serde_json::json!({
+        "harness": harness,
+        "account": account,
+        "reauthenticated": already,
+        "credentials": account_dir.display().to_string(),
+        "imported": imported,
+        "accounts": all,
+    }));
+    // Only once there is a choice to make. With one account the line is a
+    // sentence about a decision nobody has.
+    if all.len() > 1 {
+        action = action
+            .note(format!("accounts: {}", all.join(", ")))
+            .next("omh set account <name>");
+    }
+    ctx.say(&action);
+    Ok(())
+}
+
+/// The harness's own login, run in a throwaway sandbox with the account's
+/// credential files bind-mounted writable. There is no separate capture step:
+/// the login writes straight through to the host.
+fn login_in_sandbox(
+    paths: &Paths,
+    adapter: &Adapter,
+    account: &str,
+    account_dir: &std::path::Path,
+    already: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    let harness = adapter.name.as_str();
+    let profile = Profile::resolve(paths);
+    let backend = runtime::select(&crate::runtime_preference(paths), &|p| {
         runtime::installed(p)
     })?;
-    let ca = image::ca_for(&paths)?;
-    image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
+    let ca = image::ca_for(paths)?;
+    image::ensure(&backend, adapter, ca.as_ref().map(image::Root::pem))?;
 
     // A throwaway: logging in must not leave a branch behind.
     let session = Session::scratch(paths.scratch("auth"), "auth".into());
     session.ensure(&paths.repo, "")?;
-    let (own, repo) = crate::cmd::session::resolved(&paths)?;
+    let (own, repo) = crate::cmd::session::resolved(paths)?;
 
     let plan = container::plan(
-        &paths,
+        paths,
         &profile,
-        &adapter,
+        adapter,
         &session,
         &[],
         container::Options {
             staging: container::Staging::Apply,
             persist: persist::Mode::None,
             tty: true,
-            account_dir: Some(account_dir.clone()),
-            memory_bin: memory::deliver::available(&paths, ctx),
+            account_dir: Some(account_dir.to_path_buf()),
+            memory_bin: memory::deliver::available(paths, ctx),
             // Empty, like the base this scratch session was created with at
             // `session.ensure(&paths.repo, "")`: a login is not work on the
             // project, so there are no project rules to look up.
@@ -71,7 +140,7 @@ pub(crate) fn auth_cmd(
             // toolchain to type a password would spend minutes on a container
             // that is thrown away, and the credential paths a login writes are
             // the same in both images.
-            image: image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+            image: image::tag_for(adapter, ca.as_ref().map(image::Root::pem)),
             // So nothing has been measured about it here, and nothing is
             // suppressed. That is the safe direction — a login session running
             // one hook too many costs nothing, and this container exists for
@@ -106,56 +175,17 @@ pub(crate) fn auth_cmd(
 
     // Host paths, not guest ones: the guest path names a container that has
     // already been torn down and that the user cannot inspect.
-    let unfilled: Vec<std::path::PathBuf> =
-        auth::unfilled(&adapter, &account_dir, auth::GUEST_HOME)
-            .iter()
-            .map(|guest| {
-                account_dir.join(
-                    guest
-                        .strip_prefix(auth::GUEST_HOME)
-                        .unwrap_or(guest.as_path()),
-                )
-            })
-            .collect();
+    let unfilled: Vec<std::path::PathBuf> = auth::unfilled(adapter, account_dir, auth::GUEST_HOME)
+        .iter()
+        .map(|guest| {
+            account_dir.join(
+                guest
+                    .strip_prefix(auth::GUEST_HOME)
+                    .unwrap_or(guest.as_path()),
+            )
+        })
+        .collect();
     auth::login_outcome(status.success(), &unfilled)
         .map_err(|e| e.context(format!("run `omh auth {harness} --name {account}` again")))?;
-    let all = auth::accounts(&paths, &adapter)?;
-    // What the files can and cannot settle. For a harness naming `token` files
-    // an empty `unfilled` *is* the login; for one that keeps credentials
-    // somewhere omh cannot stat it means only that nothing is obviously
-    // missing, and saying "captured" there announced a login to users who had
-    // opened the harness, run nothing and quit.
-    let decided = auth::decided_by_files(&adapter);
-    let mut action = if decided {
-        report::Action::new(
-            "account-captured",
-            format!("`{account}` captured for {harness}"),
-        )
-    } else {
-        report::Action::new(
-            "account-recorded",
-            format!("`{account}` recorded for {harness} — login not confirmed"),
-        )
-        .note(format!(
-            "{harness} keeps its credentials where omh cannot read them, so only \
-             {harness} can say whether the login took"
-        ))
-        .next(format!("omh doctor --harness {harness}"))
-    };
-    action = action.data(serde_json::json!({
-        "harness": harness,
-        "account": account,
-        "reauthenticated": already,
-        "credentials": account_dir.display().to_string(),
-        "accounts": all,
-    }));
-    // Only once there is a choice to make. With one account the line is a
-    // sentence about a decision nobody has.
-    if all.len() > 1 {
-        action = action
-            .note(format!("accounts: {}", all.join(", ")))
-            .next("omh set account <name>");
-    }
-    ctx.say(&action);
     Ok(())
 }

@@ -286,7 +286,7 @@ omh: graph at http://127.0.0.1:56286
 One service per repo, not per session, and it needs no session to exist. See
 [Code graph](code-graph.md#omh-graph).
 
-## `omh auth <harness> [--name <account>]`
+## `omh auth <harness> [--name <account>] [--import]`
 
 Runs the harness's own login and captures the result. `--name` defaults to
 `default`.
@@ -294,6 +294,17 @@ Runs the harness's own login and captures the result. `--name` defaults to
 ```console
 $ omh auth claude --name personal
 $ omh auth claude --name work
+```
+
+`--import` copies the login this machine already has instead, and starts no
+sandbox. It copies the adapter's `token` files, so it works for a harness
+whose login is a file (claude, codex, opencode) and is refused for one whose
+login is not (omp):
+
+```console
+$ omh auth codex --name work --import
+`work` captured for codex
+  copied from /Users/you/.codex/auth.json
 ```
 
 See [Accounts](accounts.md).
