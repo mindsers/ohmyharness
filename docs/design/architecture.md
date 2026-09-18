@@ -47,7 +47,7 @@ the adapter's `install` command.
 
 ```dockerfile
 # omh/base
-FROM node:22-bookworm-slim
+FROM node:22-trixie-slim
 RUN apt-get install -y … git ripgrep dtach sudo curl jq socat
 RUN usermod -l agent -d /home/agent -m node        # node:slim holds UID 1000
 RUN test "$(id -u agent)" = "1000"                 # assert, do not assume
