@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.13.2`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.14.0`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -21,8 +21,27 @@ architecture is built for and not yet a thing anybody has done.
 
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
-This release is about running the harnesses their makers ship now, and about
-Codex. Every pin moved to its current release — Claude Code 2.1.274, Codex
+
+**`0.14.0` makes what a session learned reach the next one.** The note store
+had two layers — one committed, one yours — and a finding stayed invisible to
+every other session until somebody committed, pushed and merged it. There is
+one store now, at `~/.omh/memory/<repo>`, shared by every session of the repo
+and never committed: write a note and the next session can read it, the way its
+code graph already worked. `omh memory promote` is gone along with the layer it
+moved notes between, and a store recorded under the old path moves itself the
+first time 0.14 runs.
+
+**The sandbox can merge again.** omh's base image was Debian 12, whose git —
+2.39.5 — has no `merge-tree --merge-base`. Any repo whose own checks use a
+modern git failed inside the sandbox for reasons that named anything but git:
+eleven of omh's own tests did, and none of them said the word. The base is
+Debian 13 now, with git 2.47.3, and `omh doctor` asks the image the same
+question so the next one of these is a single row rather than a test run.
+Everyone rebuilds their image once. Codex and Claude also stop asking to
+approve omh's own MCP tools: omh put them there, so the prompt asks you to
+vouch for a decision omh already made.
+
+0.13.0 moved every pin to its current release — Claude Code 2.1.274, Codex
 0.154.0, oh-my-pi 18.2.3, opencode 1.18.31 — and each adapter was re-read
 against it, which found two claims the new releases broke: Claude Code's native
 builds search through `Bash`, so `graph-first` is named as dropped rather than
@@ -41,7 +60,7 @@ every harness had to share. And two more reads that could not look now say
 so: an unreadable `worktrees/` no longer makes `omh s` print *no sessions*, and
 a graph entry `omh sNN rm` could not drop is no longer reported gone.
 
-**`0.13.2` lets Codex act.** Codex runs every shell command and file edit
+**0.13.2 let Codex act.** Codex runs every shell command and file edit
 inside its own bubblewrap sandbox, which cannot start inside omh's container, so
 under 0.13.1 an agent could read nothing and change nothing. omh now turns that
 sandbox off; the container is the sandbox, as it is for every harness.

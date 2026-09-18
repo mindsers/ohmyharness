@@ -10,7 +10,7 @@ host
   ✓  stacks detected     rust (from Cargo.toml)
   ✓  settings omh reads  every key set here is one omh reads
   ✓  leftovers           none — nothing orphaned on this machine
-  ✓  seeded by           version 0.13.2, the one running now
+  ✓  seeded by           version 0.14.0, the one running now
   ✓  disk                76.6 GB free on the filesystem holding /Users/you/.omh — …
   ✓  git on the host     git version 2.55.0 — takes a `--keep` selection; syncs
   ✓  declared config     resolves
@@ -20,6 +20,7 @@ host
 
 claude in omh/claude:8eae0d5c1511fa89
   ✓  starts      claude --version
+  ✓  git         git merge-tree -h 2>&1 | grep -q merge-base || { git --version 2>&1; exit 1; }
   ✓  rules       /work/CLAUDE.md
   ✓  skills      /home/agent/.claude/skills
   …
@@ -31,8 +32,10 @@ single error. The last four read what this checkout declares — that its
 settings resolve, that every `[use]` name is in the catalogue, that every file
 in `.omh/hooks` parses, that every `carry_in` path exists — which needs no
 container either. Under the harness's heading, `starts` comes first: the
-harness printing its own version, in the image a launch uses. Every row after
-it is an adapter path, checked inside the sandbox, and they are the reason the
+harness printing its own version, in the image a launch uses. `git` is second
+and is about the image rather than the adapter — whether its git can merge,
+which is what a repo's own turn-end check will need. Every row after those two
+is an adapter path, checked inside the sandbox, and they are the reason the
 command exists — but none of them can notice a harness that dies before
 reading any of them, which is how opencode 1.18 failed every launch while every
 path row passed. One
