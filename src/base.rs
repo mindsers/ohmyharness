@@ -885,7 +885,7 @@ fn note_taking() -> String {
          under **Expected**, there is nothing here worth recording.\n\n\
          Rename a note by rewriting its `key` and its filename together — never\n\
          one without the other.\n",
-        crate::memory::GUEST_LOCAL_NOTES,
+        crate::memory::GUEST_MEMORY,
     )
 }
 
@@ -1748,35 +1748,22 @@ command = "c"
     /// store, so nobody investigates.
     ///
     /// Asserted against the constants rather than against literals, so moving
-    /// a mount without updating the manifest cannot stay green.
+    /// The memory server is pointed at the store omh mounts.
+    ///
+    /// There were two directories until 0.13 — a committed layer in the
+    /// checkout and this one — and the argument list is the only place the
+    /// manifest and the mount have to agree.
     #[test]
-    fn the_memory_server_is_pointed_at_the_directories_omh_mounts() {
-        let servers = shipped().servers();
-        let memory = servers
-            .get(crate::memory::tools::SERVER_KEY)
-            .expect("the base set must declare the memory server");
-
+    fn the_memory_server_is_pointed_at_the_store_omh_mounts() {
+        let manifest = shipped();
+        let entry = manifest
+            .entry("memory")
+            .expect("the memory server is in the manifest");
+        let args = entry.args.clone();
         assert!(
-            memory
-                .args
-                .iter()
-                .any(|a| a == crate::memory::GUEST_LOCAL_NOTES),
-            "the local store is mounted at {}, args say {:?}",
-            crate::memory::GUEST_LOCAL_NOTES,
-            memory.args
-        );
-        // The committed layer is tracked, so it arrives inside the worktree —
-        // there is no mount for it, and its path is /work-relative.
-        assert!(
-            memory.args.iter().any(|a| a == "/work/.omh/notes"),
-            "the team store lives in the checkout: {:?}",
-            memory.args
-        );
-        // Nothing that pins a session: one manifest serves every session, and
-        // the server reads $OMH_SESSION for provenance.
-        assert!(
-            !memory.args.iter().any(|a| a.contains("--session")),
-            "a session baked into the base set would be wrong for every other one"
+            args.windows(2)
+                .any(|w| w[0] == "--notes" && w[1] == crate::memory::GUEST_MEMORY),
+            "the server must read the directory omh mounts: {args:?}"
         );
     }
 
@@ -1786,8 +1773,7 @@ command = "c"
     #[test]
     fn the_memory_surfaces_declared_cost_matches_what_it_ships() {
         let mut server = crate::memory::tools::Server {
-            team: std::path::PathBuf::from("/nonexistent-team"),
-            local: std::path::PathBuf::from("/nonexistent-local"),
+            notes_dir: std::path::PathBuf::from("/nonexistent-store"),
             templates: crate::memory::shipped_templates(),
             session: "s01".into(),
             client: None,

@@ -191,6 +191,9 @@ pub const STATE_DIRS: &[(&str, bool)] = &[
     // respect. It goes only through the prompt, which names it.
     ("worktrees", true),
     ("shadow", true),
+    ("memory", true),
+    // The store's home until 0.14. Nothing writes it now, and what is in it is
+    // still somebody's notes, so it is offered the same way.
     ("notes", true),
     // Derived on every launch, and rebuilt without asking anyone.
     ("run", false),

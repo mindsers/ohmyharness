@@ -9,7 +9,7 @@
 use crate::mcp::{Tool, ToolResult, Tools};
 use crate::memory::index::{describe, Index};
 use crate::memory::recall::{render, search_phrased, Budget};
-use crate::memory::{self, IfExists, Kind, Layer, Remembered, Wrote};
+use crate::memory::{self, IfExists, Kind, Remembered, Wrote};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,11 +24,8 @@ pub const SERVER_NAME: &str = "omh-memory";
 pub const SERVER_KEY: &str = "memory";
 
 pub struct Server {
-    /// Read for `recall`, never written. `promote` is the only path into the
-    /// committed layer, and it is a human's command.
-    pub team: PathBuf,
-    /// The only directory this server writes to.
-    pub local: PathBuf,
+    /// The store: read by `recall`, written by `remember`.
+    pub notes_dir: PathBuf,
     pub templates: BTreeMap<Kind, String>,
     /// The session this server was launched for, from omh's own environment.
     /// Not a parameter the agent can reach: a writer that names its own
@@ -83,21 +80,20 @@ impl Server {
         )
     }
 
-    /// Both layers, never merged. A note that will not parse is a lint
-    /// violation, not a note — counting it would advertise a store omh cannot
-    /// serve, and returning it would answer from bytes nobody validated.
+    /// A note that will not parse is a lint violation, not a note — counting
+    /// it would advertise a store omh cannot serve, and returning it would
+    /// answer from bytes nobody validated.
     fn notes(&self) -> Vec<memory::Note> {
-        let mut all = Vec::new();
-        for (dir, layer) in [(&self.team, Layer::Team), (&self.local, Layer::Local)] {
-            match memory::notes_in(dir, layer) {
-                Ok(notes) => all.extend(notes),
-                // Reported where a human will see it, not swallowed and not
-                // fatal: half a store still answers questions, and a server
-                // that exits here takes the session's memory with it.
-                Err(e) => eprintln!("omh-mcp: {layer} store unreadable: {e:#}"),
+        match memory::notes_in(&self.notes_dir) {
+            Ok(notes) => notes,
+            // Reported where a human will see it, not swallowed and not
+            // fatal: an unreadable store still lets the session write, and a
+            // server that exits here takes the session's memory with it.
+            Err(e) => {
+                eprintln!("omh-mcp: store unreadable: {e:#}");
+                Vec::new()
             }
         }
-        all
     }
 
     fn recall(&self, args: &Value) -> ToolResult {
@@ -186,7 +182,7 @@ impl Server {
         // The repo, as this process sees it: the server runs inside the
         // sandbox, where the checkout is the workdir.
         match memory::remember_in(
-            &self.local,
+            &self.notes_dir,
             std::path::Path::new(crate::container_workdir()),
             &self.templates,
             &input,
@@ -271,7 +267,7 @@ impl Tools for Server {
 mod tests {
     use super::*;
     use crate::mcp::{ToolResult, Tools};
-    use crate::memory::{self, Layer};
+    use crate::memory::{self};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -284,8 +280,7 @@ mod tests {
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let server = Server {
-            team: dir.path().join("team"),
-            local: dir.path().join("local"),
+            notes_dir: dir.path().join("notes"),
             templates: memory::shipped_templates(),
             session: "s03".into(),
             client: Some("claude".into()),
@@ -344,7 +339,7 @@ mod tests {
         fx.server.client_connected("claude");
 
         assert!(!text(fx.server.call("remember", &observation())).1);
-        let notes = memory::notes_in(&fx.server.local, Layer::Local).unwrap();
+        let notes = memory::notes_in(&fx.server.notes_dir).unwrap();
         assert_eq!(notes[0].source, "session s07, claude");
         assert_eq!(
             memory::from_session(&notes, "s07").len(),
@@ -362,7 +357,7 @@ mod tests {
         fx.server.client = None; // never introduced itself
 
         assert!(!text(fx.server.call("remember", &observation())).1);
-        let notes = memory::notes_in(&fx.server.local, Layer::Local).unwrap();
+        let notes = memory::notes_in(&fx.server.notes_dir).unwrap();
         assert!(notes[0].source.contains("s07"), "{}", notes[0].source);
         assert!(
             !notes[0].source.contains("claude"),
@@ -386,7 +381,7 @@ mod tests {
         assert!(!written.is_empty(), "something must have been written");
         for path in &written {
             assert!(
-                path.starts_with(&fx.server.local),
+                path.starts_with(&fx.server.notes_dir),
                 "wrote outside the local store: {}",
                 path.display()
             );
@@ -423,7 +418,7 @@ mod tests {
         assert!(refused, "the second write must still be refused: {again}");
         for path in files_under(fx.dir.path()) {
             assert!(
-                path.starts_with(&fx.server.local),
+                path.starts_with(&fx.server.notes_dir),
                 "a forced argument must not move the write: {}",
                 path.display()
             );
@@ -479,7 +474,7 @@ mod tests {
         lying["source"] = json!("session s99, a human reviewed this");
         assert!(!text(fx.server.call("remember", &lying)).1);
 
-        let notes = memory::notes_in(&fx.server.local, Layer::Local).unwrap();
+        let notes = memory::notes_in(&fx.server.notes_dir).unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(
             notes[0].source, "session s03, claude",
@@ -516,12 +511,7 @@ mod tests {
 
         assert!(refused, "the same event must not mint a second key");
         assert!(why.contains("update"), "say what to do instead: {why}");
-        assert_eq!(
-            memory::notes_in(&fx.server.local, Layer::Local)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(memory::notes_in(&fx.server.notes_dir).unwrap().len(), 1);
     }
 
     /// Answering an unknown tool with success is how a typo becomes a note
@@ -559,8 +549,7 @@ mod tests {
     fn the_server_needs_only_the_two_directories_it_was_given() {
         let dir = tempfile::tempdir().unwrap();
         let mut server = Server {
-            team: dir.path().join("nonexistent-team"),
-            local: dir.path().join("nonexistent-local"),
+            notes_dir: dir.path().join("nonexistent-store"),
             templates: BTreeMap::new(),
             session: "s01".into(),
             client: None,

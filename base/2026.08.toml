@@ -266,12 +266,10 @@ remove  = "omh set memory off — the feature and its server together. Your note
 command = "omh"
 args    = [
   "memory", "serve",
-  # The committed layer is tracked, so it arrives inside the worktree and
-  # needs no mount. The local layer is mounted from ~/.omh, keyed by repo,
-  # because a worktree holds tracked files only and `omh s rm` removes it
-  # with --force.
-  "--team",  "/work/.omh/notes",
-  "--local", "/omh/notes/local",
+  # One store per repo, mounted from ~/.omh: a worktree holds tracked files
+  # only and `omh s rm` removes it with --force, so a store inside the repo
+  # would die with the session that wrote it.
+  "--notes", "/omh/memory",
 ]
 
   [[entry.measured]]
@@ -308,7 +306,7 @@ remove  = "omh set memory off — the feature and its server together. Your note
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
-  value = "1963 B"
+  value = "1958 B"
   how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. Larger than the other two because it carries the note template verbatim — worth re-measuring against how often `memory::deliver` actually fails, since `remember` enforces the same schema at the write whenever the server is there"
   on    = "2026-08-12"
 

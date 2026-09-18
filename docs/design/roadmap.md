@@ -16,7 +16,7 @@ verified runtime.
 ✅ `omh init` that decides · ✅ images · ✅ sandbox + worktree · ✅ persistence ·
 ✅ `omh auth` · ✅ `omh s attach` · ✅ `omh doctor` · ✅ `carry_in` ·
 ✅ code graph · ✅ `omh graph` · ✅ stack hooks ·
-🔶 [memory](memory.md) — the store, retrieval, the team layer and staleness
+🔶 [memory](memory.md) — the store, retrieval and staleness
 ship; hub pages do not
 
 **Success criterion:** `omh init && omh new claude` is visibly better than raw

@@ -59,14 +59,12 @@ pub(crate) fn next_after_init(harness: Option<&str>) -> Vec<(String, String)> {
 
 /// Write one note per tracked document, plus one for what `init` derived.
 ///
-/// Into the **committed** layer: a stub is reproducible from a document every
-/// teammate already has, so it is not a claim from experience and does not need
-/// a human to vouch for it. `promote` stays reserved for what an agent
-/// observed.
+/// A stub is reproducible from a document in the repo, so it is not a claim
+/// from experience — it is the store's starting shape, seeded once.
 pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
     let templates = memory::templates(paths)?;
     let today = memory::today();
-    let dir = memory::Layer::Team.dir(paths);
+    let dir = paths.memory();
 
     let mut written = 0;
     let mut skipped = 0;
@@ -408,13 +406,10 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // names them rather than shipping them.
     let repo_omh = paths.repo.join(".omh");
     std::fs::create_dir_all(repo_omh.join("hooks"))?;
-    // Both halves of the note store. The committed half lives in the repo
-    // because that is what makes it reach a teammate; the local half lives
-    // under `~/.omh`, because a worktree holds only tracked files and
-    // `omh s rm` removes it with `--force`.
-    for layer in memory::Layer::ALL {
-        std::fs::create_dir_all(layer.dir(&paths))?;
-    }
+    // The note store lives under `~/.omh`, keyed by repo: a worktree holds
+    // only tracked files and `omh s rm` removes it with `--force`, so a store
+    // inside the repo would die with the session that wrote it.
+    std::fs::create_dir_all(paths.memory())?;
     // `write_if_absent`, never the refresh path the adapters use: a shipped
     // template that changed under an existing store would silently re-key
     // every note in it, and every existing key would stop being derivable.
@@ -992,6 +987,14 @@ pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<Str
     install_bundled(&paths.stacks(), bundled::Shipped::Stacks, ctx)?;
     install_bundled(&paths.hooks(), bundled::Shipped::Hooks, ctx)?;
     install_bundled(&paths.markers(), bundled::Shipped::Markers, ctx)?;
+    // The catalogue's own entries, for the reason the files above are managed:
+    // a shipped fix has to reach an existing install. Yours are untouched.
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    for name in config::refresh_own_servers(paths, &manifest.servers())? {
+        ctx.progress(&format!(
+            "refreshed the `{name}` server in your catalogue — it is omh's own"
+        ));
+    }
     Ok(adapters)
 }
 

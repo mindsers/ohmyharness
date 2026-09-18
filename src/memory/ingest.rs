@@ -10,7 +10,7 @@
 //! agent writing is the growth path, and the growth path is where the feature
 //! is irreplaceable — there is no `grep` for a session that has been removed.
 
-use crate::memory::{Kind, Layer, Note};
+use crate::memory::{Kind, Note};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -111,7 +111,6 @@ pub fn stub(doc: &Document, templates: &BTreeMap<Kind, String>, today: &str) -> 
         recorded: today.to_string(),
         invalidated_by: None,
         body,
-        layer: Layer::Team,
         path: PathBuf::new(),
     })
 }
@@ -162,7 +161,6 @@ pub fn overview(
         recorded: today.to_string(),
         invalidated_by: None,
         body,
-        layer: Layer::Team,
         path: PathBuf::new(),
     }))
 }
@@ -181,7 +179,7 @@ pub fn write(dir: &Path, note: &Note, if_exists: crate::memory::IfExists) -> Res
     // Validated against the same schema that refuses an agent's write. A
     // generated note omh would refuse is a bug in ingestion, not an exception
     // ingestion gets to make for itself.
-    let parsed = crate::memory::parse(&rendered, stamped.layer, &path)?;
+    let parsed = crate::memory::parse(&rendered, &path)?;
     if let Some(first) = crate::memory::check(&parsed).first() {
         anyhow::bail!("`{}` would be refused: {}", note.key, first.detail);
     }
@@ -394,10 +392,7 @@ mod tests {
             !write(&store, &note, crate::memory::IfExists::Skip).unwrap(),
             "the second run creates nothing"
         );
-        assert_eq!(
-            crate::memory::notes_in(&store, Layer::Team).unwrap().len(),
-            1
-        );
+        assert_eq!(crate::memory::notes_in(&store).unwrap().len(), 1);
     }
 
     /// Fail toward the recoverable mistake: a stub somebody edited is left
@@ -443,7 +438,7 @@ mod tests {
             .unwrap();
         write(&store, &note, crate::memory::IfExists::Skip).unwrap();
 
-        let notes = crate::memory::notes_in(&store, Layer::Team).unwrap();
+        let notes = crate::memory::notes_in(&store).unwrap();
         let orphans: Vec<String> = crate::memory::hygiene(&notes)
             .into_iter()
             .filter(|v| v.rule == crate::memory::Rule::Orphan)

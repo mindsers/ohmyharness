@@ -58,14 +58,9 @@ pub(crate) fn memory_remember(
 /// used to enforce by vigilance is enforced by the type. This function is the
 /// exception that still owns its own stdout, because what it writes there is
 /// not a report at all.
-pub(crate) fn memory_serve(
-    team: std::path::PathBuf,
-    local: std::path::PathBuf,
-    session: Option<String>,
-) -> Result<()> {
+pub(crate) fn memory_serve(notes: std::path::PathBuf, session: Option<String>) -> Result<()> {
     let mut server = memory::tools::Server {
-        team,
-        local,
+        notes_dir: notes,
         templates: memory::shipped_templates(),
         // omh already sets `OMH_SESSION` in the sandbox, so the base set can
         // declare static arguments and still record real provenance.
@@ -119,7 +114,6 @@ pub(crate) fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> 
             .iter()
             .map(|j| report::Judged {
                 key: j.key.clone(),
-                layer: j.layer.to_string(),
                 recorded: j.recorded.clone(),
                 age: age(&j.verdict),
                 because: match &j.verdict {
@@ -155,44 +149,43 @@ pub(crate) fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> 
     Ok(())
 }
 
-/// local → team. §12's one human gate, because it is the one place a wrong
-/// note reaches somebody else.
-pub(crate) fn memory_promote(cwd: &std::path::Path, keys: &[String], ctx: &out::Ctx) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
-    let notes = memory::load(&paths)?;
-    let repo = paths.repo.clone();
-
-    let steps = match memory::promote::plan(&notes, &paths, keys, &|p: &std::path::Path| {
-        memory::promote::git_ignores(&repo, p)
-    }) {
-        // `git_ignores` now answers or refuses to; a promotion is never
-        // planned against a guess about where the note would land.
-        Ok(steps) => steps,
-        Err(blocked) => {
-            // Nothing moved. A partial promotion would leave a store nobody
-            // planned, and the human who ran the gate would have to work out
-            // which half landed.
-            for b in &blocked {
-                ctx.warn(&b.say());
-            }
-            anyhow::bail!("promoted nothing");
-        }
-    };
-    memory::promote::apply(&steps)?;
-    ctx.say(&report::Promoted {
-        text: memory::promote::report(&steps, &paths),
-        keys: steps.iter().map(|s| s.key.clone()).collect(),
-    });
-    Ok(())
-}
-
 /// The store, by layer, with what points at each note.
 pub(crate) fn memory_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     ctx.say(&report::Notes {
         notes: memory::load(&paths)?,
     });
+    say_what_is_no_longer_read(&paths, ctx);
     Ok(())
+}
+
+/// `<repo>/.omh/notes` was the committed layer until 0.14, and a repo that
+/// adopted omh has notes in it. omh no longer reads it — and says so, because
+/// a listing that simply omitted them reads as "the store is empty", which is
+/// the one thing a memory command must not say when it has not looked there.
+///
+/// Never deletes: they are somebody's notes, and a command that removed them
+/// to tidy up would be the failure this whole subsystem is about.
+fn say_what_is_no_longer_read(paths: &Paths, ctx: &out::Ctx) {
+    let at = paths.repo.join(".omh").join("notes");
+    let mut files = Vec::new();
+    // A directory omh cannot read is not an empty one — but it is also not a
+    // reason to fail a listing that already answered, so the count is what it
+    // could see and the sentence says "at least".
+    if memory::markdown_files(&at, &mut files).is_err() && files.is_empty() {
+        return;
+    }
+    if files.is_empty() {
+        return;
+    }
+    ctx.warn(&format!(
+        "{} note{} in {} {} no longer read — omh keeps one store per repo now, \
+         and it is not committed. They are yours to delete",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        at.display(),
+        if files.len() == 1 { "is" } else { "are" },
+    ));
 }
 
 /// The store-quality meter. Violations are grouped by rule rather than listed
@@ -227,33 +220,24 @@ pub(crate) fn memory_lint(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 pub(crate) fn memory_rm(
     cwd: &std::path::Path,
     key: &str,
-    layer: Option<memory::Layer>,
     at: Option<&str>,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let removed = memory::remove(&paths, layer, key, at, dry_run)?;
+    let removed = memory::remove(&paths, key, at, dry_run)?;
 
     let mut action = report::Action::new(
         "note-removed",
         match dry_run {
-            true => format!("would remove {key} ({})", removed.layer),
-            false => format!("removed {key} ({})", removed.layer),
+            true => format!("would remove {key}"),
+            false => format!("removed {key}"),
         },
     )
     .data(serde_json::json!({
         "key": key,
-        "layer": removed.layer.to_string(),
-        "committed": removed.layer.is_committed(),
         "inbound": removed.inbound,
     }));
-    // The file is gone here, but a teammate still has it until the deletion is
-    // committed. Saying so beats letting someone believe a shared note
-    // disappeared for everybody.
-    if removed.layer.is_committed() {
-        action = action.note("it was committed — teammates keep it until you commit the deletion");
-    }
     if !removed.inbound.is_empty() {
         action = action.note(format!(
             "still linked from {} — those links now dangle, and `omh memory lint` lists them",

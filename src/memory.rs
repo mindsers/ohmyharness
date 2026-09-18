@@ -14,87 +14,81 @@ pub mod deliver;
 pub mod expiry;
 pub mod index;
 pub mod ingest;
-pub mod promote;
 pub mod recall;
 pub mod tools;
 
-// ── layers ──────────────────────────────────────────────────────────────────
+// ── the store ───────────────────────────────────────────────────────────────
 
-/// `team` (committed) or `local` (gitignored).
-///
-/// Deliberately not `config::Layer`. Notes have no personal layer, so a type
-/// that cannot represent `~/.omh/profile` is a type through which `remember`
-/// cannot reach it — the exhaustive match *is* invariant 3's enforcement.
-///
-/// The two layers also do not merge, and never shadow one another: a setting
-/// has one value, but a note is a claim, and two claims about one topic are
-/// two facts. So the layer is part of a note's identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Layer {
-    Team,
-    Local,
-}
-
-/// Where the local store is mounted inside the sandbox.
+/// Where the note store is mounted inside the sandbox.
 ///
 /// Deliberately not under `/work`: the code graph would index notes as source,
 /// `git status` would show them, and an agent running `git add -A` would
-/// commit local notes onto its session branch — which is the one thing §9.1
-/// forbids. The committed half needs no mount at all; it is tracked, so it
-/// arrives inside the worktree by itself.
-pub const GUEST_LOCAL_NOTES: &str = "/omh/notes/local";
+/// commit them onto its session branch — which is the one thing §9.1 forbids.
+pub const GUEST_MEMORY: &str = "/omh/memory";
 
-impl Layer {
-    pub const ALL: [Layer; 2] = [Self::Team, Self::Local];
-
-    /// Where `remember` writes, and the only place it may. An unattended
-    /// writer that could reach the committed layer would push wrong facts to
-    /// teammates through git, where they arrive with the authority of a
-    /// reviewed change.
-    pub const AGENT_WRITE: Layer = Self::Local;
-
-    /// The two layers live apart because their lifecycles differ.
+/// What `move_old_store` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Moved {
+    /// Nothing under the old path, or it has already run.
+    NothingToDo,
+    /// The store moved, whole, from the old path to the new one.
+    Was { from: PathBuf, to: PathBuf },
+    /// There is a store in both places, and omh will not merge them.
     ///
-    /// `team` is committed, so it is *tracked* — which is what makes it
-    /// retrievable in a fresh clone, and what puts it inside every session
-    /// worktree for free.
-    ///
-    /// `local` is outside the checkout entirely, keyed by repo exactly as the
-    /// graph cache is. A worktree holds tracked files only, and `omh s rm`
-    /// runs `git worktree remove --force`, so a local store inside the repo
-    /// would be invisible to the sandbox and destroyed by session removal —
-    /// which is the opposite of what makes this memory rather than context.
-    pub fn dir(&self, paths: &Paths) -> PathBuf {
-        match self {
-            Self::Team => paths.repo.join(".omh").join("notes"),
-            Self::Local => paths.notes().join("local"),
-        }
-    }
-
-    pub fn is_committed(&self) -> bool {
-        matches!(self, Self::Team)
-    }
+    /// Which of two notes filed under one key is the current one is a guess,
+    /// made silently, about something a person wrote — the same guess
+    /// `profile::Migration::Stranded` refuses about two directories of
+    /// sessions. Both paths are named and neither is touched.
+    Both { from: PathBuf, to: PathBuf },
 }
 
-impl std::fmt::Display for Layer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Team => "team",
-            Self::Local => "local",
-        })
+/// Move a store recorded before 0.14 onto the path omh reads now.
+///
+/// `~/.omh/notes/<repo>/local` was the machine-local half of a two-layer
+/// store; `~/.omh/memory/<repo>` is the whole of it. A rename rather than a
+/// copy: it is atomic, it cannot half-succeed and leave two stores, and it
+/// leaves nothing behind to be read by mistake. After it, this is one
+/// `is_dir` call for ever.
+///
+/// **Safe under a running session, measured rather than assumed.** A session
+/// started before the rename has this directory bind-mounted, and on Docker
+/// Desktop a write inside the container after the host directory is renamed
+/// lands in the renamed directory — the mount follows what it was given, not
+/// the path. So this needs no live-session guard, and an old session keeps
+/// writing to the store the new ones read.
+///
+/// Reading the old path instead, or seeding a fresh empty store beside it, are
+/// the two ways this becomes "nothing recorded" about notes that exist, which
+/// is the failure the whole subsystem is about.
+pub fn move_old_store(paths: &Paths) -> Result<Moved> {
+    let from = paths.old_notes();
+    let to = paths.memory();
+    if !from.is_dir() {
+        return Ok(Moved::NothingToDo);
     }
-}
-
-impl std::str::FromStr for Layer {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> anyhow::Result<Self> {
-        match s {
-            "team" => Ok(Self::Team),
-            "local" => Ok(Self::Local),
-            other => anyhow::bail!("unknown layer `{other}` (team, local)"),
-        }
+    // An empty destination is not a second store. Nothing omh does in the
+    // ordinary course creates one before this runs — the migration goes ahead
+    // of the command that would — but a directory is cheap to create by
+    // accident, and a store that refused to move for ever because an empty
+    // one appeared beside it is the worse of the two failures.
+    if to.is_dir() && std::fs::read_dir(&to)?.next().is_some() {
+        return Ok(Moved::Both { from, to });
     }
+    if to.is_dir() {
+        std::fs::remove_dir(&to)?;
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&from, &to)
+        .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+    // The repo's directory under the retired `notes` kind, now that its one
+    // child is gone. Best effort: a leftover empty directory is untidy, and
+    // failing the command the user typed over it would not be.
+    if let Some(parent) = from.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+    Ok(Moved::Was { from, to })
 }
 
 // ── notes ───────────────────────────────────────────────────────────────────
@@ -181,10 +175,6 @@ pub struct Note {
     pub recorded: String,
     pub invalidated_by: Option<String>,
     pub body: String,
-    /// Stamped from the directory the note was read from, never from
-    /// frontmatter. A note that could declare its own layer could claim to
-    /// have been reviewed.
-    pub layer: Layer,
     pub path: PathBuf,
 }
 
@@ -214,7 +204,7 @@ fn required<'a>(fields: &BTreeMap<&str, &'a str>, name: &str, path: &Path) -> Re
     }
 }
 
-pub fn parse(raw: &str, layer: Layer, path: &Path) -> Result<Note> {
+pub fn parse(raw: &str, path: &Path) -> Result<Note> {
     let (head, body) = split_frontmatter(raw, path)?;
 
     let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
@@ -259,7 +249,6 @@ pub fn parse(raw: &str, layer: Layer, path: &Path) -> Result<Note> {
             .filter(|v| !v.is_empty())
             .map(|v| v.to_string()),
         body: body.to_string(),
-        layer,
         path: path.to_path_buf(),
     })
 }
@@ -460,7 +449,6 @@ pub enum Rule {
     DuplicateKey,
     DanglingLink,
     /// A committed note links somewhere a fresh clone cannot follow.
-    CrossLayerLink,
     /// `invalidated_by` names an expiry omh cannot evaluate, so the note
     /// advertises a freshness guarantee nothing will ever check.
     UnevaluatableTrigger,
@@ -488,9 +476,7 @@ impl Rule {
             | Self::ProseInListSection
             | Self::KeyDisagreesWithPath
             | Self::UnevaluatableTrigger => Severity::Refused,
-            Self::DuplicateKey | Self::DanglingLink | Self::CrossLayerLink | Self::Orphan => {
-                Severity::Warning
-            }
+            Self::DuplicateKey | Self::DanglingLink | Self::Orphan => Severity::Warning,
         }
     }
 }
@@ -498,7 +484,6 @@ impl Rule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub key: String,
-    pub layer: Layer,
     pub rule: Rule,
     pub detail: String,
 }
@@ -592,7 +577,6 @@ pub fn check(note: &Note) -> Vec<Violation> {
     let mut fire = |rule: Rule, detail: String| {
         found.push(Violation {
             key: note.key.clone(),
-            layer: note.layer,
             rule,
             detail,
         })
@@ -704,113 +688,23 @@ pub fn links(body: &str) -> Vec<String> {
     out
 }
 
-/// Which layers a `[[key]]` written *in a note of `from`* actually reaches.
-///
-/// A set, never a winner — that is the whole of §4. Two claims about one topic
-/// are two facts, and picking one would hide a teammate's note behind yours.
-///
-/// The asymmetry is invariant 2: from `local` a key reaches whatever holds it,
-/// but from `team` it reaches only `team`, because a committed note is read in
-/// a clone where no local layer exists.
-///
-/// It is one place to be right, not a type that refuses to be wrong — the
-/// return is `Vec<Layer>` whichever way it is asked, so the rule lives in the
-/// filter below rather than in the signature. Worth saying because the
-/// stronger claim invites trusting a `Vec<Layer>` obtained "from team" to be
-/// safe by construction, and `recall`'s neighbourhood expansion already
-/// resolves links without asking here.
-pub fn resolve(notes: &[Note], key: &str, from: Layer) -> Vec<Layer> {
-    let mut found: Vec<Layer> = notes
-        .iter()
-        .filter(|n| n.key == key)
-        .map(|n| n.layer)
-        .filter(|layer| !from.is_committed() || layer.is_committed())
-        .collect();
-    found.sort();
-    found.dedup();
-    found
-}
-
-/// The links a note carries that exist here but would not exist in a fresh
-/// clone. A link to a key nobody wrote is the lint's `DanglingLink`, not this:
-/// it is already broken everywhere, and counting it here would refuse a
-/// promotion for a reason promotion cannot fix.
-///
-/// The one predicate both `lint` and `promote` call. Two implementations of
-/// "what would dangle for a teammate" is the shape that once had two
-/// subsystems telling two stories about one file.
-///
-/// `also_committed` is everything the caller *asked* to promote, not the
-/// subset that will succeed, so a plan can be checked against its own closure
-/// — otherwise two notes that point at each other are unpromotable in either
-/// order, with an error that reads like a bug. That it is the request rather
-/// than the outcome is safe only because one blocker aborts the whole batch:
-/// a partial promotion would let a key that was itself blocked go on vouching
-/// for its neighbours.
-///
-/// Takes the note, not its key. Identity is `(layer, key)` and `DuplicateKey`
-/// is only a warning, so a key can name more than one file: looking one up
-/// here judged every claimant by the first match's body, which hid the
-/// offender's links behind a clean namesake and reported the clean one twice.
-/// Both callers already hold the note.
-pub fn uncommitted_links(notes: &[Note], note: &Note, also_committed: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = links(&note.body)
-        .into_iter()
-        .filter(|target| {
-            !also_committed.contains(target)
-                && resolve(notes, target, Layer::Team).is_empty()
-                // A link to a key nobody wrote is dangling, which the lint
-                // already reports. Counting it here too would refuse a
-                // promotion for a reason `promote` cannot fix.
-                && !resolve(notes, target, Layer::Local).is_empty()
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
-
 /// Store-wide checks: links that point nowhere, notes nothing points at.
 ///
 /// Takes the whole store because that is the only thing that can answer it,
 /// and warns rather than refuses because the note at fault is often not the
 /// note being written.
 pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
-    // Resolution ignores the layer: §4 says a key present in either layer
-    // retrieves, so a link across layers is not dangling.
     let known: std::collections::BTreeSet<&str> = notes.iter().map(|n| n.key.as_str()).collect();
     let mut pointed_at: std::collections::BTreeSet<String> = Default::default();
     let mut found = Vec::new();
 
     for note in notes {
-        // Invariant 2, checked here and again at `promote`. Warns rather than
-        // refuses: the note at fault is committed, and an agent writing right
-        // now cannot fix somebody else's.
-        //
-        // The layer decides whether to ask, not what to do with the answer:
-        // asking first and discarding the result for local notes computed the
-        // whole predicate for every note in the store to throw most of it away.
-        if note.layer.is_committed() {
-            for target in uncommitted_links(notes, note, &[]) {
-                found.push(Violation {
-                    key: note.key.clone(),
-                    layer: note.layer,
-                    rule: Rule::CrossLayerLink,
-                    detail: format!(
-                        "`{}` is committed but links to `{target}`, which is not — \
-                         a fresh clone would not have it",
-                        note.key
-                    ),
-                });
-            }
-        }
         for target in links(&note.body) {
             if known.contains(target.as_str()) {
                 pointed_at.insert(target);
             } else {
                 found.push(Violation {
                     key: note.key.clone(),
-                    layer: note.layer,
                     rule: Rule::DanglingLink,
                     detail: format!(
                         "`{}` links to `{target}`, which is not in the store",
@@ -823,23 +717,21 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
 
     // §6 makes a key a primary key, and `remember` refuses to break that —
     // but hand-written notes are the only writer M1 gives the agent, so the
-    // store can already hold two. Per layer, because §4 makes `team/deploy`
-    // and `local/deploy` two notes on purpose.
-    let mut by_key: BTreeMap<(Layer, &str), Vec<&Path>> = BTreeMap::new();
+    // store can already hold two.
+    let mut by_key: BTreeMap<&str, Vec<&Path>> = BTreeMap::new();
     for note in notes {
         by_key
-            .entry((note.layer, note.key.as_str()))
+            .entry(note.key.as_str())
             .or_default()
             .push(&note.path);
     }
-    for ((layer, key), mut paths) in by_key {
+    for (key, mut paths) in by_key {
         if paths.len() < 2 {
             continue;
         }
         paths.sort();
         found.push(Violation {
             key: key.to_string(),
-            layer,
             rule: Rule::DuplicateKey,
             detail: format!(
                 "`{key}` is claimed by {} files: {}",
@@ -870,7 +762,6 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
         if !pointed_at.contains(&note.key) {
             found.push(Violation {
                 key: note.key.clone(),
-                layer: note.layer,
                 rule: Rule::Orphan,
                 detail: format!("nothing in the store links to `{}`", note.key),
             });
@@ -882,7 +773,7 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
 
 /// Every `.md` under `dir`, including inside namespaces — a key may carry one,
 /// so the store has directories in it.
-fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+pub(crate) fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         // An absent store is empty; anything else is a real failure and must
@@ -940,13 +831,12 @@ fn contained(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Every note in one directory, stamped with the layer that directory *is*.
+/// Every note in one directory.
 ///
 /// Takes a directory rather than `Paths` because the MCP server runs inside
-/// the sandbox, where there is no git repo to discover and the two stores
-/// arrive as mount points. `Paths` is the host's way of naming them, not the
-/// only way.
-pub fn notes_in(root: &Path, layer: Layer) -> Result<Vec<Note>> {
+/// the sandbox, where there is no git repo to discover and the store arrives
+/// as a mount point. `Paths` is the host's way of naming it, not the only way.
+pub fn notes_in(root: &Path) -> Result<Vec<Note>> {
     let mut files = Vec::new();
     markdown_files(root, &mut files)?;
     files.sort();
@@ -958,23 +848,19 @@ pub fn notes_in(root: &Path, layer: Layer) -> Result<Vec<Note>> {
                 .with_context(|| format!("reading {}", path.display()))?;
             // Never `filter_map(..ok())`: a store that silently drops a note
             // answers from a subset and says nothing about the gap.
-            parse(&raw, layer, path)
+            parse(&raw, path)
         })
         .collect()
 }
 
-pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
-    notes_in(&layer.dir(paths), layer)
-}
-
-/// What a layer holds: the keys it already claims, and the files it could
+/// What the store holds: the keys it already claims, and the files it could
 /// not be asked about.
 ///
 /// The second field is the point. Skipping an unparseable note answers "is
 /// this key free?" with "yes" to a question whose true answer may be "no",
 /// and the caller acts on that by *writing* — so the gap has to travel with
 /// the answer instead of being swallowed by a `filter_map(..ok())`.
-struct LayerRead {
+struct StoreRead {
     notes: Vec<Note>,
     /// Files that exist but cannot be read back as notes, so whatever key
     /// they hold is unknown.
@@ -983,9 +869,9 @@ struct LayerRead {
 
 /// Takes a directory rather than `Paths` for the same reason `notes_in` does:
 /// `remember_in` runs against a mount point inside the sandbox, where there is
-/// no repo to derive a layer directory from — and it is the caller that most
+/// no repo to derive a store directory from — and it is the caller that most
 /// needs `opaque`, because it is about to write.
-fn read_layer(root: &Path, layer: Layer) -> Result<LayerRead> {
+fn read_store(root: &Path) -> Result<StoreRead> {
     let mut files = Vec::new();
     // Traversal errors stay fatal: a directory omh cannot list may hold the
     // key a write is about to take, and guessing is the failure this whole
@@ -998,23 +884,18 @@ fn read_layer(root: &Path, layer: Layer) -> Result<LayerRead> {
     for path in files {
         match std::fs::read_to_string(&path)
             .map_err(anyhow::Error::from)
-            .and_then(|raw| parse(&raw, layer, &path))
+            .and_then(|raw| parse(&raw, &path))
         {
             Ok(note) => notes.push(note),
             Err(_) => opaque.push(path),
         }
     }
-    Ok(LayerRead { notes, opaque })
+    Ok(StoreRead { notes, opaque })
 }
 
-/// Both layers. Never merged and never deduped: `team/deploy` and
-/// `local/deploy` are two notes, and both retrieve.
+/// Every note this repo holds.
 pub fn load(paths: &Paths) -> Result<Vec<Note>> {
-    let mut all = Vec::new();
-    for layer in Layer::ALL {
-        all.extend(load_layer(paths, layer)?);
-    }
-    Ok(all)
+    notes_in(&paths.memory())
 }
 
 // ── key templates ───────────────────────────────────────────────────────────
@@ -1098,7 +979,7 @@ pub fn templates(paths: &Paths) -> Result<BTreeMap<Kind, String>> {
     }
 }
 
-/// `omh memory lint` — schema and hygiene, over both layers.
+/// `omh memory lint` — schema and hygiene, over the store.
 ///
 /// Also the store-quality meter: violation counts are a write-time proxy for
 /// store quality, available with no questions asked and no model pass.
@@ -1108,23 +989,19 @@ pub fn lint(paths: &Paths) -> Result<Vec<Violation>> {
     // subset is a wrong answer; `lint` is the one caller whose whole job is
     // to describe the store including its damage, so giving up on the first
     // bad file is the one thing it must not do.
-    let mut notes = Vec::new();
     let mut found = Vec::new();
-    for layer in Layer::ALL {
-        let read = read_layer(&layer.dir(paths), layer)?;
-        for path in read.opaque {
-            found.push(Violation {
-                key: path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                layer,
-                rule: Rule::Unreadable,
-                detail: format!("{} is in the store but omh cannot read it", path.display()),
-            });
-        }
-        notes.extend(read.notes);
+    let read = read_store(&paths.memory())?;
+    for path in read.opaque {
+        found.push(Violation {
+            key: path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            rule: Rule::Unreadable,
+            detail: format!("{} is in the store but omh cannot read it", path.display()),
+        });
     }
+    let notes = read.notes;
 
     found.extend(notes.iter().flat_map(check));
     found.extend(hygiene(&notes));
@@ -1289,7 +1166,7 @@ fn body_of(input: &Remembered) -> String {
 /// a writer that believes it never created one.
 pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Result<Wrote> {
     remember_in(
-        &Layer::AGENT_WRITE.dir(paths),
+        &paths.memory(),
         &paths.repo,
         &templates(paths)?,
         input,
@@ -1334,17 +1211,12 @@ pub fn remember_in(
         &[("slug", &slug_of_observation(&input.observed)?)],
     )?;
 
-    // Always the write layer, never a parameter. An unattended writer that
-    // could reach the committed layer would push wrong facts to teammates
-    // through git, where they arrive with the authority of a reviewed change.
-    let layer = Layer::AGENT_WRITE;
-
     // §6 makes the key the primary key, so the conflict is on the *key*, not
     // on `{key}.md`. Those differ whenever a note sits somewhere other than
     // its own key — which nothing prevents, because `KeyDisagreesWithPath`
     // compares only the leaf. Checking the path let a second note land under
     // a key that was already taken, and `rm` could then separate neither.
-    let taken = read_layer(root, layer)?;
+    let taken = read_store(root)?;
     // A note omh cannot read may hold the key this write wants. Refusing is
     // the recoverable half of that choice — the other half is a second note
     // under a key that already existed, which is unrecoverable through the
@@ -1424,14 +1296,13 @@ pub fn remember_in(
             .map(|raw| normalise_trigger(raw, repo, recipe))
             .transpose()?,
         body: body_of(input),
-        layer,
         path: path.clone(),
     };
 
     // Round-tripped through the parser before it is trusted: a note omh cannot
     // read back is a note the store cannot serve.
     let rendered = render(&note);
-    let note = parse(&rendered, layer, &path)?;
+    let note = parse(&rendered, &path)?;
 
     // Only the schema refuses. Hygiene is store-wide, and a store-wide problem
     // must never fail somebody else's write.
@@ -1468,30 +1339,25 @@ pub fn remember_in(
 #[derive(Debug, PartialEq, Eq)]
 pub struct Removed {
     pub path: PathBuf,
-    /// The layer it came out of. Removing a committed note changes what
-    /// teammates get, and that is worth saying out loud.
-    pub layer: Layer,
-    /// Keys that pointed at what was just removed, from either layer.
+    /// Keys that pointed at what was just removed.
     pub inbound: Vec<String>,
 }
 
 /// Which of several notes under one key the caller meant.
 ///
-/// `--layer` answers this only when the layers differ. Two notes under one
-/// key in one layer used to produce "`k` is in local and local", and
-/// `--layer local` produced it again — the note could not be reached through
-/// omh at all, in a store deliberately kept outside the checkout.
+/// `--at` answers it. A key over two files is `DuplicateKey` to the lint, and
+/// the only thing that separates them is where they sit.
 fn disambiguate<'a>(
     paths: &Paths,
     many: &[&'a Note],
     key: &str,
     at: Option<&str>,
 ) -> Result<&'a Note> {
-    // Relative to the layer's root, which is what `--at` takes: the store's
-    // absolute path is noise the caller did not type.
+    // Relative to the store's root, which is what `--at` takes: its absolute
+    // path is noise the caller did not type.
     let shown = |note: &Note| {
         note.path
-            .strip_prefix(note.layer.dir(paths))
+            .strip_prefix(paths.memory())
             .unwrap_or(&note.path)
             .display()
             .to_string()
@@ -1499,31 +1365,11 @@ fn disambiguate<'a>(
 
     if let Some(at) = at {
         let picked: Vec<&&Note> = many.iter().filter(|n| n.path.ends_with(at)).collect();
-        let spans_layers = |notes: &[&&Note]| {
-            notes
-                .iter()
-                .map(|n| n.layer)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                > 1
-        };
         return match picked.as_slice() {
             [one] => Ok(**one),
             [] => bail!(
                 "no note `{key}` at `{at}` — it is in {}",
                 many.iter().map(|n| shown(n)).collect::<Vec<_>>().join(", ")
-            ),
-            // Two layers can hold the same relative path, and then `shown`
-            // renders both identically — so "give more of the path" asks for
-            // something the caller does not have. The layer is the only
-            // thing that separates them.
-            rest if spans_layers(rest) => bail!(
-                "`{at}` matches {} notes, in {} — name one with --layer",
-                rest.len(),
-                rest.iter()
-                    .map(|n| n.layer.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" and ")
             ),
             rest => bail!(
                 "`{at}` matches {} of them — give more of the path",
@@ -1532,22 +1378,9 @@ fn disambiguate<'a>(
         };
     }
 
-    let layers: Vec<String> = many.iter().map(|n| n.layer.to_string()).collect();
-    if layers
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        > 1
-    {
-        bail!(
-            "`{key}` is in {} — name one with --layer",
-            layers.join(" and ")
-        );
-    }
     bail!(
-        "`{key}` is one key over {} files in {} — name one with --at: {}",
+        "`{key}` is one key over {} files — name one with --at: {}",
         many.len(),
-        layers[0],
         many.iter().map(|n| shown(n)).collect::<Vec<_>>().join(", ")
     )
 }
@@ -1557,21 +1390,12 @@ fn disambiguate<'a>(
 /// A dangling link is visible and the lint already finds it; a silently pruned
 /// neighbourhood is neither. Fail toward the recoverable mistake.
 /// `dry_run` resolves the note and counts what pointed at it, then leaves the
-/// file alone. Everything that decides *which* note — the layer filter, `--at`,
-/// the ambiguity refusal — runs either way, because a preview that skipped them
-/// would be previewing a different deletion.
-pub fn remove(
-    paths: &Paths,
-    layer: Option<Layer>,
-    key: &str,
-    at: Option<&str>,
-    dry_run: bool,
-) -> Result<Removed> {
+/// file alone. Everything that decides *which* note — `--at`, the ambiguity
+/// refusal — runs either way, because a preview that skipped them would be
+/// previewing a different deletion.
+pub fn remove(paths: &Paths, key: &str, at: Option<&str>, dry_run: bool) -> Result<Removed> {
     let notes = load(paths)?;
-    let matching: Vec<&Note> = notes
-        .iter()
-        .filter(|n| n.key == key && layer.is_none_or(|l| n.layer == l))
-        .collect();
+    let matching: Vec<&Note> = notes.iter().filter(|n| n.key == key).collect();
     // `--at` is applied whenever it is given, not only when the key is
     // ambiguous. Consulting it only in the `many` arm meant naming a file
     // that does not hold the key deleted a *different* note and reported
@@ -1598,18 +1422,17 @@ pub fn remove(
 
     Ok(Removed {
         path: note.path.clone(),
-        layer: note.layer,
         inbound,
     })
 }
 
 // ── listing and the review moment ───────────────────────────────────────────
 
-/// `omh memory`'s output. Pure, and every line carries the note's own date and
-/// its own layer: a note presented without age and origin cannot be judged.
+/// `omh memory`'s output. Pure, and every line carries the note's own date: a
+/// note presented without its age cannot be judged.
 pub fn render_list(notes: &[Note]) -> String {
     let mut sorted: Vec<&Note> = notes.iter().collect();
-    sorted.sort_by(|a, b| (a.layer, &a.key).cmp(&(b.layer, &b.key)));
+    sorted.sort_by_key(|n| &n.key);
 
     let width = sorted.iter().map(|n| n.key.len()).max().unwrap_or(0);
     let mut out = String::new();
@@ -1619,9 +1442,8 @@ pub fn render_list(notes: &[Note]) -> String {
             .filter(|n| links(&n.body).contains(&note.key))
             .count();
         out.push_str(&format!(
-            "{:width$}  {:<5}  {}  {} ref{}\n",
+            "{:width$}  {}  {} ref{}\n",
             note.key,
-            note.layer.to_string(),
             note.recorded,
             refs,
             if refs == 1 { "" } else { "s" },
@@ -1662,7 +1484,6 @@ pub fn session_nudge(notes: &[Note], session: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     fn fixture() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
@@ -1684,51 +1505,36 @@ mod tests {
             .join("\n")
     }
 
-    // ── layers ──────────────────────────────────────────────────────────────
+    // ── the store ───────────────────────────────────────────────────────────
 
-    /// Invariant 3, as a constant rather than a rule. The risk this guards is
-    /// someone "generalising" `remember` with a layer parameter, or flipping
-    /// the constant while every other test stays green.
+    /// The store must not live in the checkout. Asserted as a relationship to
+    /// the repo root rather than as literal paths, so a refactor that moves
+    /// `~/.omh` does not force an edit here.
+    ///
+    /// There was a committed layer under `<repo>/.omh/notes` until 0.13, and a
+    /// test here that it was inside the checkout. One store replaced it: a
+    /// note reaches every session of this repo the moment it is written, the
+    /// way the code graph does, and reaches nobody else.
     #[test]
-    fn the_layer_remember_writes_to_is_never_committed() {
-        assert_eq!(Layer::AGENT_WRITE, Layer::Local);
-        assert!(
-            !Layer::AGENT_WRITE.is_committed(),
-            "an unattended writer must not reach the committed layer"
-        );
-        // The negative half: without it, `is_committed` could be `=> false`
-        // and this test would still pass — which this repo has shipped twice.
-        assert!(Layer::Team.is_committed());
-    }
-
-    /// The local store must not live in the checkout, and the team store must.
-    /// Asserted as a relationship to the repo root rather than as literal
-    /// paths, so a refactor that moves `~/.omh` does not force an edit here.
-    #[test]
-    fn the_local_store_lives_outside_the_checkout_and_the_team_store_inside_it() {
+    fn the_store_lives_outside_the_checkout() {
         let (_d, paths) = fixture();
 
         assert!(
-            Layer::Team.dir(&paths).starts_with(&paths.repo),
-            "the team layer must be committable: {}",
-            Layer::Team.dir(&paths).display()
-        );
-        assert!(
-            !Layer::Local.dir(&paths).starts_with(&paths.repo),
+            !paths.memory().starts_with(&paths.repo),
             "a local note inside the checkout dies with the worktree: {}",
-            Layer::Local.dir(&paths).display()
+            paths.memory().display()
         );
         assert!(
-            Layer::Local.dir(&paths).starts_with(&paths.root),
+            paths.memory().starts_with(&paths.root),
             "the local store belongs to omh, keyed by repo"
         );
     }
 
-    /// Two repos must not share one local store. `repo_id` is what keys it,
-    /// and a `notes()` that ignored the repo would silently pool every
-    /// project's notes into one graph.
+    /// Two repos must not share one store. `repo_id` is what keys it, and a
+    /// `notes()` that ignored the repo would silently pool every project's
+    /// notes into one graph.
     #[test]
-    fn two_repos_do_not_share_a_local_store() {
+    fn two_repos_do_not_share_a_store() {
         let dir = tempfile::tempdir().unwrap();
         let a = Paths {
             root: dir.path().join("home"),
@@ -1738,7 +1544,7 @@ mod tests {
             root: dir.path().join("home"),
             repo: dir.path().join("beta"),
         };
-        assert_ne!(Layer::Local.dir(&a), Layer::Local.dir(&b));
+        assert_ne!(a.memory(), b.memory());
     }
 
     // ── notes ───────────────────────────────────────────────────────────────
@@ -1772,7 +1578,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 ";
 
     fn parsed() -> Note {
-        parse(SURPRISE, Layer::Local, std::path::Path::new("x.md")).unwrap()
+        parse(SURPRISE, std::path::Path::new("x.md")).unwrap()
     }
 
     /// Both directions, against bytes nobody generated. A renderer that emits
@@ -1783,14 +1589,14 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn a_note_round_trips_through_its_own_parser() {
         let note = parsed();
         assert_eq!(
-            parse(&render(&note), note.layer, &note.path).unwrap(),
+            parse(&render(&note), &note.path).unwrap(),
             note,
             "render must produce bytes parse accepts"
         );
 
         let mut bare = note.clone();
         bare.invalidated_by = None;
-        assert_eq!(parse(&render(&bare), bare.layer, &bare.path).unwrap(), bare);
+        assert_eq!(parse(&render(&bare), &bare.path).unwrap(), bare);
         assert!(
             !render(&bare).contains("invalidated_by"),
             "an absent trigger must not render as an empty one:\n{}",
@@ -1809,7 +1615,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
                 .filter(|l| !l.starts_with(&format!("{field}:")))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let err = parse(&without, Layer::Local, std::path::Path::new("x.md"))
+            let err = parse(&without, std::path::Path::new("x.md"))
                 .unwrap_err()
                 .to_string();
             assert!(err.contains(field), "dropping `{field}` gave: {err}");
@@ -1834,7 +1640,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let err = parse(&blank, Layer::Local, std::path::Path::new("x.md"));
+            let err = parse(&blank, std::path::Path::new("x.md"));
             assert!(
                 err.is_err(),
                 "a blank `{field}` must be refused, not read as empty"
@@ -1850,7 +1656,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn the_recorded_date_must_be_a_real_calendar_date() {
         let with = |d: &str| {
             let raw = SURPRISE.replace("recorded: 2026-08-07", &format!("recorded: {d}"));
-            parse(&raw, Layer::Local, std::path::Path::new("x.md"))
+            parse(&raw, std::path::Path::new("x.md"))
         };
         for bad in [
             "2026-13-45",
@@ -1875,27 +1681,13 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn an_unknown_note_type_is_an_error_not_a_default() {
         let raw = SURPRISE.replace("type: surprise", "type: hunch");
-        let err = parse(&raw, Layer::Local, std::path::Path::new("x.md"))
+        let err = parse(&raw, std::path::Path::new("x.md"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("hunch"), "got: {err}");
         for kind in Kind::ALL {
             assert!(err.contains(&kind.to_string()), "must name `{kind}`: {err}");
         }
-    }
-
-    /// The layer is where a note lives, never what it says. A note that can
-    /// declare its own layer can lie about having been reviewed, which makes
-    /// the provenance the whole feature rests on decorative.
-    #[test]
-    fn a_notes_layer_comes_from_where_it_lives_not_from_what_it_says() {
-        let lying = SURPRISE.replace("type: surprise", "layer: team\ntype: surprise");
-        let note = parse(&lying, Layer::Local, std::path::Path::new("x.md")).unwrap();
-        assert_eq!(note.layer, Layer::Local);
-        assert!(
-            !render(&note).contains("layer:"),
-            "the layer is not a field a note carries"
-        );
     }
 
     /// The sections a surprise must carry are exactly what `remember` asks
@@ -2117,7 +1909,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             recorded: "2026-08-07".into(),
             invalidated_by: None,
             body: body.to_string(),
-            layer: Layer::Local,
             path: PathBuf::from(format!("{}.md", key.rsplit('/').next().unwrap())),
         }
     }
@@ -2384,18 +2175,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── the store ───────────────────────────────────────────────────────────
 
-    /// The note a key names, for the predicates that take one. Panics rather
-    /// than returning an `Option`: a fixture that did not seed what the test
-    /// asks about is a broken test, not a case to assert about.
-    fn find<'a>(notes: &'a [Note], key: &str) -> &'a Note {
-        notes
-            .iter()
-            .find(|n| n.key == key)
-            .unwrap_or_else(|| panic!("no note `{key}` in the fixture"))
-    }
-
-    fn seed(paths: &Paths, layer: Layer, key: &str, body: &str) {
-        let path = layer.dir(paths).join(format!("{key}.md"));
+    fn seed(paths: &Paths, key: &str, body: &str) {
+        let path = paths.memory().join(format!("{key}.md"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let note = Note {
             path: path.clone(),
@@ -2422,10 +2203,10 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_note_file_that_does_not_parse_is_an_error_not_a_skipped_file() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "good", &surprise_body());
-        std::fs::write(Layer::Local.dir(&paths).join("bad.md"), "no frontmatter\n").unwrap();
+        seed(&paths, "good", &surprise_body());
+        std::fs::write(paths.memory().join("bad.md"), "no frontmatter\n").unwrap();
 
-        let err = load_layer(&paths, Layer::Local).unwrap_err().to_string();
+        let err = notes_in(&paths.memory()).unwrap_err().to_string();
         assert!(
             err.contains("bad"),
             "must name the file it could not read: {err}"
@@ -2442,8 +2223,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_non_markdown_file_in_the_store_is_ignored() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "good", &surprise_body());
-        std::fs::write(Layer::Local.dir(&paths).join(".DS_Store"), "junk").unwrap();
+        seed(&paths, "good", &surprise_body());
+        std::fs::write(paths.memory().join(".DS_Store"), "junk").unwrap();
         assert_eq!(keys(&load(&paths).unwrap()), ["good"]);
     }
 
@@ -2452,24 +2233,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_note_in_a_namespace_is_still_in_the_store() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "surprise/ebusy", &surprise_body());
+        seed(&paths, "surprise/ebusy", &surprise_body());
         assert_eq!(keys(&load(&paths).unwrap()), ["surprise/ebusy"]);
-    }
-
-    /// §4. Shadowing would hide a teammate's note behind yours and the reader
-    /// would never learn it existed — so both load, and both carry their own
-    /// layer.
-    #[test]
-    fn the_two_layers_do_not_shadow_each_other() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "deploy", &surprise_body());
-        seed(&paths, Layer::Local, "deploy", &surprise_body());
-
-        let all = load(&paths).unwrap();
-        assert_eq!(all.len(), 2, "one key in two layers is two notes");
-        let mut layers: Vec<Layer> = all.iter().map(|n| n.layer).collect();
-        layers.sort();
-        assert_eq!(layers, [Layer::Team, Layer::Local]);
     }
 
     /// A link into the other layer is not dangling — §4 says both retrieve —
@@ -2477,10 +2242,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_dangling_link_is_found_and_names_both_ends() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "target", &surprise_body());
+        seed(&paths, "target", &surprise_body());
         seed(
             &paths,
-            Layer::Local,
             "source",
             &format!(
                 "{}\n## Related\n\n- [[target]]\n- [[nope]]\n",
@@ -2505,11 +2269,10 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Local,
             "pointer",
             &format!("{}\n## Related\n\n- [[leaf]]\n", surprise_body()),
         );
-        seed(&paths, Layer::Local, "leaf", &surprise_body());
+        seed(&paths, "leaf", &surprise_body());
 
         let orphans: Vec<String> = hygiene(&load(&paths).unwrap())
             .into_iter()
@@ -2529,7 +2292,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Local,
             "source",
             &format!("{}\n## Related\n\n- [[nope]]\n", surprise_body()),
         );
@@ -2597,7 +2359,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert!(!written.is_empty(), "something must have been written");
         for path in written.keys() {
             assert!(
-                path.starts_with(Layer::Local.dir(&paths)),
+                path.starts_with(paths.memory()),
                 "wrote outside the local store: {}",
                 path.display()
             );
@@ -2643,7 +2405,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_symlinked_namespace_cannot_carry_a_write_out_of_the_store() {
         let (dir, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -2665,7 +2427,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn the_store_does_not_read_through_a_symlink() {
         let (dir, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -2684,7 +2446,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
 
         assert!(
-            load_layer(&paths, Layer::Local).unwrap().is_empty(),
+            notes_in(&paths.memory()).unwrap().is_empty(),
             "the store answered with a note that is not in it"
         );
     }
@@ -2761,8 +2523,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         // by design, and it is notes that must not escape.
         for path in files_under(dir.path()).keys() {
             assert!(
-                path.extension().is_none_or(|e| e != "md")
-                    || path.starts_with(Layer::Local.dir(&paths)),
+                path.extension().is_none_or(|e| e != "md") || path.starts_with(paths.memory()),
                 "wrote outside the local store: {}",
                 path.display()
             );
@@ -2780,7 +2541,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
         // The same key, stored somewhere else — what a hand-written note
         // produces, which in M1 is the only writer the agent has.
-        let elsewhere = Layer::Local.dir(&paths).join("hand-written.md");
+        let elsewhere = paths.memory().join("hand-written.md");
         std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
         let mut note = note_with(Kind::Surprise, &taken, &surprise_body());
         note.path = elsewhere.clone();
@@ -2806,7 +2567,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_note_omh_cannot_read_stops_the_write_rather_than_risking_a_duplicate() {
         let (dir, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("unreadable.md"), "this has no frontmatter\n").unwrap();
 
@@ -2836,7 +2597,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn override_replaces_a_mislocated_note_and_leaves_one_behind() {
         let (_d, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         let key = derived_key(&paths, &observation());
 
         let stale = root.join("hand-written.md");
@@ -2870,7 +2631,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn skip_and_suffix_see_a_key_held_by_a_mislocated_note() {
         let (_d, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         let key = derived_key(&paths, &observation());
         let mut note = note_with(Kind::Surprise, &key, &surprise_body());
         note.path = root.join("hand-written.md");
@@ -2907,12 +2668,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let Wrote::Created(path) = remember(&paths, &input, IfExists::Error).unwrap() else {
             panic!("a fresh key must be created");
         };
-        let note = parse(
-            &std::fs::read_to_string(&path).unwrap(),
-            Layer::Local,
-            &path,
-        )
-        .unwrap();
+        let note = parse(&std::fs::read_to_string(&path).unwrap(), &path).unwrap();
 
         assert_eq!(note.kind, Kind::Surprise);
         assert_eq!(note.source, input.source);
@@ -3057,30 +2813,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert_eq!(load(&paths).unwrap().len(), 3);
     }
 
-    /// §4, at the write path. Keying the collision check on the bare key
-    /// across layers means an agent's *contradicting* observation is refused
-    /// because a teammate documented the topic — the inverse of the shadowing
-    /// §4 forbids.
-    #[test]
-    fn a_teammates_note_on_the_same_topic_does_not_block_the_write() {
-        let (_d, paths) = fixture();
-        let key = expand_key(
-            "surprise/{{slug}}",
-            &[(
-                "slug",
-                &slug_of_observation(&observation().observed).unwrap(),
-            )],
-        )
-        .unwrap();
-        seed(&paths, Layer::Team, &key, &surprise_body());
-
-        assert!(
-            remember(&paths, &observation(), IfExists::Error).is_ok(),
-            "the committed layer is a different note, not a collision"
-        );
-        assert_eq!(load(&paths).unwrap().len(), 2);
-    }
-
     /// §7 gives the two guards different powers. `remember` calling `lint()`
     /// would fail the agent's write, unattended, because of somebody else's
     /// note — with no way for it to fix the problem.
@@ -3089,7 +2821,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Local,
             "broken",
             &format!("{}\n## Related\n\n- [[nowhere]]\n", surprise_body()),
         );
@@ -3140,14 +2871,14 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn an_at_that_names_nothing_never_falls_through_to_another_note() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "solo", &surprise_body());
+        seed(&paths, "solo", &surprise_body());
 
-        let err = remove(&paths, None, "solo", Some("some-other-file.md"), false)
+        let err = remove(&paths, "solo", Some("some-other-file.md"), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("some-other-file.md"), "got: {err}");
         assert!(
-            Layer::Local.dir(&paths).join("solo.md").exists(),
+            paths.memory().join("solo.md").exists(),
             "a note the caller did not name was removed"
         );
     }
@@ -3158,7 +2889,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn an_at_that_cannot_pick_one_note_removes_none_of_them() {
         let (_d, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
         for at in ["dup.md", "ns/dup.md"] {
             let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
@@ -3166,13 +2897,13 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             std::fs::write(&note.path, render(&note)).unwrap();
         }
 
-        let missed = remove(&paths, Some(Layer::Local), "dup", Some("absent.md"), false)
+        let missed = remove(&paths, "dup", Some("absent.md"), false)
             .unwrap_err()
             .to_string();
         assert!(missed.contains("absent.md"), "got: {missed}");
 
         // `dup.md` is a component-suffix of both paths, so it names neither.
-        let ambiguous = remove(&paths, Some(Layer::Local), "dup", Some("dup.md"), false)
+        let ambiguous = remove(&paths, "dup", Some("dup.md"), false)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3187,25 +2918,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// When the same relative path exists in both layers, `--at` cannot
-    /// separate them however much of the path is given — the answer is
-    /// `--layer`, and the message has to say so rather than asking for more
-    /// of a path that is already identical.
-    #[test]
-    fn an_at_that_spans_layers_points_at_the_layer_flag() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "shared", &surprise_body());
-        seed(&paths, Layer::Team, "shared", &surprise_body());
-
-        let err = remove(&paths, None, "shared", Some("shared.md"), false)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("--layer"),
-            "the only thing that separates these is the layer: {err}"
-        );
-    }
-
     /// `remove` assumed duplicates could only be cross-layer, so two notes
     /// under one key in one layer produced "`k` is in local and local" — and
     /// `--layer local` produced it again. There was no argument that reached
@@ -3213,7 +2925,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_key_duplicated_inside_one_layer_is_still_removable() {
         let (_d, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
         for at in ["dup.md", "ns/dup.md"] {
             let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
@@ -3221,9 +2933,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             std::fs::write(&note.path, render(&note)).unwrap();
         }
 
-        let err = remove(&paths, Some(Layer::Local), "dup", None, false)
-            .unwrap_err()
-            .to_string();
+        let err = remove(&paths, "dup", None, false).unwrap_err().to_string();
         assert!(
             err.contains("dup.md") && err.contains("ns/dup.md"),
             "the error must name the files, since the layer cannot separate them: {err}"
@@ -3234,7 +2944,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
 
         // And the store must be repairable through omh itself.
-        let removed = remove(&paths, Some(Layer::Local), "dup", Some("ns/dup.md"), false)
+        let removed = remove(&paths, "dup", Some("ns/dup.md"), false)
             .expect("a duplicated key must still be removable");
         assert!(
             removed.path.ends_with("ns/dup.md"),
@@ -3254,16 +2964,16 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn rm_removes_one_note_and_leaves_every_neighbour_byte_identical() {
         let (dir, paths) = fixture();
         let pointing = format!("{}\n## Related\n\n- [[b]]\n", surprise_body());
-        seed(&paths, Layer::Local, "a", &pointing);
-        seed(&paths, Layer::Team, "c", &pointing);
-        seed(&paths, Layer::Local, "b", &surprise_body());
+        seed(&paths, "a", &pointing);
+        seed(&paths, "c", &pointing);
+        seed(&paths, "b", &surprise_body());
 
         let before: BTreeMap<PathBuf, Vec<u8>> = files_under(dir.path())
             .into_iter()
             .filter(|(p, _)| !p.ends_with("b.md"))
             .collect();
 
-        remove(&paths, None, "b", None, false).unwrap();
+        remove(&paths, "b", None, false).unwrap();
 
         assert_eq!(
             files_under(dir.path()),
@@ -3276,61 +2986,22 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn rm_reports_what_linked_to_the_note_it_removed() {
         let (_d, paths) = fixture();
         let pointing = format!("{}\n## Related\n\n- [[b]]\n", surprise_body());
-        seed(&paths, Layer::Local, "a", &pointing);
-        seed(&paths, Layer::Team, "c", &pointing);
-        seed(&paths, Layer::Local, "b", &surprise_body());
+        seed(&paths, "a", &pointing);
+        seed(&paths, "c", &pointing);
+        seed(&paths, "b", &surprise_body());
 
-        let removed = remove(&paths, None, "b", None, false).unwrap();
+        let removed = remove(&paths, "b", None, false).unwrap();
         assert_eq!(
             removed.inbound,
             ["a", "c"],
-            "inbound links cross layers; scoping to one hides half of them"
+            "every note that pointed at it, whichever it is"
         );
-    }
-
-    /// Picking `local` "because that is where writes go" leaves a pulled team
-    /// note silently alive while the user believes it is gone.
-    #[test]
-    fn removing_a_key_present_in_both_layers_names_both_rather_than_picking_one() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "deploy", &surprise_body());
-        seed(&paths, Layer::Local, "deploy", &surprise_body());
-
-        let err = remove(&paths, None, "deploy", None, false)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("team") && err.contains("local"), "got: {err}");
-        assert_eq!(load(&paths).unwrap().len(), 2, "and removed neither");
-
-        remove(&paths, Some(Layer::Local), "deploy", None, false).unwrap();
-        let left = load(&paths).unwrap();
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].layer, Layer::Team);
-    }
-
-    /// Removing a committed note deletes it here and nowhere else until the
-    /// deletion is committed. `rm` has to report which layer it came out of,
-    /// or a shared note reads as gone for everybody.
-    #[test]
-    fn rm_reports_which_layer_the_note_came_out_of() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "shared", &surprise_body());
-        seed(&paths, Layer::Local, "mine", &surprise_body());
-
-        assert!(remove(&paths, None, "shared", None, false)
-            .unwrap()
-            .layer
-            .is_committed());
-        assert!(!remove(&paths, None, "mine", None, false)
-            .unwrap()
-            .layer
-            .is_committed());
     }
 
     #[test]
     fn rm_on_an_absent_key_says_so_rather_than_succeeding_quietly() {
         let (_d, paths) = fixture();
-        let err = remove(&paths, None, "never-existed", None, false)
+        let err = remove(&paths, "never-existed", None, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("never-existed"), "got: {err}");
@@ -3345,10 +3016,10 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// This is `omh memory`'s render, not the retrieval proxy's. Invariant 1
     /// belongs to `recall` and this test does not discharge it.
     #[test]
-    fn omh_memory_lists_every_note_with_its_date_and_its_layer() {
+    fn omh_memory_lists_every_note_with_its_date() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "older", &surprise_body());
-        seed(&paths, Layer::Local, "newer", &surprise_body());
+        seed(&paths, "older", &surprise_body());
+        seed(&paths, "newer", &surprise_body());
         let mut notes = load(&paths).unwrap();
         for note in &mut notes {
             note.recorded = if note.key == "older" {
@@ -3359,15 +3030,11 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
 
         let out = render_list(&notes);
-        for (key, layer, date) in [
-            ("older", "team", "2026-06-12"),
-            ("newer", "local", "2026-08-07"),
-        ] {
+        for (key, date) in [("older", "2026-06-12"), ("newer", "2026-08-07")] {
             let line = out
                 .lines()
                 .find(|l| l.contains(key))
                 .unwrap_or_else(|| panic!("`{key}` is missing from:\n{out}"));
-            assert!(line.contains(layer), "`{key}` lost its layer: {line}");
             assert!(line.contains(date), "`{key}` lost its date: {line}");
         }
     }
@@ -3413,224 +3080,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── resolution across layers ────────────────────────────────────────────
 
-    /// Identity is `(layer, key)`. A `BTreeMap<String, Note>` is the natural
-    /// first implementation and it collapses `team/deploy` into
-    /// `local/deploy`, which silently loses whichever a teammate wrote — the
-    /// exact shadowing §4 forbids.
-    #[test]
-    fn the_layer_is_part_of_a_notes_identity() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "deploy", &surprise_body());
-        seed(&paths, Layer::Local, "deploy", &surprise_body());
-
-        let notes = load(&paths).unwrap();
-        assert_eq!(notes.len(), 2);
-        assert_eq!(resolve(&notes, "deploy", Layer::Local).len(), 2);
-    }
-
-    /// From the gitignored layer a key resolves into whatever holds it: §4 says
-    /// both retrieve, so a local note may point at a committed one.
-    #[test]
-    fn a_local_link_resolves_into_either_layer() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "shared", &surprise_body());
-        let notes = load(&paths).unwrap();
-        assert_eq!(resolve(&notes, "shared", Layer::Local), vec![Layer::Team]);
-    }
-
-    /// **Invariant 2's whole mechanism.** A committed note is read in a clone
-    /// where no local layer exists, so a link out of `team` may only reach
-    /// `team`. Expressed as resolution rather than as a separate rule, because
-    /// a rule can be forgotten at a second call site and a return type cannot.
-    ///
-    /// This is also the "fallback" somebody adds to silence the test above:
-    /// one layer-blind `resolve` breaks the invariant everywhere at once.
-    #[test]
-    fn a_committed_note_never_resolves_a_link_into_the_gitignored_layer() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "mine", &surprise_body());
-        let notes = load(&paths).unwrap();
-
-        assert_eq!(resolve(&notes, "mine", Layer::Local), vec![Layer::Local]);
-        assert!(
-            resolve(&notes, "mine", Layer::Team).is_empty(),
-            "a teammate cloning this repo has no local layer to reach"
-        );
-    }
-
-    /// The one predicate the lint and `promote` both call. Two implementations
-    /// of "which links would dangle in a clone" is the shape that let two
-    /// subsystems tell two stories about one file in `config.rs`.
-    #[test]
-    fn uncommitted_links_names_what_a_clone_would_lose() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "committed", &surprise_body());
-        seed(&paths, Layer::Local, "private", &surprise_body());
-        seed(
-            &paths,
-            Layer::Local,
-            "candidate",
-            &format!(
-                "{}\n## Related\n\n- [[committed]]\n- [[private]]\n",
-                surprise_body()
-            ),
-        );
-        let notes = load(&paths).unwrap();
-
-        assert_eq!(
-            uncommitted_links(&notes, find(&notes, "candidate"), &[]),
-            vec!["private".to_string()],
-            "only the link a clone could not follow"
-        );
-    }
-
-    /// Two notes that point at each other are unpromotable in either order
-    /// unless the check knows what else is being promoted alongside — and the
-    /// error would read like a bug rather than a rule.
-    #[test]
-    fn a_pair_that_link_to_each_other_are_promotable_together() {
-        let (_d, paths) = fixture();
-        for (key, other) in [("a", "b"), ("b", "a")] {
-            seed(
-                &paths,
-                Layer::Local,
-                key,
-                &format!("{}\n## Related\n\n- [[{other}]]\n", surprise_body()),
-            );
-        }
-        let notes = load(&paths).unwrap();
-
-        assert_eq!(
-            uncommitted_links(&notes, find(&notes, "a"), &[]),
-            vec!["b".to_string()]
-        );
-        assert!(
-            uncommitted_links(&notes, find(&notes, "a"), &["b".to_string()]).is_empty(),
-            "promoted together, neither dangles"
-        );
-    }
-
-    /// **Invariant 2, the headline.** A lint that asks "does this key exist
-    /// *somewhere*" is green on precisely the store that breaks in a fresh
-    /// clone — the target is right there in the local layer, which the
-    /// teammate will never receive.
-    #[test]
-    fn every_committed_note_links_only_to_committed_notes() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "private", &surprise_body());
-        seed(
-            &paths,
-            Layer::Team,
-            "shared",
-            &format!("{}\n## Related\n\n- [[private]]\n", surprise_body()),
-        );
-
-        let found = lint(&paths).unwrap();
-        let crossing: Vec<&Violation> = found
-            .iter()
-            .filter(|v| v.rule == Rule::CrossLayerLink)
-            .collect();
-        assert_eq!(crossing.len(), 1, "got: {found:?}");
-        assert_eq!(crossing[0].key, "shared");
-        assert!(crossing[0].detail.contains("private"), "{:?}", crossing[0]);
-    }
-
-    /// **The store the lint exists for is the one it was blind to.** Identity
-    /// is `(layer, key)` and `DuplicateKey` is a *warning*, so two committed
-    /// files may legitimately claim one key. Looking a note up by key alone
-    /// then judged every one of them by the first match's body: the offending
-    /// file's links were never read, and the clean file was reported twice.
-    ///
-    /// Order-independent on purpose. The defect was invisible while
-    /// `Layer::ALL` happened to list `Team` first, and a test that only holds
-    /// for one ordering is a test that stops holding when somebody sorts.
-    #[test]
-    fn a_duplicate_key_never_hides_a_committed_notes_cross_layer_link() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "private", &surprise_body());
-        // Clean, and first by path — so a key-only lookup finds this one.
-        seed(&paths, Layer::Team, "dup", &surprise_body());
-        // The offender, claiming the same key from a different file.
-        let other = Layer::Team.dir(&paths).join("ns/dup.md");
-        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
-        std::fs::write(
-            &other,
-            render(&Note {
-                path: other.clone(),
-                ..note_with(
-                    Kind::Surprise,
-                    "dup",
-                    &format!("{}\n## Related\n\n- [[private]]\n", surprise_body()),
-                )
-            }),
-        )
-        .unwrap();
-
-        let found = lint(&paths).unwrap();
-        let crossing: Vec<&Violation> = found
-            .iter()
-            .filter(|v| v.rule == Rule::CrossLayerLink)
-            .collect();
-        assert_eq!(
-            crossing.len(),
-            1,
-            "the file that links into the gitignored layer, exactly once: {found:?}"
-        );
-        assert!(crossing[0].detail.contains("private"), "{:?}", crossing[0]);
-    }
-
-    /// Without this the test above passes on a lint that complains about every
-    /// committed note — which this repo has shipped before, as a check that
-    /// could have been `=> true`.
-    #[test]
-    fn a_committed_note_pointing_at_a_committed_note_is_silent() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "target", &surprise_body());
-        seed(
-            &paths,
-            Layer::Team,
-            "source",
-            &format!("{}\n## Related\n\n- [[target]]\n", surprise_body()),
-        );
-        assert!(
-            !lint(&paths)
-                .unwrap()
-                .iter()
-                .any(|v| v.rule == Rule::CrossLayerLink),
-            "a committed link to a committed note is exactly what is wanted"
-        );
-    }
-
-    /// Applied in both directions it would make the gitignored layer unusable:
-    /// a local note is *supposed* to reach a committed one.
-    #[test]
-    fn a_local_note_may_point_wherever_it_likes() {
-        let (_d, paths) = fixture();
-        seed(&paths, Layer::Team, "shared", &surprise_body());
-        seed(&paths, Layer::Local, "other", &surprise_body());
-        seed(
-            &paths,
-            Layer::Local,
-            "mine",
-            &format!(
-                "{}\n## Related\n\n- [[shared]]\n- [[other]]\n",
-                surprise_body()
-            ),
-        );
-        assert!(!lint(&paths)
-            .unwrap()
-            .iter()
-            .any(|v| v.rule == Rule::CrossLayerLink));
-    }
-
-    /// It warns rather than refuses. The note at fault is committed and the
-    /// agent writing right now cannot fix it, so refusing would fail an
-    /// unattended write over somebody else's mistake — §7's whole split.
-    #[test]
-    fn a_cross_layer_link_warns_rather_than_refusing() {
-        assert_eq!(Rule::CrossLayerLink.severity(), Severity::Warning);
-    }
-
     // ── lint ────────────────────────────────────────────────────────────────
 
     /// One note omh cannot parse aborted `lint` before it printed anything,
@@ -3641,14 +3090,14 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn lint_reports_a_note_it_cannot_read_instead_of_giving_up() {
         let (_d, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("broken.md"), "no frontmatter here\n").unwrap();
         // Judged and *found wanting*, so "the rest of the store is still
         // judged" rests on a schema finding rather than on orphanhood — which
         // is silent in a store this small, and which is not what this test is
         // about anyway.
-        seed(&paths, Layer::Local, "fine", "# F\n\n## Expected\na\n");
+        seed(&paths, "fine", "# F\n\n## Expected\na\n");
 
         let found = lint(&paths).unwrap();
         let unreadable: Vec<_> = found
@@ -3686,7 +3135,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn two_notes_under_one_key_in_one_layer_are_reported() {
         let (_d, paths) = fixture();
-        let root = Layer::Local.dir(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
         for at in ["dup.md", "ns/dup.md"] {
             let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
@@ -3715,8 +3164,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn one_key_in_both_layers_is_not_a_duplicate() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "deploy", &surprise_body());
-        seed(&paths, Layer::Team, "deploy", &surprise_body());
+        seed(&paths, "deploy", &surprise_body());
+        seed(&paths, "deploy", &surprise_body());
 
         assert!(
             !lint(&paths)
@@ -3735,7 +3184,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn only_refusals_decide_whether_lint_fails() {
         let warning = Violation {
             key: "k".into(),
-            layer: Layer::Local,
             rule: Rule::Orphan,
             detail: String::new(),
         };
@@ -3759,7 +3207,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Local,
             "broken",
             "# T\n\n## Expected\na\n\n## Related\n\nprose, not bullets\n",
         );
@@ -3788,25 +3235,18 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (_d, good) = fixture();
         seed(
             &good,
-            Layer::Local,
             "a",
             &format!("{}\n## Related\n\n- [[b]]\n", surprise_body()),
         );
         seed(
             &good,
-            Layer::Local,
             "b",
             &format!("{}\n## Related\n\n- [[a]]\n", surprise_body()),
         );
 
         let (_d2, bad) = fixture();
-        seed(
-            &bad,
-            Layer::Local,
-            "a",
-            "# T\n\n## Related\n\nre-narration\n",
-        );
-        seed(&bad, Layer::Local, "b", "# T\n\n## Related\n\n- [[gone]]\n");
+        seed(&bad, "a", "# T\n\n## Related\n\nre-narration\n");
+        seed(&bad, "b", "# T\n\n## Related\n\n- [[gone]]\n");
 
         let clean = lint(&good).unwrap();
         assert!(
@@ -3851,7 +3291,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             );
 
         let path = PathBuf::from("an-observation.md");
-        let note = parse(&filled, Layer::Local, &path)
+        let note = parse(&filled, &path)
             .unwrap_or_else(|e| panic!("the documented shape does not parse: {e}\n\n{filled}"));
         assert_eq!(
             check(&note),
@@ -3937,7 +3377,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             "invalidated_by: image:4f2a1c3b5d7e9f0a2b4c6d8e0f1a3b5c7d9e0f1a",
             "invalidated_by: vibes:soon",
         );
-        let note = parse(&raw, Layer::Local, std::path::Path::new("x.md"))
+        let note = parse(&raw, std::path::Path::new("x.md"))
             .expect("a note that already exists must still be readable");
 
         let found = check(&note);
@@ -3977,8 +3417,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_trigger_omh_cannot_evaluate_does_not_take_the_store_down() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "good", &surprise_body());
-        let bad = Layer::Local.dir(&paths).join("legacy.md");
+        seed(&paths, "good", &surprise_body());
+        let bad = paths.memory().join("legacy.md");
         std::fs::write(
             &bad,
             format!(
@@ -4179,25 +3619,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn the_staged_rules_name_the_path_the_store_is_mounted_at() {
         assert!(
-            shipped_rules().contains(GUEST_LOCAL_NOTES),
-            "the rules must point at {GUEST_LOCAL_NOTES}"
+            shipped_rules().contains(GUEST_MEMORY),
+            "the rules must point at {GUEST_MEMORY}"
         );
-    }
-
-    #[test]
-    fn every_layer_round_trips_through_its_own_name() {
-        for layer in Layer::ALL {
-            assert_eq!(Layer::from_str(&layer.to_string()).unwrap(), layer);
-        }
-    }
-
-    /// An unknown layer names what is accepted rather than defaulting. A
-    /// `_ => Local` arm would silently write a typo'd `--layer team` into the
-    /// gitignored store and report success.
-    #[test]
-    fn an_unknown_layer_is_an_error_that_names_the_known_ones() {
-        let err = Layer::from_str("shared").unwrap_err().to_string();
-        assert!(err.contains("shared"), "got: {err}");
-        assert!(err.contains("team") && err.contains("local"), "got: {err}");
     }
 }

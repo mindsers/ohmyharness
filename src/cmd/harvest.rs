@@ -1063,7 +1063,6 @@ pub(crate) fn commit(
     skip_carried: bool,
     force: bool,
     no_verify: bool,
-    no_promote: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -1076,14 +1075,6 @@ pub(crate) fn commit(
     // outcome for `omh sNN` and bails on a failure, so the landing below is
     // reached only for a commit that passed, was skipped, or could not be run.
     run_checks(&paths, &session, no_verify, ctx)?;
-
-    // The session's notes are promoted into the worktree's team layer so they
-    // land in the same commit as the code — a commit is the human gate §12
-    // talks about. *When* differs by landing, and it matters: the squash's
-    // `git add -A` sweeps whatever is in the worktree, but `shadow.harvest`
-    // opens `--keep` with its own uncommitted-work sweep, so notes written
-    // before it would be mislabelled "Work in progress". So each arm promotes
-    // at its own moment — squash before its commit, keep after the harvest.
 
     // Two ways to land the same work, and the user picks which at the moment
     // they land it. `-m` squashes the files into one commit of their own and
@@ -1123,8 +1114,6 @@ pub(crate) fn commit(
             let landed = harvest.landed;
             // After the harvest's own sweep, so the notes are not swept into a
             // "Work in progress" commit; then committed on their own.
-            let promoted = promote_session_notes(&paths, &session, no_promote, ctx)?;
-            commit_promoted_notes(&paths, &session, &promoted)?;
             // Said before the count, not after. This is the sentence that stops
             // "nothing carried reached the branch" from being read as "every
             // carried file was checked", and a caveat printed under the result
@@ -1187,7 +1176,6 @@ pub(crate) fn commit(
                     "landed": landed_at(&held),
                     "landed_unknown": landed_unknown(&held),
                     "base": base,
-                    "promoted": promoted,
                 })),
             );
             return Ok(());
@@ -1202,8 +1190,6 @@ pub(crate) fn commit(
     } else {
         session::Carried::refusing(&carried)
     };
-    // Before the commit that sweeps the worktree, so the notes land in it.
-    let promoted = promote_session_notes(&paths, &session, no_promote, ctx)?;
     session.commit(message, policy)?;
 
     // Counted against the base rather than reported as "committed", because the
@@ -1224,16 +1210,8 @@ pub(crate) fn commit(
             "landed": landed_at(&held),
             "landed_unknown": landed_unknown(&held),
             "base": base,
-            "promoted": promoted,
         })),
     );
-    if !promoted.is_empty() {
-        ctx.progress(&format!(
-            "promoted {} note{} to the team layer",
-            promoted.len(),
-            if promoted.len() == 1 { "" } else { "s" }
-        ));
-    }
     Ok(())
 }
 
@@ -1372,87 +1350,6 @@ pub(crate) fn push(
         .status()
         .context("running gh pr create")?;
     anyhow::ensure!(status.success(), "gh pr create did not open a pull request");
-    Ok(())
-}
-
-/// Promote the notes this session recorded into the worktree's team layer.
-///
-/// The session's local notes — the ones whose provenance parses to this
-/// session id — pass through the same gate `omh memory promote` uses, but the
-/// destination is the *session worktree's* `.omh/notes`, so the commit below
-/// carries them. Returns the keys that landed; a note the gate refuses is
-/// reported and left local, and never stops the commit. `--no-promote` skips
-/// the whole thing.
-fn promote_session_notes(
-    paths: &Paths,
-    session: &Session,
-    no_promote: bool,
-    ctx: &out::Ctx,
-) -> Result<Vec<String>> {
-    if no_promote {
-        return Ok(Vec::new());
-    }
-    let notes = crate::memory::load(paths)?;
-    let keys: Vec<String> = crate::memory::from_session(&notes, &session.id)
-        .into_iter()
-        .filter(|n| n.layer == crate::memory::Layer::Local)
-        .map(|n| n.key.clone())
-        .collect();
-    if keys.is_empty() {
-        return Ok(Vec::new());
-    }
-    let to_dir = session.worktree.join(".omh").join("notes");
-    // check-ignore runs in the worktree, where the notes are being written.
-    let repo = session.worktree.clone();
-    match crate::memory::promote::plan_into(&notes, &to_dir, &keys, &|p: &std::path::Path| {
-        crate::memory::promote::git_ignores(&repo, p)
-    }) {
-        Ok(steps) => {
-            crate::memory::promote::apply(&steps)?;
-            Ok(steps.iter().map(|s| s.key.clone()).collect())
-        }
-        Err(blocked) => {
-            // Reported and left local. All-or-nothing, like the gate it reuses:
-            // one refused note holds the rest back this time, but the commit
-            // still lands — the notes are not lost, only not shared yet.
-            for b in &blocked {
-                ctx.warn(&format!("note `{}` stays local — {}", b.key, b.say()));
-            }
-            Ok(Vec::new())
-        }
-    }
-}
-
-/// Commit the promoted notes as one commit on the session's branch.
-///
-/// For `--keep`, where the replant does not sweep the worktree the way the
-/// squash's `git add -A` does. A no-op when nothing was promoted.
-fn commit_promoted_notes(paths: &Paths, session: &Session, promoted: &[String]) -> Result<()> {
-    if promoted.is_empty() {
-        return Ok(());
-    }
-    let run = |args: &[&str]| -> Result<()> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&session.worktree)
-            .args(args)
-            .output()
-            .context("running git")?;
-        anyhow::ensure!(
-            out.status.success(),
-            "git {}: {}",
-            args.join(" "),
-            crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
-        );
-        Ok(())
-    };
-    let _ = paths;
-    run(&["add", ".omh/notes"])?;
-    run(&[
-        "commit",
-        "-m",
-        &format!("notes: {} from {}", promoted.len(), session.id),
-    ])?;
     Ok(())
 }
 

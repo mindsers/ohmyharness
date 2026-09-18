@@ -394,16 +394,27 @@ impl Paths {
         self.root.join("shadow").join(self.repo_id())
     }
 
-    /// The local note store — keyed by repo, and outside the checkout so it
-    /// outlives the worktree that produced it. A session is a git worktree
-    /// holding tracked files only, and `omh s rm` removes it with `--force`,
-    /// so a gitignored store inside the repo would be both invisible to the
-    /// sandbox and destroyed by session removal.
+    /// The note store — one per repo, shared by every session of it, and
+    /// outside the checkout so it outlives the worktree that produced it. A
+    /// session is a git worktree holding tracked files only, and `omh s rm`
+    /// removes it with `--force`, so a gitignored store inside the repo would
+    /// be both invisible to the sandbox and destroyed by session removal.
     ///
-    /// The committed half of the store is not here: it is tracked, so it
-    /// belongs in the repo, and it arrives in every worktree by itself.
-    pub fn notes(&self) -> PathBuf {
-        self.root.join("notes").join(self.repo_id())
+    /// There is no second half. The committed layer is gone as of 0.14, and
+    /// with it the `local` directory that used to distinguish this one — see
+    /// `old_notes`, which is where a store recorded before then still is.
+    pub fn memory(&self) -> PathBuf {
+        self.root.join("memory").join(self.repo_id())
+    }
+
+    /// Where the store was until 0.14: `~/.omh/notes/<repo id>/local`, the
+    /// machine-local half of a two-layer store.
+    ///
+    /// Spelled here rather than at the call site because `repo_id` is this
+    /// module's business — and kept at all because notes are something a
+    /// person wrote. `memory::move_old_store` moves them once.
+    pub fn old_notes(&self) -> PathBuf {
+        self.root.join("notes").join(self.repo_id()).join("local")
     }
 
     /// Cache volume — keyed by repo, deliberately not by harness. This is what
@@ -528,11 +539,25 @@ pub(crate) fn settled(path: &Path) -> PathBuf {
 /// Every kind of per-repo state, as `<root>/<kind>/<repo id>`.
 ///
 /// The list the migration walks, and the reason `repo_id` is worth getting
-/// right: these are the six directories a checkout's identity names. Kept
-/// beside the accessors that build them so adding a seventh is a change in one
-/// place — `worktrees`, `runs`, `keys`, `shadows`, `notes` and `scratch` each
-/// join one of these.
-pub(crate) const KEYED: [&str; 6] = ["worktrees", "run", "keys", "shadow", "notes", "scratch"];
+/// right: these are the directories a checkout's identity names. Kept beside
+/// the accessors that build them so adding one is a change in one place —
+/// `worktrees`, `runs`, `keys`, `shadows`, `memory` and `scratch` each join one
+/// of these.
+///
+/// `notes` is the one that names nothing omh writes any more: the store moved
+/// to `memory` in 0.14. It stays on the list so that a checkout which
+/// skipped 2026.08 still has its old store moved onto its own id — where
+/// `memory::move_old_store` can then find it — instead of being stranded under
+/// a basename by a rename it never saw.
+pub(crate) const KEYED: [&str; 7] = [
+    "worktrees",
+    "run",
+    "keys",
+    "shadow",
+    "memory",
+    "notes",
+    "scratch",
+];
 
 /// What the one-time move from basename keying to digest keying did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1528,7 +1553,7 @@ mod tests {
             ("runs", |p| p.runs().display().to_string()),
             ("keys", |p| p.keys().display().to_string()),
             ("shadows", |p| p.shadows().display().to_string()),
-            ("notes", |p| p.notes().display().to_string()),
+            ("memory", |p| p.memory().display().to_string()),
             ("scratch", |p| p.scratch("login").display().to_string()),
         ];
         for (name, of) in both_ways {
@@ -1669,14 +1694,21 @@ mod tests {
         };
 
         legacy_session(&paths.root, "api", "s01", &repo);
+        std::fs::create_dir_all(paths.root.join("memory/api")).unwrap();
+        std::fs::write(paths.root.join("memory/api/a.md"), "a note").unwrap();
+        // The retired kind, seeded on purpose: an install this old predates
+        // the store's move to `memory`, so its notes are under `notes/<name>`
+        // and `move_old_store` will look for them under `notes/<id>`. If this
+        // hop does not happen they are stranded under a basename for ever.
         std::fs::create_dir_all(paths.root.join("notes/api/local")).unwrap();
-        std::fs::write(paths.root.join("notes/api/local/a.md"), "a note").unwrap();
+        std::fs::write(paths.root.join("notes/api/local/b.md"), "an older note").unwrap();
         std::fs::create_dir_all(paths.root.join("shadow/api")).unwrap();
 
         let moved = migrate(&paths, NOT_RUNNING).unwrap();
         assert!(
             matches!(&moved, Migration::Moved { kinds, .. }
                 if kinds.contains(&"worktrees".to_string())
+                    && kinds.contains(&"memory".to_string())
                     && kinds.contains(&"notes".to_string())
                     && kinds.contains(&"shadow".to_string())),
             "got: {moved:?}"
@@ -1687,9 +1719,14 @@ mod tests {
             "the session arrived"
         );
         assert_eq!(
-            std::fs::read_to_string(paths.notes().join("local/a.md")).unwrap(),
+            std::fs::read_to_string(paths.memory().join("a.md")).unwrap(),
             "a note",
             "and so did the notes, contents intact"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.old_notes().join("b.md")).unwrap(),
+            "an older note",
+            "and the pre-0.14 store came too, where `move_old_store` will find it"
         );
         assert!(
             !paths.root.join("worktrees/api").exists(),
@@ -2046,13 +2083,13 @@ mod tests {
             root: dir.path().join("home"),
             repo,
         };
-        std::fs::create_dir_all(paths.root.join("notes/api/local")).unwrap();
+        std::fs::create_dir_all(paths.root.join("memory/api")).unwrap();
 
         assert!(matches!(
             migrate(&paths, NOT_RUNNING).unwrap(),
             Migration::Moved { .. }
         ));
-        assert!(paths.notes().join("local").is_dir());
+        assert!(paths.memory().is_dir());
     }
 
     /// Running it twice is not running it twice.

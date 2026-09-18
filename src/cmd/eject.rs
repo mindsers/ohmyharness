@@ -174,7 +174,7 @@ pub(crate) fn eject(
 /// Does this document only work inside omh's sandbox?
 ///
 /// The honest half of the exit. omh renders these for a container: the memory
-/// server is invoked with `--local /omh/notes/local`, hooks read
+/// server is invoked with `--notes /omh/memory`, hooks read
 /// `$OMH_GRAPH_PROJECT`, rules point at `/work`. On a host none of it
 /// resolves — so handing somebody a directory and saying *these are yours
 /// now* would be a thing that cannot be relied on, spelled exactly like a

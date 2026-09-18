@@ -622,13 +622,6 @@ pub(crate) enum SessionsCmd {
         /// as `git commit --no-verify` skips git's.
         #[arg(long = "no-verify")]
         no_verify: bool,
-        /// Keep the session's notes local instead of promoting them.
-        ///
-        /// A commit is the human gate a note passes to reach the team layer,
-        /// so `commit` promotes the notes this session recorded in the same
-        /// commit as the code. This holds them back.
-        #[arg(long = "no-promote")]
-        no_promote: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {
@@ -706,12 +699,11 @@ pub(crate) enum SettingsCmd {
     },
 }
 
-/// Deliberately short. `promote` and `stale` arrive with the layers and the
-/// expiry events they act on; a subcommand that prints "not implemented" is
-/// worse than its absence, because `--help` advertises it.
+/// Deliberately short: a subcommand that prints "not implemented" is worse
+/// than its absence, because `--help` advertises it.
 #[derive(Subcommand)]
 pub(crate) enum MemoryCmd {
-    /// Record what surprised you. Writes to the gitignored layer, always.
+    /// Record what surprised you. Writes this repo's store, always.
     Remember {
         /// What you thought would happen.
         #[arg(long)]
@@ -750,24 +742,14 @@ pub(crate) enum MemoryCmd {
     /// sandbox, where there is no repo to discover.
     #[command(hide = true)]
     Serve {
-        /// The team layer's directory, as mounted in the sandbox.
+        /// The note store's directory, as mounted in the sandbox.
         #[arg(long)]
-        team: std::path::PathBuf,
-        /// The local layer's directory, as mounted in the sandbox.
-        #[arg(long)]
-        local: std::path::PathBuf,
+        notes: std::path::PathBuf,
         /// The session this server serves. Defaults to `$OMH_SESSION`, which
         /// omh already sets in the sandbox — so the base set can declare
         /// static arguments and still record real provenance.
         #[arg(long)]
         session: Option<String>,
-    },
-    /// Share a note with the repo: local → team. The only human gate there is.
-    Promote {
-        /// One or more keys. Notes that link to each other must be named
-        /// together, or each would leave the other dangling for a teammate.
-        #[arg(required = true)]
-        keys: Vec<String>,
     },
     /// Notes the world has moved on from. A join, never a judgement.
     Stale,
@@ -777,12 +759,8 @@ pub(crate) enum MemoryCmd {
     Rm {
         /// Which note, as `omh memory lint` and the recall output name it.
         key: String,
-        /// `team` or `local`, when one key is in both layers. Without it a
-        /// key found twice is refused rather than guessed at.
-        #[arg(long, value_parser = parse_note_layer)]
-        layer: Option<memory::Layer>,
         /// Which file, when one key somehow reached two of them. Path
-        /// relative to the layer's root, as `rm` prints it.
+        /// relative to the store's root, as `rm` prints it.
         #[arg(long)]
         at: Option<String>,
     },
@@ -867,6 +845,24 @@ pub(crate) const RETIRED: &[Retired] = &[
         spellings: &["--force"],
         at: At::Flag(&[("import", &["mcp"])]),
         said: "`--force` is `--replace` now, named for what it does to your entry:\n  omh settings mcp import claude --replace",
+    },
+    // The team layer is gone: one store per repo, shared by its sessions and
+    // never committed. Its verb and both flags named it, so each is refused by
+    // name rather than left to clap's "unexpected argument".
+    Retired {
+        spellings: &["promote"], // types the retired verb on purpose
+        at: At::Under(&["memory"]),
+        said: "`promote` is gone — notes are one store per repo now, shared by every session of it and never committed:\n  omh memory                what this repo knows\n  omh memory rm <key>       drop one note",
+    },
+    Retired {
+        spellings: &["--layer"],
+        at: At::Flag(&[("rm", &["memory"])]),
+        said: "`--layer` is gone — there is one store, so a key names one note:\n  omh memory rm <key>\n  omh memory rm <key> --at <file>   when one key reached two files",
+    },
+    Retired {
+        spellings: &["--no-promote"],
+        at: At::Flag(&[("commit", &["s", "sessions"])]),
+        said: "`--no-promote` is gone — a commit no longer moves notes anywhere; they are already shared with every session of this repo:\n  omh s01 commit",
     },
     Retired {
         spellings: &["--file"],
@@ -1038,7 +1034,6 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
             None
             | Some(MemoryCmd::Remember { .. })
             | Some(MemoryCmd::Serve { .. })
-            | Some(MemoryCmd::Promote { .. })
             | Some(MemoryCmd::Stale)
             | Some(MemoryCmd::Lint) => false,
         },
@@ -1109,7 +1104,6 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
             Some(MemoryCmd::Serve { .. }) => false,
             None
             | Some(MemoryCmd::Remember { .. })
-            | Some(MemoryCmd::Promote { .. })
             | Some(MemoryCmd::Stale)
             | Some(MemoryCmd::Lint)
             | Some(MemoryCmd::Rm { .. }) => true,
@@ -1179,12 +1173,6 @@ pub(crate) fn consumes_session(cmd: &Cmd) -> bool {
         // the id arrived.
         | Cmd::New { .. } => false,
     }
-}
-
-/// A note's layer, which is a different set from a profile's: notes have no
-/// personal layer, and the two they do have never merge.
-pub(crate) fn parse_note_layer(s: &str) -> std::result::Result<memory::Layer, String> {
-    s.parse().map_err(|e: anyhow::Error| e.to_string())
 }
 
 pub(crate) fn parse_if_exists(s: &str) -> std::result::Result<memory::IfExists, String> {

@@ -2963,7 +2963,6 @@ impl Report for Init {
 #[derive(Debug, Clone)]
 pub struct Judged {
     pub key: String,
-    pub layer: String,
     pub recorded: String,
     pub age: Age,
     /// Why it is stale, or why omh could not tell.
@@ -3235,32 +3234,6 @@ impl Report for Diff {
     }
 }
 
-/// Notes moved from local to team.
-///
-/// The human text comes from `memory::promote::report`, which already knows
-/// how to say it — including the `git add :/` line, whose whole point is that
-/// promoting moves a file and does **not** send anything to a teammate. This
-/// adds the keys as data so a script does not have to parse `promoted X → Y`.
-#[derive(Debug, Clone)]
-pub struct Promoted {
-    pub text: String,
-    pub keys: Vec<String>,
-}
-
-impl Report for Promoted {
-    fn human(&self, _p: &out::Palette) -> String {
-        self.text.clone()
-    }
-
-    fn json(&self) -> serde_json::Value {
-        json!({
-            "action": "notes-promoted",
-            "keys": self.keys,
-            "message": self.text.trim_end(),
-        })
-    }
-}
-
 /// What the store looks like against the world it describes.
 #[derive(Debug, Clone)]
 pub struct Stale {
@@ -3301,12 +3274,10 @@ impl Report for Stale {
 
             let mut t = Table::new();
             for j in members {
-                // Every line carries its date and its layer, exactly as
-                // `recall` does: a note reported without those cannot be
-                // judged.
+                // Every line carries its date, exactly as `recall` does: a
+                // note reported without it cannot be judged.
                 t = t.row(vec![
                     Cell::styled(&j.key, out::NAME),
-                    Cell::plain(&j.layer),
                     Cell::plain(&j.recorded),
                     match &j.because {
                         Some(because) => Cell::styled(format!("— {because}"), out::DIM),
@@ -3333,7 +3304,6 @@ impl Report for Stale {
         json!({
             "notes": self.judged.iter().map(|j| json!({
                 "key": j.key,
-                "layer": j.layer,
                 "recorded": j.recorded,
                 "verdict": j.age.key(),
                 "because": j.because,
@@ -3434,7 +3404,6 @@ impl Report for Notes {
             "notes": self.notes.iter().map(|n| json!({
                 "key": n.key,
                 "kind": n.kind.to_string(),
-                "layer": n.layer.to_string(),
                 "source": n.source,
                 "recorded": n.recorded,
                 "invalidated_by": n.invalidated_by,
@@ -3485,7 +3454,6 @@ impl Report for Lint {
                 } else {
                     Cell::styled("warning", out::WARN)
                 },
-                Cell::plain(v.layer.to_string()),
                 Cell::plain(&v.detail),
             ]);
         }
@@ -3507,7 +3475,6 @@ impl Report for Lint {
         json!({
             "violations": self.violations.iter().map(|v| json!({
                 "key": v.key,
-                "layer": v.layer.to_string(),
                 "rule": format!("{:?}", v.rule),
                 "severity": match v.rule.severity() {
                     crate::memory::Severity::Refused => "refused",

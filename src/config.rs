@@ -922,6 +922,38 @@ pub fn mcp_add(paths: &Paths, name: &str, server: Server) -> Result<Written> {
     })
 }
 
+/// Bring omh's own servers back in line with the manifest, and leave yours
+/// alone. Answers the names it changed.
+///
+/// `init` seeds the catalogue with `write_if_absent`, so nothing refreshed a
+/// server after the first run: the memory server kept the arguments it was
+/// seeded with, and a release that moved them — `--team`/`--local` to
+/// `--notes` — reached an existing install as a server that would not start.
+/// Adapters, the base set and the stacks are already managed this way; this is
+/// the same rule for the entries the manifest owns.
+pub fn refresh_own_servers(paths: &Paths, own: &BTreeMap<String, Server>) -> Result<Vec<String>> {
+    let path = mcp_path(paths);
+    let mut all = read_servers(&path)?;
+    let mut changed = Vec::new();
+    for (name, server) in own {
+        // Only a server omh ships and the catalogue still holds: a name taken
+        // out with `omh settings mcp rm` stays out, which is what that command
+        // promises.
+        match all.get(name) {
+            Some(theirs) if theirs == server => {}
+            Some(_) => {
+                all.insert(name.clone(), server.clone());
+                changed.push(name.clone());
+            }
+            None => {}
+        }
+    }
+    if !changed.is_empty() {
+        write_servers(&path, &all)?;
+    }
+    Ok(changed)
+}
+
 pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
     let path = mcp_path(paths);
     let mut all = read_servers(&path)?;

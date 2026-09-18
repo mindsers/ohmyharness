@@ -67,7 +67,7 @@ change — most of them record something that was tried and cost something.
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
 | [Adoption](design/adoption.md) | partly built — what `init` decides when it meets a repo, the toolchain probe, and what `omh import` still has to migrate |
 | [Git](design/git.md) | built in 0.6.0 — the loop around the sandbox's repository: reading a session's work, landing it in stages, staying current with trunk, and reaching several sessions from one place. Twelve steps, each naming the pull request that landed it |
-| [Memory](design/memory.md) | the note graph, its guards, and the build order — the store, retrieval, the team layer and staleness are built; hub pages are not |
+| [Memory](design/memory.md) | the note graph, its guards, and the build order — the store, retrieval and staleness are built; hub pages are not, and the committed layer the spec describes was removed in 0.14 |
 | [Memory: how the design got here](design/memory-rationale.md) | the survey, the benchmark that reversed six choices, and the alternatives not taken |
 | [Memory M0: running iwe](design/memory-m0.md) | the blocking spike, and the four claims the design rested on that did not survive it |
 | [Measuring retrieval](design/memory-benchmark.md) | the benchmark that decides retrieval questions, and why it cannot be tilted |

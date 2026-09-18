@@ -684,8 +684,8 @@ pub fn plan(
     // it. Writable, because `remember` writes here.
     if memory_on {
         mounts.push(Mount {
-            host: crate::memory::Layer::Local.dir(paths),
-            guest: PathBuf::from(crate::memory::GUEST_LOCAL_NOTES),
+            host: paths.memory(),
+            guest: PathBuf::from(crate::memory::GUEST_MEMORY),
             read_only: false,
             file: false,
         });
@@ -1811,7 +1811,7 @@ mod tests {
         );
         assert!(guests.contains(&"/work".to_string()));
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
-        assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
+        assert!(guests.iter().any(|g| g == crate::memory::GUEST_MEMORY));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
         assert!(
             guests.iter().any(|g| g.contains(".claude/projects")),
@@ -2270,7 +2270,7 @@ mod tests {
         let notes = p
             .mounts
             .iter()
-            .find(|m| m.guest == Path::new(crate::memory::GUEST_LOCAL_NOTES))
+            .find(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
             .expect("the local note store must reach the sandbox");
 
         assert!(!notes.read_only, "`remember` writes there");
@@ -2343,7 +2343,7 @@ mod tests {
         let host_of = |p: &Plan| {
             p.mounts
                 .iter()
-                .find(|m| m.guest == Path::new(crate::memory::GUEST_LOCAL_NOTES))
+                .find(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
                 .map(|m| m.host.clone())
                 .expect("note store mount")
         };
@@ -3264,7 +3264,7 @@ mod tests {
             .map(|m| m.guest.display().to_string())
             .collect();
         assert!(
-            !guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES),
+            !guests.iter().any(|g| g == crate::memory::GUEST_MEMORY),
             "no note store: {guests:?}"
         );
         assert!(

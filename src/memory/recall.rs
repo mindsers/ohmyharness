@@ -28,7 +28,7 @@
 //! **Layer is not a tiebreak.** Retrieval never picks a winner; reconciling a
 //! contradiction is the agent's job, done with layers and dates in hand.
 
-use crate::memory::{Layer, Note};
+use crate::memory::Note;
 #[cfg(test)]
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,12 +36,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// What a note must carry to be judgeable at all: which note, how old, and
 /// whether a human reviewed it.
 ///
-/// There is no constructor that takes a key without a layer and a date. That
-/// is the whole of invariant 1, expressed as a type rather than as a rule.
+/// There is no constructor that takes a key without a date. That is the whole
+/// of invariant 1, expressed as a type rather than as a rule.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cite {
     pub key: String,
-    pub layer: Layer,
     pub recorded: String,
 }
 
@@ -297,7 +296,6 @@ fn inbound_counts(notes: &[Note]) -> BTreeMap<&str, usize> {
 fn cite(note: &Note) -> Cite {
     Cite {
         key: note.key.clone(),
-        layer: note.layer,
         recorded: note.recorded.clone(),
     }
 }
@@ -359,7 +357,6 @@ pub fn search_phrased(notes: &[Note], phrasings: &[String], budget: Budget) -> N
                     .cmp(inbound.get(a.key.as_str()).unwrap_or(&0)),
             )
             .then(a.key.cmp(&b.key))
-            .then(a.layer.cmp(&b.layer))
     });
 
     let omitted = scored.len().saturating_sub(budget.roots);
@@ -369,19 +366,15 @@ pub fn search_phrased(notes: &[Note], phrasings: &[String], budget: Budget) -> N
         .map(|(_, n)| n)
         .collect();
 
-    // Identity is (layer, key) throughout. Deduping by key alone would drop
-    // one of two notes that disagree, which is the one thing retrieval must
-    // never do.
-    let by_identity: BTreeMap<(Layer, &str), &Note> = notes
-        .iter()
-        .map(|n| ((n.layer, n.key.as_str()), n))
-        .collect();
+    // Keyed by key alone now that there is one store: two notes that disagree
+    // are two keys, and `DuplicateKey` is what the lint calls the rest.
+    let by_identity: BTreeMap<&str, &Note> = notes.iter().map(|n| (n.key.as_str(), n)).collect();
 
-    let mut seen: BTreeSet<(Layer, String)> = BTreeSet::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut hits: Vec<Hit> = Vec::new();
 
     for note in &roots {
-        if !seen.insert((note.layer, note.key.clone())) {
+        if !seen.insert(note.key.clone()) {
             continue;
         }
         hits.push(Hit {
@@ -395,13 +388,11 @@ pub fn search_phrased(notes: &[Note], phrasings: &[String], budget: Budget) -> N
     // never terminates.
     for note in &roots {
         for target in crate::memory::links(&note.body) {
-            // A link resolves into either layer — §4 says both retrieve — so a
-            // neighbour may appear in both, and each keeps its own provenance.
-            for layer in Layer::ALL {
-                let Some(child) = by_identity.get(&(layer, target.as_str())) else {
+            {
+                let Some(child) = by_identity.get(target.as_str()) else {
                     continue;
                 };
-                if !seen.insert((child.layer, child.key.clone())) {
+                if !seen.insert(child.key.clone()) {
                     continue;
                 }
                 hits.push(Hit {
@@ -418,10 +409,6 @@ pub fn search_phrased(notes: &[Note], phrasings: &[String], budget: Budget) -> N
         omitted,
     }
 }
-
-/// The separator between a note and its provenance. One glyph, so a key
-/// containing spaces cannot be mistaken for a layer.
-const SEP: &str = " · ";
 
 /// The only place a note becomes text an agent reads.
 pub fn render(n: &Neighbourhood) -> String {
@@ -461,10 +448,7 @@ pub fn render(n: &Neighbourhood) -> String {
     let mut out = String::new();
     for (i, hit) in n.hits.iter().enumerate() {
         let label = label_of(i, hit);
-        out.push_str(&format!(
-            "{label:width$}{}{SEP}{}\n",
-            hit.cite.layer, hit.cite.recorded
-        ));
+        out.push_str(&format!("{label:width$}{}\n", hit.cite.recorded));
     }
 
     if n.omitted > 0 {
@@ -503,20 +487,12 @@ pub fn parse_rendered(rendered: &str) -> Result<Vec<Cite>> {
         let Some((key, rest)) = stripped.split_once("  ") else {
             bail!("`{line}` carries no provenance at all");
         };
-        let Some((layer, recorded)) = rest.trim().split_once(SEP) else {
-            bail!("`{line}` is missing its layer or its date");
-        };
-        let layer: Layer = layer
-            .trim()
-            .parse()
-            .map_err(|_| anyhow::anyhow!("`{line}` names no layer omh knows"))?;
-        let recorded = recorded.trim();
+        let recorded = rest.trim();
         if !crate::memory::is_calendar_date(recorded) {
             bail!("`{line}` carries `{recorded}`, which is not a date");
         }
         out.push(Cite {
             key: key.trim().to_string(),
-            layer,
             recorded: recorded.to_string(),
         });
     }
@@ -526,11 +502,11 @@ pub fn parse_rendered(rendered: &str) -> Result<Vec<Cite>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Kind, Layer, Note};
+    use crate::memory::{Kind, Note};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
-    fn note(layer: Layer, key: &str, recorded: &str, links: &[&str]) -> Note {
+    fn note(key: &str, recorded: &str, links: &[&str]) -> Note {
         // No single-letter filler: those are whole tokens, and they made every
         // note match every question by accident.
         let mut body = format!(
@@ -549,7 +525,6 @@ mod tests {
             recorded: recorded.to_string(),
             invalidated_by: None,
             body,
-            layer,
             path: PathBuf::from(format!("{key}.md")),
         }
     }
@@ -567,7 +542,6 @@ mod tests {
     fn store() -> Vec<Note> {
         vec![
             note(
-                Layer::Team,
                 "credentials-are-a-named-volume",
                 "2026-06-12",
                 &[
@@ -575,29 +549,14 @@ mod tests {
                     "accounts-are-single-path-components",
                 ],
             ),
-            // Same key, other layer, contradicting — and a different date.
-            note(
-                Layer::Local,
-                "credentials-are-a-named-volume",
-                "2026-07-02",
-                &[],
-            ),
-            // A local child of a team parent.
-            note(
-                Layer::Local,
-                "credentials-file-mount-returns-ebusy",
-                "2026-08-07",
-                &[],
-            ),
-            note(
-                Layer::Team,
-                "accounts-are-single-path-components",
-                "2026-06-14",
-                &[],
-            ),
+            // A second claim about the same topic: its own key, because one
+            // store makes a key a primary key. Two notes disagreeing under one
+            // key is `DuplicateKey` to the lint.
+            note("credentials-are-a-named-volume-on-macos", "2026-07-02", &[]),
+            note("credentials-file-mount-returns-ebusy", "2026-08-07", &[]),
+            note("accounts-are-single-path-components", "2026-06-14", &[]),
             // A second root reaching the same child.
             note(
-                Layer::Team,
                 "credentials-the-image-ends-unprivileged",
                 "2026-07-20",
                 &["credentials-file-mount-returns-ebusy"],
@@ -650,74 +609,6 @@ mod tests {
         );
     }
 
-    /// §4: `team/deploy` and `local/deploy` are different notes and both
-    /// retrieve. Dedup by `Key` instead of `(Layer, Key)` hides a teammate's
-    /// note behind yours, and the reader never learns it existed.
-    #[test]
-    fn a_note_and_its_local_counterpart_both_retrieve() {
-        let found = search(
-            &store(),
-            "credentials-are-a-named-volume",
-            Budget::default(),
-        );
-        let both: Vec<&Hit> = found
-            .hits
-            .iter()
-            .filter(|h| h.cite.key == "credentials-are-a-named-volume")
-            .collect();
-
-        assert_eq!(both.len(), 2, "one key in two layers is two notes");
-        let layers: BTreeSet<Layer> = both.iter().map(|h| h.cite.layer).collect();
-        assert_eq!(layers.len(), 2, "and they are not the same layer");
-    }
-
-    /// Printing the root's layer down the tree makes a local child of a team
-    /// parent read as reviewed — which is the exact laundering invariant 1
-    /// exists to stop.
-    #[test]
-    fn an_expanded_neighbour_carries_its_own_layer_not_its_parents() {
-        // The question is chosen so these neighbours are reachable *only* by
-        // expansion. An earlier version asked something the neighbours matched
-        // directly, so they arrived as roots, the child path never ran, and
-        // inheriting the parent's layer left the whole suite green. Asserting
-        // `depth == 1` is what stops that recurring.
-        let found = search(&store(), "named volume", Budget::default());
-
-        let parent = found
-            .hits
-            .iter()
-            .find(|h| h.depth == 0 && h.cite.layer == Layer::Team)
-            .expect("a team note must match the question directly");
-        let child = found
-            .hits
-            .iter()
-            .find(|h| h.cite.key == "credentials-file-mount-returns-ebusy")
-            .expect("the local neighbour must be expanded");
-
-        assert_eq!(child.depth, 1, "it arrives by expansion, not by matching");
-        assert_eq!(
-            child.cite.layer,
-            Layer::Local,
-            "a local child of a team parent must not read as reviewed"
-        );
-        assert_ne!(child.cite.layer, parent.cite.layer, "inheritance, caught");
-        assert_eq!(
-            child.cite.recorded, "2026-08-07",
-            "and it keeps its own date"
-        );
-        assert_ne!(child.cite.recorded, parent.cite.recorded);
-
-        // The other neighbour really is `team`, so hardcoding `local` to
-        // satisfy the assertion above fails here instead.
-        let sibling = found
-            .hits
-            .iter()
-            .find(|h| h.cite.key == "accounts-are-single-path-components")
-            .expect("the team neighbour must be expanded too");
-        assert_eq!(sibling.depth, 1);
-        assert_eq!(sibling.cite.layer, Layer::Team);
-    }
-
     /// Expansion without a visited set renders a note once per path that
     /// reaches it, and a two-note cycle renders forever.
     #[test]
@@ -745,17 +636,11 @@ mod tests {
     fn a_long_key_never_runs_into_its_provenance() {
         let notes = vec![
             note(
-                Layer::Team,
                 "short",
                 "2026-01-01",
                 &["a-very-much-longer-key-than-its-parent"],
             ),
-            note(
-                Layer::Local,
-                "a-very-much-longer-key-than-its-parent",
-                "2026-02-02",
-                &[],
-            ),
+            note("a-very-much-longer-key-than-its-parent", "2026-02-02", &[]),
         ];
         let rendered = render(&search(&notes, "short", Budget::default()));
 
@@ -770,8 +655,8 @@ mod tests {
     #[test]
     fn a_cycle_terminates() {
         let notes = vec![
-            note(Layer::Local, "a", "2026-01-01", &["b"]),
-            note(Layer::Local, "b", "2026-01-02", &["a"]),
+            note("a", "2026-01-01", &["b"]),
+            note("b", "2026-01-02", &["a"]),
         ];
         let found = search(&notes, "a", Budget::default());
         assert_eq!(found.hits.len(), 2);
@@ -790,36 +675,29 @@ mod tests {
         let both: Vec<&Hit> = found
             .hits
             .iter()
-            .filter(|h| h.cite.key == "credentials-are-a-named-volume")
+            .filter(|h| h.cite.key.starts_with("credentials-are-a-named-volume"))
             .collect();
         assert_eq!(both.len(), 2, "both claims come back; neither is filtered");
     }
 
-    /// §9.2 says layer outranks recency **when the agent reconciles** — which
-    /// is precisely why the ranking must not do it first. Sorting the
-    /// committed layer above the local one presents a reconciliation the
-    /// indexer is not entitled to make, and hides that the local note is the
-    /// newer claim.
+    /// Recency leads, and nothing else does. §9.2 leaves reconciling two
+    /// claims to the agent, so an order that put one first on any other
+    /// ground would present a reconciliation the indexer is not entitled to
+    /// make.
     ///
     /// Asserted in both directions, because a one-directional check passes on
-    /// an implementation that always sorts `team` first.
+    /// an implementation that always keeps the order it was given.
     #[test]
-    fn order_follows_recency_not_layer() {
+    fn order_follows_recency() {
         let key = "deploy";
-        let newer_is_local = vec![
-            note(Layer::Team, key, "2026-01-01", &[]),
-            note(Layer::Local, key, "2026-09-09", &[]),
-        ];
-        let newer_is_team = vec![
-            note(Layer::Team, key, "2026-09-09", &[]),
-            note(Layer::Local, key, "2026-01-01", &[]),
-        ];
+        let newer_is_local = vec![note(key, "2026-01-01", &[]), note(key, "2026-09-09", &[])];
+        let newer_is_team = vec![note(key, "2026-09-09", &[]), note(key, "2026-01-01", &[])];
 
         for notes in [newer_is_local, newer_is_team] {
             let found = search(&notes, key, Budget::default());
             assert_eq!(
                 found.hits[0].cite.recorded, "2026-09-09",
-                "the newer claim leads, whichever layer it is in"
+                "the newer claim leads, whichever order they arrive in"
             );
         }
     }
@@ -867,13 +745,8 @@ mod tests {
     #[test]
     fn a_note_is_found_when_the_question_inflects_a_word_differently() {
         let notes = vec![
-            note(
-                Layer::Local,
-                "the-harness-rewrites-in-place",
-                "2026-01-01",
-                &[],
-            ),
-            note(Layer::Local, "an-unrelated-topic", "2026-01-02", &[]),
+            note("the-harness-rewrites-in-place", "2026-01-01", &[]),
+            note("an-unrelated-topic", "2026-01-02", &[]),
         ];
         // `rewrites` in the note, `rewriting` in the question.
         let hits = search(&notes, "rewriting", Budget::default()).hits;
@@ -902,13 +775,8 @@ mod tests {
     #[test]
     fn the_index_and_the_question_go_through_the_same_stemmer() {
         let notes = vec![
-            note(
-                Layer::Local,
-                "credentials-refresh-in-place",
-                "2026-01-01",
-                &[],
-            ),
-            note(Layer::Local, "an-unrelated-topic", "2026-01-02", &[]),
+            note("credentials-refresh-in-place", "2026-01-01", &[]),
+            note("an-unrelated-topic", "2026-01-02", &[]),
         ];
         let hits = search(&notes, "refreshing credential", Budget::default()).hits;
         assert_eq!(
@@ -936,7 +804,7 @@ mod tests {
 
     // ── question-shaped text ────────────────────────────────────────────────
 
-    fn asking(layer: Layer, key: &str, recorded: &str, answers: &[&str], prose: &str) -> Note {
+    fn asking(key: &str, recorded: &str, answers: &[&str], prose: &str) -> Note {
         let mut body = format!(
             "# {key}\n\n## Expected\nsomething\n\n## Observed\n{prose}\n\n## Evidence\nc\n"
         );
@@ -951,7 +819,6 @@ mod tests {
             recorded: recorded.to_string(),
             invalidated_by: None,
             body,
-            layer,
             path: PathBuf::from(format!("{key}.md")),
         }
     }
@@ -966,14 +833,12 @@ mod tests {
     fn a_note_is_found_by_the_question_it_says_it_answers() {
         let notes = vec![
             asking(
-                Layer::Local,
                 "one-inode",
                 "2026-01-01",
                 &["why does my login not persist"],
                 "the harness rewrites the file in place",
             ),
             asking(
-                Layer::Local,
                 "unrelated",
                 "2026-01-02",
                 &["how do I attach an editor"],
@@ -998,14 +863,12 @@ mod tests {
     fn a_declared_question_outweighs_the_same_words_buried_in_prose() {
         let notes = vec![
             asking(
-                Layer::Local,
                 "declared",
                 "2026-01-01",
                 &["how does caching behave"],
                 "unrelated observation about mounting",
             ),
             asking(
-                Layer::Local,
                 "buried",
                 "2026-01-02",
                 &["something else entirely"],
@@ -1026,14 +889,12 @@ mod tests {
     fn an_alternative_phrasing_finds_what_the_first_one_missed() {
         let notes = vec![
             asking(
-                Layer::Local,
                 "ebusy",
                 "2026-01-01",
                 &["why does mounting a token file fail"],
                 "one inode, so the write fails",
             ),
             asking(
-                Layer::Local,
                 "other",
                 "2026-01-02",
                 &["how do sessions end"],
@@ -1071,14 +932,12 @@ mod tests {
     fn adding_a_phrasing_never_demotes_what_a_better_one_found() {
         let notes = vec![
             asking(
-                Layer::Local,
                 "target",
                 "2026-01-01",
                 &["why does mounting a token file fail"],
                 "one inode",
             ),
             asking(
-                Layer::Local,
                 "noise",
                 "2026-01-02",
                 &[
@@ -1110,7 +969,7 @@ mod tests {
 
     #[test]
     fn one_phrasing_is_the_same_as_asking_once() {
-        let notes = vec![asking(Layer::Local, "k", "2026-01-01", &["why"], "prose")];
+        let notes = vec![asking("k", "2026-01-01", &["why"], "prose")];
         let a = render(&search(&notes, "why", Budget::default()));
         let b = render(&search_phrased(&notes, &["why".into()], Budget::default()));
         assert_eq!(a, b);
@@ -1129,8 +988,8 @@ mod tests {
         // `named-volume-mounts` contains the letter `a` only *inside* words.
         // `a-thing` carries it as a word of its own.
         let notes = vec![
-            note(Layer::Local, "named-volume-mounts", "2026-01-01", &[]),
-            note(Layer::Local, "a-thing", "2026-01-02", &[]),
+            note("named-volume-mounts", "2026-01-01", &[]),
+            note("a-thing", "2026-01-02", &[]),
         ];
 
         let hits = search(&notes, "a", Budget::default()).hits;
@@ -1166,19 +1025,13 @@ mod tests {
         let mut notes: Vec<Note> = (0..9)
             .map(|i| {
                 note(
-                    Layer::Local,
                     &format!("the-note-about-things-{i}"),
                     &format!("2026-02-0{}", i + 1),
                     &[],
                 )
             })
             .collect();
-        notes.push(note(
-            Layer::Local,
-            "ebusy-on-file-mounts",
-            "2026-01-01",
-            &[],
-        ));
+        notes.push(note("ebusy-on-file-mounts", "2026-01-01", &[]));
 
         let hits = search(&notes, "the note ebusy", Budget::default()).hits;
         assert_eq!(
@@ -1195,29 +1048,13 @@ mod tests {
     fn a_real_question_puts_the_note_that_answers_it_first() {
         let notes = vec![
             note(
-                Layer::Local,
                 "mounting-a-credential-file-returns-ebusy",
                 "2026-01-01",
                 &[],
             ),
-            note(
-                Layer::Local,
-                "the-graph-cache-is-keyed-by-repo",
-                "2026-06-01",
-                &[],
-            ),
-            note(
-                Layer::Local,
-                "a-latest-tag-skips-the-rebuild",
-                "2026-06-02",
-                &[],
-            ),
-            note(
-                Layer::Local,
-                "the-image-ends-unprivileged",
-                "2026-06-03",
-                &[],
-            ),
+            note("the-graph-cache-is-keyed-by-repo", "2026-06-01", &[]),
+            note("a-latest-tag-skips-the-rebuild", "2026-06-02", &[]),
+            note("the-image-ends-unprivileged", "2026-06-03", &[]),
         ];
 
         let hits = search(
@@ -1240,7 +1077,7 @@ mod tests {
     /// for everything, and must not crash the weighting either.
     #[test]
     fn a_term_the_store_has_never_seen_matches_nothing() {
-        let notes = vec![note(Layer::Local, "credentials", "2026-01-01", &[])];
+        let notes = vec![note("credentials", "2026-01-01", &[])];
         assert!(search(&notes, "kubernetes", Budget::default())
             .hits
             .is_empty());
@@ -1255,18 +1092,8 @@ mod tests {
     #[test]
     fn a_store_where_every_note_shares_a_term_is_still_searchable() {
         let notes = vec![
-            note(
-                Layer::Local,
-                "credentials-are-a-named-volume",
-                "2026-01-01",
-                &[],
-            ),
-            note(
-                Layer::Local,
-                "credentials-refresh-in-place",
-                "2026-01-02",
-                &[],
-            ),
+            note("credentials-are-a-named-volume", "2026-01-01", &[]),
+            note("credentials-refresh-in-place", "2026-01-02", &[]),
         ];
         assert_eq!(
             search(&notes, "credentials", Budget::default()).hits.len(),
@@ -1287,8 +1114,8 @@ mod tests {
     fn a_note_the_store_points_at_wins_a_tie() {
         let tied = || {
             vec![
-                note(Layer::Local, "alpha-topic", "2026-01-01", &[]),
-                note(Layer::Local, "beta-topic", "2026-01-01", &[]),
+                note("alpha-topic", "2026-01-01", &[]),
+                note("beta-topic", "2026-01-01", &[]),
             ]
         };
         let position = |notes: &[Note], key: &str| {
@@ -1306,12 +1133,7 @@ mod tests {
 
         // Now one of them is pointed at, and it overtakes.
         let mut linked = tied();
-        linked.push(note(
-            Layer::Local,
-            "referrer",
-            "2026-01-01",
-            &["beta-topic"],
-        ));
+        linked.push(note("referrer", "2026-01-01", &["beta-topic"]));
         assert!(
             position(&linked, "beta-topic") < position(&linked, "alpha-topic"),
             "the note the store points at leads once the tie is broken"
@@ -1335,9 +1157,7 @@ mod tests {
     #[test]
     fn the_rendered_form_parser_rejects_a_line_missing_its_provenance() {
         assert!(parse_rendered("just-a-key\n").is_err());
-        assert!(parse_rendered("a-key  team\n").is_err());
-        assert!(parse_rendered("a-key  team · not-a-date\n").is_err());
-        assert!(parse_rendered("a-key  sideways · 2026-08-07\n").is_err());
-        assert!(parse_rendered("a-key  team · 2026-08-07\n").is_ok());
+        assert!(parse_rendered("a-key  not-a-date\n").is_err());
+        assert!(parse_rendered("a-key  2026-08-07\n").is_ok());
     }
 }
