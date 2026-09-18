@@ -345,6 +345,13 @@ working git, and a `doctor` that goes red over something you never run is one
 you stop running. The same reasoning holds for the stacks row — a repo of prose
 has no stack and that is not a failure.
 
+**The sandbox has a git row of its own**, under the harness heading, and it
+asks the same question of the image: whether `merge-tree` takes `--merge-base`.
+Nothing omh does needs it there — omh merges on the host — but the agent's
+commits and your turn-end check run inside, and a sandbox git three Debian
+releases behind fails those in ways that name anything but git. The row that
+failed printed eleven test names and no version; this one prints the version.
+
 A detected stack whose toolchain will not be installed says so, and says which
 of the two reasons it is: `[provision]` switched it off, or it has not been
 provisioned yet. Both install nothing; only one of them is a decision you made.
@@ -888,7 +895,8 @@ changed and trunk deleted is a conflict like any other: the agent's version
 stays, uncommitted, and is named in the report. Carried files and omh's own
 placeholders are never removed, whatever trunk did.
 
-Needs git 2.38 on the host. `omh doctor` says so if yours is older.
+Needs a host git whose `merge-tree` takes `--merge-base` — git 2.39.5 does not.
+`omh doctor` asks the binary and says so if yours cannot.
 
 ### `omh sNN commit` will not land a conflict
 

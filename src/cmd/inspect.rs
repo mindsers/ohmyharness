@@ -433,7 +433,9 @@ pub(crate) fn doctor_cmd(
                 ctx,
             )?;
         }
-        let mut checks = vec![doctor::start_check(&adapter)];
+        // The harness first, then the image's own git: both are about whether
+        // the sandbox can work at all, and neither depends on what omh mounted.
+        let mut checks = vec![doctor::start_check(&adapter), doctor::sandbox_git_check()];
         checks.extend(doctor::checks(
             &profile,
             &adapter,

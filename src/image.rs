@@ -367,7 +367,7 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<Root>> {
 ///
 /// **What is claimed here is what has been measured**, and the variables have
 /// now been isolated. Three arms against a local `openssl s_server` presenting
-/// a leaf signed by a self-signed root, on this recipe's `node:22-bookworm-slim`
+/// a leaf signed by a self-signed root, on this recipe's `node:22-trixie-slim`
 /// base with the python, go and rust stacks installed:
 ///
 /// | | no root | root in the store, no variables | this recipe |
@@ -499,7 +499,7 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
     format!(
-        r#"FROM node:22-bookworm-slim
+        r#"FROM node:22-trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
@@ -2303,7 +2303,7 @@ mod tests {
     ///
     /// Summing the `SIZE` column of `docker images` instead gives about 20 GB,
     /// and that is the number *not* to quote: it charges every tag the full
-    /// cost of the `node:22-bookworm-slim` and apt layers they share. What one
+    /// cost of the `node:22-trixie-slim` and apt layers they share. What one
     /// superseded harness tag actually returns is its own install layer, which
     /// `docker system df -v` puts in the hundreds of kilobytes. The cost being
     /// paid down here is unbounded tag growth, not the gigabytes the `SIZE`
@@ -2482,6 +2482,26 @@ mod tests {
     /// that text — would not move: an image built without the certificate
     /// would be reused for somebody who had set one, and setting it would
     /// appear to do nothing. That is the stale-tag failure `tag_for`'s own doc
+    /// The base is a Debian whose `git` can do what a repo's tooling asks.
+    ///
+    /// Measured, not assumed: `node:22-bookworm-slim` is Debian 12 and its git
+    /// is 2.39.5, which has no `merge-tree --merge-base`; bookworm-backports
+    /// offers nothing newer, so there is no surgical pin. `node:22-trixie-slim`
+    /// is Debian 13 with git 2.47.3. omh's own suite failed eleven tests inside
+    /// a bookworm sandbox, every one of them on that option.
+    ///
+    /// A string, and weak on its own — `doctor`'s `git` row is what asks the
+    /// image itself. This is here so that moving the base back is a decision
+    /// somebody makes on purpose.
+    #[test]
+    fn the_base_image_ships_a_git_that_can_merge() {
+        assert!(
+            base_dockerfile(None).starts_with("FROM node:22-trixie-slim\n"),
+            "{}",
+            base_dockerfile(None).lines().next().unwrap_or_default()
+        );
+    }
+
     /// records. Embedding makes the certificate part of what the image *is*.
     ///
     /// Only the base needs it. The harness and stack layers are `FROM` it, so

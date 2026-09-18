@@ -1046,7 +1046,7 @@ pub fn git_checks() -> Vec<Outcome> {
         Ok(version) => git_checks_from(
             version,
             crate::shadow::git_supports("cherry-pick", "--empty"),
-            crate::shadow::git_supports("merge-tree", "--write-tree"),
+            crate::shadow::git_supports("merge-tree", "--merge-base"),
         ),
         Err(why) => vec![Outcome {
             name: "git on the host".into(),
@@ -1121,9 +1121,9 @@ fn git_checks_from(
     // command is unavailable rather than slower.
     let syncs = match merges_on_the_host {
         Ok(true) => "syncs".to_string(),
-        Ok(false) => {
-            "no `merge-tree --write-tree` (git 2.38), so `omh sNN sync` cannot run here".to_string()
-        }
+        Ok(false) => "no `merge-tree --merge-base`, so `omh sNN sync` cannot run here — \
+             git 2.39.5 is known to be too old"
+            .to_string(),
         Err(e) => format!("omh could not tell whether `sync` works here: {e}"),
     };
     vec![Outcome {
@@ -1148,6 +1148,37 @@ pub fn memory_checks(server: &crate::render::Server) -> Vec<Check> {
         expect: Expect::Speaks(vec!["recall".into(), "remember".into()]),
         dir: false,
     }]
+}
+
+/// Whether the sandbox's git can do what a repo's own tooling asks of it.
+///
+/// omh's merges run on the host — `git on the host` is that row — so nothing
+/// omh does itself needs this. What needs it is everything *inside*: the
+/// agent's commits, and the turn-end check, which is whatever the repo runs.
+///
+/// A capability, not a version, for `git_checks`' reason: omh cannot compare
+/// against a number it has no way to verify, and asking the binary keeps
+/// answering as git grows. `--merge-base` is the option this was written for —
+/// a sandbox on `node:22-bookworm-slim` had git 2.39.5, which does not take
+/// it, and omh's own suite failed eleven tests inside that sandbox without one
+/// of them naming git. The fallback prints the version, because that is the
+/// whole diagnosis once you know to look.
+pub fn sandbox_git_check() -> Check {
+    Check {
+        name: "git".into(),
+        guest: PathBuf::from(GUEST_HOME),
+        expect: Expect::Starts {
+            // The word, not the flag: git 2.47.3 lists the option as
+            // `--[no-]merge-base <tree-ish>`, so a grep for `--merge-base`
+            // finds nothing and calls a git that has it too old — measured,
+            // against the image this bump moves to. A git without the option
+            // does not print the word at all, anywhere in its listing.
+            command: "git merge-tree -h 2>&1 | grep -q merge-base \
+                      || { git --version 2>&1; exit 1; }"
+                .into(),
+        },
+        dir: true,
+    }
 }
 
 /// What must be true of the credential mounts, given an account.
@@ -4481,6 +4512,84 @@ mod tests {
         let outcomes = parse(&String::from_utf8_lossy(&sh.stdout));
         assert_eq!(outcomes.len(), 1, "one check, one line: {script}");
         outcomes.into_iter().next().unwrap()
+    }
+
+    /// A `git` old enough to fail is named as such, by the version it prints.
+    ///
+    /// Written against the real thing: omh's turn-end check ran the suite in a
+    /// sandbox whose git was 2.39.5, eleven tests failed at once, and every one
+    /// of them was `git merge-tree: error: unknown option \`merge-base'` —
+    /// three screens down, under a list of test names that pointed at merges,
+    /// worktrees and rebases and said nothing about git.
+    fn git_probe_against(usage: &str, version: &str) -> Outcome {
+        let stub = tempfile::tempdir().unwrap();
+        let at = stub.path().join("git");
+        std::fs::write(
+            &at,
+            format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'merge-tree -h' ]; then \
+                 printf '%s\\n' {usage} >&2; exit 129; fi\nprintf '%s\\n' {version}\n",
+                usage = single_quote(usage),
+                version = single_quote(version),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Somewhere that exists on this machine: the check names a guest path,
+        // and a `cd` that fails takes the command with it — which would make
+        // every case here "fail", including the one that must pass.
+        let mut check = sandbox_git_check();
+        check.guest = stub.path().to_path_buf();
+        let script = probe_script(&[check]);
+        let sh = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    stub.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("sh must run");
+        let outcomes = parse(&String::from_utf8_lossy(&sh.stdout));
+        assert_eq!(outcomes.len(), 1, "one check, one line: {script}");
+        outcomes.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_git_that_cannot_merge_fails_doctor_and_names_its_version() {
+        // Both listings are what these two gits print, captured: 2.39.5 from
+        // the sandbox that failed, 2.47.3 from the image this branch moves to.
+        // Invented output is what made the first version of this check wrong —
+        // it looked for `--merge-base`, which no git prints.
+        let old = git_probe_against(
+            "usage: git merge-tree [--write-tree] [<options>] <branch1> <branch2>\n    \
+             --write-tree          do a real merge instead of a trivial merge\n    \
+             --trivial-merge       do a trivial merge only",
+            "git version 2.39.5",
+        );
+        assert!(!old.ok, "{old:?}");
+        assert!(
+            old.detail.contains("2.39.5"),
+            "the version is the whole diagnosis: {old:?}"
+        );
+
+        let new = git_probe_against(
+            "usage: git merge-tree [--write-tree] [<options>] <branch1> <branch2>\n    \
+             --stdin                perform multiple merges, one per line of input\n    \
+             --[no-]merge-base <tree-ish>\n                          specify a \
+             merge-base for the merge",
+            "git version 2.47.3",
+        );
+        assert!(new.ok, "{new:?}");
     }
 
     /// Whether the harness **starts** is a check of its own, and the first one.

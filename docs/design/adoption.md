@@ -228,7 +228,7 @@ A stack layer is the same shape, one layer further out — with one `RUN` per
 provide that applied (§1.4), in file order:
 
 ```
-node:22-bookworm-slim + graph + tools      base
+node:22-trixie-slim + graph + tools         base
   → RUN adapter.install                    harness
     → RUN <provide 1>.install              stack
       → RUN <provide 2>.install

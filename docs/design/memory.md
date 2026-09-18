@@ -585,8 +585,10 @@ recorded so they are not rediscovered.
 1. ~~**iwe has never been run in an omh container**~~ — **answered 2026-08-08**,
    in [M0](memory-m0.md). It was worth running: four of the claims this design
    rested on did not survive it — one the survey made, three carried here. iwe
-   **does not run on omh's base image at all** (needs glibc 2.39, bookworm ships
-   2.36, and no musl build is published); it is three dynamic binaries totalling
+   **did not run on omh's base image at all** (needs glibc 2.39, bookworm shipped
+   2.36, and no musl build is published — the base is `node:22-trixie-slim` and
+   glibc 2.41 as of 0.14, so that one obstacle is gone); it is three dynamic
+   binaries totalling
    64 MB rather than one static one; `iwe rename` breaks the identity model in
    §6, and names guards §6 and §7 still owe; and the tool count is 14, not 13.
    Apache-2.0 and the no-service claim hold. The
