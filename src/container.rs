@@ -2786,6 +2786,47 @@ mod tests {
         );
     }
 
+    /// Codex runs omh's own servers' tools without asking, and yours as Codex
+    /// decides. Unset, Codex stopped the first `search_graph` of a real session
+    /// at "Allow the codegraph MCP server to run tool …?" — omh's graph, which
+    /// every base-set rule tells the agent to reach for, behind a dialog on
+    /// every call. A server from your catalogue is one omh cannot vouch for.
+    #[test]
+    fn codex_runs_omhs_own_mcp_tools_without_asking() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+                              "linear":{"command":"l"}}}"#,
+        )
+        .unwrap();
+        selects(&fx, "mcp = [\"linear\"]\n");
+
+        let p = plan_for(&fx, "codex");
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new("/etc/codex/managed_config.toml"))
+            .expect("codex's MCP document");
+        let doc: toml::Table = std::fs::read_to_string(&mount.host)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mode = |name: &str| {
+            doc["mcp_servers"][name]
+                .get("default_tools_approval_mode")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(mode("codegraph").as_deref(), Some("approve"), "{doc}");
+        assert_eq!(mode("memory").as_deref(), Some("approve"), "{doc}");
+        assert_eq!(
+            mode("linear"),
+            None,
+            "yours keeps Codex's own prompt: {doc}"
+        );
+    }
+
     /// The trusted half of the ledger, read back off real disk after a real
     /// `plan()` — not asserted by reading the code that writes it. Every
     /// hook this fixture's own `own_commands()` proves claude actually
