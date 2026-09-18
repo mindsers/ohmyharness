@@ -100,10 +100,10 @@ pub fn describe(index: &Index) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Kind, Layer};
+    use crate::memory::Kind;
     use std::path::PathBuf;
 
-    fn note(layer: Layer, key: &str) -> Note {
+    fn note(key: &str) -> Note {
         Note {
             key: key.to_string(),
             kind: Kind::Surprise,
@@ -111,21 +111,13 @@ mod tests {
             recorded: "2026-08-07".into(),
             invalidated_by: None,
             body: "# t\n\n## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n".into(),
-            layer,
             path: PathBuf::from(format!("{key}.md")),
         }
     }
 
     fn store(n: usize, namespaces: usize) -> Vec<Note> {
         (0..n)
-            .map(|i| {
-                let layer = if i % 2 == 0 {
-                    Layer::Team
-                } else {
-                    Layer::Local
-                };
-                note(layer, &format!("ns{}/note-{i}", i % namespaces.max(1)))
-            })
+            .map(|i| note(&format!("ns{}/note-{i}", i % namespaces.max(1))))
             .collect()
     }
 
@@ -182,10 +174,7 @@ mod tests {
     /// promoted that it holds two notes, and the agent stops querying.
     #[test]
     fn the_description_counts_both_layers() {
-        let notes = vec![
-            note(Layer::Team, "surprise/a"),
-            note(Layer::Local, "surprise/b"),
-        ];
+        let notes = vec![note("surprise/a"), note("surprise/b")];
         assert_eq!(Index::of(&notes).total, 2);
         assert!(describe(&Index::of(&notes)).contains('2'));
     }
@@ -194,9 +183,7 @@ mod tests {
     /// the whole store in the sentence — titles by another route.
     #[test]
     fn keys_with_no_namespace_collapse_rather_than_each_becoming_a_group() {
-        let notes: Vec<Note> = (0..30)
-            .map(|i| note(Layer::Local, &format!("bare-key-{i}")))
-            .collect();
+        let notes: Vec<Note> = (0..30).map(|i| note(&format!("bare-key-{i}"))).collect();
         let index = Index::of(&notes);
         assert_eq!(index.groups.len(), 1);
         assert_eq!(index.groups[0], ("other".to_string(), 30));

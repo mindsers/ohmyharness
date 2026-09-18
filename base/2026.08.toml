@@ -266,12 +266,10 @@ remove  = "omh set memory off — the feature and its server together. Your note
 command = "omh"
 args    = [
   "memory", "serve",
-  # The committed layer is tracked, so it arrives inside the worktree and
-  # needs no mount. The local layer is mounted from ~/.omh, keyed by repo,
-  # because a worktree holds tracked files only and `omh s rm` removes it
-  # with --force.
-  "--team",  "/work/.omh/notes",
-  "--local", "/omh/notes/local",
+  # One store per repo, mounted from ~/.omh: a worktree holds tracked files
+  # only and `omh s rm` removes it with --force, so a store inside the repo
+  # would die with the session that wrote it.
+  "--notes", "/omh/notes/local",
 ]
 
   [[entry.measured]]

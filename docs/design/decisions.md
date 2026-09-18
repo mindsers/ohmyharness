@@ -57,7 +57,7 @@ omh settings mcp add …
 | `omh s attach` | ✅ | IDE attach |
 | **`codegraph`** | ✅ | structural queries instead of re-grepping every task |
 | test-on-stop + format-on-edit hooks | ✅ | `init` detects the commands and wires them |
-| memory | ✅ | survives harness switches — the store, retrieval and the team layer ship; hub pages do not |
+| memory | ✅ | survives harness switches — one store per repo, shared by its sessions and never committed; hub pages do not ship, and the committed layer was removed in 0.14 |
 | egress allowlist | ⬜ | inherited from the runtime |
 
 **If a further entry needs a paragraph to justify, it belongs in a profile, not

@@ -450,7 +450,6 @@ fn hash_file(repo: &Path, path: &str) -> Result<String> {
 #[derive(Debug)]
 pub struct Judged {
     pub key: String,
-    pub layer: crate::memory::Layer,
     pub recorded: String,
     pub verdict: Verdict,
 }
@@ -479,7 +478,6 @@ pub fn judge(paths: &crate::profile::Paths, notes: &[crate::memory::Note]) -> Re
             };
             Judged {
                 key: n.key.clone(),
-                layer: n.layer,
                 recorded: n.recorded.clone(),
                 verdict,
             }
@@ -522,7 +520,6 @@ mod tests {
             recorded: "2026-08-07".into(),
             invalidated_by: trigger.map(|t| t.into()),
             body: String::new(),
-            layer: crate::memory::Layer::Local,
             path: std::path::PathBuf::from("k.md"),
         }
     }
@@ -901,7 +898,6 @@ mod tests {
             recorded: "2026-08-07".into(),
             invalidated_by: Some("vibes:soon".into()),
             body: String::new(),
-            layer: crate::memory::Layer::Local,
             path: std::path::PathBuf::from("k.md"),
         };
         let judged = judge(&paths, std::slice::from_ref(&note)).unwrap();

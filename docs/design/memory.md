@@ -2,13 +2,20 @@
 
 > **Status: M1–M4 are built, except hub pages.** The store, its schemas, the
 > key templates, retrieval, the MCP surface, `invalidated_by`, and `omh memory`
-> / `lint` / `rm` / `promote` / `stale` ship — see
+> / `lint` / `rm` / `stale` ship — see
 > [commands](../commands.md#omh-memory-) and §14 for what each milestone
 > deferred. Hub pages remain specification, because their lint needs a
 > threshold §7 will not let anyone guess. The reasoning
 > behind each decision, the survey that picked the server, the benchmark that
 > reversed six of these choices, and the alternatives not taken are in
 > [how the design got here](memory-rationale.md).
+>
+> **The two layers are gone as of 0.14.** This document specifies `team` and
+> `local`, `promote`, and the invariants that follow from a note's reach being
+> a property of git. omh keeps one store per repo instead: every session of a
+> repo shares it the moment a note is written, and nothing is committed. §4,
+> §12's `promote` and invariant 2 are history — read them as the reasoning that
+> produced the layers, not as what ships.
 >
 > One thing here is still **unverified** and gates the build rather than sitting
 > inside it. A second was verified in [M0](memory-m0.md), and cost this design
@@ -361,8 +368,7 @@ guard red first, then reintroduce the defect to confirm it bites**
 ## 12. CLI
 
 ```console
-$ omh memory                    # list, by layer, with reference counts
-$ omh memory promote <key>…     # local → team; refuses anything unshareable
+$ omh memory                    # list, with reference counts
 $ omh memory rm <key>           # one note; reports inbound links
 $ omh memory stale              # join against §8 events
 $ omh memory lint               # schema + hygiene violations

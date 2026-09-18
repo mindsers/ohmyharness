@@ -472,7 +472,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 edit,
                 force,
                 no_verify,
-                no_promote,
             } => cmd::harvest::commit(
                 &cwd,
                 cli.session.as_deref(),
@@ -486,7 +485,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 *skip_carried,
                 *force,
                 *no_verify,
-                *no_promote,
                 ctx,
             ),
             SessionsCmd::Push { name, pr } => {
@@ -629,14 +627,11 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             None => cmd::memory::memory_ls(&cwd, ctx),
             Some(MemoryCmd::Lint) => cmd::memory::memory_lint(&cwd, ctx),
             Some(MemoryCmd::Stale) => cmd::memory::memory_stale(&cwd, ctx),
-            Some(MemoryCmd::Promote { keys }) => cmd::memory::memory_promote(&cwd, keys, ctx),
-            Some(MemoryCmd::Serve {
-                team,
-                local,
-                session,
-            }) => cmd::memory::memory_serve(team.clone(), local.clone(), session.clone()),
-            Some(MemoryCmd::Rm { key, layer, at }) => {
-                cmd::memory::memory_rm(&cwd, key, *layer, at.as_deref(), cli.dry_run, ctx)
+            Some(MemoryCmd::Serve { notes, session }) => {
+                cmd::memory::memory_serve(notes.clone(), session.clone())
+            }
+            Some(MemoryCmd::Rm { key, at }) => {
+                cmd::memory::memory_rm(&cwd, key, at.as_deref(), cli.dry_run, ctx)
             }
             Some(MemoryCmd::Remember {
                 expected,

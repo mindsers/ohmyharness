@@ -268,7 +268,7 @@ omh why <thing>                   who put this here, and on what grounds
 omh doctor [--harness <name>]     prove a harness really sees your profile
 omh graph [--stop]                browse the code graph in a browser
 
-omh memory [remember|stale|lint|rm|promote] …
+omh memory [remember|stale|lint|rm] …
                                   notes that outlive a session
 omh import <capability> <harness>
                                   bring a setup you already have into omh
@@ -540,7 +540,7 @@ whether anything reads it. That gap is what `doctor` closes.
 
 | | |
 |---|---|
-| **Memory** | mostly [built](docs/commands.md#omh-memory-) — the store, its schemas, retrieval, the team layer and `remember` / `recall` as MCP tools all ship. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
+| **Memory** | mostly [built](docs/commands.md#omh-memory-) — the store, its schemas, retrieval and `remember` / `recall` as MCP tools all ship. One store per repo, shared by its sessions, never committed: the committed layer and its promotion gate were removed in 0.14. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
 | **`sbx` backend** | the spike ran (against `sbx` 0.39.0) and the backend was rewritten from what it measured — image delivery, the stage-and-symlink model for file mounts and guest paths, label-free session reuse. It is **opt-in** (`runtime = "sbx"`), and `auto` never picks it. What remains is the full live `omh doctor --harness claude` acceptance and a doctor row for its setup prerequisites; Docker is still the only end-to-end-verified runtime. |
 | **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](docs/design/decisions.md) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |

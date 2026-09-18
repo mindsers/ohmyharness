@@ -1183,13 +1183,13 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("code-graph.md", 1),
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
         // then `omh s` and `omh s01 rm` in the landed-branch block
-        ("commands.md", 147),
+        ("commands.md", 145),
         ("configuration.md", 47), // + `omh use hooks tdd-guard`
         ("decisions.md", 1),
         ("editors.md", 4),
         ("getting-started.md", 14),
         ("git.md", 18),
-        ("memory.md", 5),
+        ("memory.md", 4),
         ("profile.md", 3),
         ("sessions.md", 11),
         ("troubleshooting.md", 13),
@@ -1750,7 +1750,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("base/2026.08.toml", 19),
         ("src/auth.rs", 7),
         ("src/base.rs", 3),
-        ("src/cli.rs", 19), // + the retired --force and --file sentences
+        ("src/cli.rs", 24), // + the retired --force and --file sentences
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
@@ -5805,9 +5805,10 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // rather than assert a number that goes stale the first time somebody
     // moves a line.
     //
-    // Two are the exemptions this rule has always had: the error renderer
+    // Three are the exemptions this rule has always had: the error renderer
     // in `main`, which cannot report through the thing it is reporting
-    // about, and the MCP line reader, which speaks protocol.
+    // about, and the two MCP sites, which speak protocol on stdout and have
+    // no `Ctx` to report through.
     //
     // The tenth is neither: it is a relay of a child's stream, listed
     // separately below.
@@ -5826,9 +5827,13 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // which is a guard failing for a reason that has nothing to do with
     // what it guards.
     let named = [
-        // The two real exemptions.
+        // The three real exemptions.
         ("src/main.rs", "out::problem"),
         ("src/mcp.rs", "omh-mcp: ignoring unparseable line"),
+        // The note server, for the same reason as the line reader above it:
+        // it speaks MCP on stdout, so stderr is the only channel it has, and
+        // there is no `Ctx` inside a server the harness spawned.
+        ("src/memory/tools.rs", "omh-mcp: store unreadable"),
         // Owed a `Ctx`. See above.
         ("src/facts.rs", "could not read"),
         // Wrapped, so the macro line carries no text of its own — the
@@ -5884,10 +5889,10 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     }
     assert_eq!(
         named.len(),
-        8,
-        "the debt register grew. Two exemptions and six owed sites — the sbx \
+        9,
+        "the debt register grew. Three exemptions and six owed sites — the sbx \
          delivery folded three build-note prints into `provide` (one text) and \
-         added the template-load note beside it. A ninth owed site is a fix, \
+         added the template-load note beside it. A seventh owed site is a fix, \
          not an entry"
     );
     // The comment above `relayed` says it "may not quietly become a second
@@ -6216,10 +6221,7 @@ fn a_command_that_hands_you_a_program_has_no_json_to_print() {
         (&["new", "claude"][..], false),
         (&["sessions", "resume"][..], false),
         (&["settings", "edit"][..], false),
-        (
-            &["memory", "serve", "--team", "t", "--local", "l"][..],
-            false,
-        ),
+        (&["memory", "serve", "--notes", "n"][..], false),
         (&["sessions"][..], true),
         (&["sessions", "attach"][..], true),
         (&["graph"][..], true),

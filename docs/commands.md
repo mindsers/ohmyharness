@@ -1007,15 +1007,6 @@ shell wrapper claude's hooks run through (200 appends in a loop) and ~0.03ms
 through `node`'s `appendFileSync` (opencode, omp) — against `git-turn`'s own
 ~80ms per turn, the heaviest thing omh already does on every tool call.
 
-### `omh sNN commit` promotes the session's notes
-
-A commit is the human gate a note passes to reach the team layer, so
-`omh sNN commit` promotes the notes this session recorded — the ones whose
-provenance names this session — into `<repo>/.omh/notes` in the same commit as
-the code. A note the store would refuse is reported and left local; it never
-blocks the commit. `--no-promote` holds them all back. Notes recorded outside a
-session are still promoted by hand with `omh memory promote`.
-
 ### `omh sNN commit` runs this repo's checks first
 
 Before it lands anything, `omh sNN commit` runs the repo's turn-end hook
@@ -1772,32 +1763,33 @@ survives session removal and a switch from one harness to another. That
 survival is what makes it memory rather than context.
 
 Two layers, and they **do not merge**. A setting has one value; a note is a
-claim, and two claims about one topic are two facts — so the layer is part of a
-note's identity, and `team/deploy` and `local/deploy` are different notes that
-both retrieve.
+claim, and two claims about one topic are two facts — so a disagreement is two
+keys, and a key claimed twice is what `omh memory lint` calls `DuplicateKey`.
 
-| layer | where | who sees it |
-|---|---|---|
-| `team` | `<repo>/.omh/notes/` — committed | everyone who clones |
-| `local` | `~/.omh/notes/<repo>/local/` | you, on this machine |
+**One store per repo**, at `~/.omh/notes/<repo>/local/`, shared by every session
+of that repo and never committed. It lives outside the checkout on purpose: a
+session is a git worktree holding tracked files only, and removing one runs
+`git worktree remove --force`, so a store inside the repo would be invisible to
+the sandbox and destroyed by `omh s rm`. Inside the sandbox it is mounted at
+`/omh/notes/local`.
 
-The local layer lives outside the checkout on purpose. A session is a git
-worktree holding tracked files only, and removing one runs `git worktree remove
---force`, so a store inside the repo would be invisible to the sandbox and
-destroyed by `omh s rm`. Inside the sandbox it is mounted at `/omh/notes/local`.
+A note reaches the next session of this repo the moment it is written, the way
+the code graph does. It reaches nobody else: there was a committed layer under
+`<repo>/.omh/notes` until 0.14, promoted by hand and shared through review, and
+one store replaced it.
 
 ```console
 $ omh memory
-credentials-are-a-named-volume                     team   2026-08-05  1 ref
-surprise/mounting-a-credential-file-returns-ebusy  local  2026-08-07  1 ref
+credentials-are-a-named-volume                     2026-08-05  1 ref
+surprise/mounting-a-credential-file-returns-ebusy  2026-08-07  1 ref
 ```
 
 The `surprise/` on the second key is the shipped template's namespace, not
 decoration — see `omh memory remember` below.
 
-**Every line carries its date and its layer.** A note presented without age and
-origin cannot be judged, and a store the agent writes to unattended would
-otherwise become a machine for laundering guesses into facts.
+**Every line carries its date.** A note presented without its age cannot be
+judged, and a store the agent writes to unattended would otherwise become a
+machine for laundering guesses into facts.
 
 ### `omh memory remember`
 
@@ -1879,92 +1871,18 @@ Three rules are worth naming because they describe the store rather than one
 note's shape. `UnclosedFence` refuses a note whose code fence never closes:
 everything after it is quoted, including headings and `[[links]]`, so the note
 does not mean what it looks like. `DuplicateKey` warns when one key is claimed
-by two files in one layer — §6 makes a key a primary key, `remember` refuses to
-create a second, and this is how one that arrived by hand becomes visible.
-`CrossLayerLink` warns when a *committed* note links to one that is not: the
-link works on the machine that wrote it and dangles in every clone, which is
-invariant 2 and the reason `promote` exists. It warns rather than refuses
-because the note at fault is somebody else's, and an agent writing right now
-cannot fix it — `promote` is where the same condition is fatal.
+by two files — §6 makes a key a primary key, `remember` refuses to create a
+second, and this is how one that arrived by hand becomes visible. `Orphan`
+warns about a note nothing links to, which is the store's shape rather than one
+note's, so it never refuses a write.
 
-### `omh memory promote <key>…`
-
-local → team. **The only place a human gates anything**, because it is the only
-place a wrong note reaches somebody else. Everything else is invisible: a memory
-you have to approve is a notebook, and nobody keeps one.
-
-```console
-$ omh memory promote surprise/credentials-live-in-a-volume
-omh: `surprise/credentials-live-in-a-volume` links to
-     surprise/ebusy-on-a-file-mount, which is not committed — promote it too,
-     or drop the link
-Error: promoted nothing
-```
-
-That refusal is **invariant 2**: a committed note may only link to committed
-notes, because a teammate's clone has no gitignored layer to follow the link
-into. The lint warns about it; `promote` refuses, since a warning is negotiable
-and this is the last point at which it can be caught.
-
-These are two mechanisms, not two settings on one dial. A rule's `Severity`
-gates a *write* — `CrossLayerLink` is a warning there because the note at fault
-is committed and the agent writing right now cannot fix somebody else's. A
-`Blocker` gates a *promotion*, and there the same condition is fatal. Raising
-the rule to a refusal to make them agree would fail every `remember` in a repo
-whose committed layer has one bad link.
-
-Invariant 2 is not the only thing refused, because it is not the only way a
-promotion can publish something wrong:
-
-- **A note the schema refuses** is never shared. An unclosed fence is the case
-  that matters: it quotes every heading and link below it, so the invariant-2
-  check would read no links at all and pass on the one note whose links cannot
-  be seen.
-- **A key that is not a key.** `validate_key` guards the mint; a key read back
-  off disk has never been through it, and every path here is built from it.
-- **A destination that already exists.** The conflict above asks whether a
-  *key* is committed; the write lands on a *path*, and a note whose frontmatter
-  disagrees with its filename owns one without the other.
-- **A key claimed by two local files** — `rm` refuses this store and asks for
-  `--at`; promoting one and leaving the other would be a third story about it.
-- **An ignore check that could not answer.** `git check-ignore` reports
-  ignored, not-ignored, or failure, and the third is not the second.
-
-Name them together and both go:
-
-```console
-$ omh memory promote surprise/credentials-live-in-a-volume surprise/ebusy-on-a-file-mount
-promoted surprise/credentials-live-in-a-volume → .omh/notes/…
-promoted surprise/ebusy-on-a-file-mount → .omh/notes/…
-
-not shared until committed:
-  git add :/.omh/notes && git commit
-```
-
-Two notes that link to each other are unpromotable one at a time, which is why
-the check knows what else is in the batch.
-
-`:/` in that last line is git's root-relative pathspec, so the command works
-from wherever you happened to run `promote`. A bare `.omh/notes` matches
-nothing from a subdirectory, and a command that fails is a poor way to end the
-one step that actually shares the note.
-
-**One blocked key stops the whole batch.** A half-finished promotion leaves a
-store nobody planned, and you would have to work out which half landed.
-
-**The key never changes** — identity is `(layer, key)`, so promotion moves a
-note between layers rather than renaming it — and nothing else is rewritten.
-Notes that pointed at it keep working, because from `local` a key resolves into
-either layer.
-
-### `omh memory rm <key> [--layer team|local] [--at <path>]`
+### `omh memory rm <key> [--at <path>]`
 
 Removes one note and reports what pointed at it.
 
 ```console
 $ omh memory rm credentials-are-a-named-volume
-removed credentials-are-a-named-volume (team)
-  it was committed — teammates keep it until you commit the deletion
+removed credentials-are-a-named-volume
   still linked from surprise/mounting-a-credential-file-returns-ebusy — those links now dangle, and `omh memory lint` lists them
 ```
 
@@ -1972,17 +1890,14 @@ removed credentials-are-a-named-volume (team)
 is visible and the lint finds it; a silently pruned neighbourhood is neither.
 This is the same rule that makes `omh s rm` keep a branch holding commits.
 
-`--layer` is needed when one key exists in both layers, which is a disagreement
-rather than a duplicate. Without it, `rm` names both and removes neither.
-
-`--at` is the repair path for something worse: two files in *one* layer claiming
-one key, which `omh memory lint` reports as `DuplicateKey`. It takes any
-trailing run of path components — `dup.md` alone is enough when it is
-unambiguous — and `rm` prints the layer-relative form:
+`--at` is the repair path for two files claiming one key, which
+`omh memory lint` reports as `DuplicateKey`. It takes any trailing run of path
+components — `dup.md` alone is enough when it is unambiguous — and `rm` prints
+the store-relative form:
 
 ```console
 $ omh memory rm surprise/the-mount-failed
-Error: `surprise/the-mount-failed` is one key over 2 files in local — name one
+Error: `surprise/the-mount-failed` is one key over 2 files — name one
        with --at: ns/dup.md, surprise/the-mount-failed.md
 ```
 

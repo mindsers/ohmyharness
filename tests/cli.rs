@@ -518,10 +518,118 @@ impl Sandbox {
             .expect("git must be installed to run this test");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
+}
 
-    fn team_store(&self) -> PathBuf {
-        self.repo.join(".omh/notes")
-    }
+/// `omh upgrade` re-reads omh's own servers from the manifest, so a release
+/// that changes one's arguments reaches an existing install.
+///
+/// `init` seeds `~/.omh/mcp.json` with `write_if_absent` and nothing refreshed
+/// it, so the memory server kept the arguments it was seeded with — in 0.14
+/// `--team … --local …`, which the binary that reads them now refuses. Only
+/// omh's own entries: the file is yours, and a server you added is yours to
+/// keep.
+#[test]
+fn upgrade_refreshes_omhs_own_servers() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{
+             "memory":{"command":"omh","args":["memory","serve","--team","/work/.omh/notes","--local","/omh/notes/local"]},
+             "mine":{"command":"my-server","args":["--flag"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/seeded-by"),
+        "0.1.0
+",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
+            .unwrap();
+    let args = doc["mcpServers"]["memory"]["args"].to_string();
+    assert!(
+        args.contains("--notes") && !args.contains("--team"),
+        "omh's own server follows the manifest: {args}"
+    );
+    assert_eq!(
+        doc["mcpServers"]["mine"]["command"], "my-server",
+        "and yours is left exactly as you have it: {doc}"
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("memory"),
+        "and it says what it changed: {said}"
+    );
+}
+
+/// Notes committed under `<repo>/.omh/notes` are not read, and omh says so
+/// rather than leaving somebody to wonder where their store went.
+///
+/// That directory was the team layer until 0.14. A repo that adopted omh has
+/// notes in it, and silence would read as "the store is empty" — the one thing
+/// a memory command must never say when it has not looked.
+#[test]
+fn committed_notes_are_named_as_no_longer_read() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed(
+        "mine.md",
+        &note(
+            "mine",
+            "## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n",
+        ),
+    );
+    let theirs = sb.repo.join(".omh/notes");
+    std::fs::create_dir_all(&theirs).unwrap();
+    std::fs::write(
+        theirs.join("shared.md"),
+        note(
+            "shared",
+            "## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n",
+        ),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["memory"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        printed.contains("mine"),
+        "the store still answers: {printed}"
+    );
+    assert!(
+        !printed.contains("shared"),
+        "and the committed file is not in it: {printed}"
+    );
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains(".omh/notes") && said.contains("1"),
+        "omh says what it is no longer reading, and how much of it: {said}"
+    );
+    assert!(
+        theirs.join("shared.md").exists(),
+        "and never deletes somebody's notes for them"
+    );
 }
 
 fn note(key: &str, body: &str) -> String {
@@ -637,73 +745,6 @@ fn escaped_notes(under: &Path) -> bool {
         }
     }
     false
-}
-
-/// `promote` is the one command whose failure must not be quiet: it is the
-/// human gate, and a gate that reports a refusal only on stdout — or exits 0
-/// having refused — is a gate somebody scripts straight past. Nothing under
-/// `plan` can observe either, because both live in `main`.
-#[test]
-fn promote_fails_the_command_and_moves_nothing_when_a_key_is_blocked() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed("private.md", &note("private", WHOLE));
-    sb.seed(
-        "candidate.md",
-        &note(
-            "candidate",
-            &format!("{WHOLE}\n## Related\n\n- [[private]]\n"),
-        ),
-    );
-
-    let out = sb.omh(&["memory", "promote", "candidate"]);
-    assert!(
-        !out.status.success(),
-        "a refused promotion must fail the command"
-    );
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        said.contains("private"),
-        "the blocker names what to fix, on stderr: {said}"
-    );
-    assert!(
-        sb.local_store().join("candidate.md").exists(),
-        "and the note is still in the gitignored layer"
-    );
-    assert!(
-        !sb.team_store().join("candidate.md").exists(),
-        "and nothing was committed-layer written"
-    );
-}
-
-/// The other half. Without it the test above passes on a `promote` that
-/// refuses everything, which is the failure mode a fail-closed ignore check
-/// makes easy to ship.
-#[test]
-fn promote_moves_the_note_and_says_it_is_not_shared_yet() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed("fine.md", &note("fine", WHOLE));
-
-    let out = sb.omh(&["memory", "promote", "fine"]);
-    assert!(
-        out.status.success(),
-        "a clean note promotes: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let printed = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        printed.contains("not shared until committed"),
-        "moving the file is not sharing it: {printed}"
-    );
-    assert!(
-        sb.team_store().join("fine.md").exists(),
-        "the note is in the committed layer"
-    );
-    assert!(
-        !sb.local_store().join("fine.md").exists(),
-        "and no longer in the gitignored one"
-    );
 }
 
 /// The hash git would record for a file, so a fixture can pin the real thing
@@ -4818,7 +4859,6 @@ fn a_command_that_cannot_preview_refuses_the_flag() {
         vec!["info"],
         vec!["why", "account"],
         vec!["settings", "edit"],
-        vec!["memory", "promote", "x"],
         vec!["s", "down"],
         vec!["s", "rm"],
         vec!["s", "commit"],
@@ -5344,7 +5384,6 @@ fn a_name_nothing_answers_to_is_refused_whichever_command_you_typed() {
         vec!["unuse", "skills", "nope"],
         vec!["use", "skills", "nope"],
         vec!["memory", "rm", "nope"],
-        vec!["memory", "promote", "nope"],
     ] {
         let out = sb.omh(&argv);
         assert!(
@@ -6118,6 +6157,8 @@ fn every_retired_spelling_is_refused_and_names_a_replacement() {
         vec!["s", "ls"],                           // types the retired verb on purpose
         vec!["sessions", "ls"],                    // types the retired verb on purpose
         vec!["s01", "ls"],                         // types the retired verb on purpose
+        vec!["memory", "promote"],                 // types the retired verb on purpose
+        vec!["memory", "promote", "some-key"],     // types the retired verb on purpose
     ] {
         let out = sb.omh(&argv);
         assert!(
@@ -6127,7 +6168,7 @@ fn every_retired_spelling_is_refused_and_names_a_replacement() {
         );
         let said = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(
-            said.contains("omh s attach") || said.contains("omh s "),
+            said.contains("omh s attach") || said.contains("omh s ") || said.contains("omh memory"),
             "`omh {}` must name the spelling that replaced it, not clap's \
              complaint: {said}",
             argv.join(" ")
@@ -6167,6 +6208,11 @@ fn a_retired_flag_is_refused_with_what_replaced_it() {
         (
             vec!["settings", "mcp", "import", "claude", "--file", "x"], // types the retired verb on purpose
             "--from",
+        ),
+        (vec!["memory", "rm", "k", "--layer", "local"], "one store"),
+        (
+            vec!["s01", "commit", "--no-promote"],
+            "no longer moves notes",
         ),
     ] {
         let out = sb.omh(&argv);
@@ -10690,96 +10736,6 @@ fn the_scoped_row_reports_the_recorded_check_result() {
     assert_eq!(doc["focus"]["check"]["state"], "unreadable");
 }
 
-/// `--keep` promotes the session's notes too, in their own commit after the
-/// replant — the path the code review found broken.
-#[test]
-fn commit_keep_lands_the_sessions_notes() {
-    let sb = sandbox();
-    let worktree = sb.session("s01");
-    sb.sandbox_repo_with_unkept_work("s01", &worktree);
-    let local = sb.keyed("notes").join("local");
-    std::fs::create_dir_all(local.join("surprise")).unwrap();
-    std::fs::write(
-        local.join("surprise/s01-thing.md"),
-        "---\nkey: surprise/s01-thing\ntype: surprise\nsource: session s01, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n",
-    )
-    .unwrap();
-
-    let out = sb.omh(&["s01", "commit", "--keep"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let tree = String::from_utf8_lossy(
-        &std::process::Command::new("git")
-            .arg("-C")
-            .arg(&sb.repo)
-            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .to_string();
-    assert!(
-        tree.contains(".omh/notes/surprise/s01-thing.md"),
-        "the note landed on the branch under --keep: {tree}"
-    );
-    // In a commit that names it as a promotion, not a "Work in progress" one.
-    let log = String::from_utf8_lossy(
-        &std::process::Command::new("git")
-            .arg("-C")
-            .arg(&sb.repo)
-            .args(["log", "--oneline", "omh/s01"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .to_string();
-    assert!(
-        log.contains("notes: 1 from s01"),
-        "the notes have their own commit: {log}"
-    );
-    assert!(
-        !local.join("surprise/s01-thing.md").exists(),
-        "and left the local layer"
-    );
-}
-
-/// A note the gate refuses is reported and left local, and the commit still
-/// lands — a blocked note never blocks the work.
-#[test]
-fn a_blocked_note_is_reported_and_the_commit_still_lands() {
-    let sb = sandbox();
-    let worktree = sb.session("s01");
-    sb.sandbox_repo_with_unkept_work("s01", &worktree);
-    // The session's note, and a committed team note already claiming the key —
-    // a collision the gate refuses.
-    let note = "---\nkey: surprise/s01-thing\ntype: surprise\nsource: session s01, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx\n\n## Observed\ny\n\n## Evidence\nlog\n\n## Answers\n- z\n";
-    let local = sb.keyed("notes").join("local");
-    std::fs::create_dir_all(local.join("surprise")).unwrap();
-    std::fs::write(local.join("surprise/s01-thing.md"), note).unwrap();
-    // The destination already exists in the worktree, so promoting would
-    // overwrite it — the gate refuses.
-    let team = worktree.join(".omh/notes/surprise");
-    std::fs::create_dir_all(&team).unwrap();
-    std::fs::write(team.join("s01-thing.md"), note).unwrap();
-
-    let out = sb.omh(&["s01", "commit", "-m", "land the work"]);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "the commit still lands: {err}");
-    assert!(
-        err.contains("stays local"),
-        "the blocked note is reported: {err}"
-    );
-    // And it is still local, not lost.
-    assert!(
-        local.join("surprise/s01-thing.md").exists(),
-        "the refused note stayed local"
-    );
-}
-
 /// A failing turn-end check refuses the commit, and `--no-verify` skips it.
 ///
 /// The check runs in the sandbox as the agent's own turn-end hook would, from
@@ -10838,99 +10794,6 @@ fn commit_refuses_when_the_turn_end_hook_fails() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_ne!(sb.head_of_branch("omh/s01"), before, "and the work landed");
-}
-
-/// A commit promotes the session's own notes into the team layer, in the same
-/// commit as the code, and leaves another session's notes local.
-#[test]
-fn commit_lands_the_sessions_notes_in_the_team_layer() {
-    let sb = sandbox();
-    let worktree = sb.session("s01");
-    sb.sandbox_repo_with_unkept_work("s01", &worktree);
-
-    // A note this session recorded, and one another session did.
-    let local = sb.keyed("notes").join("local");
-    std::fs::create_dir_all(local.join("surprise")).unwrap();
-    let note = |session: &str| {
-        format!(
-            "---\nkey: surprise/{session}-thing\ntype: surprise\nsource: session {session}, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n"
-        )
-    };
-    std::fs::write(local.join("surprise/s01-thing.md"), note("s01")).unwrap();
-    std::fs::write(local.join("surprise/s02-thing.md"), note("s02")).unwrap();
-
-    let out = sb.omh(&["s01", "commit", "-m", "land the work"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // The session's note is committed on its branch, under the team layer.
-    let tree = String::from_utf8_lossy(
-        &std::process::Command::new("git")
-            .arg("-C")
-            .arg(&sb.repo)
-            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .to_string();
-    assert!(
-        tree.contains(".omh/notes/surprise/s01-thing.md"),
-        "the session's note landed in the commit: {tree}"
-    );
-    assert!(
-        !tree.contains("s02-thing"),
-        "another session's note is not promoted: {tree}"
-    );
-    // And the promoted note is no longer local — promotion moves it.
-    assert!(
-        !local.join("surprise/s01-thing.md").exists(),
-        "the promoted note left the local layer"
-    );
-    assert!(
-        local.join("surprise/s02-thing.md").exists(),
-        "the other session's note stayed local"
-    );
-}
-
-/// `--no-promote` holds the session's notes back, and says nothing landed.
-#[test]
-fn commit_with_no_promote_leaves_the_notes_local() {
-    let sb = sandbox();
-    let worktree = sb.session("s01");
-    sb.sandbox_repo_with_unkept_work("s01", &worktree);
-    let local = sb.keyed("notes").join("local");
-    std::fs::create_dir_all(local.join("surprise")).unwrap();
-    std::fs::write(
-        local.join("surprise/s01-thing.md"),
-        "---\nkey: surprise/s01-thing\ntype: surprise\nsource: session s01, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n",
-    )
-    .unwrap();
-
-    let out = sb.omh(&["s01", "commit", "-m", "land it", "--no-promote"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        local.join("surprise/s01-thing.md").exists(),
-        "--no-promote keeps the note local"
-    );
-    let tree = String::from_utf8_lossy(
-        &std::process::Command::new("git")
-            .arg("-C")
-            .arg(&sb.repo)
-            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .to_string();
-    assert!(!tree.contains("s01-thing"), "and out of the commit: {tree}");
 }
 
 /// `commit --keep` refuses a commit holding the **value** of a carried secret,
