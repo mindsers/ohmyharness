@@ -50,6 +50,13 @@ pub enum Moved {
 /// leaves nothing behind to be read by mistake. After it, this is one
 /// `is_dir` call for ever.
 ///
+/// **Safe under a running session, measured rather than assumed.** A session
+/// started before the rename has this directory bind-mounted, and on Docker
+/// Desktop a write inside the container after the host directory is renamed
+/// lands in the renamed directory — the mount follows what it was given, not
+/// the path. So this needs no live-session guard, and an old session keeps
+/// writing to the store the new ones read.
+///
 /// Reading the old path instead, or seeding a fresh empty store beside it, are
 /// the two ways this becomes "nothing recorded" about notes that exist, which
 /// is the failure the whole subsystem is about.

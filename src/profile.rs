@@ -544,8 +544,8 @@ pub(crate) fn settled(path: &Path) -> PathBuf {
 /// `worktrees`, `runs`, `keys`, `shadows`, `memory` and `scratch` each join one
 /// of these.
 ///
-/// `notes` is the seventh and names nothing omh writes any more: the store
-/// moved to `memory` in 0.14. It stays on the list so that a checkout which
+/// `notes` is the one that names nothing omh writes any more: the store moved
+/// to `memory` in 0.14. It stays on the list so that a checkout which
 /// skipped 2026.08 still has its old store moved onto its own id — where
 /// `memory::move_old_store` can then find it — instead of being stranded under
 /// a basename by a rename it never saw.
