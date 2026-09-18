@@ -3,10 +3,14 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.13.2`. This release is about running the harnesses
-their makers ship now, and about Codex. Every pin moved to its current release
-and each adapter was re-read against it; the two claims that broke were fixed
-rather than carried. [`omh auth codex`](accounts.md#a-login-that-cannot-finish-in-a-sandbox)
+**Status: early.** `0.14.0`. This release is about memory another session can
+use, and a sandbox whose git can merge. One note store per repo at
+`~/.omh/memory/<repo>`, shared the moment a note is written and never
+committed — [`omh memory`](commands.md#omh-memory-) — and a base image on
+Debian 13, because Debian 12's git 2.39.5 failed any check that merges.
+0.13.0 ran the harnesses their makers ship now: every pin moved to its current
+release and each adapter was re-read against it; the two claims that broke were
+fixed rather than carried. [`omh auth codex`](accounts.md#a-login-that-cannot-finish-in-a-sandbox)
 finishes — a device code, or `--import` of the login this machine has — Codex
 runs omh's hooks, `omh sNN` reads its rollouts, and an
 [`account`](accounts.md#keyed-by-harness-not-by-provider) can name one
@@ -21,11 +25,14 @@ before landing in 0.10.0, the [silent failures](design/roadmap.md)
 closed in 0.8.0, the [command surface](design/profile.md) landed in 0.7.0 and
 the [work loop](design/git.md) in 0.6.0.
 
-`0.13.2` lets Codex run commands and edit files: its own sandbox cannot start
-inside omh's container, so omh turns it off. 0.13.1 fixed two launches 0.13.0
-broke: opencode died on start over a
+`0.14.0` retires the committed note layer and `omh memory promote` with it, and
+moves the store to `~/.omh/memory/<repo>` — a store under the old path moves
+itself, once, and says so. `omh doctor` gained a `git` row that asks the image
+rather than the host. 0.13.2 let Codex run commands and edit files: its own
+sandbox cannot start inside omh's container, so omh turns it off. 0.13.1 fixed
+two launches 0.13.0 broke: opencode died on start over a
 directory the image left to root, and Codex could not save its own config.
-[`omh doctor`](troubleshooting.md#omh-doctor) now asks first whether a harness
+[`omh doctor`](troubleshooting.md#omh-doctor) asks first whether a harness
 starts at all.
 
 One harness (`claude`) has been driven for real work; `opencode`, `omp` and
