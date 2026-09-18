@@ -491,7 +491,7 @@ fn ca_layer(ca: Option<&str>) -> String {
 pub fn base_dockerfile(ca: Option<&str>) -> String {
     // Interpolated rather than written out, so the directory the image
     // prepares and the directory the launcher mounts into cannot drift.
-    let notes = crate::memory::GUEST_NOTES;
+    let notes = crate::memory::GUEST_MEMORY;
     let hostkeys = crate::ssh::GUEST_HOST_KEYS;
     #[allow(non_snake_case)]
     let AGENT_UID = crate::runtime::AGENT_UID;
@@ -3852,7 +3852,7 @@ mod tests {
     #[test]
     fn the_image_creates_the_note_store_the_launcher_mounts_into() {
         let df = base_dockerfile(None);
-        let notes = crate::memory::GUEST_NOTES;
+        let notes = crate::memory::GUEST_MEMORY;
         assert!(
             df.contains(notes),
             "the image must create {notes}, or docker makes it root-owned"

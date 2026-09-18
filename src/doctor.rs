@@ -4333,15 +4333,15 @@ mod tests {
             args: vec![
                 "memory".into(),
                 "serve".into(),
-                "--local".into(),
-                "/omh/notes/local".into(),
+                "--notes".into(),
+                "/omh/memory".into(),
             ],
             env: Default::default(),
         };
         let script = probe_script(&memory_checks(&server));
 
         assert!(
-            script.contains("omh memory serve --local /omh/notes/local"),
+            script.contains("omh memory serve --notes /omh/memory"),
             "{script}"
         );
         assert!(script.contains("tools/list"), "it has to ask: {script}");

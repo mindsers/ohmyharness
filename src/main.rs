@@ -253,6 +253,43 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
     }
 }
 
+/// Move a store recorded before 0.14 onto the path omh reads now, and say so.
+///
+/// Beside `say_what_moved_off_the_old_key` and for its reasons: the store is
+/// read by `omh memory`, by a launch's mount and by the MCP server inside the
+/// sandbox, and a migration wired into one of them leaves the others looking
+/// at an empty directory. It runs *after* that one, which is what moves a
+/// pre-2026.08 `notes/<basename>` onto this checkout's id first.
+///
+/// **Never fatal**, for the same reason: a store omh could not move is
+/// something the user has to decide about, not a reason to fail the command
+/// they typed. But it is a warning either way, because until it is dealt with
+/// the notes in it are invisible to every command that reads the store.
+fn say_where_the_store_went(cwd: &std::path::Path, ctx: &out::Ctx) {
+    let Ok(paths) = Paths::discover(cwd) else {
+        return;
+    };
+    match memory::move_old_store(&paths) {
+        Ok(memory::Moved::NothingToDo) => {}
+        Ok(memory::Moved::Was { from, to }) => ctx.warn(&format!(
+            "moved this checkout's notes from `{}` to `{}` — there is one store per repo now, \
+             and it is not committed",
+            from.display(),
+            to.display()
+        )),
+        Ok(memory::Moved::Both { from, to }) => ctx.warn(&format!(
+            "there are notes in `{}`, which omh no longer reads, and notes in `{}`, which it \
+             does. omh will not merge two stores: move what you want across yourself",
+            from.display(),
+            to.display()
+        )),
+        Err(e) => ctx.warn(&format!(
+            "omh could not move this checkout's notes onto the store it reads, so anything \
+             recorded before 0.14 is invisible to omh until this is resolved: {e}"
+        )),
+    }
+}
+
 fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     let cwd = std::env::current_dir()?;
     say_if_the_template_was_renamed(&cwd, ctx);
@@ -294,6 +331,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     // settled — a preview writes nothing, and a migration is a write.
     if !cli.dry_run {
         say_what_moved_off_the_old_key(&cwd, ctx);
+        say_where_the_store_went(&cwd, ctx);
     }
 
     match &cli.cmd {

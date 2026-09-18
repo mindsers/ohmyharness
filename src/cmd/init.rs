@@ -64,7 +64,7 @@ pub(crate) fn next_after_init(harness: Option<&str>) -> Vec<(String, String)> {
 pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
     let templates = memory::templates(paths)?;
     let today = memory::today();
-    let dir = memory::store(paths);
+    let dir = paths.memory();
 
     let mut written = 0;
     let mut skipped = 0;
@@ -409,7 +409,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // The note store lives under `~/.omh`, keyed by repo: a worktree holds
     // only tracked files and `omh s rm` removes it with `--force`, so a store
     // inside the repo would die with the session that wrote it.
-    std::fs::create_dir_all(memory::store(&paths))?;
+    std::fs::create_dir_all(paths.memory())?;
     // `write_if_absent`, never the refresh path the adapters use: a shipped
     // template that changed under an existing store would silently re-key
     // every note in it, and every existing key would stop being derivable.

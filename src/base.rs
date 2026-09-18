@@ -885,7 +885,7 @@ fn note_taking() -> String {
          under **Expected**, there is nothing here worth recording.\n\n\
          Rename a note by rewriting its `key` and its filename together — never\n\
          one without the other.\n",
-        crate::memory::GUEST_NOTES,
+        crate::memory::GUEST_MEMORY,
     )
 }
 
@@ -1762,7 +1762,7 @@ command = "c"
         let args = entry.args.clone();
         assert!(
             args.windows(2)
-                .any(|w| w[0] == "--notes" && w[1] == crate::memory::GUEST_NOTES),
+                .any(|w| w[0] == "--notes" && w[1] == crate::memory::GUEST_MEMORY),
             "the server must read the directory omh mounts: {args:?}"
         );
     }

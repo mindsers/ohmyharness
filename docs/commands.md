@@ -1742,7 +1742,7 @@ lets you tell "this belongs in my repo" from "this belongs in my dotfiles"
 without knowing omh's mount layout.
 
 **The warning is not a caveat, it is the honest half.** omh renders these for
-a sandbox: the memory server is invoked with `--local /omh/notes/local`, hooks
+a sandbox: the memory server is invoked with `--notes /omh/memory`, hooks
 read `$OMH_GRAPH_PROJECT`, rules point at `/work`. On your host none of that
 resolves. omh names the files rather than rewriting them, because it does not
 know where you want your notes or whether you will run the harness in a
@@ -1762,16 +1762,22 @@ The note store: a graph of linked Markdown notes, scoped to this repo, that
 survives session removal and a switch from one harness to another. That
 survival is what makes it memory rather than context.
 
-Two layers, and they **do not merge**. A setting has one value; a note is a
-claim, and two claims about one topic are two facts — so a disagreement is two
-keys, and a key claimed twice is what `omh memory lint` calls `DuplicateKey`.
+**Nothing merges.** A setting has one value; a note is a claim, and two claims
+about one topic are two facts — so a disagreement is two keys, and a key
+claimed twice is what `omh memory lint` calls `DuplicateKey`.
 
-**One store per repo**, at `~/.omh/notes/<repo>/local/`, shared by every session
-of that repo and never committed. It lives outside the checkout on purpose: a
+**One store per repo**, at `~/.omh/memory/<repo>/`, shared by every session of
+that repo and never committed. It lives outside the checkout on purpose: a
 session is a git worktree holding tracked files only, and removing one runs
 `git worktree remove --force`, so a store inside the repo would be invisible to
 the sandbox and destroyed by `omh s rm`. Inside the sandbox it is mounted at
-`/omh/notes/local`.
+`/omh/memory`.
+
+It was `~/.omh/notes/<repo>/local/` until 0.14, when the committed layer went
+and `local` stopped naming anything. A store found there is moved onto the new
+path the next time omh runs, which it says out loud; two stores are named and
+neither is touched, because which of two notes under one key is the current one
+is not omh's guess to make.
 
 A note reaches the next session of this repo the moment it is written, the way
 the code graph does. It reaches nobody else: there was a committed layer under
@@ -1798,7 +1804,7 @@ $ omh memory remember \
     --expected "A bind mount of the token file would persist the login." \
     --observed "Mounting a credential file returns EBUSY." \
     --evidence 'EBUSY from the mount syscall'
-recorded /home/you/.omh/notes/omh/local/surprise/mounting-a-credential-file-returns-ebusy.md
+recorded /home/you/.omh/memory/omh-1a2b3c4d/surprise/mounting-a-credential-file-returns-ebusy.md
 ```
 
 The three arguments are the discipline. Something with nothing to put in
@@ -1828,12 +1834,12 @@ replacement at the key's own path:
 
 ```console
 $ omh memory remember --if-exists override …
-replaced /home/you/.omh/notes/omh/local/surprise/mounting-a-credential-file-returns-ebusy.md — the note that was there is gone
+replaced /home/you/.omh/memory/omh-1a2b3c4d/surprise/mounting-a-credential-file-returns-ebusy.md — the note that was there is gone
 ```
 
-Writes go to **`local` only**, always. A writer that could reach the committed
-layer would push wrong facts to teammates through git, where they arrive with
-the authority of a reviewed change.
+There is one place a write can go, which is the point: a writer that could
+reach a committed layer would push wrong facts to teammates through git, where
+they arrive with the authority of a reviewed change.
 
 ### `omh memory lint`
 
@@ -1980,13 +1986,13 @@ Ranking is by how *rare* the question's words are in this store — a word in
 every note cannot tell two notes apart, so it barely counts. Ties break on
 recency, then on what the rest of the store points at. **Layer is never a
 tiebreak**: contradicting notes both come back, and reconciling them is the
-agent's job, done with dates and layers in hand.
+agent's job, done with the dates in hand.
 
 **`remember(expected, observed, evidence)`** records a surprise. The three
 arguments are the filter — something with nothing to put in `expected` has
-learned nothing. It cannot pass a layer, a source, or an override: writes go to
-`local`, provenance is omh's (the session from its environment, the harness
-from the MCP handshake), and strict mode has no off switch over MCP.
+learned nothing. It cannot pass a source or an override: provenance is omh's
+(the session from its environment, the harness from the MCP handshake), and
+strict mode has no off switch over MCP.
 
 The tool description carries a census of the store — counts, never titles, so
 what it costs stops growing with the graph. It is recomputed on every

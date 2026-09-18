@@ -15,7 +15,10 @@
 > a property of git. omh keeps one store per repo instead: every session of a
 > repo shares it the moment a note is written, and nothing is committed. §4,
 > §12's `promote` and invariant 2 are history — read them as the reasoning that
-> produced the layers, not as what ships.
+> produced the layers, not as what ships. The store that does ship is
+> `~/.omh/memory/<repo>/`, mounted in the sandbox at `/omh/memory`; the paths
+> §4 names are the two layers', and omh moves a store found under the old one
+> the next time it runs.
 >
 > One thing here is still **unverified** and gates the build rather than sitting
 > inside it. A second was verified in [M0](memory-m0.md), and cost this design

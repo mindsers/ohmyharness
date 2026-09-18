@@ -412,12 +412,14 @@ impl Sandbox {
         })
     }
 
-    fn local_store(&self) -> PathBuf {
-        self.keyed("notes").join("local")
+    /// The one store: `~/.omh/memory/<repo id>`, machine-local and shared by
+    /// every session of this checkout.
+    fn store(&self) -> PathBuf {
+        self.keyed("memory")
     }
 
     fn seed(&self, at: &str, body: &str) {
-        let path = self.local_store().join(at);
+        let path = self.store().join(at);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     }
@@ -560,7 +562,7 @@ fn upgrade_refreshes_omhs_own_servers() {
             .unwrap();
     let args = doc["mcpServers"]["memory"]["args"].to_string();
     assert!(
-        args.contains("--notes") && !args.contains("--team"),
+        args.contains("--notes") && args.contains("/omh/memory") && !args.contains("--team"),
         "omh's own server follows the manifest: {args}"
     );
     assert_eq!(
@@ -632,6 +634,103 @@ fn committed_notes_are_named_as_no_longer_read() {
     );
 }
 
+/// The store used to be `~/.omh/notes/<repo>/local`; it is `~/.omh/memory/<repo>`
+/// now. An install that recorded anything before the rename has notes under the
+/// old path, and omh moves them on the next command rather than answering
+/// "nothing recorded" about notes that exist.
+#[test]
+fn a_store_under_the_old_path_moves_itself() {
+    let sb = sandbox();
+    let was = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(&was).unwrap();
+    std::fs::write(was.join("a.md"), note("a", WHOLE)).unwrap();
+
+    let out = sb.omh(&["memory"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(printed.contains("a"), "the note is in the store: {printed}");
+    assert!(
+        sb.store().join("a.md").exists(),
+        "and the file itself is under the new path"
+    );
+    assert!(!was.exists(), "nothing is left where omh no longer looks");
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains(sb.store().to_str().unwrap()),
+        "omh says where the store went: {said}"
+    );
+}
+
+/// An empty directory where the store goes is not a second store.
+///
+/// Refusing on its mere existence would strand the notes behind it for ever,
+/// and nothing would say why twice — the warning is the same every run, so it
+/// reads as noise rather than as something to act on.
+#[test]
+fn an_empty_store_is_not_something_to_refuse_over() {
+    let sb = sandbox();
+    std::fs::create_dir_all(sb.store()).unwrap();
+    let was = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(&was).unwrap();
+    std::fs::write(was.join("a.md"), note("a", WHOLE)).unwrap();
+
+    let out = sb.omh(&["memory"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.store().join("a.md").exists(),
+        "the store moved anyway: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A store in both places is two people's notes, and which one a key belongs to
+/// is a guess. omh names both and touches neither — the same answer
+/// `Migration::Stranded` gives about two directories of sessions.
+#[test]
+fn a_store_in_both_places_is_named_not_merged() {
+    let sb = sandbox();
+    sb.seed("new.md", &note("new", WHOLE));
+    let was = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(&was).unwrap();
+    std::fs::write(was.join("old.md"), note("old", WHOLE)).unwrap();
+
+    let out = sb.omh(&["memory"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains(was.to_str().unwrap()) && said.contains(sb.store().to_str().unwrap()),
+        "omh names both stores: {said}"
+    );
+    // The refusal itself, not just the two paths: a failed `rename` onto a
+    // non-empty directory reports both paths too, so paths alone would pass
+    // over a merge omh attempted and the filesystem happened to stop.
+    assert!(
+        said.contains("will not merge"),
+        "and says it is refusing, not failing: {said}"
+    );
+    assert!(
+        was.join("old.md").exists() && sb.store().join("new.md").exists(),
+        "and moves nothing"
+    );
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        printed.contains("new") && !printed.contains("old"),
+        "the store it reads is the new one, alone: {printed}"
+    );
+}
+
 fn note(key: &str, body: &str) -> String {
     format!(
         "---\nkey: {key}\ntype: surprise\nsource: audit\nrecorded: 2026-08-10\n---\n\n# T\n\n{body}"
@@ -693,7 +792,7 @@ fn rm_refuses_an_at_that_names_no_note() {
     let out = sb.omh(&["memory", "rm", "solo", "--at", "elsewhere.md"]);
     assert!(!out.status.success());
     assert!(
-        sb.local_store().join("solo.md").exists(),
+        sb.store().join("solo.md").exists(),
         "a note the caller did not name was removed"
     );
 }
@@ -10167,7 +10266,7 @@ fn eject_refuses_a_harness_it_has_no_adapter_for() {
 ///
 /// The uncomfortable half of the exit, and the half that makes it honest.
 /// omh renders these documents for a container: the memory server is invoked
-/// with `--local /omh/notes/local`, hooks reference `$OMH_GRAPH_PROJECT`, and
+/// with `--notes /omh/memory`, hooks reference `$OMH_GRAPH_PROJECT`, and
 /// rules point at `/work`. None of those exist on a host. Handing somebody a
 /// directory and saying *these are yours now* while several of the files
 /// silently do not work is the exact shape of failure this release spent
@@ -10183,7 +10282,7 @@ fn eject_names_the_files_that_still_point_into_a_sandbox() {
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     std::fs::write(
         sb.home.join(".omh/mcp.json"),
-        r#"{"mcpServers":{"demo":{"command":"demo","args":["--at","/omh/notes/local"]}}}"#,
+        r#"{"mcpServers":{"demo":{"command":"demo","args":["--at","/omh/memory"]}}}"#,
     )
     .unwrap();
     std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n").unwrap();

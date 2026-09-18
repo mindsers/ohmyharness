@@ -24,25 +24,64 @@ pub mod tools;
 /// Deliberately not under `/work`: the code graph would index notes as source,
 /// `git status` would show them, and an agent running `git add -A` would
 /// commit them onto its session branch — which is the one thing §9.1 forbids.
-pub const GUEST_NOTES: &str = "/omh/notes/local";
+pub const GUEST_MEMORY: &str = "/omh/memory";
 
-/// The store: one per repo, shared by every session of it, never committed.
+/// What `move_old_store` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Moved {
+    /// Nothing under the old path, or it has already run.
+    NothingToDo,
+    /// The store moved, whole, from the old path to the new one.
+    Was { from: PathBuf, to: PathBuf },
+    /// There is a store in both places, and omh will not merge them.
+    ///
+    /// Which of two notes filed under one key is the current one is a guess,
+    /// made silently, about something a person wrote — the same guess
+    /// `profile::Migration::Stranded` refuses about two directories of
+    /// sessions. Both paths are named and neither is touched.
+    Both { from: PathBuf, to: PathBuf },
+}
+
+/// Move a store recorded before 0.14 onto the path omh reads now.
 ///
-/// Outside the checkout so it outlives the worktree that produced it. A
-/// session is a git worktree holding tracked files only, and `omh s rm` runs
-/// `git worktree remove --force`, so a store inside the repo would be both
-/// invisible to the sandbox and destroyed by session removal.
+/// `~/.omh/notes/<repo>/local` was the machine-local half of a two-layer
+/// store; `~/.omh/memory/<repo>` is the whole of it. A rename rather than a
+/// copy: it is atomic, it cannot half-succeed and leave two stores, and it
+/// leaves nothing behind to be read by mistake. After it, this is one
+/// `is_dir` call for ever.
 ///
-/// There was a second, committed layer under `<repo>/.omh/notes` until 0.13.
-/// It made a note's reach a property of git — written locally, promoted by a
-/// human, shared only after a merge — and the thing people actually wanted was
-/// the one this keeps: what any session of this repo learned, available to the
-/// next one immediately, the way its code graph is.
-///
-/// The directory is still called `local`, which is now a name for nothing:
-/// keeping it means an existing store keeps answering without a migration.
-pub fn store(paths: &Paths) -> PathBuf {
-    paths.notes().join("local")
+/// Reading the old path instead, or seeding a fresh empty store beside it, are
+/// the two ways this becomes "nothing recorded" about notes that exist, which
+/// is the failure the whole subsystem is about.
+pub fn move_old_store(paths: &Paths) -> Result<Moved> {
+    let from = paths.old_notes();
+    let to = paths.memory();
+    if !from.is_dir() {
+        return Ok(Moved::NothingToDo);
+    }
+    // An empty destination is not a second store. Nothing omh does in the
+    // ordinary course creates one before this runs — the migration goes ahead
+    // of the command that would — but a directory is cheap to create by
+    // accident, and a store that refused to move for ever because an empty
+    // one appeared beside it is the worse of the two failures.
+    if to.is_dir() && std::fs::read_dir(&to)?.next().is_some() {
+        return Ok(Moved::Both { from, to });
+    }
+    if to.is_dir() {
+        std::fs::remove_dir(&to)?;
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&from, &to)
+        .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+    // The repo's directory under the retired `notes` kind, now that its one
+    // child is gone. Best effort: a leftover empty directory is untidy, and
+    // failing the command the user typed over it would not be.
+    if let Some(parent) = from.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+    Ok(Moved::Was { from, to })
 }
 
 // ── notes ───────────────────────────────────────────────────────────────────
@@ -849,7 +888,7 @@ fn read_store(root: &Path) -> Result<StoreRead> {
 
 /// Every note this repo holds.
 pub fn load(paths: &Paths) -> Result<Vec<Note>> {
-    notes_in(&store(paths))
+    notes_in(&paths.memory())
 }
 
 // ── key templates ───────────────────────────────────────────────────────────
@@ -944,7 +983,7 @@ pub fn lint(paths: &Paths) -> Result<Vec<Violation>> {
     // to describe the store including its damage, so giving up on the first
     // bad file is the one thing it must not do.
     let mut found = Vec::new();
-    let read = read_store(&store(paths))?;
+    let read = read_store(&paths.memory())?;
     for path in read.opaque {
         found.push(Violation {
             key: path
@@ -1120,7 +1159,7 @@ fn body_of(input: &Remembered) -> String {
 /// a writer that believes it never created one.
 pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Result<Wrote> {
     remember_in(
-        &store(paths),
+        &paths.memory(),
         &paths.repo,
         &templates(paths)?,
         input,
@@ -1311,7 +1350,7 @@ fn disambiguate<'a>(
     // path is noise the caller did not type.
     let shown = |note: &Note| {
         note.path
-            .strip_prefix(store(paths))
+            .strip_prefix(paths.memory())
             .unwrap_or(&note.path)
             .display()
             .to_string()
@@ -1474,12 +1513,12 @@ mod tests {
         let (_d, paths) = fixture();
 
         assert!(
-            !store(&paths).starts_with(&paths.repo),
+            !paths.memory().starts_with(&paths.repo),
             "a local note inside the checkout dies with the worktree: {}",
-            store(&paths).display()
+            paths.memory().display()
         );
         assert!(
-            store(&paths).starts_with(&paths.root),
+            paths.memory().starts_with(&paths.root),
             "the local store belongs to omh, keyed by repo"
         );
     }
@@ -1498,7 +1537,7 @@ mod tests {
             root: dir.path().join("home"),
             repo: dir.path().join("beta"),
         };
-        assert_ne!(store(&a), store(&b));
+        assert_ne!(a.memory(), b.memory());
     }
 
     // ── notes ───────────────────────────────────────────────────────────────
@@ -2130,7 +2169,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     // ── the store ───────────────────────────────────────────────────────────
 
     fn seed(paths: &Paths, key: &str, body: &str) {
-        let path = store(paths).join(format!("{key}.md"));
+        let path = paths.memory().join(format!("{key}.md"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let note = Note {
             path: path.clone(),
@@ -2158,9 +2197,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn a_note_file_that_does_not_parse_is_an_error_not_a_skipped_file() {
         let (_d, paths) = fixture();
         seed(&paths, "good", &surprise_body());
-        std::fs::write(store(&paths).join("bad.md"), "no frontmatter\n").unwrap();
+        std::fs::write(paths.memory().join("bad.md"), "no frontmatter\n").unwrap();
 
-        let err = notes_in(&store(&paths)).unwrap_err().to_string();
+        let err = notes_in(&paths.memory()).unwrap_err().to_string();
         assert!(
             err.contains("bad"),
             "must name the file it could not read: {err}"
@@ -2178,7 +2217,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn a_non_markdown_file_in_the_store_is_ignored() {
         let (_d, paths) = fixture();
         seed(&paths, "good", &surprise_body());
-        std::fs::write(store(&paths).join(".DS_Store"), "junk").unwrap();
+        std::fs::write(paths.memory().join(".DS_Store"), "junk").unwrap();
         assert_eq!(keys(&load(&paths).unwrap()), ["good"]);
     }
 
@@ -2313,7 +2352,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert!(!written.is_empty(), "something must have been written");
         for path in written.keys() {
             assert!(
-                path.starts_with(store(&paths)),
+                path.starts_with(paths.memory()),
                 "wrote outside the local store: {}",
                 path.display()
             );
@@ -2359,7 +2398,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_symlinked_namespace_cannot_carry_a_write_out_of_the_store() {
         let (dir, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -2381,7 +2420,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn the_store_does_not_read_through_a_symlink() {
         let (dir, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         let outside = dir.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -2400,7 +2439,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
 
         assert!(
-            notes_in(&store(&paths)).unwrap().is_empty(),
+            notes_in(&paths.memory()).unwrap().is_empty(),
             "the store answered with a note that is not in it"
         );
     }
@@ -2477,7 +2516,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         // by design, and it is notes that must not escape.
         for path in files_under(dir.path()).keys() {
             assert!(
-                path.extension().is_none_or(|e| e != "md") || path.starts_with(store(&paths)),
+                path.extension().is_none_or(|e| e != "md") || path.starts_with(paths.memory()),
                 "wrote outside the local store: {}",
                 path.display()
             );
@@ -2495,7 +2534,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
         // The same key, stored somewhere else — what a hand-written note
         // produces, which in M1 is the only writer the agent has.
-        let elsewhere = store(&paths).join("hand-written.md");
+        let elsewhere = paths.memory().join("hand-written.md");
         std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
         let mut note = note_with(Kind::Surprise, &taken, &surprise_body());
         note.path = elsewhere.clone();
@@ -2521,7 +2560,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_note_omh_cannot_read_stops_the_write_rather_than_risking_a_duplicate() {
         let (dir, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("unreadable.md"), "this has no frontmatter\n").unwrap();
 
@@ -2551,7 +2590,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn override_replaces_a_mislocated_note_and_leaves_one_behind() {
         let (_d, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         let key = derived_key(&paths, &observation());
 
         let stale = root.join("hand-written.md");
@@ -2585,7 +2624,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn skip_and_suffix_see_a_key_held_by_a_mislocated_note() {
         let (_d, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         let key = derived_key(&paths, &observation());
         let mut note = note_with(Kind::Surprise, &key, &surprise_body());
         note.path = root.join("hand-written.md");
@@ -2832,7 +2871,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             .to_string();
         assert!(err.contains("some-other-file.md"), "got: {err}");
         assert!(
-            store(&paths).join("solo.md").exists(),
+            paths.memory().join("solo.md").exists(),
             "a note the caller did not name was removed"
         );
     }
@@ -2843,7 +2882,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn an_at_that_cannot_pick_one_note_removes_none_of_them() {
         let (_d, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
         for at in ["dup.md", "ns/dup.md"] {
             let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
@@ -2879,7 +2918,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_key_duplicated_inside_one_layer_is_still_removable() {
         let (_d, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
         for at in ["dup.md", "ns/dup.md"] {
             let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
@@ -3044,7 +3083,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn lint_reports_a_note_it_cannot_read_instead_of_giving_up() {
         let (_d, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("broken.md"), "no frontmatter here\n").unwrap();
         // Judged and *found wanting*, so "the rest of the store is still
@@ -3089,7 +3128,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn two_notes_under_one_key_in_one_layer_are_reported() {
         let (_d, paths) = fixture();
-        let root = store(&paths);
+        let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
         for at in ["dup.md", "ns/dup.md"] {
             let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
@@ -3372,7 +3411,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     fn a_trigger_omh_cannot_evaluate_does_not_take_the_store_down() {
         let (_d, paths) = fixture();
         seed(&paths, "good", &surprise_body());
-        let bad = store(&paths).join("legacy.md");
+        let bad = paths.memory().join("legacy.md");
         std::fs::write(
             &bad,
             format!(
@@ -3573,8 +3612,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn the_staged_rules_name_the_path_the_store_is_mounted_at() {
         assert!(
-            shipped_rules().contains(GUEST_NOTES),
-            "the rules must point at {GUEST_NOTES}"
+            shipped_rules().contains(GUEST_MEMORY),
+            "the rules must point at {GUEST_MEMORY}"
         );
     }
 }
