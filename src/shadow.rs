@@ -1233,13 +1233,8 @@ impl Shadow {
         // nothing, while the agent is handed half a sentence with the
         // `git show HEAD` clause missing and no sign anything was lost. A
         // rename either replaces the file or does not.
-        let part = self.gitdir.join(format!("{NOTE_NAME}.part"));
-        let write = std::fs::write(&part, format!("{}\n", text.trim_end()))
-            .and_then(|()| std::fs::rename(&part, &note));
-        if write.is_err() {
-            let _ = std::fs::remove_file(&part);
-        }
-        write.with_context(|| format!("leaving a note at {}", note.display()))
+        replace_record(&note, format!("{}\n", text.trim_end()))
+            .with_context(|| format!("leaving a note at {}", note.display()))
     }
 
     /// Whether `commit` is still in the history `HEAD` reaches.
@@ -3059,3 +3054,16 @@ fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+/// Replace a host-managed record without writing through an existing link or
+/// leaving a truncated prefix behind.
+pub fn replace_record(path: &Path, body: impl AsRef<[u8]>) -> Result<()> {
+    let parent = path.parent().context("a managed record has a parent")?;
+    std::fs::create_dir_all(parent)?;
+    let mut part = tempfile::NamedTempFile::new_in(parent)?;
+    use std::io::Write as _;
+    part.write_all(body.as_ref())?;
+    part.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}

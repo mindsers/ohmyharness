@@ -2805,6 +2805,8 @@ fn auth_makes_the_host_key_rather_than_letting_the_mount_make_it() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    let network = format!("omh-{}", sb.repo_id());
+    let _cleanup = DockerNetworkCleanup(network.clone());
 
     // The login path fails at the end — there is no terminal to hand Claude
     // Code — and by then it has done everything this asserts.
@@ -2814,6 +2816,24 @@ fn auth_makes_the_host_key_rather_than_letting_the_mount_make_it() {
         "auth left the host key to the mount: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let left = Command::new("docker")
+        .args(["network", "inspect", &network])
+        .output()
+        .unwrap();
+    assert!(
+        !left.status.success(),
+        "authentication left Docker network {network} behind"
+    );
+}
+
+struct DockerNetworkCleanup(String);
+
+impl Drop for DockerNetworkCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["network", "rm", &self.0])
+            .output();
+    }
 }
 
 /// A previewed `omh doctor` builds nothing.
@@ -7389,7 +7409,7 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
     let run = sb.keyed("run").join("s01");
     std::fs::create_dir_all(&run).unwrap();
 
-    let out = sb.omh(&["s01", "rm"]);
+    let out = sb.omh(&["s01", "rm", "--yes"]);
     assert!(
         out.status.success(),
         "rm failed: {}",
@@ -9787,6 +9807,35 @@ fn importing_hooks_writes_them_into_this_repo() {
     assert!(
         !fx.home.join(".omh/hooks/turn-end-cargo.json").exists(),
         "a repo's hook must not be installed into the catalogue"
+    );
+}
+
+#[test]
+fn importing_hooks_on_a_dry_run_writes_nothing() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"cargo test"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !fx.repo.join(".omh/hooks").exists(),
+        "a hook preview must not create its destination"
     );
 }
 

@@ -368,6 +368,14 @@ impl Session {
     /// into an existing session resumes it.
     pub fn ensure(&self, repo: &Path, base: &str) -> Result<()> {
         if self.worktree.exists() {
+            let worktree_is_valid = git(&self.worktree, &["status", "--porcelain"]).is_ok();
+            if self.branch.is_some() && !worktree_is_valid {
+                let path = self.worktree.to_string_lossy().into_owned();
+                git(repo, &["worktree", "repair", &path])
+                    .with_context(|| format!("repairing moved worktree for session {}", self.id))?;
+                git(&self.worktree, &["rev-parse", "--is-inside-work-tree"])
+                    .with_context(|| format!("opening worktree for session {}", self.id))?;
+            }
             return Ok(());
         }
         std::fs::create_dir_all(self.worktree.parent().unwrap())?;
@@ -727,6 +735,17 @@ impl Session {
             .with_context(|| format!("counting what arrived between {from} and {to}"))
     }
 
+    /// The commit from which this session branch diverged from `base`.
+    pub fn merge_base(&self, base: &str) -> Result<String> {
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no merge base")?;
+        Ok(git(&self.worktree, &["merge-base", base, branch])?
+            .trim()
+            .to_string())
+    }
+
     /// The session's files as a tree object, ready to be merged against.
     ///
     /// Built from the same throwaway index a review is, so what `sync` merges
@@ -844,7 +863,13 @@ impl Session {
     /// already carries are the user's, so they are replayed onto the new base
     /// first, in a scratch worktree — and a conflict there refuses, since
     /// resolving someone's committed work is not omh's to do.
-    pub fn move_baseline(&self, repo: &Path, onto: &str, was: &str) -> Result<()> {
+    pub fn move_baseline(
+        &self,
+        repo: &Path,
+        onto: &str,
+        old_baseline: &str,
+        expected_tip: &str,
+    ) -> Result<()> {
         let branch = self
             .branch
             .as_deref()
@@ -856,10 +881,13 @@ impl Session {
         // resolving someone's committed work is not omh's to do, and the
         // sandbox's files are not at risk either way because nothing has been
         // written yet when this runs.
-        let mine = git(repo, &["rev-list", "--count", &format!("{was}..{branch}")])?
-            .trim()
-            .parse::<usize>()
-            .with_context(|| format!("counting what {branch} carries beyond its base"))?;
+        let mine = git(
+            repo,
+            &["rev-list", "--count", &format!("{old_baseline}..{branch}")],
+        )?
+        .trim()
+        .parse::<usize>()
+        .with_context(|| format!("counting what {branch} carries beyond its base"))?;
         let tip = match mine {
             0 => onto.to_string(),
             _ => {
@@ -882,14 +910,17 @@ impl Session {
                         branch,
                     ],
                 )?;
-                let replayed = git(&scratch, &["rebase", "-q", "--onto", onto, was])
+                let replayed = git(
+                    &scratch,
+                    &["rebase", "-q", "--onto", onto, old_baseline],
+                )
                     .and_then(|_| git(&scratch, &["rev-parse", "HEAD"]))
                     .map(|tip| tip.trim().to_string())
                     .with_context(|| {
                         format!(
                             "{branch} carries {mine} commit{} of your own and they do not \
                              replay onto the new base cleanly. Nothing was changed — resolve \
-                             it yourself with `git -C {} rebase --onto {onto} {was} {branch}`",
+                             it yourself with `git -C {} rebase --onto {onto} {old_baseline} {branch}`",
                             if mine == 1 { "" } else { "s" },
                             repo.display()
                         )
@@ -909,7 +940,7 @@ impl Session {
                 "--create-reflog",
                 &format!("refs/heads/{branch}"),
                 &tip,
-                was,
+                expected_tip,
             ],
         )
         .with_context(|| {
@@ -3154,6 +3185,22 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
         s.ensure(&root, "main").unwrap();
+    }
+
+    #[test]
+    fn ensure_repairs_an_existing_worktree_that_was_moved() {
+        let (d, root) = repo();
+        let old = d.path().join("old/s01");
+        let moved = d.path().join("new/s01");
+        let before = Session::new(old.parent().unwrap(), "s01".into());
+        before.ensure(&root, "main").unwrap();
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&old, &moved).unwrap();
+
+        let after = Session::new(moved.parent().unwrap(), "s01".into());
+        after.ensure(&root, "main").unwrap();
+
+        assert!(git(&moved, &["status", "--porcelain"]).is_ok());
     }
 
     /// Regression: `rm` keeps branches on purpose so unreviewed work can never be

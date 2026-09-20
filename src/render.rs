@@ -270,24 +270,35 @@ fn mcp_approving(
             }))
         }
         Render::CodexToml => {
-            let mut out = String::new();
-            for (name, s) in servers {
-                out.push_str(&format!("[mcp_servers.{name}]\n"));
-                out.push_str(&format!("command = {}\n", toml_str(&s.command)));
-                let args: Vec<String> = s.args.iter().map(|a| toml_str(a)).collect();
-                out.push_str(&format!("args = [{}]\n", args.join(", ")));
-                if approved(name) {
-                    out.push_str("default_tools_approval_mode = \"approve\"\n");
-                }
-                if !s.env.is_empty() {
-                    out.push_str(&format!("\n[mcp_servers.{name}.env]\n"));
-                    for (k, v) in &s.env {
-                        out.push_str(&format!("{k} = {}\n", toml_str(v)));
-                    }
-                }
-                out.push('\n');
+            #[derive(Serialize)]
+            struct CodexServer<'a> {
+                command: &'a str,
+                args: &'a [String],
+                #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+                env: &'a BTreeMap<String, String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                default_tools_approval_mode: Option<&'static str>,
             }
-            Ok(out)
+            #[derive(Serialize)]
+            struct Doc<'a> {
+                mcp_servers: BTreeMap<&'a str, CodexServer<'a>>,
+            }
+
+            let mcp_servers = servers
+                .iter()
+                .map(|(name, s)| {
+                    (
+                        name.as_str(),
+                        CodexServer {
+                            command: &s.command,
+                            args: &s.args,
+                            env: &s.env,
+                            default_tools_approval_mode: approved(name).then_some("approve"),
+                        },
+                    )
+                })
+                .collect();
+            toml::to_string_pretty(&Doc { mcp_servers }).context("rendering codex config.toml")
         }
         _ => unreachable!("caller matched on MCP renders"),
     }
@@ -1678,10 +1689,6 @@ fn pretty(v: serde_json::Value) -> Result<String> {
     Ok(serde_json::to_string_pretty(&v)?)
 }
 
-fn toml_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2355,6 +2362,23 @@ mod tests {
         let out = mcp(Render::CodexToml, &m).unwrap();
         out.parse::<toml::Table>()
             .expect("must stay valid TOML when values contain quotes");
+    }
+
+    #[test]
+    fn codex_toml_quotes_names_and_multiline_values() {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "server.with spaces".to_string(),
+            Server {
+                command: "line one\nline two".into(),
+                args: vec!["first\nsecond".into()],
+                env: BTreeMap::from([("KEY.WITH SPACE".into(), "a\nb".into())]),
+            },
+        );
+
+        let out = mcp(Render::CodexToml, &m).unwrap();
+        let back = parse(Render::CodexToml, &out).expect("renderer must emit parseable TOML");
+        assert_eq!(back, m);
     }
 
     use crate::adapter::Adapter;

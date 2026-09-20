@@ -1157,11 +1157,13 @@ fn the_pager_omh_names_last_is_the_users_own() {
         .chain(["-c".to_string(), mine.clone()])
         .collect();
 
-    let at = |needle: &str| full.iter().position(|a| a == needle);
+    let first = |needle: &str| full.iter().position(|a| a == needle);
+    let last = |needle: &str| full.iter().rposition(|a| a == needle);
     assert!(
-        at(&mine) > at("core.pager=cat"),
+        last(&mine) > first("core.pager=cat"),
         "the user's pager comes after the sandbox's, or the sandbox's wins: {full:?}"
     );
+    assert_eq!(&full[full.len() - 2..], &["-c", &mine]);
     assert!(!mine.ends_with('='), "and it names something: {mine}");
 }
 
