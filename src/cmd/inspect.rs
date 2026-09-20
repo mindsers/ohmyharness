@@ -480,7 +480,7 @@ pub(crate) fn doctor_cmd(
         session.ensure(&paths.repo, "")?;
 
         // The sandbox's host key, made here rather than left to the mount.
-        // **A directory Docker creates is root's.** Every plan mounts
+        // **On Linux, a directory Docker creates is root's.** Every plan mounts
         // `keys/<repo>/host`, and on Linux a bind mount whose host path does not
         // exist is created by the daemon as root — taking `keys/<repo>` with it.
         // The next `omh new` then cannot write its own client key beside it:
