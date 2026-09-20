@@ -8,6 +8,12 @@
 # was known to work end to end.
 name: nightly
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 on:
   schedule:
     # 04:00 UTC, which is nobody's working hour in the timezones this is
@@ -19,9 +25,10 @@ jobs:
   sweep:
     name: every command, against a real container
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: check out the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: run every test, including the ones that need Docker

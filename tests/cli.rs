@@ -2765,9 +2765,10 @@ fn doctor_checks_the_memory_server_before_any_launch() {
 /// omh: ssh-keygen: Saving key ".../keys/repo-2d0f305f/id_ed25519" failed: Permission denied
 /// ```
 ///
-/// Only `session_up` generated the key; `doctor` and `auth` mounted the
-/// directory and left it to Docker. Invisible on Docker Desktop, which maps
-/// the mount to the calling user — it took a Linux CI runner and a sweep that
+/// The key was only ever made on the launch path — `session_up`, and `attach`
+/// through it. `doctor` and `auth` mounted the directory and left it to
+/// Docker. Invisible on Docker Desktop, which maps such a mount to the calling
+/// user (measured on 29.8.0), so it took a Linux CI runner and a sweep that
 /// happens to run `doctor` before `new` to see it at all.
 ///
 /// The assertion is on the *cause*, so it is one any machine can make: the key
@@ -2786,6 +2787,31 @@ fn doctor_makes_the_host_key_rather_than_letting_the_mount_make_it() {
     assert!(
         sb.keyed("keys").join("host/ssh_host_ed25519_key").is_file(),
         "doctor left the host key to the mount: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `omh auth` makes the sandbox's host key too, for `doctor`'s reason.
+///
+/// Its own test rather than a row in the sweep, because the sweep runs it in a
+/// sandbox where `init` and `doctor` have already made the key — so the row
+/// would pass with the fix deleted. A fresh sandbox is the only place this can
+/// fail.
+///
+/// `#[ignore]`d because it needs a container runtime.
+#[test]
+#[ignore]
+fn auth_makes_the_host_key_rather_than_letting_the_mount_make_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    // The login path fails at the end — there is no terminal to hand Claude
+    // Code — and by then it has done everything this asserts.
+    let out = sb.omh(&["auth", "claude"]);
+    assert!(
+        sb.keyed("keys").join("host/ssh_host_ed25519_key").is_file(),
+        "auth left the host key to the mount: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -12105,6 +12131,11 @@ fn an_unreadable_credential_directory_stops_the_launch() {
 #[derive(Debug, Default)]
 struct Spelling {
     flags: std::collections::BTreeSet<String>,
+    /// The ones spelled `--base <BASE>`. Without this a flag's *value* falls
+    /// through to the positional counter, and the run that types
+    /// `--base main` is credited with `omh sessions diff <CHECKPOINT>` —
+    /// measured, and the reason this field exists.
+    takes_a_value: std::collections::BTreeSet<String>,
     positionals: Vec<String>,
 }
 
@@ -12121,9 +12152,12 @@ struct Surface {
 /// **The four global flags are counted once, at the root.** clap repeats
 /// `--json`, `--dry-run`, `--session` and `--color` in every subcommand's
 /// help, which would make most of the entries those same four. What each
-/// command does with them is not skipped, it is checked better elsewhere:
-/// `cli::previews` and `cli::answers_json` classify every command
-/// exhaustively, and `main.rs` refuses the flag where the answer is no.
+/// command does with them is not skipped, it is checked better elsewhere, by
+/// three exhaustive matches with no wildcard arm: `cli::previews` for
+/// `--dry-run`, `cli::answers_json` for `--json`, `cli::consumes_session` for
+/// `--session`, each wired in `main.rs` to a refusal where the answer is no.
+/// `--color` has no fourth classifier and needs none: it is applied in the
+/// output layer, so there is nothing per command to classify.
 const GLOBAL_FLAGS: [&str; 4] = ["--json", "--dry-run", "--session", "--color"];
 
 /// Everything omh accepts, asked of the binary — a map from `omh <path>` to
@@ -12138,7 +12172,22 @@ fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
         .arg("--help")
         .output()
         .expect("the binary under test must run");
+    // Status, then emptiness. A `--help` that exited non-zero — or wrote to
+    // stderr and left stdout empty — would give this command an empty
+    // `Spelling` and stop the walk at its subtree, so the gate would demand
+    // *fewer* runs and pass. A scan that goes quiet has to be loud about it.
+    assert!(
+        help.status.success(),
+        "`omh {} --help` did not run: {}",
+        path.join(" "),
+        String::from_utf8_lossy(&help.stderr)
+    );
     let text = String::from_utf8_lossy(&help.stdout).to_string();
+    assert!(
+        !text.trim().is_empty(),
+        "`omh {} --help` said nothing",
+        path.join(" ")
+    );
     let here = match path.is_empty() {
         true => "omh".to_string(),
         false => format!("omh {}", path.join(" ")),
@@ -12159,7 +12208,9 @@ fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
         }
         // The help columns: the spelling, then two or more spaces, then prose.
         // Reading the whole line found `--repo` inside a *description* and
-        // enumerated a flag that does not exist.
+        // enumerated a flag that does not exist. The indent rule below catches
+        // that case too — removing this split changes nothing today — and it
+        // stays for the one-line help form, where prose shares the line.
         //
         // Commands with long help put the description on its own line,
         // indented past the spelling column — which is how `Which harness's
@@ -12178,28 +12229,49 @@ fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
             // nothing about omh.
             "commands" if first != "help" && !first.starts_with('-') => {
                 // `doctor    Verify … [alias: d]`, or `[aliases: a, b]`.
+                // Keyed by the parent, because an alias is scoped to one:
+                // `d` and `s` are the root's, `a` is `sessions`' own. A flat
+                // map resolves an alias at any depth and lets two commands
+                // that both spell `a` overwrite each other — in the one test
+                // whose job is to notice something has no run behind it.
                 if let Some((_, rest)) = line.split_once("[alias") {
                     if let Some((_, list)) = rest.split_once(':') {
                         for alias in list.trim_end_matches(']').split(',') {
                             out.aliases
-                                .insert(alias.trim().to_string(), first.to_string());
+                                .insert(format!("{here} {}", alias.trim()), first.to_string());
                         }
                     }
                 }
                 subs.push(first.to_string())
             }
             "options" => {
+                let mut long: Option<String> = None;
                 for word in spelled.split_whitespace() {
-                    if let Some(name) = word.trim_end_matches(',').strip_prefix("--") {
-                        let flag = format!("--{name}");
-                        // `--help` and `--version` are clap's own; the globals
-                        // are counted at the root.
-                        if !matches!(name, "help" | "version")
-                            && (path.is_empty() || !GLOBAL_FLAGS.contains(&flag.as_str()))
-                        {
-                            spelling.flags.insert(flag);
+                    match &long {
+                        // The token after the spelling is its value's
+                        // placeholder — `--base <BASE>`, `--color <WHEN>`.
+                        Some(flag) => {
+                            if word.starts_with('<') || word.starts_with('[') {
+                                spelling.takes_a_value.insert(flag.clone());
+                            }
+                            break;
                         }
-                        break;
+                        None => {
+                            if let Some(name) = word.trim_end_matches(',').strip_prefix("--") {
+                                let flag = format!("--{name}");
+                                if matches!(name, "help" | "version") {
+                                    break;
+                                }
+                                // The globals are counted at the root, but
+                                // every command has to know they take a value,
+                                // or a run that types one loses the token after
+                                // it to the positional counter.
+                                if path.is_empty() || !GLOBAL_FLAGS.contains(&flag.as_str()) {
+                                    spelling.flags.insert(flag.clone());
+                                }
+                                long = Some(flag);
+                            }
+                        }
                     }
                 }
             }
@@ -12246,6 +12318,19 @@ fn surface_items(surface: &Surface) -> std::collections::BTreeSet<String> {
     out
 }
 
+/// Whether a flag spends the token after it.
+///
+/// Asked of the whole surface rather than of the command being walked,
+/// because a flag can be typed before its command is known — `omh --color
+/// never info` reads `--color` two tokens before `info` settles the path.
+fn takes_a_value(surface: &Surface, flag: &str) -> bool {
+    let spelled = format!("--{flag}");
+    surface
+        .cmds
+        .values()
+        .any(|s| s.takes_a_value.contains(&spelled))
+}
+
 /// What one real invocation exercises, derived from the argv rather than
 /// declared beside it.
 ///
@@ -12259,6 +12344,8 @@ fn covered_by(surface: &Surface, argv: &[&str]) -> std::collections::BTreeSet<St
     let mut flags: Vec<&str> = Vec::new();
     let mut positionals = 0usize;
     let mut still_walking = true;
+    // Set by a flag that takes one, and cleared by the token it swallows.
+    let mut value_pending = false;
 
     for token in argv {
         if *token == "--" {
@@ -12269,13 +12356,24 @@ fn covered_by(surface: &Surface, argv: &[&str]) -> std::collections::BTreeSet<St
         }
         if let Some(flag) = token.strip_prefix("--") {
             flags.push(flag);
+            // `--base main` and `--base=main` are the same flag; only the
+            // first spends the token after it.
+            value_pending = !flag.contains('=') && takes_a_value(surface, flag);
             continue;
         }
         // The short spellings of the globals. `-s` is the one anybody types.
         if let Some(short) = token.strip_prefix('-') {
             if short == "s" {
                 flags.push("session");
+                value_pending = true;
             }
+            continue;
+        }
+        // The value of the flag before it, and not a positional. Counting it
+        // as one credited `omh sessions diff <CHECKPOINT>` to a run that only
+        // ever typed `--base main`.
+        if value_pending {
+            value_pending = false;
             continue;
         }
         if still_walking {
@@ -12286,7 +12384,10 @@ fn covered_by(surface: &Surface, argv: &[&str]) -> std::collections::BTreeSet<St
                 && token[1..].chars().all(|c| c.is_ascii_digit())
             {
                 true => "sessions",
-                false => surface.aliases.get(*token).map_or(*token, String::as_str),
+                false => surface
+                    .aliases
+                    .get(&format!("{path} {token}"))
+                    .map_or(*token, String::as_str),
             };
             let deeper = format!("{path} {canonical}");
             if surface.cmds.contains_key(&deeper) {
@@ -12328,10 +12429,12 @@ enum Needs {
     /// A git repo with omh's catalogue seeded. Enough for everything that
     /// reads configuration rather than containers.
     Repo,
-    /// …and a session worktree, made the way omh makes one, with work in it
-    /// and trunk moved on.
+    /// Repo **and** a session worktree, made the way omh makes one, with work
+    /// in it and trunk moved on.
     Session,
-    /// …and a note in the store.
+    /// Repo **and** a note in the store. A sibling of `Session`, not a
+    /// an extension of it: neither contains the other, and `staged_for` builds
+    /// the common part before the match.
     Store,
 }
 
@@ -12370,6 +12473,17 @@ struct Exercise {
 /// takes the session away.
 const EXERCISES: &[Exercise] = &[
     // ── things that read the machine ────────────────────────────────────
+    //
+    // `omh` alone: clap prints the command list and exits 2. It was covered by
+    // accident until the deriver stopped counting a flag's value as a
+    // positional — `omh --color never info` used to stop walking at `never`
+    // and credit the root with a run that never typed it.
+    Exercise {
+        argv: &[],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["Usage: omh"]),
+        runtime: false,
+    },
     Exercise {
         argv: &["info"],
         needs: Needs::Repo,
@@ -12460,7 +12574,7 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &["settings", "mcp"],
         needs: Needs::Repo,
-        expect: Expect::Refuses(&["MCP servers"]),
+        expect: Expect::Refuses(&["MCP servers", "Commands:", "import"]),
         runtime: false,
     },
     Exercise {
@@ -12535,8 +12649,9 @@ const EXERCISES: &[Exercise] = &[
         expect: Expect::Ok,
         runtime: false,
     },
-    // Before `use`: the catalogue entry has to exist to be selected, and this
-    // is the command that creates one.
+    // `settings edit` for *was it opened*: the fixture's editor records its
+    // argv and writes nothing, so the entry `use` selects on the next line is
+    // the one `staged_for` wrote by hand — as the note there says.
     Exercise {
         argv: &["settings", "edit", "skills", "review-diff"],
         needs: Needs::Repo,
@@ -12624,6 +12739,16 @@ const EXERCISES: &[Exercise] = &[
         expect: Expect::Ok,
         runtime: false,
     },
+    // The checkpoint positional, which `--base` cannot be combined with —
+    // `omh sessions diff --help` says it is refused alongside one, so it needs
+    // a run of its own. A session with no turns has no checkpoint 1, and being
+    // told so is the run: it reaches the same lookup a real number does.
+    Exercise {
+        argv: &["s01", "diff", "1"],
+        needs: Needs::Session,
+        expect: Expect::Refuses(&["checkpoint"]),
+        runtime: false,
+    },
     // Last in its group: it takes the session away.
     Exercise {
         argv: &["s01", "rm", "--yes"],
@@ -12668,6 +12793,16 @@ const EXERCISES: &[Exercise] = &[
         expect: Expect::Ok,
         runtime: true,
     },
+    // The *login* branch, which is the one that starts a container.
+    // `auth --import` below copies a file and returns before
+    // `login_in_sandbox` is reached — so with only that row, the host key
+    // `auth` now makes was on a path no test ran at all.
+    Exercise {
+        argv: &["auth", "claude"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["nothing was captured", "tty"]),
+        runtime: true,
+    },
     Exercise {
         argv: &["auth", "claude", "--name", "work", "--import"],
         needs: Needs::Repo,
@@ -12701,13 +12836,13 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &["new", "claude", "--", "--version"],
         needs: Needs::Repo,
-        expect: Expect::Refuses(&["claude on omh/s0", "tty"]),
+        expect: Expect::Refuses(&["claude on omh/s", "tty"]),
         runtime: true,
     },
     Exercise {
         argv: &["s01", "resume", "claude", "--", "--version"],
         needs: Needs::Session,
-        expect: Expect::Refuses(&["claude on omh/s0", "tty"]),
+        expect: Expect::Refuses(&["claude on omh/s", "tty"]),
         runtime: true,
     },
     Exercise {
@@ -12812,15 +12947,26 @@ fn staged_for(needs: Needs) -> Sandbox {
     )
     .unwrap();
 
-    // A `gh` on the sandbox's PATH. One of two fakes here: the real one wants
-    // a GitHub account, a token and a network, and what `omh sNN push --pr`
-    // owes anybody is that it runs `gh pr create` with the branch it just
-    // pushed — which a stand-in that prints a URL can answer. The push itself
-    // is real, to the sandbox's own origin.
+    // An editor stand-in for `omh sNN attach code`. Without it `attach` finds
+    // the real `code` — `runtime::installed` asks PATH and the sandbox only
+    // prepends to it — and running the suite opens a VS Code window onto a
+    // session inside a TempDir that is deleted seconds later. On a machine
+    // without VS Code the same row passes having exercised only the
+    // "editor is not installed" warning, which proves nothing about the
+    // launch. The stand-in makes both machines run the same path.
+    sb.fake_editor("code");
+
+    // A `gh` on the sandbox's PATH: the real one wants a GitHub account, a
+    // token and a network. It records the argv it was handed, so the assertion
+    // below can be about what omh asked for rather than about it exiting 0 —
+    // the push itself is real, to the sandbox's own origin.
     let gh = sb.bin.join("gh");
     std::fs::write(
         &gh,
-        "#!/bin/sh\nprintf '%s\\n' \"https://example.invalid/pr/1\"\nexit 0\n",
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\n' \"https://example.invalid/pr/1\"\nexit 0\n",
+            sb.bin.join("gh.log").display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -12893,7 +13039,7 @@ fn exercise(sb: &Sandbox, e: &Exercise) {
 /// commands only mean something in sequence.
 #[test]
 fn the_surface_runs_without_a_container() {
-    for needs in [Needs::Repo, Needs::Session, Needs::Store] {
+    for needs in [Needs::Repo, Needs::Store, Needs::Session] {
         let sb = staged_for(needs);
         for e in EXERCISES.iter().filter(|e| !e.runtime && e.needs == needs) {
             exercise(&sb, e);
@@ -12911,40 +13057,64 @@ fn the_surface_runs_without_a_container() {
 #[ignore]
 fn the_surface_runs_with_a_container() {
     let sb = staged_for(Needs::Session);
+    let _teardown = Teardown { sb: &sb };
     for e in EXERCISES.iter().filter(|e| e.runtime) {
         exercise(&sb, e);
     }
 
-    // Through omh's own verbs, and not best-effort: a sweep that leaves a
-    // container and a network per run is how a machine reaches Docker's
-    // `all predefined address pools have been fully subnetted` — which this
-    // sweep hit twice while it was being written.
+    // What omh asked `gh` for, not merely that `gh` exited 0: the branch it
+    // had just pushed. The stand-in prints a URL whatever it is handed, so
+    // without this the `push --pr` row asserts nothing about the flag.
     //
-    // Named, because a landing verb refuses a bare call: `omh s rm` with no
-    // selector asks which session rather than removing all of them. `s02` is
-    // the one `omh new` made.
-    for last in [
-        vec!["sessions", "down"],
-        vec!["s01", "rm", "--yes"],
-        vec!["s02", "rm", "--yes"],
-        vec!["prune"],
-    ] {
-        let out = sb.omh(&last);
-        assert!(
-            out.status.success(),
-            "`omh {}` must clean up after this sweep: {}",
-            last.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    // Here rather than in `Teardown`, because a panic while unwinding aborts
+    // the process — a `Drop` that asserts would turn the first red row into a
+    // crash with no report.
+    let asked = std::fs::read_to_string(sb.bin.join("gh.log")).unwrap_or_default();
+    assert!(
+        asked.contains("pr") && asked.contains("review/s01"),
+        "`omh sNN push --pr` did not ask gh for the branch it pushed: {asked:?}"
+    );
+}
 
-    // The repo's own network, removed by hand because no omh verb can: a
-    // session's network goes with the session, and the repo's goes when the
-    // checkout does — which for this sandbox is after the test ends. `prune`
-    // is right to leave it alone while the checkout is still there.
-    let _ = Command::new("docker")
-        .args(["network", "rm", &format!("omh-{}", sb.repo_id())])
-        .output();
+/// Cleans up after the container sweep **however it ends**.
+///
+/// The cleanup used to sit at the end of the test body, where a failed
+/// assertion skips it: `exercise` panics, the containers and networks stay,
+/// and `Sandbox._dir` — the `~/.omh` those verbs need — is dropped on the way
+/// out, so omh can no longer remove them at all. The failure mode is the one
+/// the comment below already describes, reachable in exactly the case that
+/// hurts: a red sweep, re-run.
+///
+/// Nothing here asserts. Each verb it uses is a row in the table with its own
+/// `Expect::Ok`, so a broken `down` or `rm` fails there, where the failure
+/// names the command instead of the tidying.
+struct Teardown<'a> {
+    sb: &'a Sandbox,
+}
+
+impl Drop for Teardown<'_> {
+    fn drop(&mut self) {
+        // Named sessions, because a landing verb refuses a bare call, and
+        // `s02` is the one `omh new` made.
+        for last in [
+            vec!["sessions", "down"],
+            vec!["s01", "rm", "--yes"],
+            vec!["s02", "rm", "--yes"],
+            vec!["prune"],
+        ] {
+            let _ = self.sb.omh(&last);
+        }
+        // The repo's own network, removed by hand because no omh verb can: a
+        // session's network goes with the session, and the repo's goes when
+        // the checkout does — which for this sandbox is after the test ends.
+        // `prune` is right to leave it alone while the checkout is still
+        // there. One left behind per run is how a machine walks into Docker's
+        // `all predefined address pools have been fully subnetted`, which this
+        // sweep hit twice while it was being written.
+        let _ = Command::new("docker")
+            .args(["network", "rm", &format!("omh-{}", self.sb.repo_id())])
+            .output();
+    }
 }
 
 /// The whole surface, and what is left over once every run above is counted.
@@ -12960,11 +13130,88 @@ fn every_command_and_flag_is_exercised_by_a_real_run() {
     }
     assert!(
         left.is_empty(),
-        "{} of omh's {} commands and flags have no run behind them:\n  {}",
+        "{} of omh's {} commands, flags and arguments have no run behind them:\n  {}",
         left.len(),
         all.len(),
         left.into_iter().collect::<Vec<_>>().join("\n  ")
     );
+}
+
+/// A previewed `eject` writes nothing.
+///
+/// The sweep asserts exit status and, for a refusal, words — so a `--dry-run`
+/// that wrote the tree anyway passes it, and the table runs the real `eject`
+/// two rows later, which makes the two indistinguishable from the outside.
+/// The preview rows are the ones where "it exited 0" is furthest from "it did
+/// the right thing".
+#[test]
+fn a_previewed_eject_writes_nothing() {
+    let sb = staged_for(Needs::Repo);
+    let to = sb.repo.parent().unwrap().join("previewed-nothing");
+
+    let out = sb.omh(&[
+        "--dry-run",
+        "eject",
+        "claude",
+        "--to",
+        "../previewed-nothing",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !to.exists(),
+        "a preview wrote {}: {}",
+        to.display(),
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The table is shaped the way the runners read it.
+///
+/// Three rules that were comments until a reviewer pointed out that a comment
+/// is not a failure:
+///
+/// - A `Refuses` with no words asserts only *non-zero*, which a clap usage
+///   error, a panic and a missing fixture all satisfy. That is the
+///   pass-for-the-wrong-reason this whole file exists to refuse.
+/// - The container lane stages one `Needs::Session` sandbox and filters on
+///   `runtime` alone, so a `Needs::Store` row there would run with the store
+///   never seeded and pass or fail for a reason unrelated to what it claims.
+/// - "Order is part of the table" is true only *within* a `(runtime, needs)`
+///   group, because the runners loop over groups. A row wedged between two
+///   rows of another group reads as "in between" and executes in a different
+///   sandbox.
+#[test]
+fn the_table_is_shaped_the_way_the_runners_read_it() {
+    let mut seen: Vec<(bool, Needs)> = Vec::new();
+    for e in EXERCISES {
+        if let Expect::Refuses(words) = e.expect {
+            assert!(
+                !words.is_empty(),
+                "`omh {}` asserts only a non-zero exit, which anything satisfies",
+                e.argv.join(" ")
+            );
+        }
+        assert!(
+            !(e.runtime && e.needs == Needs::Store),
+            "`omh {}` is a container run, and that lane stages a session — \
+             its note is never seeded",
+            e.argv.join(" ")
+        );
+        let group = (e.runtime, e.needs);
+        if seen.last() != Some(&group) {
+            assert!(
+                !seen.contains(&group),
+                "`omh {}` reopens a group that had already finished, so it \
+                 runs in a different sandbox than the rows around it",
+                e.argv.join(" ")
+            );
+            seen.push(group);
+        }
+    }
 }
 
 /// What the enumerator can see, named rather than counted.
@@ -12972,8 +13219,12 @@ fn every_command_and_flag_is_exercised_by_a_real_run() {
 /// A scan keyed on the shape of `--help` goes quiet the moment that shape
 /// changes: clap could rename a section and this would read less and say
 /// nothing, which is the failure mode every guard in this repo that reads text
-/// has hit at least once. A floor of "more than fifty" is satisfied by the
-/// commands alone, so the floor names one of each *kind* of thing instead.
+/// has hit at least once.
+///
+/// A count is the wrong floor. Forty commands and thirty-one positionals clear
+/// a floor of fifty between them, so `Options:` could go unread and the number
+/// would still look healthy — and any floor rots as omh grows. This names one
+/// of each *kind* of thing instead.
 #[test]
 fn the_surface_reads_commands_flags_and_positionals() {
     let items = surface_items(&surface());

@@ -367,8 +367,10 @@ pub fn plan(
 
     // The sandbox's ssh host key, for the entrypoint to install as root. Read
     // only, and the directory rather than the file, so the `.pub` rides along.
-    // `session_up` generates it before the launch; a plan that is only printed
-    // names the path either way.
+    // `session_up` generates it before the launch, and so do `doctor` and
+    // `auth` — whoever is about to start a container, because a mount the
+    // daemon creates instead is root's. A plan that is only printed names the
+    // path either way.
     mounts.push(Mount {
         host: crate::ssh::host_key_dir(&paths.keys()),
         guest: crate::ssh::GUEST_HOST_KEYS.into(),
