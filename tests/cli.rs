@@ -2753,6 +2753,43 @@ fn doctor_checks_the_memory_server_before_any_launch() {
     );
 }
 
+/// `omh doctor` makes the sandbox's host key rather than letting the mount
+/// make it.
+///
+/// Every plan mounts `keys/<repo>/host`, and on Linux a bind mount whose host
+/// path does not exist is created by the daemon **as root**, taking
+/// `keys/<repo>` with it. The next `omh new` then cannot write its own client
+/// key beside it:
+///
+/// ```text
+/// omh: ssh-keygen: Saving key ".../keys/repo-2d0f305f/id_ed25519" failed: Permission denied
+/// ```
+///
+/// Only `session_up` generated the key; `doctor` and `auth` mounted the
+/// directory and left it to Docker. Invisible on Docker Desktop, which maps
+/// the mount to the calling user — it took a Linux CI runner and a sweep that
+/// happens to run `doctor` before `new` to see it at all.
+///
+/// The assertion is on the *cause*, so it is one any machine can make: the key
+/// exists after `doctor`, which is exactly what stops the daemon inventing the
+/// directory.
+///
+/// `#[ignore]`d because it needs a container runtime.
+#[test]
+#[ignore]
+fn doctor_makes_the_host_key_rather_than_letting_the_mount_make_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    let out = sb.omh(&["doctor", "--harness", "claude"]);
+    assert!(
+        sb.keyed("keys").join("host/ssh_host_ed25519_key").is_file(),
+        "doctor left the host key to the mount: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A previewed `omh doctor` builds nothing.
 ///
 /// The other half of the rule above, and the half a fix reaches for: if
