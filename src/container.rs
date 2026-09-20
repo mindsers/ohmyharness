@@ -577,7 +577,7 @@ pub fn plan(
                 hooks: rendered_hooks.clone(),
             };
             if let Ok(json) = serde_json::to_string(&record) {
-                let _ = std::fs::write(&shadow.events_ledger, json);
+                let _ = crate::shadow::replace_record(&shadow.events_ledger, json);
             }
 
             // The observed half, started empty in the same breath as the
@@ -594,7 +594,7 @@ pub fn plan(
             // is one whose gitdir never mounted, not one whose hooks were
             // quiet. That distinction only holds if this never silently
             // skips a launch.
-            let _ = std::fs::write(crate::shadow::events_file(&shadow.gitdir), "");
+            let _ = crate::shadow::replace_record(&crate::shadow::events_file(&shadow.gitdir), "");
         }
 
         mounts.push(Mount {
@@ -2902,6 +2902,25 @@ mod tests {
             "",
             "a relaunch must not inherit the previous launch's observations"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_does_not_follow_a_linked_events_file() {
+        use std::os::unix::fs::symlink;
+
+        let fx = fixture();
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        shadow.ensure(&fx.session.worktree, &[]).unwrap();
+        let events = crate::shadow::events_file(&shadow.gitdir);
+        let unrelated = fx._dir.path().join("unrelated");
+        std::fs::write(&unrelated, "keep\n").unwrap();
+        let _ = std::fs::remove_file(&events);
+        symlink(&unrelated, &events).unwrap();
+
+        let _ = plan_for(&fx, "claude");
+
+        assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep\n");
     }
 
     /// A layer that exists and cannot be read is a failed launch, not a

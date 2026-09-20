@@ -10,7 +10,7 @@
 //! all work without omh knowing they exist — which is the only way a
 //! harness-agnostic tool avoids being IDE-locked.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 pub const INCLUDE_LINE: &str = "Include ~/.ssh/config.d/omh";
@@ -147,7 +147,7 @@ pub fn write_known_hosts(path: &Path, lines: &[String]) -> Result<()> {
         out.push_str(line);
         out.push('\n');
     }
-    std::fs::write(path, out)?;
+    crate::shadow::replace_record(path, out)?;
     Ok(())
 }
 
@@ -160,8 +160,52 @@ pub fn write_hosts(path: &Path, blocks: &[String]) -> Result<()> {
         out.push_str(block);
         out.push('\n');
     }
-    std::fs::write(path, out)?;
+    crate::shadow::replace_record(path, out)?;
     Ok(())
+}
+
+/// Host blocks for every session under the shared omh root.
+///
+/// The managed SSH include is global, so rebuilding it from one checkout alone
+/// would erase aliases belonging to every other checkout.
+pub fn config_blocks(root: &Path) -> Result<Vec<String>> {
+    let worktrees = root.join("worktrees");
+    let repos = match std::fs::read_dir(&worktrees) {
+        Ok(repos) => repos,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", worktrees.display())),
+    };
+    let mut blocks = Vec::new();
+    for repo in repos {
+        let repo = repo?;
+        if !repo.file_type()?.is_dir() {
+            continue;
+        }
+        let repo_id = repo.file_name().to_string_lossy().into_owned();
+        let key = root.join("keys").join(&repo_id).join("id_ed25519");
+        let known_hosts = root.join("keys").join(&repo_id).join("known_hosts");
+        if !key.is_file() || !known_hosts.is_file() {
+            continue;
+        }
+        let sessions = std::fs::read_dir(repo.path())
+            .with_context(|| format!("reading {}", repo.path().display()))?;
+        for session in sessions {
+            let session = session?;
+            if !session.file_type()?.is_dir() {
+                continue;
+            }
+            let id = session.file_name().to_string_lossy().into_owned();
+            blocks.push(config_block(
+                &host_alias(&repo_id, &id),
+                recorded_port(&root.join("run").join(&repo_id), &id)
+                    .unwrap_or_else(|| port(&repo_id, &id)),
+                &key,
+                &known_hosts,
+            ));
+        }
+    }
+    blocks.sort();
+    Ok(blocks)
 }
 
 /// Add the `Include` to `~/.ssh/config` if absent, preserving everything else.
@@ -385,6 +429,22 @@ mod tests {
         let body = std::fs::read_to_string(&f).unwrap();
         assert!(body.contains("Host b"));
         assert!(!body.contains("Host a"), "stale sessions must not linger");
+    }
+
+    #[test]
+    fn managed_blocks_include_sessions_from_every_repository() {
+        let d = tempfile::tempdir().unwrap();
+        for repo in ["one-11111111", "two-22222222"] {
+            std::fs::create_dir_all(d.path().join("worktrees").join(repo).join("s01")).unwrap();
+            std::fs::create_dir_all(d.path().join("keys").join(repo)).unwrap();
+            std::fs::write(d.path().join("keys").join(repo).join("id_ed25519"), "key").unwrap();
+            std::fs::write(d.path().join("keys").join(repo).join("known_hosts"), "host").unwrap();
+        }
+
+        let blocks = config_blocks(d.path()).unwrap().join("\n");
+
+        assert!(blocks.contains("Host omh-one-11111111-s01"), "{blocks}");
+        assert!(blocks.contains("Host omh-two-22222222-s01"), "{blocks}");
     }
 
     #[test]

@@ -126,10 +126,11 @@ pub(crate) fn sync_session(paths: &Paths, session: &Session, base: &str) -> Resu
         .branch
         .as_deref()
         .context("a scratch session has no base to move")?;
-    let was = session::head_of(&paths.repo, branch)?;
+    let tip = session::head_of(&paths.repo, branch)?;
+    let old_baseline = session.merge_base(base)?;
     let onto = session::head_of(&paths.repo, base)?;
     anyhow::ensure!(
-        was != onto,
+        old_baseline != onto,
         "{} is already on {base}. Nothing to bring over",
         session.id
     );
@@ -144,14 +145,14 @@ pub(crate) fn sync_session(paths: &Paths, session: &Session, base: &str) -> Resu
     let ours = format!("refs/{}", session.id);
     let tree = session.tree(base)?;
     session::name_tree(&paths.repo, &ours, &tree)?;
-    let merged = session::merge_three(&paths.repo, &was, base, &session.id);
+    let merged = session::merge_three(&paths.repo, &old_baseline, base, &session.id);
     let _ = session::unname_tree(&paths.repo, &ours);
     let merged = merged?;
 
     session.materialise(&tree, &merged.tree)?;
-    session.move_baseline(&paths.repo, &onto, &was)?;
+    session.move_baseline(&paths.repo, &onto, &old_baseline, &tip)?;
     shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
-    let moved = session.commits_between(&paths.repo, &was, &onto)?;
+    let moved = session.commits_between(&paths.repo, &old_baseline, &onto)?;
     // Deliberately not `?`. The sync is done — the tree is merged, the baseline
     // has moved and the shadow has its commit — and a note that could not be
     // written is a worse outcome to report than to carry: the user would read a
@@ -953,7 +954,40 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
         shadow.gitdir.exists(),
         &shadow,
     ) {
-        return answer;
+        return match answer {
+            AtStake::Nothing if session.worktree.is_dir() => {
+                let out = std::process::Command::new("git")
+                    .current_dir(&session.worktree)
+                    .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                    .output();
+                match out {
+                    Ok(out) if !out.status.success() => AtStake::Unknown(format!(
+                        "the worktree at {} could not be inspected: {}",
+                        session.worktree.display(),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )),
+                    Ok(out) => {
+                        let files = out
+                            .stdout
+                            .split(|b| *b == 0)
+                            .filter(|p| !p.is_empty())
+                            .count();
+                        match files {
+                            0 => AtStake::Nothing,
+                            n => AtStake::Work(format!(
+                                "{n} uncommitted path{} in the worktree",
+                                plural(n)
+                            )),
+                        }
+                    }
+                    Err(e) => AtStake::Unknown(format!(
+                        "the worktree at {} could not be inspected: {e}",
+                        session.worktree.display()
+                    )),
+                }
+            }
+            other => other,
+        };
     }
 
     match shadow.unkept(&session.worktree) {

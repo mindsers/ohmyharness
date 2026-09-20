@@ -2542,6 +2542,41 @@ fn a_sync_brings_trunk_over_and_leaves_the_agents_work_harvestable() {
     );
 }
 
+#[test]
+fn a_sync_preserves_committed_and_uncommitted_session_work() {
+    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    std::fs::write(session.worktree.join("committed.rs"), "fn committed() {}\n").unwrap();
+    git(&session.worktree, &["add", "committed.rs"]);
+    git(&session.worktree, &["commit", "-qm", "session commit"]);
+    std::fs::write(session.worktree.join("in-flight.rs"), "fn in_flight() {}\n").unwrap();
+
+    std::fs::write(paths.repo.join("from-trunk.rs"), "fn trunk() {}\n").unwrap();
+    git(&paths.repo, &["add", "from-trunk.rs"]);
+    git(&paths.repo, &["commit", "-qm", "trunk moved"]);
+
+    cmd::harvest::sync_session(&paths, &session, "main").unwrap();
+
+    assert!(session.worktree.join("committed.rs").is_file());
+    assert!(session.worktree.join("in-flight.rs").is_file());
+    assert!(session.worktree.join("from-trunk.rs").is_file());
+    assert!(
+        git(&paths.repo, &["log", "--format=%s", "omh/s01"])
+            .lines()
+            .any(|line| line == "session commit"),
+        "the session commit must still be reachable"
+    );
+}
+
 /// **Three behaviours, one value.** `force` and `terminal` were adjacent
 /// `bool`s meaning opposite things — *the user said delete it anyway* and
 /// *there is somebody at a keyboard*. Swapping them compiles, and the two
@@ -3000,6 +3035,8 @@ fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
     // Gone entirely: nothing is left to lose, and `rm` must not stand in
     // the way of clearing up.
     let (paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::remove_file(session.worktree.join("one.rs")).unwrap();
+    std::fs::remove_file(session.worktree.join("two.rs")).unwrap();
     std::fs::remove_dir_all(&shadow.gitdir).unwrap();
     std::fs::remove_file(&shadow.seed_record).unwrap();
     assert!(
@@ -3026,6 +3063,22 @@ fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
         &mut std::io::sink(),
     )
     .is_ok());
+}
+
+#[test]
+fn a_missing_shadow_does_not_hide_uncommitted_worktree_files() {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::remove_dir_all(&shadow.gitdir).unwrap();
+    std::fs::remove_file(&shadow.seed_record).unwrap();
+    std::fs::write(session.worktree.join("only-copy.txt"), "keep me\n").unwrap();
+
+    assert!(
+        matches!(
+            cmd::harvest::at_stake(&paths, &session),
+            cmd::harvest::AtStake::Work(_)
+        ),
+        "the worktree itself still contains work"
+    );
 }
 
 /// The count says what it counted, and says it in the singular when there
@@ -5830,10 +5883,6 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
         // The three real exemptions.
         ("src/main.rs", "out::problem"),
         ("src/mcp.rs", "omh-mcp: ignoring unparseable line"),
-        // The note server, for the same reason as the line reader above it:
-        // it speaks MCP on stdout, so stderr is the only channel it has, and
-        // there is no `Ctx` inside a server the harness spawned.
-        ("src/memory/tools.rs", "omh-mcp: store unreadable"),
         // Owed a `Ctx`. See above.
         ("src/facts.rs", "could not read"),
         // Wrapped, so the macro line carries no text of its own — the
@@ -5889,8 +5938,8 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     }
     assert_eq!(
         named.len(),
-        9,
-        "the debt register grew. Three exemptions and six owed sites — the sbx \
+        8,
+        "the debt register grew. Three exemptions and five owed sites — the sbx \
          delivery folded three build-note prints into `provide` (one text) and \
          added the template-load note beside it. A seventh owed site is a fix, \
          not an entry"

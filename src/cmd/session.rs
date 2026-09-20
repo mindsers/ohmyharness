@@ -431,7 +431,7 @@ pub(crate) fn attach(
     // that is what keeps every editor working without omh knowing about any.
     let home = dirs::home_dir().context("no home directory")?;
     let alias = ssh::host_alias(&paths.repo_name(), &session.id);
-    let key = ssh::ensure_key(&paths.keys())?;
+    ssh::ensure_key(&paths.keys())?;
     // The sandbox's host key, pinned under every session's alias. One key per
     // repo, so the known_hosts omh writes is the same key on every line — what
     // differs is the alias, which is what `HostKeyAlias` looks up.
@@ -444,25 +444,12 @@ pub(crate) fn attach(
     // checkout would lose its alias and its pinned host key, and the next
     // `omh sNN attach` would fail on a host ssh no longer has an entry for.
     let sessions = session::list(&paths.worktrees())?;
-    let blocks: Vec<String> = sessions
-        .iter()
-        .map(|s| {
-            ssh::config_block(
-                &ssh::host_alias(&paths.repo_name(), s),
-                // The recorded port — never probe here: the session holds its
-                // own port, so a probe would walk away from it.
-                ssh::recorded_port(&paths.runs(), s)
-                    .unwrap_or_else(|| ssh::port(&paths.repo_name(), s)),
-                &key,
-                &known_hosts,
-            )
-        })
-        .collect();
     let pinned: Vec<String> = sessions
         .iter()
         .map(|s| ssh::known_hosts_line(&ssh::host_alias(&paths.repo_name(), s), &host_pub))
         .collect();
     ssh::write_known_hosts(&known_hosts, &pinned)?;
+    let blocks = ssh::config_blocks(&paths.root)?;
     ssh::write_hosts(&home.join(".ssh/config.d/omh"), &blocks)?;
     ssh::ensure_include(&home.join(".ssh/config"))?;
 

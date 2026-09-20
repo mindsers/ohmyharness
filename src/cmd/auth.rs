@@ -13,6 +13,17 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::process::Command;
 
+struct NetworkCleanup<'a> {
+    backend: &'a runtime::Backend,
+    name: &'a str,
+}
+
+impl Drop for NetworkCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = image::network_remove(self.backend, self.name);
+    }
+}
+
 /// Capture an account: run the harness's own login in a sandbox, or with
 /// `--import` copy the login this machine already holds.
 pub(crate) fn auth_cmd(
@@ -157,6 +168,10 @@ fn login_in_sandbox(
     )?;
     plan.validate_for(&backend)?;
     image::ensure_network(&backend, &plan.network)?;
+    let _network_cleanup = NetworkCleanup {
+        backend: &backend,
+        name: &plan.network,
+    };
 
     // Progress, not the report: the login itself is what the user is here for,
     // and this is the sentence that tells them which window is about to open

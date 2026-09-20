@@ -800,8 +800,10 @@ pub(crate) fn import_hooks(
             });
             continue;
         }
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(hook)?))?;
+        if !dry_run {
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(hook)?))?;
+        }
         considered.push(report::Considered {
             name: name.clone(),
             verdict: report::Verdict::Took,
@@ -842,7 +844,7 @@ pub(crate) fn import_hooks(
         source: source.display().to_string(),
         considered,
         noun: "hooks".into(),
-        dry_run: false,
+        dry_run,
         // The hooks directory, for the same reason as `import_entries`: a run
         // that wrote files has to say where they went.
         wrote: (!written.is_empty()).then(|| dir.display().to_string()),

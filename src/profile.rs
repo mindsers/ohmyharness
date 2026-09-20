@@ -724,6 +724,42 @@ pub fn migrate(paths: &Paths, is_running: &dyn Fn(&str) -> bool) -> Result<Migra
                 }
             )
         })?;
+        if *kind == "worktrees" {
+            let worktrees: Vec<PathBuf> = std::fs::read_dir(&to)?
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_dir() && path.join(".git").is_file())
+                .collect();
+            let repository_is_git = std::process::Command::new("git")
+                .current_dir(&paths.repo)
+                .args(["rev-parse", "--git-common-dir"])
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false);
+            if repository_is_git && !worktrees.is_empty() {
+                let mut command = std::process::Command::new("git");
+                command
+                    .current_dir(&paths.repo)
+                    .args(["worktree", "repair"]);
+                command.args(&worktrees);
+                let repaired = match command.output() {
+                    Ok(repaired) => repaired,
+                    Err(e) => {
+                        let _ = std::fs::rename(&to, &from);
+                        return Err(e).with_context(|| {
+                            format!("repairing worktrees after moving them to {}", to.display())
+                        });
+                    }
+                };
+                if !repaired.status.success() {
+                    let _ = std::fs::rename(&to, &from);
+                    anyhow::bail!(
+                        "repairing worktrees after moving them to {}: {}",
+                        to.display(),
+                        String::from_utf8_lossy(&repaired.stderr).trim()
+                    );
+                }
+            }
+        }
         moved.push(kind);
     }
     Ok(Migration::Moved {
@@ -1732,6 +1768,49 @@ mod tests {
             !paths.root.join("worktrees/api").exists(),
             "and the old key is gone, so this does not run again"
         );
+    }
+
+    #[test]
+    fn migration_repairs_git_worktree_registrations_after_the_directory_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        run(&repo, &["init", "-q", "-b", "main"]);
+        run(&repo, &["config", "user.email", "t@example.com"]);
+        run(&repo, &["config", "user.name", "t"]);
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "root"]);
+
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        let old = paths.root.join("worktrees/api/s01");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        run(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "omh/s01",
+                old.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        migrate(&paths, NOT_RUNNING).unwrap();
+        run(&paths.worktrees().join("s01"), &["status", "--porcelain"]);
+        run(&repo, &["worktree", "prune"]);
+        run(&paths.worktrees().join("s01"), &["status", "--porcelain"]);
     }
 
     /// A directory holding sessions from **both** checkouts is refused.

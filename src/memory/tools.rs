@@ -83,17 +83,8 @@ impl Server {
     /// A note that will not parse is a lint violation, not a note — counting
     /// it would advertise a store omh cannot serve, and returning it would
     /// answer from bytes nobody validated.
-    fn notes(&self) -> Vec<memory::Note> {
-        match memory::notes_in(&self.notes_dir) {
-            Ok(notes) => notes,
-            // Reported where a human will see it, not swallowed and not
-            // fatal: an unreadable store still lets the session write, and a
-            // server that exits here takes the session's memory with it.
-            Err(e) => {
-                eprintln!("omh-mcp: store unreadable: {e:#}");
-                Vec::new()
-            }
-        }
+    fn notes(&self) -> anyhow::Result<Vec<memory::Note>> {
+        memory::notes_in(&self.notes_dir)
     }
 
     fn recall(&self, args: &Value) -> ToolResult {
@@ -111,8 +102,12 @@ impl Server {
         );
         // Rendered through the one function that owns the provenance envelope.
         // There is deliberately no second path from a Note to text here.
+        let notes = match self.notes() {
+            Ok(notes) => notes,
+            Err(e) => return ToolResult::Refused(format!("memory store unreadable: {e:#}")),
+        };
         ToolResult::Text(render(&search_phrased(
-            &self.notes(),
+            &notes,
             &phrasings,
             Budget::default(),
         )))
@@ -228,7 +223,10 @@ impl Tools for Server {
                 // Computed now, from the store as it is now. Cached at
                 // startup, a note written this session stays unadvertised for
                 // the rest of it.
-                description: describe(&Index::of(&self.notes())),
+                description: match self.notes() {
+                    Ok(notes) => describe(&Index::of(&notes)),
+                    Err(e) => format!("Memory store unreadable: {e:#}"),
+                },
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -308,6 +306,27 @@ mod tests {
         }
         out.sort();
         out
+    }
+
+    #[test]
+    fn a_malformed_note_is_reported_instead_of_claiming_the_store_is_empty() {
+        let mut fx = fixture();
+        std::fs::create_dir_all(&fx.server.notes_dir).unwrap();
+        std::fs::write(fx.server.notes_dir.join("broken.md"), "not frontmatter\n").unwrap();
+
+        let (said, refused) = text(
+            fx.server
+                .call("recall", &json!({"question": "what happened"})),
+        );
+
+        assert!(
+            refused,
+            "an unreadable store must be an explicit error: {said}"
+        );
+        assert!(
+            said.contains("broken.md"),
+            "name the note that failed: {said}"
+        );
     }
 
     fn observation() -> serde_json::Value {

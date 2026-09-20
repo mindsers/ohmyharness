@@ -13,6 +13,7 @@
 //! uncommitted work the worktree model exists to protect.
 
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,9 +80,9 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
         } else if tracked(repo, rel) {
             Action::AlreadyTracked
         } else if src.is_dir() {
-            copy_dir(&src, &dst)?
+            copy_dir(worktree, &src, &dst)?
         } else {
-            copy_file(&src, &dst)?
+            copy_file(worktree, &src, &dst)?
         };
         out.push(Carried {
             path: pattern.clone(),
@@ -226,7 +227,33 @@ fn tracked(repo: &Path, rel: &str) -> bool {
 
 /// The checkout is the source of truth for carried files — they are yours, not
 /// the agent's — so a changed source replaces the copy.
-fn copy_file(src: &Path, dst: &Path) -> Result<Action> {
+fn validate_destination(root: &Path, dst: &Path) -> Result<()> {
+    let rel = dst
+        .strip_prefix(root)
+        .with_context(|| format!("{} is outside {}", dst.display(), root.display()))?;
+    let mut at = root.to_path_buf();
+    for component in rel.components() {
+        at.push(component);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                anyhow::bail!("carry_in destination {} is a symbolic link", at.display())
+            }
+            Ok(meta) if at != dst && !meta.is_dir() => {
+                anyhow::bail!(
+                    "carry_in destination parent {} is not a directory",
+                    at.display()
+                )
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("inspecting {}", at.display())),
+        }
+    }
+    Ok(())
+}
+
+fn copy_file(root: &Path, src: &Path, dst: &Path) -> Result<Action> {
+    validate_destination(root, dst)?;
     let incoming = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
     if std::fs::read(dst)
         .map(|existing| existing == incoming)
@@ -234,11 +261,16 @@ fn copy_file(src: &Path, dst: &Path) -> Result<Action> {
     {
         return Ok(Action::Unchanged);
     }
-    let existed = dst.exists();
+    let existed = std::fs::symlink_metadata(dst).is_ok();
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
+        validate_destination(root, parent)?;
+        let mut part = tempfile::NamedTempFile::new_in(parent)?;
+        part.write_all(&incoming)?;
+        part.persist(dst)
+            .map_err(|e| e.error)
+            .with_context(|| format!("writing {}", dst.display()))?;
     }
-    std::fs::write(dst, incoming).with_context(|| format!("writing {}", dst.display()))?;
     Ok(if existed {
         Action::Refreshed
     } else {
@@ -246,16 +278,17 @@ fn copy_file(src: &Path, dst: &Path) -> Result<Action> {
     })
 }
 
-fn copy_dir(src: &Path, dst: &Path) -> Result<Action> {
+fn copy_dir(root: &Path, src: &Path, dst: &Path) -> Result<Action> {
+    validate_destination(root, dst)?;
     std::fs::create_dir_all(dst)?;
     let mut action = Action::Unchanged;
     for entry in std::fs::read_dir(src)?.flatten() {
         let from = entry.path();
         let to = dst.join(entry.file_name());
         let result = if from.is_dir() {
-            copy_dir(&from, &to)?
+            copy_dir(root, &from, &to)?
         } else {
-            copy_file(&from, &to)?
+            copy_file(root, &from, &to)?
         };
         // The directory as a whole is as changed as its most-changed member.
         if result != Action::Unchanged && action == Action::Unchanged {
@@ -365,6 +398,48 @@ fn exclude(worktree: &Path, patterns: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_carried_file_does_not_follow_a_destination_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let worktree = dir.path().join("worktree");
+        let unrelated = dir.path().join("unrelated");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(repo.join(".env"), "new\n").unwrap();
+        std::fs::write(&unrelated, "keep\n").unwrap();
+        symlink(&unrelated, worktree.join(".env")).unwrap();
+
+        let result = apply(&repo, &worktree, &[".env".into()]);
+
+        assert!(result.is_err(), "a linked destination must be refused");
+        assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_carried_file_does_not_traverse_a_destination_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let worktree = dir.path().join("worktree");
+        let unrelated = dir.path().join("unrelated");
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(repo.join("config/app"), "new\n").unwrap();
+        symlink(&unrelated, worktree.join("config")).unwrap();
+
+        let result = apply(&repo, &worktree, &["config/app".into()]);
+
+        assert!(result.is_err(), "a linked parent must be refused");
+        assert!(!unrelated.join("app").exists());
+    }
 
     /// The three skips guard `materialise`'s `fs::copy`, which fails on a
     /// missing source and on a directory. Drop either and the error propagates
