@@ -10,7 +10,7 @@ host
   ✓  stacks detected     rust (from Cargo.toml)
   ✓  settings omh reads  every key set here is one omh reads
   ✓  leftovers           none — nothing orphaned on this machine
-  ✓  seeded by           version 0.14.0, the one running now
+  ✓  seeded by           version 0.14.1, the one running now
   ✓  disk                76.6 GB free on the filesystem holding /Users/you/.omh — …
   ✓  git on the host     git version 2.55.0 — takes a `--keep` selection; syncs
   ✓  declared config     resolves
@@ -201,7 +201,8 @@ chroot("/run/sshd"): Operation not permitted [preauth]
 
 sshd's unprivileged pre-auth process chroots to `/run/sshd`, and omh's
 container dropped `SYS_CHROOT` — a capability its own list described as having
-no caller. `0.14.0` gives it back.
+no caller. `0.14.1` gives it back — it was missing since the runtime seam
+landed, so every omh that could attach at all had this.
 
 **A container created by an older omh keeps the old capability set**, because
 capabilities are fixed when a container is created and not when it starts. Take

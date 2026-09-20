@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.14.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.14.1`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -22,7 +22,18 @@ architecture is built for and not yet a thing anybody has done.
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
 
-**`0.14.0` makes what a session learned reach the next one.** The note store
+**`0.14.1` fixes three things nobody could see.** No editor could attach to
+any session — sshd dropped every connection before authentication, because
+omh's container dropped the one capability its privilege separation needs, and
+omh reported it as the editor failing to open. A fresh install's `omh doctor`
+ended red on a memory server it had never built, and the row said the server
+answered wrongly rather than that nothing was there. And a set of session
+lifecycle paths could lose work: `sync` conflating a branch tip with its old
+baseline, a removal that could not see uncommitted work when shadow state was
+missing, a migration that left git worktrees unusable, a carry-in that
+overwrote a symlinked destination.
+
+**0.14.0 made what a session learned reach the next one.** The note store
 had two layers — one committed, one yours — and a finding stayed invisible to
 every other session until somebody committed, pushed and merged it. There is
 one store now, at `~/.omh/memory/<repo>`, shared by every session of the repo
