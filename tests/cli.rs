@@ -12341,8 +12341,10 @@ enum Needs {
 #[derive(Debug, Clone, Copy)]
 enum Expect {
     Ok,
-    /// Non-zero, and the output names this.
-    Refuses(&'static str),
+    /// Non-zero, and the output names each of these — matched without case,
+    /// because some of what a refusal prints is the runtime's own words and
+    /// those differ by platform.
+    Refuses(&'static [&'static str]),
 }
 
 /// One real invocation.
@@ -12458,7 +12460,7 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &["settings", "mcp"],
         needs: Needs::Repo,
-        expect: Expect::Refuses("MCP servers"),
+        expect: Expect::Refuses(&["MCP servers"]),
         runtime: false,
     },
     Exercise {
@@ -12685,20 +12687,27 @@ const EXERCISES: &[Exercise] = &[
         runtime: true,
     },
     // A launch ends by handing you the harness on a terminal, and a test
-    // harness has none — so the last thing it says is that it will not attach
-    // to a pipe. Everything before that is the launch: the image, the mounts,
-    // the container. The refusal is asserted by its own words rather than by
-    // the exit code alone, so a container that never came up fails here.
+    // harness has none — so the last thing that happens is the runtime
+    // refusing to attach a pipe. Everything before it is the launch: the
+    // image, the mounts, the container.
+    //
+    // Two strings, and the split matters. omh's banner names the harness and
+    // the session it brought up, which is the part worth asserting; the
+    // refusal itself is **the runtime's own words and they differ by
+    // platform** — `cannot attach stdin to a TTY-enabled container` on Docker
+    // Desktop, `the input device is not a TTY` on Linux. Pinning the first
+    // spelling passed on a Mac and failed on CI, which is the whole reason
+    // this table asserts what omh says and only the shape of what Docker says.
     Exercise {
         argv: &["new", "claude", "--", "--version"],
         needs: Needs::Repo,
-        expect: Expect::Refuses("cannot attach stdin"),
+        expect: Expect::Refuses(&["claude on omh/s0", "tty"]),
         runtime: true,
     },
     Exercise {
         argv: &["s01", "resume", "claude", "--", "--version"],
         needs: Needs::Session,
-        expect: Expect::Refuses("cannot attach stdin"),
+        expect: Expect::Refuses(&["claude on omh/s0", "tty"]),
         runtime: true,
     },
     Exercise {
@@ -12735,7 +12744,7 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &["s01", "commit", "--keep", "--edit"],
         needs: Needs::Session,
-        expect: Expect::Refuses("no terminal here"),
+        expect: Expect::Refuses(&["no terminal here"]),
         runtime: true,
     },
     Exercise {
@@ -12860,17 +12869,20 @@ fn exercise(sb: &Sandbox, e: &Exercise) {
             "`omh {}` failed:\n{said}",
             e.argv.join(" ")
         ),
-        Expect::Refuses(word) => {
+        Expect::Refuses(words) => {
             assert!(
                 !out.status.success(),
                 "`omh {}` was supposed to refuse:\n{said}",
                 e.argv.join(" ")
             );
-            assert!(
-                said.contains(word),
-                "`omh {}` refused without saying `{word}`:\n{said}",
-                e.argv.join(" ")
-            );
+            let lowered = said.to_lowercase();
+            for word in words {
+                assert!(
+                    lowered.contains(&word.to_lowercase()),
+                    "`omh {}` refused without saying `{word}`:\n{said}",
+                    e.argv.join(" ")
+                );
+            }
         }
     }
 }
