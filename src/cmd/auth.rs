@@ -116,13 +116,10 @@ fn login_in_sandbox(
     let session = Session::scratch(paths.scratch("auth"), "auth".into());
     session.ensure(&paths.repo, "")?;
 
-    // The sandbox's host key, made here rather than left to the mount.
-    // **A directory Docker creates is root's.** Every plan mounts
-    // `keys/<repo>/host`, and on Linux a bind mount whose host path does not
-    // exist is created by the daemon as root — taking `keys/<repo>` with it.
-    // The next `omh new` then cannot write its own client key beside it:
-    // `ssh-keygen: Saving key ".../id_ed25519" failed: Permission denied`.
-    // Invisible on Docker Desktop, which maps the mount to the calling user.
+    // The sandbox's host key, made here rather than left to the mount — the
+    // reason is with the same call in `cmd::inspect`'s doctor, which hit it
+    // first. In short: a bind mount whose host path does not exist is created
+    // by the daemon, as root, on Linux.
     crate::ssh::ensure_host_key(&paths.keys())?;
 
     let (own, repo) = crate::cmd::session::resolved(paths)?;

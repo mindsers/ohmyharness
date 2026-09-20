@@ -31,15 +31,23 @@ binary what omh accepts and fails when anything in that answer has no run
 behind it. Declare a flag and it fails by name:
 
 ```
-1 of omh's 114 commands and flags have no run behind them:
+1 of omh's N commands and flags have no run behind them:
   omh graph --loudly
 ```
 
 Add a line to `EXERCISES` — a real argv, not a claim about one, since what it
-covers is derived from the argv itself. The container-backed half runs under
-`--include-ignored`; everything else runs on every push. A command that cannot
-run for real (a browser login, a `gh pr create`) gets a stand-in on the
-sandbox's PATH, and the stand-in is named as one where it is built.
+covers is derived from the argv itself. The container-backed half is
+`#[ignore]`d, which means the linux job runs it on every push and the macOS
+job does not. A command that cannot
+run for real gets a stand-in, named as one where it is built: on the sandbox's
+PATH when it is a program omh runs (`gh`, an editor), on disk when it is a file
+omh reads (a captured login). An editor especially — without a stand-in
+`attach` finds the real one, and the suite opens windows on your desktop.
+
+The container-backed tests each hold a Docker network while they run, and
+Docker's address pool is finite: a few of them in parallel on a machine with
+leftovers is `all predefined address pools have been fully subnetted`. Clear
+stale ones with `docker network ls | grep omh-` before blaming your change.
 
 ## Honesty about coverage
 
