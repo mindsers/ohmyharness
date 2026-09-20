@@ -2753,6 +2753,43 @@ fn doctor_checks_the_memory_server_before_any_launch() {
     );
 }
 
+/// `omh doctor` makes the sandbox's host key rather than letting the mount
+/// make it.
+///
+/// Every plan mounts `keys/<repo>/host`, and on Linux a bind mount whose host
+/// path does not exist is created by the daemon **as root**, taking
+/// `keys/<repo>` with it. The next `omh new` then cannot write its own client
+/// key beside it:
+///
+/// ```text
+/// omh: ssh-keygen: Saving key ".../keys/repo-2d0f305f/id_ed25519" failed: Permission denied
+/// ```
+///
+/// Only `session_up` generated the key; `doctor` and `auth` mounted the
+/// directory and left it to Docker. Invisible on Docker Desktop, which maps
+/// the mount to the calling user — it took a Linux CI runner and a sweep that
+/// happens to run `doctor` before `new` to see it at all.
+///
+/// The assertion is on the *cause*, so it is one any machine can make: the key
+/// exists after `doctor`, which is exactly what stops the daemon inventing the
+/// directory.
+///
+/// `#[ignore]`d because it needs a container runtime.
+#[test]
+#[ignore]
+fn doctor_makes_the_host_key_rather_than_letting_the_mount_make_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    let out = sb.omh(&["doctor", "--harness", "claude"]);
+    assert!(
+        sb.keyed("keys").join("host/ssh_host_ed25519_key").is_file(),
+        "doctor left the host key to the mount: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A previewed `omh doctor` builds nothing.
 ///
 /// The other half of the rule above, and the half a fix reaches for: if
@@ -12058,5 +12095,901 @@ fn an_unreadable_credential_directory_stops_the_launch() {
         said.contains("creds") || said.contains("Permission denied"),
         "the refusal has to name what omh could not read, or it reads as \
          `omh auth` never having been run: {said}"
+    );
+}
+
+// ── the command surface ─────────────────────────────────────────────────────
+
+/// One command's own surface: the flags it declares and the positionals it
+/// takes, in the order `--help` lists them.
+#[derive(Debug, Default)]
+struct Spelling {
+    flags: std::collections::BTreeSet<String>,
+    positionals: Vec<String>,
+}
+
+/// The command tree, plus the aliases help declares for it. `omh d` and
+/// `omh s01 resume` have to resolve to the same paths as `omh doctor` and
+/// `omh sessions resume`, or an invocation written the short way covers
+/// nothing and the gate asks for a run that already exists.
+#[derive(Debug, Default)]
+struct Surface {
+    cmds: std::collections::BTreeMap<String, Spelling>,
+    aliases: std::collections::BTreeMap<String, String>,
+}
+
+/// **The four global flags are counted once, at the root.** clap repeats
+/// `--json`, `--dry-run`, `--session` and `--color` in every subcommand's
+/// help, which would make most of the entries those same four. What each
+/// command does with them is not skipped, it is checked better elsewhere:
+/// `cli::previews` and `cli::answers_json` classify every command
+/// exhaustively, and `main.rs` refuses the flag where the answer is no.
+const GLOBAL_FLAGS: [&str; 4] = ["--json", "--dry-run", "--session", "--color"];
+
+/// Everything omh accepts, asked of the binary — a map from `omh <path>` to
+/// what that path takes.
+///
+/// Read from `--help` rather than from clap in process, because this file
+/// drives the real binary and a list maintained by hand would be a second
+/// place to forget, which is the defect this exists to catch.
+fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
+    let help = Command::new(bin)
+        .args(path)
+        .arg("--help")
+        .output()
+        .expect("the binary under test must run");
+    let text = String::from_utf8_lossy(&help.stdout).to_string();
+    let here = match path.is_empty() {
+        true => "omh".to_string(),
+        false => format!("omh {}", path.join(" ")),
+    };
+    let mut spelling = Spelling::default();
+
+    let mut section = "";
+    let mut subs: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if !line.starts_with(' ') && line.ends_with(':') {
+            section = match line.trim_end_matches(':') {
+                "Commands" => "commands",
+                "Options" => "options",
+                "Arguments" => "arguments",
+                _ => "",
+            };
+            continue;
+        }
+        // The help columns: the spelling, then two or more spaces, then prose.
+        // Reading the whole line found `--repo` inside a *description* and
+        // enumerated a flag that does not exist.
+        //
+        // Commands with long help put the description on its own line,
+        // indented past the spelling column — which is how `Which harness's
+        // shapes to render into` became an argument called `Which`. Anything
+        // indented that far is prose.
+        let indent = line.len() - line.trim_start().len();
+        if indent > 8 {
+            continue;
+        }
+        let spelled = line.trim_start().split("  ").next().unwrap_or_default();
+        let Some(first) = spelled.split_whitespace().next() else {
+            continue;
+        };
+        match section {
+            // `help` is clap's, on every command, and running it proves
+            // nothing about omh.
+            "commands" if first != "help" && !first.starts_with('-') => {
+                // `doctor    Verify … [alias: d]`, or `[aliases: a, b]`.
+                if let Some((_, rest)) = line.split_once("[alias") {
+                    if let Some((_, list)) = rest.split_once(':') {
+                        for alias in list.trim_end_matches(']').split(',') {
+                            out.aliases
+                                .insert(alias.trim().to_string(), first.to_string());
+                        }
+                    }
+                }
+                subs.push(first.to_string())
+            }
+            "options" => {
+                for word in spelled.split_whitespace() {
+                    if let Some(name) = word.trim_end_matches(',').strip_prefix("--") {
+                        let flag = format!("--{name}");
+                        // `--help` and `--version` are clap's own; the globals
+                        // are counted at the root.
+                        if !matches!(name, "help" | "version")
+                            && (path.is_empty() || !GLOBAL_FLAGS.contains(&flag.as_str()))
+                        {
+                            spelling.flags.insert(flag);
+                        }
+                        break;
+                    }
+                }
+            }
+            "arguments" => {
+                let name = first.trim_matches(|c: char| "[]<>.".contains(c));
+                if !name.is_empty() {
+                    spelling.positionals.push(name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out.cmds.insert(here, spelling);
+    for sub in subs {
+        let mut deeper: Vec<&str> = path.to_vec();
+        deeper.push(&sub);
+        surface_under(bin, &deeper, out);
+    }
+}
+
+fn surface() -> Surface {
+    let mut out = Surface::default();
+    surface_under(
+        std::path::Path::new(env!("CARGO_BIN_EXE_omh")),
+        &[],
+        &mut out,
+    );
+    out
+}
+
+/// Every item that has to be exercised: the command itself, each flag of its
+/// own, each positional.
+fn surface_items(surface: &Surface) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (path, spelling) in &surface.cmds {
+        out.insert(path.clone());
+        for flag in &spelling.flags {
+            out.insert(format!("{path} {flag}"));
+        }
+        for arg in &spelling.positionals {
+            out.insert(format!("{path} <{arg}>"));
+        }
+    }
+    out
+}
+
+/// What one real invocation exercises, derived from the argv rather than
+/// declared beside it.
+///
+/// A declared list would be the second place to forget that this whole test
+/// exists to abolish: someone would write `covers: ["omh memory rm --at"]`,
+/// change the argv, and the claim would outlive the run. Here the run is the
+/// claim.
+fn covered_by(surface: &Surface, argv: &[&str]) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut path = "omh".to_string();
+    let mut flags: Vec<&str> = Vec::new();
+    let mut positionals = 0usize;
+    let mut still_walking = true;
+
+    for token in argv {
+        if *token == "--" {
+            // Everything after it belongs to the harness, not to omh — but the
+            // fact that omh *has* an `<ARGS>` positional is exercised by it.
+            positionals += 1;
+            break;
+        }
+        if let Some(flag) = token.strip_prefix("--") {
+            flags.push(flag);
+            continue;
+        }
+        // The short spellings of the globals. `-s` is the one anybody types.
+        if let Some(short) = token.strip_prefix('-') {
+            if short == "s" {
+                flags.push("session");
+            }
+            continue;
+        }
+        if still_walking {
+            // `s01` is the session form of `omh sessions`, and an alias is the
+            // command it names.
+            let canonical = match token.len() >= 2
+                && token.starts_with('s')
+                && token[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                true => "sessions",
+                false => surface.aliases.get(*token).map_or(*token, String::as_str),
+            };
+            let deeper = format!("{path} {canonical}");
+            if surface.cmds.contains_key(&deeper) {
+                path = deeper;
+                continue;
+            }
+            still_walking = false;
+        }
+        positionals += 1;
+    }
+
+    out.insert(path.clone());
+    let Some(spelling) = surface.cmds.get(&path) else {
+        return out;
+    };
+    for flag in flags {
+        let spelled = format!("--{flag}");
+        // A flag written `--key=value` is the same flag.
+        let name = spelled.split('=').next().unwrap_or(&spelled).to_string();
+        // A global belongs to the root wherever it is typed: that is the one
+        // place the surface counts it, and `omh --json info` is how anyone
+        // actually types it.
+        if GLOBAL_FLAGS.contains(&name.as_str()) {
+            out.insert(format!("omh {name}"));
+        }
+        if spelling.flags.contains(&name) {
+            out.insert(format!("{path} {name}"));
+        }
+    }
+    for arg in spelling.positionals.iter().take(positionals) {
+        out.insert(format!("{path} <{arg}>"));
+    }
+    out
+}
+
+/// What a run needs before it means anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Needs {
+    /// A git repo with omh's catalogue seeded. Enough for everything that
+    /// reads configuration rather than containers.
+    Repo,
+    /// …and a session worktree, made the way omh makes one, with work in it
+    /// and trunk moved on.
+    Session,
+    /// …and a note in the store.
+    Store,
+}
+
+/// What the run has to do. A refusal is an answer: several commands exist to
+/// say no, and asserting success would mean building a fixture that misses
+/// their point.
+#[derive(Debug, Clone, Copy)]
+enum Expect {
+    Ok,
+    /// Non-zero, and the output names each of these — matched without case,
+    /// because some of what a refusal prints is the runtime's own words and
+    /// those differ by platform.
+    Refuses(&'static [&'static str]),
+}
+
+/// One real invocation.
+struct Exercise {
+    argv: &'static [&'static str],
+    needs: Needs,
+    expect: Expect,
+    /// Whether it drives a container. Those are the slow half, and they are
+    /// kept together so the cheap half is never their hostage.
+    runtime: bool,
+}
+
+/// Every command and flag, run for real.
+///
+/// `every_command_and_flag_is_exercised_by_a_real_run` is what keeps this
+/// honest: it asks the binary what omh accepts and fails when anything in that
+/// answer has no run here. A flag added tomorrow fails the moment it is
+/// declared, naming itself.
+///
+/// **Order is part of the table.** Half of these only mean something in
+/// sequence — `settings mcp rm demo` is a real removal after `settings mcp add
+/// demo` and a refusal without it, and `s01 rm` has to come last because it
+/// takes the session away.
+const EXERCISES: &[Exercise] = &[
+    // ── things that read the machine ────────────────────────────────────
+    Exercise {
+        argv: &["info"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["info", "--repo"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["--json", "info"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["--color", "never", "info"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["why", "codegraph"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // A preview of something that writes a tree. `init` refuses `--dry-run` —
+    // `cli::previews` is the list, and `eject` is on it for the reason given
+    // there: its whole effect is files.
+    Exercise {
+        argv: &["--dry-run", "eject", "claude", "--to", "../previewed"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // ── the note store ──────────────────────────────────────────────────
+    Exercise {
+        argv: &[
+            "memory",
+            "remember",
+            "--expected",
+            "a mount would persist the login",
+            "--observed",
+            "mounting a credential file returns EBUSY",
+            "--evidence",
+            "EBUSY from the mount syscall",
+            "--answers",
+            "why does mounting auth.json fail",
+            "--source",
+            "audit",
+            "--relates-to",
+            "surprise/something-else",
+            "--invalidated-by",
+            "file:mcp.json@0000000000000000000000000000000000000000",
+            "--if-exists",
+            "override",
+        ],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // ── configuration ───────────────────────────────────────────────────
+    Exercise {
+        argv: &["settings"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "set", "idle_timeout", "45m"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "unset", "idle_timeout"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // A group with no default verb: clap prints its help and exits non-zero.
+    // That *is* the contract — the command exists and says what it holds — and
+    // asserting success here would be asserting something omh does not do.
+    Exercise {
+        argv: &["settings", "mcp"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["MCP servers"]),
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "mcp", "ls"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &[
+            "settings",
+            "mcp",
+            "add",
+            "demo",
+            "demo-server",
+            "--env",
+            "TOKEN=x",
+            "--",
+            "--flag",
+        ],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "mcp", "rm", "demo"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &[
+            "settings",
+            "mcp",
+            "import",
+            "claude",
+            "--from",
+            "mcp.json",
+            "--replace",
+        ],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["set", "idle_timeout", "30m", "--local"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["set", "idle_timeout", "30m", "--save"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["unset", "idle_timeout", "--local"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["unset", "idle_timeout", "--save"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["unset", "account", "codex"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // Before `use`: the catalogue entry has to exist to be selected, and this
+    // is the command that creates one.
+    Exercise {
+        argv: &["settings", "edit", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["use", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["use", "--all"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["unuse", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // ── rendering and adoption, which need no container ─────────────────
+    Exercise {
+        argv: &["eject", "claude", "--to", "../ejected"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["import", "skills", "claude", "--from", "imported/skills"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // ── the store, with something in it ─────────────────────────────────
+    Exercise {
+        argv: &["memory"],
+        needs: Needs::Store,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["memory", "lint"],
+        needs: Needs::Store,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["memory", "stale"],
+        needs: Needs::Store,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["memory", "rm", "seeded", "--at", "seeded.md"],
+        needs: Needs::Store,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // ── sessions, without a container ───────────────────────────────────
+    Exercise {
+        argv: &["sessions"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["--session", "s01", "sessions", "log"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["s01", "log", "--turns"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["s01", "diff", "--base", "main", "--patch"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // Last in its group: it takes the session away.
+    Exercise {
+        argv: &["s01", "rm", "--yes"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // ── the container half ──────────────────────────────────────────────
+    //
+    // `--dry-run` where the real thing would take something away: a preview is
+    // a real run of the code that decides, and `prune --dangerously-include-
+    // unsafe` on a machine shared with somebody's sessions is not a test, it
+    // is an accident waiting for a CI runner that is not as disposable as
+    // promised.
+    Exercise {
+        argv: &["init"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["doctor", "--harness", "claude"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["upgrade"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["prune"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["--dry-run", "prune", "--dangerously-include-unsafe"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["auth", "claude", "--name", "work", "--import"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["graph"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["graph", "--stop"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    // A launch ends by handing you the harness on a terminal, and a test
+    // harness has none — so the last thing that happens is the runtime
+    // refusing to attach a pipe. Everything before it is the launch: the
+    // image, the mounts, the container.
+    //
+    // Two strings, and the split matters. omh's banner names the harness and
+    // the session it brought up, which is the part worth asserting; the
+    // refusal itself is **the runtime's own words and they differ by
+    // platform** — `cannot attach stdin to a TTY-enabled container` on Docker
+    // Desktop, `the input device is not a TTY` on Linux. Pinning the first
+    // spelling passed on a Mac and failed on CI, which is the whole reason
+    // this table asserts what omh says and only the shape of what Docker says.
+    Exercise {
+        argv: &["new", "claude", "--", "--version"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["claude on omh/s0", "tty"]),
+        runtime: true,
+    },
+    Exercise {
+        argv: &["s01", "resume", "claude", "--", "--version"],
+        needs: Needs::Session,
+        expect: Expect::Refuses(&["claude on omh/s0", "tty"]),
+        runtime: true,
+    },
+    Exercise {
+        argv: &["s01", "attach", "code"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["s01", "sync", "--base", "main", "--down"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &[
+            "s01",
+            "commit",
+            "--message",
+            "what the agent did",
+            "--no-verify",
+            "--skip-carried",
+            "--allow-conflicts",
+        ],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    // `--edit` refuses without a terminal, on purpose and in those words: git
+    // would run the list unedited and report success, which is the shape of
+    // silent loss this verb exists to prevent. What `--keep` *does* with a
+    // selection is pinned by `shadow::tests::a_selection_lands_those_commits_in_that_order`
+    // and the three tests beside it.
+    Exercise {
+        argv: &["s01", "commit", "--keep", "--edit"],
+        needs: Needs::Session,
+        expect: Expect::Refuses(&["no terminal here"]),
+        runtime: true,
+    },
+    Exercise {
+        argv: &["s01", "push", "review/s01", "--pr"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+    Exercise {
+        argv: &["s01", "down"],
+        needs: Needs::Session,
+        expect: Expect::Ok,
+        runtime: true,
+    },
+];
+
+/// The state an exercise needs, built the way omh builds it.
+fn staged_for(needs: Needs) -> Sandbox {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    match needs {
+        Needs::Repo => {}
+        Needs::Session => {
+            sb.session("s01");
+            // Work in the sandbox, as an agent would have left it: `commit`
+            // with nothing to land says so and exits non-zero, so without this
+            // the sweep would exercise the empty case of the one command whose
+            // whole job is not to lose work.
+            std::fs::write(
+                sb.keyed("worktrees").join("s01/the-agent-wrote-this.md"),
+                "a change the agent left behind\n",
+            )
+            .unwrap();
+            // And one commit on trunk after the session forked, so `sync` has
+            // something to bring over: with nothing to merge it reports
+            // `already on main` and exits non-zero.
+            std::fs::write(sb.repo.join("moved-on.md"), "trunk moved\n").unwrap();
+            for args in [vec!["add", "-A"], vec!["commit", "-qm", "trunk moved on"]] {
+                let out = Command::new("git")
+                    .arg("-C")
+                    .arg(&sb.repo)
+                    .args(&args)
+                    .output()
+                    .expect("git must be installed to run this test");
+                assert!(out.status.success(), "git {args:?}: {out:?}");
+            }
+        }
+        Needs::Store => {
+            sb.seed("seeded.md", &note("seeded", WHOLE));
+        }
+    }
+
+    // A catalogue with something in it. `seed_catalogue` copies the
+    // repository's own directories, which hold adapters and stacks and no
+    // skills, so `omh use skills …` had nothing to select — and `settings
+    // edit` could not have made one: the fixture's editor records its argv and
+    // writes nothing, which is the right fake for *was it opened* and the
+    // wrong one for *did it produce an entry*.
+    let skill = sb.home.join(".omh/skills/review-diff");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: review-diff\ndescription: read a diff\n---\n\n# Review a diff\n",
+    )
+    .unwrap();
+
+    // A `gh` on the sandbox's PATH. One of two fakes here: the real one wants
+    // a GitHub account, a token and a network, and what `omh sNN push --pr`
+    // owes anybody is that it runs `gh pr create` with the branch it just
+    // pushed — which a stand-in that prints a URL can answer. The push itself
+    // is real, to the sandbox's own origin.
+    let gh = sb.bin.join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\nprintf '%s\\n' \"https://example.invalid/pr/1\"\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    // The other fake: a login for `omh auth claude --import` to copy, since
+    // the real path is a browser and a person. Deliberately not `{}` — that is
+    // what `auth::prepare` writes for *no credential captured*, so a fixture
+    // using it would seed the absent marker and pass against the bug.
+    let login = sb.home.join(".claude");
+    std::fs::create_dir_all(&login).unwrap();
+    std::fs::write(
+        login.join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"not-a-real-token","expiresAt":9999999999}}"#,
+    )
+    .unwrap();
+
+    // What the runs read: a directory to import from and a catalogue to
+    // import. Written here rather than in the table so the table stays a list
+    // of command lines.
+    let from = sb.repo.join("imported/skills/review-diff");
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::write(
+        from.join("SKILL.md"),
+        "---\nname: review-diff\n---\n\n# x\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sb.repo.join("mcp.json"),
+        r#"{"mcpServers":{"imported":{"command":"demo","args":[]}}}"#,
+    )
+    .unwrap();
+    sb
+}
+
+/// Run one, and say which line failed rather than that something did.
+fn exercise(sb: &Sandbox, e: &Exercise) {
+    let out = sb.omh(e.argv);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    match e.expect {
+        Expect::Ok => assert!(
+            out.status.success(),
+            "`omh {}` failed:\n{said}",
+            e.argv.join(" ")
+        ),
+        Expect::Refuses(words) => {
+            assert!(
+                !out.status.success(),
+                "`omh {}` was supposed to refuse:\n{said}",
+                e.argv.join(" ")
+            );
+            let lowered = said.to_lowercase();
+            for word in words {
+                assert!(
+                    lowered.contains(&word.to_lowercase()),
+                    "`omh {}` refused without saying `{word}`:\n{said}",
+                    e.argv.join(" ")
+                );
+            }
+        }
+    }
+}
+
+/// Every command line in the table that needs no container.
+///
+/// One sandbox per kind of fixture, in table order, because half of these
+/// commands only mean something in sequence.
+#[test]
+fn the_surface_runs_without_a_container() {
+    for needs in [Needs::Repo, Needs::Session, Needs::Store] {
+        let sb = staged_for(needs);
+        for e in EXERCISES.iter().filter(|e| !e.runtime && e.needs == needs) {
+            exercise(&sb, e);
+        }
+    }
+}
+
+/// The container half, in table order and in one sandbox, because it is a
+/// session's life: set the repo up, look at it, start one, land it, take it
+/// down. A fixture apiece would cross-build the memory server a dozen times to
+/// prove the same thing.
+///
+/// `#[ignore]`d because it needs a container runtime.
+#[test]
+#[ignore]
+fn the_surface_runs_with_a_container() {
+    let sb = staged_for(Needs::Session);
+    for e in EXERCISES.iter().filter(|e| e.runtime) {
+        exercise(&sb, e);
+    }
+
+    // Through omh's own verbs, and not best-effort: a sweep that leaves a
+    // container and a network per run is how a machine reaches Docker's
+    // `all predefined address pools have been fully subnetted` — which this
+    // sweep hit twice while it was being written.
+    //
+    // Named, because a landing verb refuses a bare call: `omh s rm` with no
+    // selector asks which session rather than removing all of them. `s02` is
+    // the one `omh new` made.
+    for last in [
+        vec!["sessions", "down"],
+        vec!["s01", "rm", "--yes"],
+        vec!["s02", "rm", "--yes"],
+        vec!["prune"],
+    ] {
+        let out = sb.omh(&last);
+        assert!(
+            out.status.success(),
+            "`omh {}` must clean up after this sweep: {}",
+            last.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // The repo's own network, removed by hand because no omh verb can: a
+    // session's network goes with the session, and the repo's goes when the
+    // checkout does — which for this sandbox is after the test ends. `prune`
+    // is right to leave it alone while the checkout is still there.
+    let _ = Command::new("docker")
+        .args(["network", "rm", &format!("omh-{}", sb.repo_id())])
+        .output();
+}
+
+/// The whole surface, and what is left over once every run above is counted.
+#[test]
+fn every_command_and_flag_is_exercised_by_a_real_run() {
+    let surface = surface();
+    let all = surface_items(&surface);
+    let mut left = all.clone();
+    for e in EXERCISES {
+        for item in covered_by(&surface, e.argv) {
+            left.remove(&item);
+        }
+    }
+    assert!(
+        left.is_empty(),
+        "{} of omh's {} commands and flags have no run behind them:\n  {}",
+        left.len(),
+        all.len(),
+        left.into_iter().collect::<Vec<_>>().join("\n  ")
+    );
+}
+
+/// What the enumerator can see, named rather than counted.
+///
+/// A scan keyed on the shape of `--help` goes quiet the moment that shape
+/// changes: clap could rename a section and this would read less and say
+/// nothing, which is the failure mode every guard in this repo that reads text
+/// has hit at least once. A floor of "more than fifty" is satisfied by the
+/// commands alone, so the floor names one of each *kind* of thing instead.
+#[test]
+fn the_surface_reads_commands_flags_and_positionals() {
+    let items = surface_items(&surface());
+    for must in [
+        "omh doctor",
+        "omh settings mcp add",
+        "omh doctor --harness",
+        "omh memory rm <KEY>",
+        "omh --json",
+    ] {
+        assert!(items.contains(must), "the walk never saw `{must}`");
+    }
+    // And that a global is counted **once**: repeated per command it would be
+    // forty entries saying the same thing, and the table would grow to match.
+    assert!(
+        !items.contains("omh doctor --json"),
+        "the globals are the root's, or this table is mostly four flags"
     );
 }

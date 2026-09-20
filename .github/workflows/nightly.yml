@@ -1,0 +1,28 @@
+# The sweep, once a day, against whatever the world looks like that morning.
+#
+# `verify` runs the same tests on every push, so this is not about the code:
+# it is about everything the code sits on. The base image is `node:22-trixie-
+# slim` by tag, Docker moves, and the harnesses' own installers run at image
+# build time — none of which a pull request changes, and all of which have
+# broken a launch here before. A nightly run puts a date on the last time omh
+# was known to work end to end.
+name: nightly
+
+on:
+  schedule:
+    # 04:00 UTC, which is nobody's working hour in the timezones this is
+    # developed in — a failure is read with coffee rather than mid-review.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    name: every command, against a real container
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v4
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: run every test, including the ones that need Docker
+        run: cargo test --locked -- --include-ignored
