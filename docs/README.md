@@ -3,7 +3,7 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.14.0`. This release is about memory another session can
+**Status: early.** `0.14.1`. This release is about memory another session can
 use, and a sandbox whose git can merge. One note store per repo at
 `~/.omh/memory/<repo>`, shared the moment a note is written and never
 committed — [`omh memory`](commands.md#omh-memory-) — and a base image on
@@ -25,7 +25,10 @@ before landing in 0.10.0, the [silent failures](design/roadmap.md)
 closed in 0.8.0, the [command surface](design/profile.md) landed in 0.7.0 and
 the [work loop](design/git.md) in 0.6.0.
 
-`0.14.0` retires the committed note layer and `omh memory promote` with it, and
+`0.14.1` is repairs: no editor could attach to a session, a fresh install's
+[`omh doctor`](troubleshooting.md#omh-doctor) ended red on a memory server it
+had never built, and several session lifecycle paths could lose work or leave a
+worktree unusable. 0.14.0 retired the committed note layer and `omh memory promote` with it, and
 moves the store to `~/.omh/memory/<repo>` — a store under the old path moves
 itself, once, and says so. `omh doctor` gained a `git` row that asks the image
 rather than the host. 0.13.2 let Codex run commands and edit files: its own
