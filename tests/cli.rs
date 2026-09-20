@@ -623,7 +623,12 @@ fn committed_notes_are_named_as_no_longer_read() {
         !printed.contains("shared"),
         "and the committed file is not in it: {printed}"
     );
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains(".omh/notes") && said.contains("1"),
         "omh says what it is no longer reading, and how much of it: {said}"
@@ -658,7 +663,12 @@ fn a_store_under_the_old_path_moves_itself() {
         "and the file itself is under the new path"
     );
     assert!(!was.exists(), "nothing is left where omh no longer looks");
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains(sb.store().to_str().unwrap()),
         "omh says where the store went: {said}"
@@ -708,7 +718,12 @@ fn a_store_in_both_places_is_named_not_merged() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains(was.to_str().unwrap()) && said.contains(sb.store().to_str().unwrap()),
         "omh names both stores: {said}"
@@ -2388,7 +2403,12 @@ fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
     .unwrap();
 
     let out = sb.omh(&["--dry-run", "new", "claude"]);
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("this repo's hooks") && said.contains("rust-test"),
         "a launch has to name the executable content it was handed: {said}"
@@ -2765,6 +2785,84 @@ fn a_previewed_doctor_does_not_cross_build_anything() {
     assert!(
         !sb.home.join(".omh/bin").exists(),
         "a preview cross-built the memory server: {said}"
+    );
+}
+
+/// A launched session answers ssh, which is the whole of `omh sNN attach`.
+///
+/// Every editor `attach` offers is an ssh URL, so a container that cannot
+/// complete an ssh handshake has no attach at all — and omh reported it as the
+/// *editor's* failure: `nvim did not open the session`, then the same four
+/// commands to run by hand, each of which fails the same way.
+///
+/// It could not: `--cap-drop=ALL` came back without `SYS_CHROOT`, whose entry
+/// in `SESSION_CAPS` said it had "no caller in the image". sshd's
+/// unprivileged pre-auth process chroots to `/run/sshd`, so every connection
+/// died before authentication with `chroot("/run/sshd"): Operation not
+/// permitted [preauth]` — in a log inside the container, which is the last
+/// place anyone looks when their editor will not open.
+///
+/// Measured on both bases before the fix, so this is not the Debian 13 bump:
+/// bookworm's OpenSSH 9.2 and trixie's 10.0 both drop the connection without
+/// the capability, and both authenticate with it.
+///
+/// `#[ignore]`d because it launches a real container.
+#[test]
+#[ignore]
+fn a_launched_session_answers_ssh() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+    // A real worktree on `omh/s01`, as the resume test next door builds one:
+    // `git_init` alone leaves a repo with no commit, and a launch cannot fork
+    // a session branch from a HEAD that does not resolve.
+    sb.session("s01");
+    // The status is deliberately not asserted, as in the resume test next
+    // door: the container comes up and then omh cannot attach a TTY-enabled
+    // container to a test harness's stdin. The container is what this needs.
+    let _ = sb.omh(&["s01", "resume", "claude", "--", "--version"]);
+
+    // `attach` is what writes the ssh config — the launch does not — so this
+    // runs the command under test even though its editor will not open here.
+    let attached = sb.omh(&["s01", "attach"]);
+    let told = format!(
+        "{}{}",
+        String::from_utf8_lossy(&attached.stdout),
+        String::from_utf8_lossy(&attached.stderr)
+    );
+
+    // The file omh generates, read directly. `~/.ssh/config` only carries the
+    // `Include` that pulls it in, and pointing ssh at the generated block is
+    // the same connection an editor makes through that include.
+    let config = sb.home.join(".ssh/config.d/omh");
+    assert!(
+        config.is_file(),
+        "an attach writes the ssh config it then offers: {} — {told}",
+        config.display()
+    );
+    let out = Command::new("ssh")
+        .env("HOME", &sb.home)
+        .arg("-F")
+        .arg(&config)
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
+        .arg(sb.container("s01"))
+        .arg("true")
+        .output()
+        .expect("ssh must be installed to run this test");
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = sb.omh(&["s01", "down"]);
+
+    assert!(
+        out.status.success(),
+        "a session nobody can ssh into cannot be attached to: {said}"
     );
 }
 
@@ -3451,7 +3549,12 @@ fn unset_says_what_still_supplies_the_value() {
 
     let out = sb.omh(&["unset", "--local", "idle_timeout"]);
     assert!(out.status.success());
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("shared") && said.contains("idle_timeout"),
         "the layer still supplying it has to be named: {said}"
@@ -3547,7 +3650,12 @@ fn a_write_something_outranks_says_the_value_did_not_change() {
     // Named, so the rule steps aside — and says what that cost.
     let out = sb.omh(&["set", "--save", "idle_timeout", "30m"]);
     assert!(out.status.success(), "the write still happens");
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("outranks") && said.contains("20m"),
         "a value that did not change has to say which layer kept it: {said}"
@@ -3567,7 +3675,12 @@ fn the_advice_names_the_gitignored_file_not_the_one_written() {
 
     let out = sb.omh(&["set", "--save", "carry_in", "[\".env\"]"]);
     assert!(out.status.success());
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let advice = said
         .lines()
         .find(|l| l.contains("belongs in"))
@@ -3604,7 +3717,12 @@ fn a_key_that_carries_no_secret_is_not_singled_out() {
     sb.seed_catalogue(&["adapters"]);
     sb.account("claude", "work");
     let out = sb.omh(&["set", "--save", "account", "work"]);
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(said.contains("COMMITTED"), "got: {said}");
     assert!(
         !said.contains("belongs in"),
@@ -3804,7 +3922,12 @@ fn a_feature_takes_on_or_off_and_names_them() {
         !out.status.success(),
         "a feature is not a free-text setting"
     );
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("on") && said.contains("off"),
         "the refusal names the two words that work: {said}"
@@ -3926,7 +4049,12 @@ fn set_tells_an_entry_from_the_feature_that_contains_it() {
 
     let out = sb.omh(&["set", "graph-rules", "off"]);
     assert!(!out.status.success());
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("codegraph"),
         "naming the feature it belongs to is how somebody finds the grouping: {said}"
@@ -4337,7 +4465,12 @@ fn settings_refuses_a_feature_name() {
         vec!["settings", "unset", "codegraph"],
     ] {
         let out = sb.omh(&argv);
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             !out.status.success(),
             "`omh {}`: a feature is not a default",
@@ -4688,7 +4821,12 @@ fn the_renamed_template_is_reported_rather_than_dropped() {
 
     let out = sb.omh(&["settings"]);
     assert!(out.status.success());
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("settings.toml") && said.contains("default.toml"),
         "the old name and the new one, so the fix is obvious: {said}"
@@ -4718,7 +4856,12 @@ fn a_server_environment_is_refused_in_the_template() {
         !out.status.success(),
         "a token must not reach a committed file"
     );
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("omh settings mcp add"),
         "and it names where a server's environment belongs: {said}"
@@ -4876,7 +5019,12 @@ fn the_rename_is_reported_by_commands_other_than_settings() {
 
     for argv in [vec!["info"], vec!["settings"]] {
         let out = sb.omh(&argv);
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             said.contains("default.toml") && said.contains("settings.toml"),
             "`omh {}` said nothing about the file that stopped being read: {said}",
@@ -4916,7 +5064,12 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
             !out.status.success(),
             "`{template}` was accepted, and a repo seeded from it"
         );
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             said.contains(expected) && said.contains("default.toml"),
             "the refusal names the offending part and the template it is in — \
@@ -5042,7 +5195,12 @@ fn a_command_that_cannot_preview_refuses_the_flag() {
         let mut dry = vec!["--dry-run"];
         dry.extend(argv.iter().copied());
         let out = sb.omh(&dry);
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             !out.status.success(),
             "`omh {}` took a flag it does not honour",
@@ -5283,7 +5441,12 @@ fn the_account_is_the_setting_and_there_is_no_second_way_to_say_it() {
         vec!["doctor", "-a", "work"],
     ] {
         let out = sb.omh(&argv);
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             !out.status.success(),
             "`omh {}` names an account a second way",
@@ -5504,7 +5667,12 @@ fn a_session_scopes_a_session_verb_and_nothing_else() {
         "--answers",
         "d",
     ]);
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         !out.status.success(),
         "the store is repo-wide, so a session id here scopes nothing: {said}"
@@ -5805,7 +5973,12 @@ fn a_catalogue_entry_of_any_capability_is_not_a_setting() {
     ] {
         for argv in [vec!["set", name, "on"], vec!["settings", "set", name, "on"]] {
             let out = sb.omh(&argv);
-            let said = String::from_utf8_lossy(&out.stderr).to_string();
+            let said = format!(
+                "{:?}\n{}{}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             assert!(
                 !out.status.success(),
                 "`omh {}` wrote a catalogue entry as a bare key: {said}",
@@ -5924,7 +6097,12 @@ fn the_rename_is_silent_when_the_old_file_is_gone() {
     sb.seed_base();
 
     let out = sb.omh(&["info", "--repo"]);
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     // The only assertion here is a negative on stderr, and a command that
     // refused writes a *different* sentence to the same stream — so without
     // this the test passes hardest when the line does not run at all.
@@ -5949,7 +6127,12 @@ fn setting_a_default_is_not_reported_as_losing_to_a_repo() {
     assert!(sb.omh(&["set", "idle_timeout", "5m"]).status.success());
     let out = sb.omh(&["settings", "set", "idle_timeout", "45m"]);
     assert!(out.status.success());
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         !said.contains("outranks"),
         "the template does not lose a contest it is not in: {said}"
@@ -6047,7 +6230,12 @@ fn a_feature_switch_omh_cannot_read_is_named_not_skipped() {
     .unwrap();
 
     let out = sb.omh(&["unset", "--save", "codegraph"]);
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains("codegraph") && said.contains("true or false"),
         "the entry omh cannot read has to be named where it is found, not \
@@ -6342,7 +6530,12 @@ fn every_retired_spelling_is_refused_and_names_a_replacement() {
             "`omh {}` names a retired spelling and must be refused",
             argv.join(" ")
         );
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             said.contains("omh s attach") || said.contains("omh s ") || said.contains("omh memory"),
             "`omh {}` must name the spelling that replaced it, not clap's \
@@ -6392,7 +6585,12 @@ fn a_retired_flag_is_refused_with_what_replaced_it() {
         ),
     ] {
         let out = sb.omh(&argv);
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             !out.status.success(),
             "`omh {}` names a retired flag and must be refused",
@@ -6651,7 +6849,12 @@ fn a_retired_spelling_somewhere_other_than_the_verb_gets_claps_own_refusal() {
         ),
     ] {
         let out = sb.omh(&argv);
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             !out.status.success(),
             "`omh {}` is not a line omh accepts",
@@ -11360,7 +11563,12 @@ fn a_read_omh_could_not_make_reaches_stderr_and_not_only_the_report() {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
         return;
     }
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(out.status.success(), "`omh s` did not run: {said}");
     assert!(
         said.contains("sandbox repositories went unchecked"),
@@ -11701,7 +11909,12 @@ fn writing_an_unreadable_duration_says_so_at_the_time() {
             "`omh settings set idle_timeout {bad}` is warned about, not refused: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let said = format!(
+            "{:?}\n{}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(
             said.contains("idle_timeout"),
             "`{bad}` was stored with nothing said, so the first anyone hears of \
@@ -11775,7 +11988,12 @@ fn an_unreadable_catalogue_is_named_rather_than_listed_as_empty() {
     let out = sb.omh(&["new", "zed"]);
     std::fs::set_permissions(&editors, was).unwrap();
 
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let said = format!(
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!out.status.success(), "`omh new zed` has to fail: {said}");
     assert!(
         said.contains("editors"),
