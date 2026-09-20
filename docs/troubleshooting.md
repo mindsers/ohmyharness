@@ -178,6 +178,36 @@ The token was written somewhere that does not persist. `omh doctor` names it:
 
 Background in [Accounts](accounts.md#mount-the-directory-never-the-token-file).
 
+### `nvim did not open the session` — and neither does any other editor
+
+```console
+$ omh s06 attach
+omh: nvim did not open the session
+session s06 is up
+
+  ssh://omh-ohmyharness-c8a80c16-s06/work
+  ssh omh-ohmyharness-c8a80c16-s06
+```
+
+Every editor `attach` offers is an ssh URL, so this is never really about the
+editor: the container is refusing the connection, and each of the commands
+printed under it fails the same way. `ssh -v` shows it closing right after
+`SSH2_MSG_KEXINIT sent`, and the reason is in a log inside the container:
+
+```console
+$ docker exec -u root omh-<repo>-s06 tail -3 /omh/sshd.log
+chroot("/run/sshd"): Operation not permitted [preauth]
+```
+
+sshd's unprivileged pre-auth process chroots to `/run/sshd`, and omh's
+container dropped `SYS_CHROOT` — a capability its own list described as having
+no caller. `0.14.0` gives it back.
+
+**A container created by an older omh keeps the old capability set**, because
+capabilities are fixed when a container is created and not when it starts. Take
+the session down and start it again: `omh s06 down`, then `omh s06 resume
+<harness>`. The worktree and everything in it are untouched.
+
 ### `up?` in `omh s`, or `omh could not tell whether the sandbox is running`
 
 The container runtime is installed — omh checked before it asked — but it would

@@ -185,11 +185,16 @@ pub trait Runtime: std::fmt::Debug {
 ///
 /// Everything is dropped and these come back, each for a reason the entrypoint
 /// or the agent's ordinary work needs. Docker's default grants fourteen; the
-/// six it grants that are not here — `FSETID`, `SETPCAP`, `NET_RAW`, `SYS_CHROOT`,
-/// `MKNOD`, `SETFCAP` — have no caller in the image, and `NET_RAW` in particular
-/// is what raw-socket tooling would need to spoof traffic on the session
-/// network. Anything not on the list is a request to add it, with its reason,
-/// here.
+/// five it grants that are not here — `FSETID`, `SETPCAP`, `NET_RAW`, `MKNOD`,
+/// `SETFCAP` — have no caller in the image, and `NET_RAW` in particular is what
+/// raw-socket tooling would need to spoof traffic on the session network.
+/// Anything not on the list is a request to add it, with its reason, here.
+///
+/// **`SYS_CHROOT` was on that list of five, and the claim was wrong.** sshd
+/// has a caller: its unprivileged pre-auth process chroots to `/run/sshd`, and
+/// without the capability every connection died there — so no editor could
+/// attach to any session, on either Debian base, and omh reported it as the
+/// editor failing to open.
 pub const SESSION_CAPS: &[&str] = &[
     // `sudo` in the entrypoint: becoming root to start sshd, and sshd itself
     // dropping to `agent` for the session.
@@ -205,6 +210,11 @@ pub const SESSION_CAPS: &[&str] = &[
     "KILL",
     // sshd binds 22.
     "NET_BIND_SERVICE",
+    // sshd's pre-auth privilege separation chroots to `/run/sshd`. Without it
+    // the handshake is dropped with `chroot("/run/sshd"): Operation not
+    // permitted [preauth]`, in a log inside the container, and every `attach`
+    // fails as though the editor were at fault.
+    "SYS_CHROOT",
     // PAM writes the login record on an ssh session; without it the attach
     // connects and is dropped with `pam_loginuid` in the log.
     "AUDIT_WRITE",
