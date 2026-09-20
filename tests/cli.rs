@@ -2691,6 +2691,83 @@ fn a_launch_with_no_account_points_at_omh_auth() {
     );
 }
 
+/// `omh doctor` answers about the memory server on a machine that has never
+/// launched.
+///
+/// `deliver::available` never builds — that is its contract — so before a first
+/// launch there is no Linux binary to mount, and the probe asks a server that
+/// is not in the container. The row read `no reply naming: recall remember`,
+/// which says the server answered and answered wrongly; nothing was there to
+/// answer. Every fresh install's first `omh doctor` exited non-zero over it,
+/// and `omh new` made it go away, which is the worst way to learn nothing.
+///
+/// The launch path had worked this out already: `session.rs` owns the field
+/// there rather than sampling `available()` early, and says so in a comment
+/// about this exact trap. `doctor` builds the *image* it probes — the far more
+/// expensive half — so building the binary it probes is the same bargain.
+///
+/// `#[ignore]`d because it needs a container runtime.
+#[test]
+#[ignore]
+fn doctor_checks_the_memory_server_before_any_launch() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+
+    let out = sb.omh(&["doctor", "--harness", "claude"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("memory"),
+        "the memory server is one of the things doctor checks: {said}"
+    );
+    assert!(
+        !said.contains("no reply naming"),
+        "doctor asked a server it had not put in the container: {said}"
+    );
+}
+
+/// A previewed `omh doctor` builds nothing.
+///
+/// The other half of the rule above, and the half a fix reaches for: if
+/// building the memory server is what makes the probe honest, building it on
+/// `--dry-run` too looks like consistency. It is not — a preview writes
+/// nothing, and this one would spend a cross-build to print a script it was
+/// never going to run. Deleting the `dry_run` arm passed the whole suite.
+///
+/// `#[ignore]`d because `omh init` needs a container runtime.
+#[test]
+#[ignore]
+fn a_previewed_doctor_does_not_cross_build_anything() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+
+    let out = sb.omh(&["doctor", "--dry-run", "--harness", "claude"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("memory serve"),
+        "the preview is the probe script, which asks the server: {said}"
+    );
+    assert!(
+        !sb.home.join(".omh/bin").exists(),
+        "a preview cross-built the memory server: {said}"
+    );
+}
+
 /// A resumed session runs the harness it ran before.
 ///
 /// `omh new` creates and `omh s resume` rejoins, which needs a fact almost

@@ -31,7 +31,13 @@ machine that cannot build a sandbox they are still what you get, instead of a
 single error. The last four read what this checkout declares — that its
 settings resolve, that every `[use]` name is in the catalogue, that every file
 in `.omh/hooks` parses, that every `carry_in` path exists — which needs no
-container either. Under the harness's heading, `starts` comes first: the
+container either. **The first `omh doctor` on a machine cross-builds the memory server**, the
+same Linux binary a launch mounts, and says `first run only` while it does.
+Before that it asked a server it had not put in the container and reported it
+as not answering. A preview — `omh doctor --dry-run` — builds nothing; it
+prints the probe script.
+
+Under the harness's heading, `starts` comes first: the
 harness printing its own version, in the image a launch uses. `git` is second
 and is about the image rather than the adapter — whether its git can merge,
 which is what a repo's own turn-end check will need. Every row after those two

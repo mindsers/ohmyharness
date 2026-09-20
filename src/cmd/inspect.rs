@@ -479,13 +479,50 @@ pub(crate) fn doctor_cmd(
         let session = Session::scratch(paths.scratch("doctor"), "doctor".into());
         session.ensure(&paths.repo, "")?;
 
+        let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+            runtime::installed(p)
+        })?;
+
+        // **Built, not merely looked for.** `deliver::available` never builds —
+        // that is its contract — so on a machine that has not launched yet it
+        // answers `None`, nothing is mounted, and the probe then asks a server
+        // that is not in the container. The row said `no reply naming: recall
+        // remember`, which claims the server answered and answered wrongly;
+        // there was nothing there to answer. Every fresh install's first
+        // `omh doctor` failed over it, and `omh new` made it go away.
+        //
+        // `session.rs` owns this field for the same reason, and says so. A
+        // preview is the exception: `--dry-run` writes nothing, so it asks what
+        // is already cached rather than building to answer a question about a
+        // script it is only going to print.
+        let memory_bin = match dry_run {
+            true => memory::deliver::available(&paths, ctx),
+            false => match memory::deliver::ensure(
+                backend.program(),
+                &paths,
+                memory::deliver::sources_at(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .as_deref(),
+                &memory::deliver::fetch,
+                ctx,
+            ) {
+                Ok(bin) => Some(bin),
+                Err(e) => {
+                    ctx.warn(&format!("memory server unavailable — {e:#}"));
+                    None
+                }
+            },
+        };
+
         let opts = container::Options {
             staging: container::Staging::Apply,
             // No dtach and no terminal: the probe's output has to be captured.
             persist: persist::Mode::None,
             tty: false,
             account_dir: account.clone(),
-            memory_bin: memory::deliver::available(&paths, ctx),
+            memory_bin,
             // The probe has to compose the same rules a launch would, or it proves
             // the harness reads a document nobody will be given.
             base: Some(session::default_branch(&paths.repo)),
@@ -502,9 +539,6 @@ pub(crate) fn doctor_cmd(
         crate::cmd::session::say_rules(&plan, ctx);
         plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 
-        let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
-            runtime::installed(p)
-        })?;
         plan.validate_for(&backend)?;
 
         if dry_run {
