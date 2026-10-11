@@ -8360,6 +8360,66 @@ fn doctor_names_settings_omh_does_not_read() {
     );
 }
 
+/// A removal that left the sandbox's repository behind says so.
+///
+/// `rm` keeps a list of what it could not reach, and printed it in exactly
+/// one place: the message for a worktree that is still there. With the
+/// worktree gone, a sandbox repository that would not delete — every commit
+/// the agent made — or a run directory that would not, went into the list and
+/// the list went nowhere: `removed session s01`, exit 0, and a `--json`
+/// document with no field for it. The container's failures were warned about;
+/// these two were not even that.
+///
+/// Driven the way the test below is: writes denied on the parent, so the
+/// repository can be read and counted but not unlinked.
+#[test]
+#[cfg(unix)]
+fn rm_says_what_it_left_behind_when_the_worktree_did_go() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let shadows = sb.keyed("shadow");
+    let repository = shadows.join("s01.git");
+
+    let was = std::fs::metadata(&shadows).unwrap().permissions();
+    std::fs::set_permissions(&shadows, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = sb.omh(&["s01", "rm", "--yes", "--json"]);
+    std::fs::set_permissions(&shadows, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The premise, checked rather than assumed: this is the state the old
+    // message could not describe.
+    assert!(!worktree.exists(), "the worktree itself went: {said}");
+    assert!(
+        repository.exists(),
+        "and the sandbox's repository did not: {said}"
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("one document: {e}: {said}"));
+    let left: Vec<&str> = doc["left_behind"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`left_behind` is a list, always: {doc}"))
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        left.iter().any(|what| what.contains("sandbox repository")),
+        "the document names what stayed: {doc}"
+    );
+    // And why — a leftover with no reason is one nobody can clear.
+    assert!(
+        left.iter().any(|what| what.contains("ermission")),
+        "with the reason it stayed: {doc}"
+    );
+}
+
 /// **A session whose worktree survived is not a removed session.**
 ///
 /// `rm` used to trust `git worktree remove`'s exit code, so a git that exited 0

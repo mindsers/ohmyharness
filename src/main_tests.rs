@@ -1910,7 +1910,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh <id> resume <harness>` the way the `Resume` arm does.
         // + the `omh s` pointer when rm names no session, and the `omh <id> rm`
         // in the reason `leftovers` gives for naming nothing.
-        ("src/cmd/session.rs", 14),
+        ("src/cmd/session.rs", 15),
         ("src/cmd/settings.rs", 10),
         ("src/config.rs", 3),
         ("src/container.rs", 4),

@@ -132,10 +132,27 @@ pub(crate) fn start(
     pubkey: &str,
     session_id: &str,
 ) -> Result<()> {
-    let _ = image::container_remove(backend, name); // a stopped one blocks --name
+    // A stopped one blocks `--name`. **Unforced**, and that is the point:
+    // `session_up` asked whether this session was running before it fetched
+    // the memory server, built the image and made the keys, and another
+    // launch of the same session can have started the container since. Forced,
+    // this line removed it — a live agent, on the word of an answer minutes
+    // old. Unforced, the runtime refuses, and the `run` below then fails on
+    // the name instead.
+    let _ = image::container_clear_stopped(backend, name);
     let args = backend.up_args(plan, name, port, pubkey);
     let out = backend.output(&args)?;
     if !out.status.success() {
+        // Which failure it was, asked now rather than assumed: a container of
+        // this name that is up is the other launch's, and the daemon's line
+        // about a name in use is not something a user can act on.
+        if matches!(image::container_running(backend, name), image::Running::Yes) {
+            anyhow::bail!(
+                "{session_id}'s sandbox was started by another omh while this one was \
+                 getting ready, so this one stepped aside. Run the command again to \
+                 join it"
+            );
+        }
         anyhow::bail!(
             "starting session {session_id}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -2702,6 +2719,25 @@ pub(crate) fn rm(
             )
         }
     };
+    // **What did not go, on the answer itself.** `unreached` was built for
+    // this whole function and printed by one branch of it — the one above,
+    // for a worktree still on disk. With the worktree gone, a sandbox
+    // repository that would not delete went into the list and the list went
+    // nowhere: `removed session s01`, exit 0, and a document with no field
+    // for it. That repository holds every commit the agent made.
+    //
+    // Still a success, as it is for a container that would not stop: the
+    // session is gone and `omh s` will find what stayed. But a consequence is
+    // part of what happened, so it is a note on the answer and a field in the
+    // document — always there, and empty when nothing stayed, so a script can
+    // ask without first asking whether the key exists.
+    let mut action = action;
+    action.data["left_behind"] = serde_json::json!(unreached);
+    if !unreached.is_empty() {
+        action = action
+            .note(format!("left behind: {}", unreached.join(", ")))
+            .next(format!("omh {id} rm"));
+    }
     ctx.say(&action);
 
     // The review moment rides on something already happening rather than a
@@ -3323,7 +3359,7 @@ mod tests {
         let (backend, log) = Backend::scripted(
             Box::new(Docker),
             vec![
-                (vec!["rm", "-f", NAME], answered(1, "", "No such container")),
+                (vec!["rm", NAME], answered(1, "", "No such container")),
                 (vec!["run"], answered(0, "deadbeef\n", "")),
             ],
         );
@@ -3331,7 +3367,7 @@ mod tests {
         let log = log.borrow();
         let cleared = log
             .iter()
-            .position(|a| a.starts_with(&["rm".to_string(), "-f".to_string(), NAME.to_string()]));
+            .position(|a| a.as_slice() == ["rm".to_string(), NAME.to_string()]);
         let named = log.iter().position(|a| {
             a.first().map(String::as_str) == Some("run")
                 && a.windows(2).any(|w| w[0] == "--name" && w[1] == NAME)
@@ -3342,17 +3378,79 @@ mod tests {
         );
     }
 
+    /// Starting a session never removes a container that is running.
+    ///
+    /// `start` cleared the name with `rm -f`, on the strength of a *not
+    /// running* that `session_up` had asked for before the memory server was
+    /// fetched, the image built and the keys made. A second `resume` or
+    /// `attach` of the same session inside that window read the same *not
+    /// running*, and whichever of the two reached `start` last force-removed
+    /// the container the other had just started — agent and all.
+    ///
+    /// The runtime already knows the difference and will say so atomically:
+    /// an unforced `rm` takes a stopped container and refuses a running one.
+    /// So the clear asks for exactly what its comment always said it wanted,
+    /// and the loser of the race gets a name conflict instead of a kill.
+    #[test]
+    fn starting_a_session_never_removes_a_container_that_is_running() {
+        let plan = sample_plan();
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![
+                // What `start` used to send. Scripted so that sending it is a
+                // failed assertion below rather than an unscripted panic.
+                (vec!["rm", "-f", NAME], answered(0, "", "")),
+                (
+                    vec!["rm", NAME],
+                    answered(
+                        1,
+                        "",
+                        "Error response from daemon: cannot remove container: container is running",
+                    ),
+                ),
+                (
+                    vec!["run"],
+                    answered(
+                        125,
+                        "",
+                        "docker: Error response from daemon: Conflict. The container name is already in use",
+                    ),
+                ),
+                (vec!["ps"], answered(0, &format!("{NAME}\n"), "")),
+            ],
+        );
+
+        let err = start(&backend, &plan, NAME, 50022, "ssh-ed25519 AAAA omh", "s01").unwrap_err();
+
+        let log = log.borrow();
+        assert!(
+            !log.iter()
+                .any(|a| a.starts_with(&["rm".to_string(), "-f".to_string()])),
+            "a launch force-removed a container it had not been told to replace: {log:?}"
+        );
+        // And the loser is told what happened, not handed the daemon's line
+        // about a name.
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("s01") && said.contains("another") && said.contains("again"),
+            "it says who started it and what to do: {said}"
+        );
+    }
+
     #[test]
     fn a_run_the_runtime_refuses_names_the_session_and_repeats_the_reason() {
         let plan = sample_plan();
         let (backend, _) = Backend::scripted(
             Box::new(Docker),
             vec![
-                (vec!["rm", "-f", NAME], answered(0, "", "")),
+                (vec!["rm", NAME], answered(0, "", "")),
                 (
                     vec!["run"],
                     answered(125, "", "docker: port is already allocated"),
                 ),
+                // Asked after the refusal, to tell this from a launch that
+                // lost a race: nothing of that name is running.
+                (vec!["ps"], answered(0, "", "")),
             ],
         );
         let err = start(&backend, &plan, NAME, 50022, "ssh-ed25519 AAAA omh", "s01").unwrap_err();

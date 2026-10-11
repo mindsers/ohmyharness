@@ -64,6 +64,17 @@ pub trait Runtime: std::fmt::Debug {
         vec!["rm".into(), "-f".into(), name.into()]
     }
 
+    /// Remove the named container **only if it is not running**.
+    ///
+    /// What a launch wants before `run --name`: a stopped container of that
+    /// name is in the way, and a running one is somebody's session. Unforced,
+    /// the runtime tells the two apart itself and atomically — it removes the
+    /// first and refuses the second — which is the one place that question
+    /// can be asked without a gap between the asking and the acting.
+    fn clear_stopped_args(&self, name: &str) -> Vec<String> {
+        vec!["rm".into(), name.into()]
+    }
+
     /// Whether this runtime has per-session networks omh creates and reaps.
     ///
     /// Docker and podman put every session on an `omh-<repo>-<session>`
@@ -656,6 +667,15 @@ impl Runtime for Sbx {
     /// confirmation and removes a sandbox still in use.
     fn remove_args(&self, name: &str) -> Vec<String> {
         vec!["rm".into(), name.into(), "--force".into()]
+    }
+
+    /// The same as `remove_args`, and that is a gap rather than a choice:
+    /// `--force` is what skips sbx's confirmation, and it is also what removes
+    /// a sandbox still in use, so there is no unprompted way to ask for only
+    /// the first (0.39.0). Two launches of one session can still take each
+    /// other's sandbox on this backend.
+    fn clear_stopped_args(&self, name: &str) -> Vec<String> {
+        self.remove_args(name)
     }
 
     /// sbx isolates each sandbox in its own microVM and has no per-session

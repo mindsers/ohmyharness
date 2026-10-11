@@ -1281,6 +1281,12 @@ takes the cheap look only and never asks the expensive question. `delete_refused
 and `delete_unconfirmed` carry git's words for the two ways the deletion itself
 can go wrong.
 
+`left_behind` lists what the removal could not take with it — the sandbox's
+repository, the run directory, the container — each with the reason, and is `[]`
+when everything went. The session is still removed and the command still
+succeeds; the same line is printed under the summary, and `omh sNN rm` again
+clears what stayed once the reason is gone.
+
 **A removal that did not finish is a failure, not a footnote.** `rm` asks the
 disk whether the worktree is actually gone rather than trusting git's exit
 code, because a git that exits 0 while leaving the directory behind used to be
