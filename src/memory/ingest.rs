@@ -166,8 +166,16 @@ pub fn overview(
 }
 
 /// Write a note into a layer's directory, deriving its filename from its key.
+///
+/// Guarded the way `remember` is, because it is the same store: mounted
+/// writable into every session of the repository, so a name in it can be a
+/// link by the time `init` runs again. A stub's key is the path of a tracked
+/// document, which makes the name predictable.
 pub fn write(dir: &Path, note: &Note, if_exists: crate::memory::IfExists) -> Result<bool> {
     let path = dir.join(format!("{}.md", note.key));
+    // The root has to exist to be resolved; see `remember`.
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::memory::contained(dir, &path)?;
     if path.exists() && matches!(if_exists, crate::memory::IfExists::Skip) {
         return Ok(false);
     }
@@ -483,5 +491,62 @@ mod tests {
             once.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
             ["docs/a.md", "docs/b.md"]
         );
+    }
+
+    /// Seeding the store does not write a stub through a link.
+    ///
+    /// `write` is the other way into the store, and it had no guard of its own
+    /// at all: `path.exists()`, `create_dir_all`, `fs::write`. The store is
+    /// mounted writable into every session of the repository, a stub's key is
+    /// the path of a tracked document, and `omh init` can be run again — so a
+    /// link left at a name `init` is known to write, or at a directory on the
+    /// way to one, sends that write wherever it points.
+    #[test]
+    #[cfg(unix)]
+    fn seeding_does_not_write_a_stub_through_a_link() {
+        let doc = Document {
+            path: "docs/design/memory.md".into(),
+            title: "Memory".into(),
+            answers: vec!["Storage".into()],
+        };
+        let note = stub(&doc, &shipped_templates(), "2026-08-08").unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // The stub's own name, pointing at a file that is not there yet.
+        let store = d.path().join("store");
+        let at = store.join(format!("{}.md", note.key));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        let planted = outside.join("planted.md");
+        std::os::unix::fs::symlink(&planted, &at).unwrap();
+        let wrote = write(&store, &note, crate::memory::IfExists::Skip);
+        assert!(
+            !planted.exists(),
+            "a stub was written through a link at its own name: {wrote:?}"
+        );
+        assert!(
+            wrote.is_err(),
+            "and that is a refusal, not a skip: {wrote:?}"
+        );
+
+        // A directory on the way to it, pointing out of the store.
+        let store = d.path().join("another-store");
+        std::fs::create_dir_all(&store).unwrap();
+        let first = note.key.split('/').next().unwrap();
+        let through = if note.key.contains('/') {
+            store.join(first)
+        } else {
+            // A key with no namespace has no directory to link; the store
+            // itself is the only one, and that is the caller's own path.
+            return;
+        };
+        std::os::unix::fs::symlink(&outside, &through).unwrap();
+        let wrote = write(&store, &note, crate::memory::IfExists::Skip);
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "a stub landed outside the store through a linked directory: {wrote:?}"
+        );
+        assert!(wrote.is_err(), "refused: {wrote:?}");
     }
 }

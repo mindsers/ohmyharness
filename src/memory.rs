@@ -811,13 +811,37 @@ pub(crate) fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// put a symlink in it, and `{key}.md` beneath one resolves anywhere —
 /// exit 0, reporting a path it did not write to. Checked against the deepest
 /// ancestor that exists, because the note itself does not yet.
-fn contained(root: &Path, path: &Path) -> Result<()> {
+///
+/// **Exists as an entry, not as whatever it leads to.** This asked with
+/// `Path::exists`, which follows links — so a link pointing at nothing read as
+/// *absent*, the walk stepped over it to the directory above, and the check
+/// passed for a name `fs::write` would then open straight through. A link at
+/// the note's own name is refused outright, wherever it points: omh writes
+/// notes, not through them. One further up is found by `symlink_metadata`
+/// and then has to resolve inside the store like anything else — and a link
+/// to nothing does not resolve.
+///
+/// What this cannot close is the moment after it returns. The store is
+/// mounted into a running sandbox, and an agent that swaps a directory for a
+/// link between this check and the write still wins. That needs the directory
+/// held open rather than named twice.
+pub(crate) fn contained(root: &Path, path: &Path) -> Result<()> {
     let anchor = root
         .canonicalize()
         .with_context(|| format!("resolving {}", root.display()))?;
 
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        bail!(
+            "{} is a link, so omh will not write through it",
+            path.display()
+        );
+    }
+
     let mut existing = path.to_path_buf();
-    while !existing.exists() && existing.pop() {}
+    while existing.symlink_metadata().is_err() && existing.pop() {}
     let resolved = existing
         .canonicalize()
         .with_context(|| format!("resolving {}", existing.display()))?;
@@ -2418,6 +2442,41 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "a note landed outside the store through a symlink"
         );
+    }
+
+    /// A link at the note's own name is not written through — including one
+    /// that points at nothing yet, which is the one the guard could not see.
+    ///
+    /// `contained` looked for the deepest ancestor that exists and asked with
+    /// `Path::exists`, which follows links: a link whose target is not there
+    /// reads as *absent*, so the check stepped past it to the directory above,
+    /// found that inside the store, and passed. `fs::write` then opened the
+    /// name, followed the link, and created the file the agent had named —
+    /// anywhere the user can write.
+    #[test]
+    #[cfg(unix)]
+    fn a_dangling_link_at_the_notes_own_name_is_not_written_through() {
+        let (dir, paths) = fixture();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let planted = outside.join("planted.md");
+
+        // Where this note goes, learned by writing it once.
+        let at = match remember(&paths, &observation(), IfExists::Error).unwrap() {
+            Wrote::Created(at) | Wrote::Replaced(at) => at,
+            other => panic!("a first write creates the note: {other:?}"),
+        };
+        std::fs::remove_file(&at).unwrap();
+        std::os::unix::fs::symlink(&planted, &at).unwrap();
+
+        let wrote = remember(&paths, &observation(), IfExists::Error);
+
+        assert!(
+            !planted.exists(),
+            "a note was written through a link, to a file outside the store"
+        );
+        let err = wrote.expect_err("and the write is refused, not redirected");
+        assert!(format!("{err:#}").contains("link"), "got: {err:#}");
     }
 
     /// The write guard and the read guard are separate: refusing to write
