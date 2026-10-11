@@ -209,18 +209,70 @@ pub fn config_blocks(root: &Path) -> Result<Vec<String>> {
 }
 
 /// Add the `Include` to `~/.ssh/config` if absent, preserving everything else.
+///
+/// **As bytes, and only after a read that worked.** This is the one file here
+/// that is not omh's, and it was read with `read_to_string(..)
+/// .unwrap_or_default()` — so a config omh *could not read* was taken for an
+/// empty one, and the write below put one line where the whole file had been.
+/// One byte outside UTF-8 is enough to fail that read, and ssh, which reads
+/// the file as bytes, never objected to it. Absent is the only failure that
+/// means *start from nothing*.
+///
+/// **Replaced, not written in place.** `fs::write` truncates first, so a full
+/// disk or a kill between the two halves leaves a prefix of somebody's ssh
+/// config. The new file is written beside the old one and renamed over it —
+/// over what a link *names*, not over the link, because `~/.ssh/config` is a
+/// link into a dotfiles checkout often enough that replacing it with a plain
+/// file is its own way of losing the config. The mode travels with it.
 pub fn ensure_include(ssh_config: &Path) -> Result<()> {
-    let existing = std::fs::read_to_string(ssh_config).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == INCLUDE_LINE) {
+    let existing = match std::fs::read(ssh_config) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "omh could not read {}, so it will not rewrite it",
+                    ssh_config.display()
+                )
+            })
+        }
+    };
+    if existing
+        .split(|byte| *byte == b'\n')
+        .any(|line| line.trim_ascii() == INCLUDE_LINE.as_bytes())
+    {
         return Ok(());
     }
-    std::fs::create_dir_all(ssh_config.parent().unwrap())?;
+    // Where the bytes actually live. A config that is not there yet is its own
+    // target; one that is resolves through whatever links lead to it.
+    let target = match std::fs::canonicalize(ssh_config) {
+        Ok(real) => real,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ssh_config.to_path_buf(),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("resolving where {} lives", ssh_config.display()))
+        }
+    };
+    let parent = target.parent().context("an ssh config has a directory")?;
+    std::fs::create_dir_all(parent)?;
     // Prepended: ssh applies the first matching block, so an Include placed
     // after someone's `Host *` would never win.
-    let mut out = String::from(INCLUDE_LINE);
-    out.push_str("\n\n");
-    out.push_str(&existing);
-    std::fs::write(ssh_config, out)?;
+    let mut out = Vec::from(INCLUDE_LINE.as_bytes());
+    out.extend_from_slice(b"\n\n");
+    out.extend_from_slice(&existing);
+
+    use std::io::Write as _;
+    let mut part = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("writing beside {}", target.display()))?;
+    part.write_all(&out)?;
+    // A temporary file is `0600`, which is right for a config omh creates and
+    // wrong for one it found: the file keeps whatever mode it had.
+    if let Ok(meta) = std::fs::metadata(&target) {
+        std::fs::set_permissions(part.path(), meta.permissions())?;
+    }
+    part.persist(&target)
+        .map_err(|e| e.error)
+        .with_context(|| format!("writing {}", target.display()))?;
     Ok(())
 }
 
@@ -495,5 +547,93 @@ mod tests {
             body.find(INCLUDE_LINE) < body.find("Host work"),
             "Include must precede Host blocks:\n{body}"
         );
+    }
+
+    /// A config that is not UTF-8 keeps every byte it had.
+    ///
+    /// `ensure_include` read the file as a string and took *could not* for
+    /// *is empty*: `read_to_string(..).unwrap_or_default()`, then a write of
+    /// the one line omh adds onto that. A single byte outside UTF-8 — an
+    /// accented name in a comment, saved in Latin-1 years ago — fails the
+    /// read, and the user's whole ssh config was replaced by an `Include`.
+    /// ssh itself reads that file as bytes and never minded.
+    #[test]
+    fn a_config_that_is_not_utf8_keeps_every_byte() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("config");
+        let theirs: &[u8] = b"# r\xe9seau du bureau\nHost work\n  User me\n";
+        std::fs::write(&cfg, theirs).unwrap();
+
+        ensure_include(&cfg).unwrap();
+
+        let now = std::fs::read(&cfg).unwrap();
+        assert!(
+            now.ends_with(theirs),
+            "the user's config is gone: {:?}",
+            String::from_utf8_lossy(&now)
+        );
+        assert!(
+            now.starts_with(INCLUDE_LINE.as_bytes()),
+            "and the line omh adds is still first"
+        );
+        // …and a second attach finds its own line in a file it cannot decode.
+        ensure_include(&cfg).unwrap();
+        assert_eq!(std::fs::read(&cfg).unwrap(), now, "added once, not twice");
+    }
+
+    /// A config reached through a link stays a link, with the mode it had.
+    ///
+    /// The other half of not writing in place. Replacing the file by rename
+    /// is what keeps a crash from leaving half a config — and a rename onto
+    /// `~/.ssh/config` replaces the *link* a dotfiles checkout put there,
+    /// leaving the checkout's copy stale and a plain file where the link was.
+    /// So the rename lands on what the link names.
+    #[test]
+    #[cfg(unix)]
+    fn a_config_reached_through_a_link_stays_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("dotfiles").join("ssh-config");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "Host work\n  User me\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let cfg = d.path().join("config");
+        std::os::unix::fs::symlink(&real, &cfg).unwrap();
+
+        ensure_include(&cfg).unwrap();
+
+        assert!(
+            cfg.symlink_metadata().unwrap().file_type().is_symlink(),
+            "the link was replaced by a file"
+        );
+        let body = std::fs::read_to_string(&real).unwrap();
+        assert!(
+            body.starts_with(INCLUDE_LINE) && body.ends_with("Host work\n  User me\n"),
+            "and the file it names is the one that changed: {body}"
+        );
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o640,
+            "at the mode it had"
+        );
+    }
+
+    /// And one omh could not read at all is left alone, with the reason said.
+    #[test]
+    fn a_config_omh_could_not_read_is_refused_rather_than_rewritten() {
+        let d = tempfile::tempdir().unwrap();
+        // A directory where the file should be: every read fails, and not
+        // with *not found*.
+        let cfg = d.path().join("config");
+        std::fs::create_dir_all(cfg.join("something-of-theirs")).unwrap();
+
+        let err = ensure_include(&cfg).expect_err("a config omh could not read");
+
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("could not read") && err.contains(&cfg.display().to_string()),
+            "it says what it could not do, and to which file: {err}"
+        );
+        assert!(cfg.join("something-of-theirs").exists());
     }
 }
