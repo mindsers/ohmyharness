@@ -2285,41 +2285,18 @@ impl Shadow {
         // is inside the read-write mount, so by a relaunch it can be a link
         // to anywhere, and `create_dir_all` is content with a link to a
         // directory: the list was then written into a directory the agent
-        // chose. Anything there that is not a real directory is removed
-        // rather than followed.
-        match std::fs::symlink_metadata(&info) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => {
-                std::fs::remove_file(&info)
-                    .with_context(|| format!("clearing {}", info.display()))?;
-                std::fs::create_dir(&info)
-                    .with_context(|| format!("preparing {}", info.display()))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&info)
-                    .with_context(|| format!("preparing {}", info.display()))?;
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("preparing {}", info.display()));
-            }
-        }
+        // chose. And `fs::write` opens the name it is given *through* a link
+        // at that name, which truncated a host file of the agent's choosing,
+        // as the user, on every relaunch. `Held` is the answer to both, and
+        // to the agent changing either between the look and the write.
+        let held = Held::open(&info).with_context(|| format!("preparing {}", info.display()))?;
         // Just what the caller names. `container::plan` derives that from the
         // mounts it is about to make, which already covers omh's staged rules —
         // chaining `carry::STAGED_RULES` here as well only made the list
         // disagree with its own source when a capability changed.
         let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
-        // Replaced, never written in place: `fs::write` opens the name it is
-        // given and a link at that name is opened *through* — which truncated
-        // a host file of the agent's choosing, as the user, on every relaunch.
-        // `replace_record` renames over the name instead, and a rename
-        // replaces a link rather than following it.
-        //
-        // What this does not close is the moment between the check above and
-        // the rename: an agent that swaps `info` for a link in that window
-        // still gets a file called `exclude` where it pointed. Closing that
-        // needs the directory held open rather than named twice.
-        let at = info.join("exclude");
-        replace_record(&at, body).with_context(|| format!("writing {}", at.display()))?;
+        held.replace("exclude", body.as_bytes())
+            .with_context(|| format!("writing {}", info.join("exclude").display()))?;
         Ok(())
     }
 
@@ -3294,6 +3271,111 @@ fn stage(gitdir: &Path, worktree: &Path, add: &[&str]) -> Result<()> {
     let held = nested(gitdir, worktree)?;
     anyhow::ensure!(held.is_empty(), "{}", nested_refusal(&held));
     Ok(())
+}
+
+/// A directory inside the read-write mount, opened once and written through
+/// what was opened.
+///
+/// Everything in the sandbox's gitdir is the agent's to rename, so a path
+/// there is a question that can change its answer between two askings. The
+/// first version of this checked that `info` was a real directory and then
+/// wrote to `info/exclude` by name; with the container running, the directory
+/// could be moved aside and a link left in its place between the two, and the
+/// file was written wherever the link pointed.
+///
+/// Held open, there is one asking. The descriptor names the directory that
+/// was checked, and `openat` and `renameat` resolve against it — if `info` is
+/// something else by the time the write happens, the write lands in the
+/// directory it was, wherever the agent has put it, and nowhere else.
+/// `a_link_swapped_in_after_the_check_is_not_followed` plays that move.
+struct Held {
+    dir: std::fs::File,
+}
+
+impl Held {
+    /// A real directory at `path`: made if absent, and anything else at that
+    /// name removed rather than followed.
+    ///
+    /// `O_NOFOLLOW` is what makes the open itself the check. Twice at most —
+    /// once to find something that is not a directory and clear it, once to
+    /// open what replaced it. A name that is wrong a second time is being
+    /// changed under this, and that is a refusal, not a third try.
+    fn open(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        for _ in 0..2 {
+            let opened = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(path);
+            match opened {
+                Ok(dir) => return Ok(Self { dir }),
+                Err(e) => match std::fs::symlink_metadata(path) {
+                    Err(m) if m.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::create_dir(path)?
+                    }
+                    Ok(meta) if !meta.is_dir() => {
+                        std::fs::remove_file(path)?;
+                        std::fs::create_dir(path)?;
+                    }
+                    // A real directory that would not open, or a name omh
+                    // could not even look at: the open's own reason.
+                    _ => return Err(e),
+                },
+            }
+        }
+        Err(std::io::Error::other(
+            "it kept changing while omh was opening it",
+        ))
+    }
+
+    /// Put `body` at `name` in this directory, replacing whatever is there.
+    ///
+    /// Written beside and renamed over, for the reasons `replace_record`
+    /// gives — a rename replaces a link instead of following it, and never
+    /// leaves a prefix. Not through `replace_record` itself: that one names a
+    /// path, and its temporary file is `0600`, which is a list the sandbox's
+    /// git may not be able to read. This is created the way `fs::write`
+    /// creates a file, so the umask decides, as it did before.
+    fn replace(&self, name: &str, body: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let part = std::ffi::CString::new(format!(".{name}.{}.omh-part", std::process::id()))?;
+        let name = std::ffi::CString::new(name)?;
+        let dir = self.dir.as_raw_fd();
+
+        // SAFETY, for every call below: `dir` is a descriptor this struct
+        // owns and keeps open for the length of the borrow, and both names
+        // are NUL-terminated strings that outlive the calls.
+        //
+        // Whatever a run that died left at the temporary name goes first.
+        // `unlinkat` removes a link rather than what it points at.
+        unsafe { libc::unlinkat(dir, part.as_ptr(), 0) };
+        let fd = unsafe {
+            libc::openat(
+                dir,
+                part.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o666 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just returned by `openat` and nothing else has it.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let written = file.write_all(body);
+        drop(file);
+        let placed = written.and_then(|()| {
+            match unsafe { libc::renameat(dir, part.as_ptr(), dir, name.as_ptr()) } {
+                0 => Ok(()),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        });
+        if placed.is_err() {
+            unsafe { libc::unlinkat(dir, part.as_ptr(), 0) };
+        }
+        placed
+    }
 }
 
 /// What `stage` and `preflight` both say, so one of them cannot drift.

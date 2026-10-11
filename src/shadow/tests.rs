@@ -3974,3 +3974,72 @@ fn a_harvest_refuses_a_nested_repository_the_agent_committed() {
     );
     assert!(!marker.exists());
 }
+
+/// A link swapped in after the directory was checked is not followed.
+///
+/// The first fix for the exclude list looked at `info`, found a directory,
+/// and then wrote to `info/exclude` by name — two looks at one name, with the
+/// container running in between. An agent that moves the directory aside and
+/// leaves a link in that window gets the file written wherever the link
+/// points. A background review of the commit said so, correctly; the comment
+/// beside the code had said so too, and a comment is not a fix.
+///
+/// So the directory is opened once and written *through what was opened*.
+/// This plays the agent's move in exactly that window.
+#[test]
+#[cfg(unix)]
+fn a_link_swapped_in_after_the_check_is_not_followed() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let info = s.gitdir.join("info");
+
+    let held = Held::open(&info).unwrap();
+    // The agent, in the window: the real directory aside, a link in its place.
+    let aside = s.gitdir.join("info.aside");
+    let elsewhere = d.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::rename(&info, &aside).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &info).unwrap();
+
+    held.replace("exclude", b".env\n").unwrap();
+
+    assert!(
+        !elsewhere.join("exclude").exists(),
+        "the write followed a link put there after the check"
+    );
+    assert_eq!(
+        std::fs::read_to_string(aside.join("exclude")).unwrap(),
+        ".env\n",
+        "it landed in the directory that was checked, wherever that now is"
+    );
+}
+
+/// The exclude list keeps the mode a plain write gave it.
+///
+/// It is read inside the sandbox, by a git running as `agent`. The first fix
+/// wrote it through a temporary file, and a temporary file is `0600` —
+/// readable by its owner and nobody else, which on a host whose uid is not
+/// the sandbox's is a list the agent's git cannot open. A list git cannot
+/// open excludes nothing, so the carried secret it names is one `git add -A`
+/// from the agent's history.
+#[test]
+#[cfg(unix)]
+fn the_exclude_list_keeps_the_mode_a_plain_write_gives_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+    // Whatever this machine's umask makes of an ordinary file.
+    let plain = s.gitdir.join("info/an-ordinary-file");
+    std::fs::write(&plain, "x").unwrap();
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    assert_eq!(
+        mode(&s.gitdir.join("info/exclude")),
+        mode(&plain),
+        "the list is not as readable as a file written the ordinary way"
+    );
+}
