@@ -662,8 +662,8 @@ impl Report for Log {
         if self.read.unreachable > 0 {
             asides = asides.warn(format!(
                 "{} commit{} in this sandbox are on no branch it can reach, and are not \
-                 listed above. `omh {} commit --keep` refuses until they are:\n  \
-                 git --git-dir=<the sandbox repo> log --all --not HEAD",
+                 listed above. `omh {} commit --keep` refuses until they are. \
+                 From inside the sandbox:\n  git log --all --not HEAD",
                 self.read.unreachable,
                 if self.read.unreachable == 1 {
                     " "

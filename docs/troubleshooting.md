@@ -718,8 +718,9 @@ $ git -C ~/.omh/worktrees/<repo>/<session> checkout omh/<session>
 Related refusals from the same command, all meaning "a harvest here would
 silently drop work", all about the sandbox's **own** repository: a detached
 HEAD, an interrupted rebase or merge, and commits no branch there can reach.
-The detached and stranded cases each print a `git --git-dir=…` command — one to
-put it back, one to show you what it found. The interrupted case names the
+The detached and stranded cases each print a `git` command to run **inside the
+sandbox** — one to put it back, one to show you what it found. Not on the host:
+that repository's hooks are the agent's to write. The interrupted case names the
 marker it saw and leaves finishing or aborting to you.
 
 ### `the sandbox's history no longer reaches …`

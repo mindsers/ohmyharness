@@ -310,7 +310,9 @@ pub(crate) fn log_report(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
             "{} has a sandbox repository at {} and no record of where it started. omh \
              cannot tell you what the agent committed, and `omh {} rm` would remove the \
-             repository. Read it directly first:\n  git --git-dir={} log",
+             repository. Read a copy of it first, never the repository itself — \
+             its hooks are the agent's to write, and git run there runs them:\n  \
+             git clone --no-local {} <somewhere>\n  git -C <somewhere> log --all",
             session.id,
             shadow.gitdir.display(),
             session.id,

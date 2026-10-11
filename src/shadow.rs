@@ -861,9 +861,8 @@ impl Shadow {
             counted == out.commits.len(),
             "git listed {counted} commits in this sandbox and omh read {}. omh will not \
              number a list it did not fully understand, because the numbers are what \
-             `--keep` takes. Read it directly:\n  git --git-dir={} log",
-            out.commits.len(),
-            self.gitdir.display()
+             `--keep` takes. Read it from inside the sandbox:\n  git log",
+            out.commits.len()
         );
         Ok(out)
     }
@@ -918,14 +917,10 @@ impl Shadow {
         let id = self.checkpoint_id(worktree, number)?;
         let args = show_args(crate::session::What::Patch, &id, colour);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let status = Command::new("git")
-            .envs(GUEST_ENV)
+        let status = host_git(&self.gitdir)
             .current_dir(worktree)
-            .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
             .arg("-c")
             .arg(format!("core.pager={}", user_pager(repo)))
-            .arg("--git-dir")
-            .arg(&self.gitdir)
             .arg("--work-tree")
             .arg(worktree)
             .args(guarded(&args))
@@ -1115,7 +1110,22 @@ impl Shadow {
                     &from,
                 ],
             )?),
-            lines(git(&self.gitdir, worktree, &["status", "--porcelain"])?),
+            // Plus every repository nested in the worktree, counted without
+            // being looked into. `guarded` keeps `status` out of them, so it
+            // reports a pointer that *moved* and says nothing at all about
+            // one that did not — and on its own this number then reads
+            // *nothing uncommitted* for a session whose unkept work is all
+            // inside one, which `omh sNN rm` believes. A pointer omh will not
+            // follow is work at stake, not work that is absent. One `status`
+            // did report is already in the count.
+            {
+                let status = git(&self.gitdir, worktree, &["status", "--porcelain"])?;
+                let unseen = nested(&self.gitdir, worktree)?
+                    .iter()
+                    .filter(|path| !status.lines().any(|l| l.ends_with(path.as_str())))
+                    .count();
+                lines(status) + unseen
+            },
         ))
     }
 
@@ -1129,13 +1139,20 @@ impl Shadow {
     /// case for a session whose agent has just committed its work — that is not
     /// a failure and must not read as one.
     pub fn checkpoint(&self, worktree: &Path, why: &str) -> Result<Option<String>> {
+        // Nothing changed *and* nothing nested. `status` is told to stay out
+        // of a nested repository, so it is silent about a pointer that has not
+        // moved — and a silent `status` used to end this function, which let a
+        // sync merge, rewrite the worktree and move the branch before `stage`
+        // refused at `record_base_moved`. This is the only point a sync can
+        // stop with nothing done, so the pointer is asked about here.
         if git(&self.gitdir, worktree, &["status", "--porcelain"])?
             .trim()
             .is_empty()
+            && nested(&self.gitdir, worktree)?.is_empty()
         {
             return Ok(None);
         }
-        git(&self.gitdir, worktree, &["add", "-A", "."])?;
+        stage(&self.gitdir, worktree, &["add", "-A", "."])?;
         git(
             &self.gitdir,
             worktree,
@@ -1178,7 +1195,7 @@ impl Shadow {
             .map(|path| format!(":(exclude){path}"))
             .collect();
         add.extend(keep_out.iter().map(String::as_str));
-        git(&self.gitdir, worktree, &add)?;
+        stage(&self.gitdir, worktree, &add)?;
 
         let message = match conflicted.len() {
             0 => format!("base moved to {onto}"),
@@ -1244,11 +1261,7 @@ impl Shadow {
     /// with exit 1 and says *I could not tell* with anything else, and
     /// collapsing those is how a rewound session would report as a broken one.
     fn reaches(&self, worktree: &Path, commit: &str) -> Result<bool> {
-        let out = Command::new("git")
-            .envs(GUEST_ENV)
-            .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
-            .arg("--git-dir")
-            .arg(&self.gitdir)
+        let out = host_git(&self.gitdir)
             .arg("--work-tree")
             .arg(worktree)
             .args(["merge-base", "--is-ancestor", commit, "HEAD"])
@@ -1291,9 +1304,7 @@ impl Shadow {
         // Detached: `git checkout <sha>` to look at an old checkpoint, and the
         // commits after it are no longer reachable from HEAD. Measured: the
         // harvest reported success and left them behind.
-        let attached = Command::new("git")
-            .arg("--git-dir")
-            .arg(&self.gitdir)
+        let attached = host_git(&self.gitdir)
             .args(["symbolic-ref", "-q", "HEAD"])
             .output()
             .map(|o| o.status.success())
@@ -1302,8 +1313,7 @@ impl Shadow {
             attached,
             "the sandbox's repository is on a detached HEAD, so a harvest would \
              take only what that commit can reach. Put it back on a branch \
-             first:\n  git --git-dir={} checkout {}",
-            self.gitdir.display(),
+             first, from inside the sandbox:\n  git checkout {}",
             self.branch
         );
 
@@ -1327,10 +1337,24 @@ impl Shadow {
             stranded.is_empty(),
             "the sandbox's repository has commits no branch it is on can reach \
              ({}…) — they would be dropped in silence. Merge or delete them \
-             first: git --git-dir={} log --all --not HEAD",
-            stranded.join(", "),
-            self.gitdir.display()
+             first, from inside the sandbox: git log --all --not HEAD",
+            stranded.join(", ")
         );
+
+        // Nested: a pointer the agent committed, to a directory that is a
+        // repository right now. With nothing uncommitted a harvest stages
+        // nothing, so `stage` never meets it, and the commit was fetched and
+        // replayed onto the user's branch as it stood — a commit id that
+        // exists nowhere else, on a branch about to be pushed.
+        //
+        // Only while the repository is there. A pointer left in the index
+        // after its `.git` was deleted is what following the refusal's own
+        // advice produces, and the next `stage` clears it.
+        let held: Vec<String> = nested(&self.gitdir, worktree)?
+            .into_iter()
+            .filter(|path| worktree.join(path).join(".git").symlink_metadata().is_ok())
+            .collect();
+        anyhow::ensure!(held.is_empty(), "{}", nested_refusal(&held));
         Ok(())
     }
 
@@ -1379,7 +1403,7 @@ impl Shadow {
                 .trim()
                 .is_empty()
         {
-            git(&self.gitdir, worktree, &["add", "-A", "."])?;
+            stage(&self.gitdir, worktree, &["add", "-A", "."])?;
             git(
                 &self.gitdir,
                 worktree,
@@ -2141,9 +2165,7 @@ impl Shadow {
             "extensions.refstorage",
         ];
 
-        let listed = Command::new("git")
-            .arg("--git-dir")
-            .arg(gitdir)
+        let listed = host_git(gitdir)
             .args(["config", "--list", "--local", "--name-only"])
             .output()
             .with_context(|| format!("reading the config of {}", gitdir.display()))?;
@@ -2174,9 +2196,7 @@ impl Shadow {
             if KEEP.contains(&key) || key == "user.name" || key == "user.email" {
                 continue;
             }
-            let dropped = Command::new("git")
-                .arg("--git-dir")
-                .arg(gitdir)
+            let dropped = host_git(gitdir)
                 .args(["config", "--unset-all", key])
                 .output()
                 .with_context(|| format!("dropping {key} from {}", gitdir.display()))?;
@@ -2188,9 +2208,7 @@ impl Shadow {
         }
 
         for (key, value) in [("user.name", AUTHOR_NAME), ("user.email", AUTHOR_EMAIL)] {
-            let set = Command::new("git")
-                .arg("--git-dir")
-                .arg(gitdir)
+            let set = host_git(gitdir)
                 .args(["config", key, value])
                 .output()
                 .with_context(|| format!("setting {key} on {}", gitdir.display()))?;
@@ -2898,13 +2916,50 @@ const GUEST_ENV: [(&str, &str); 1] = [("GIT_GRAFT_FILE", "/dev/null")];
 /// front they are read as options to `git` itself, and every call dies on
 /// `unknown option: --no-textconv` — which is how the first version of this
 /// disarmed the whole module rather than just failing to guard it.
+///
+///
+/// And `out_of_nested` goes on last, for the two verbs that compare against a
+/// worktree.
 fn guarded(args: &[&str]) -> Vec<String> {
-    let mut out: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let mut out = out_of_nested(args);
     if matches!(args.first(), Some(&"log" | &"show" | &"diff" | &"rev-list")) {
         out.splice(
             1..1,
             ["--no-textconv".to_string(), "--no-ext-diff".to_string()],
         );
+    }
+    out
+}
+
+/// `status` and `diff`, told to stay out of any repository nested in the
+/// worktree they are comparing against.
+///
+/// A pointer in the index makes both ask whether the repository it names is
+/// dirty, and git answers by running `git status` *inside that repository*,
+/// under its own config — a file in `/work`. Measured 2026-10-10 against git
+/// 2.56.0: a clean filter named there ran on the host, with every key in
+/// `NEUTRALISED` in place and travelling to the child.
+///
+/// `diff.ignoreSubmodules` is not enough, because a `.gitmodules` saying
+/// `ignore = none` outranks it and that file is the agent's as well; the flag
+/// on the command line outranks both.
+///
+/// **`dirty`, not `all`.** `all` was the first version and it keeps git out
+/// just as well, but it does so by dropping the pointer from the answer
+/// altogether — so a `diff` between two *commits* stopped showing a pointer
+/// that moved, and a review went quiet about a change the commit would carry.
+/// `dirty` skips only the question that needs the child. Measured 2026-10-11:
+/// nothing runs, a moved pointer is still ` M`, and a tree-to-tree diff is
+/// byte-for-byte what it was.
+///
+/// Shared with `session`, whose worktree is the user's own repository and
+/// whose config is theirs — none of `NEUTRALISED` belongs there, and this
+/// does: the files are the agent's in both. `add` takes no such flag; see
+/// `NO_NESTED_STATUS`.
+pub(crate) fn out_of_nested(args: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    if matches!(args.first(), Some(&"status" | &"diff")) {
+        out.insert(1, "--ignore-submodules=dirty".to_string());
     }
     out
 }
@@ -2920,6 +2975,7 @@ fn git_in(at: &Path, args: &[&str]) -> Result<String> {
         .current_dir(at)
         .envs(GUEST_ENV)
         .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+        .args(before_the_verb(args))
         .args(guarded(args))
         .output()
         .context("running git")?;
@@ -3027,16 +3083,13 @@ fn git_owned(gitdir: &Path, worktree: &Path, args: &[String]) -> Result<String> 
 }
 
 fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .envs(GUEST_ENV)
-        .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+    let out = host_git(gitdir)
+        .args(before_the_verb(args))
         // Explicitly, because a child inherits omh's cwd and `add -A .` is
         // resolved against it: invoked from inside the session's worktree, git
         // computes a prefix and seeds only that subtree, silently leaving the
         // rest of the tree out of the commit every later diff is measured from.
         .current_dir(worktree)
-        .arg("--git-dir")
-        .arg(gitdir)
         .arg("--work-tree")
         .arg(worktree)
         .args(guarded(args))
@@ -3050,6 +3103,170 @@ fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `git` over the sandbox's repository, from the host — and the only place
+/// that names its gitdir.
+///
+/// **`GIT_COMMON_DIR` is the line that matters.** The `config` in this gitdir
+/// is mounted read-only and every claim in `NEUTRALISED`'s comment rests on
+/// that, but the mount pins one path and git does not look for `config` at
+/// that path: it looks in the gitdir's *common directory*, and a file called
+/// `commondir` in the gitdir root says where that is. The root is the
+/// read-write mount. Measured 2026-10-10 against git 2.56.0: with `commondir`
+/// naming a directory the agent filled in, a host-side `status --porcelain`
+/// carrying all eight keys ran a clean filter out of the agent's own `config`,
+/// as the user.
+///
+/// The variable is what git consults *before* it opens that file, so this does
+/// not look for the trick and refuse — it answers the question first. With it
+/// set, the same `status` reads the `config` omh wrote and runs nothing.
+///
+/// **It moves `config` and `objects`, and not the refs.** git's ref store
+/// opens `commondir` for itself and never asks the variable — measured the
+/// same day, when a commit made through this constructor moved the branch
+/// under the directory the agent had named rather than under this one. That
+/// hands the agent nothing it did not have: every ref in this gitdir is
+/// already its to write, wherever git goes looking for them. It is the reason
+/// this says *config*, though, and not *everything*.
+///
+/// One constructor rather than a line at each call site, because there were
+/// seven and they did not agree: `preflight` and every call in `write_config`
+/// built their own `Command` and carried neither the keys nor the graft
+/// override. `every_host_git_over_the_sandbox_is_built_in_one_place` counts
+/// the argument below, so an eighth site that spells it out for itself fails
+/// by name.
+///
+/// **Not for `git_in`.** That one runs in the user's repository, and this
+/// variable there would point their own git at the sandbox's objects.
+fn host_git(gitdir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.envs(GUEST_ENV)
+        .env("GIT_COMMON_DIR", gitdir)
+        .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+        .arg("--git-dir")
+        .arg(gitdir);
+    cmd
+}
+
+/// What `add` is told so that it stops rather than run `git` in a repository
+/// nested in the worktree.
+///
+/// `add` has no `--ignore-submodules`, and no config key reaches it either —
+/// measured with `diff.ignoreSubmodules` and `submodule.recurse` both set. A
+/// pointer already in the index, whose repository claims the commit it
+/// records, is asked whether that repository is dirty, and git answers by
+/// running `git status --porcelain=2` *inside it*, under a config the agent
+/// wrote. Measured 2026-10-10 against git 2.56.0 — a clean filter named there
+/// ran on the host.
+///
+/// What does reach that child is this: `-c` travels to it, and a value
+/// `status` cannot parse for `status.showUntrackedFiles` is fatal to it.
+/// Measured: the child dies with nothing in that repository having run, and
+/// `add` reports `'git status --porcelain=2' failed in submodule` and stages
+/// nothing.
+/// `add` itself never reads the key, so an ordinary add is untouched — both
+/// halves are in `an_add_that_would_enter_a_nested_repository_fails_before_it_does`.
+///
+/// **A backstop, and deliberately an ugly one.** `stage` is what refuses a
+/// nested repository in words; it looks at the index and then adds, and the
+/// agent can write the index in between. This is the part that cannot be
+/// raced. If a git release ever stops the child reading the key first, that
+/// test goes red rather than this going quiet.
+const NO_NESTED_STATUS: &str = "status.showUntrackedFiles=omh-does-not-enter-a-nested-repository";
+
+/// Options that belong in front of the verb, by verb — `guarded`'s other half,
+/// and shared with `session` for the same reason `out_of_nested` is.
+pub(crate) fn before_the_verb(args: &[&str]) -> Vec<&'static str> {
+    match args.first() {
+        Some(&"add") => vec!["-c", NO_NESTED_STATUS],
+        _ => Vec::new(),
+    }
+}
+
+/// The paths the sandbox's index records as repositories of their own.
+///
+/// `ls-files` reads the index and nothing else — measured, it does not enter
+/// what it lists. A failure propagates: an index omh could not read is not an
+/// index with no pointers in it, and `stage` is about to act on the answer.
+fn nested(gitdir: &Path, worktree: &Path) -> Result<Vec<String>> {
+    Ok(pointers(&git(gitdir, worktree, &["ls-files", "-s", "-z"])?))
+}
+
+/// The paths an `ls-files -s -z` listing records as repositories of their own
+/// — mode 160000, which is all a pointer is.
+pub(crate) fn pointers(listing: &str) -> Vec<String> {
+    listing
+        .split('\0')
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            meta.starts_with("160000 ").then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// "`a` is a repository of its own", for however many there are — the start
+/// of both refusals, so they cannot name the same thing two ways.
+pub(crate) fn of_their_own(paths: &[String]) -> String {
+    match paths {
+        [one] => format!(
+            "`{}` is a repository of its own",
+            crate::out::untrusted(one)
+        ),
+        many => format!(
+            "{} are repositories of their own",
+            many.iter()
+                .take(3)
+                .map(|path| format!("`{}`", crate::out::untrusted(path)))
+                .chain((many.len() > 3).then(|| format!("{} more", many.len() - 3)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Stage the worktree for a commit omh is about to make in the sandbox's
+/// repository, and refuse a nested repository rather than enter it.
+///
+/// Pointers already in the index go first. That is what keeps the `add` below
+/// from asking about them — and it is also what lets the refusal *end*: an
+/// entry left behind after the user deleted the nested `.git` would otherwise
+/// be found here forever. `update-index` drops them without looking inside
+/// (measured), and a repository that is still there comes straight back as a
+/// new pointer, which `add` records in-process.
+///
+/// Then the answer is read back from the index rather than assumed from the
+/// first look, because the worktree is what decides it.
+///
+/// **Refused, not left out.** Leaving it out is a commit that reads as the
+/// session's work and is missing a directory of it, with nothing on the branch
+/// to say so. And the pointer is not the work either way: a commit carries a
+/// nested repository as a commit id that exists nowhere else.
+fn stage(gitdir: &Path, worktree: &Path, add: &[&str]) -> Result<()> {
+    let held = nested(gitdir, worktree)?;
+    if !held.is_empty() {
+        let mut drop = vec!["update-index", "--force-remove", "--"];
+        drop.extend(held.iter().map(String::as_str));
+        git(gitdir, worktree, &drop)?;
+    }
+    git(gitdir, worktree, add)?;
+
+    let held = nested(gitdir, worktree)?;
+    anyhow::ensure!(held.is_empty(), "{}", nested_refusal(&held));
+    Ok(())
+}
+
+/// What `stage` and `preflight` both say, so one of them cannot drift.
+fn nested_refusal(held: &[String]) -> String {
+    format!(
+        "{} inside this session's worktree, and omh will not run git in one \
+         from the host — its config is the agent's to write, and git runs what a \
+         config names. Nothing was committed. A commit could only have carried a \
+         pointer to it, not its files. In the sandbox, delete its `.git` to keep \
+         the files as ordinary files, or add the path to `.gitignore` to leave \
+         it out, then run this again",
+        of_their_own(held)
+    )
 }
 
 #[cfg(test)]

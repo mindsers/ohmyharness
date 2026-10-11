@@ -3401,3 +3401,476 @@ fn seeding_twice_keeps_the_work_the_agent_already_did() {
         "a relaunch must not discard the agent's checkpoints"
     );
 }
+
+/// `git` the way the agent runs it: the same gitdir and worktree, and none of
+/// what omh adds on the host. No global config either, because the container
+/// carries none.
+fn as_the_agent(gitdir: &Path, wt: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(wt)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("--git-dir")
+        .arg(gitdir)
+        .arg("--work-tree")
+        .arg(wt)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the fixture's own git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if src.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// A repository inside the worktree, every part of it the agent's: its own
+/// config names a filter and a monitor that each leave `marker` behind, and
+/// one tracked file is changed without changing its size — which is what
+/// makes git read the content, and reading the content is what runs a filter.
+fn nested_repository(wt: &Path, name: &str, marker: &Path) {
+    let sub = wt.join(name);
+    std::fs::create_dir_all(&sub).unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&sub)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "building the nested repository, git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "a@example.com"]);
+    run(&["config", "user.name", "a"]);
+    std::fs::write(sub.join("g.txt"), "yyyyy\n").unwrap();
+    std::fs::write(sub.join(".gitattributes"), "* filter=pwn\n").unwrap();
+    run(&["add", "-A"]);
+    run(&["commit", "-q", "-m", "inner"]);
+    let touch = format!("touch '{}'", marker.display());
+    run(&["config", "filter.pwn.clean", &format!("{touch}; cat")]);
+    run(&["config", "core.fsmonitor", &format!("{touch}; false")]);
+    std::fs::write(sub.join("g.txt"), "zzzzz\n").unwrap();
+}
+
+/// A common directory the sandbox named does not redirect the host.
+///
+/// `config` is mounted read-only over the gitdir, and everything this module
+/// says about a driver or a pager being unreachable rests on that. It pins one
+/// path. git finds a gitdir's `config`, `objects`, `refs`, `hooks` and `info`
+/// through its *common directory*, and a file called `commondir` in the gitdir
+/// root — which the mount leaves writable — says where that is.
+///
+/// Measured 2026-10-10 against git 2.56.0, with the flags `git()` passed at
+/// the time: the agent copies `objects` and `refs` into a directory of its
+/// own, writes a `config` beside them naming a clean filter, writes
+/// `commondir`, and the next host-side `status --porcelain` runs the filter as
+/// the user. Eight `-c` keys and a read-only mount were all in place. The read
+/// that does it is the one behind `omh sNN log`.
+///
+/// `GIT_COMMON_DIR` is what git asks before it opens that file, so naming the
+/// gitdir there is not a check for the trick — it is the answer, given first.
+#[test]
+fn a_common_directory_the_sandbox_named_does_not_redirect_the_host() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("THE-FILTER-RAN");
+
+    // Everything below is a write inside the read-write mount. `config`
+    // itself is never touched, which is the point.
+    let alt = s.gitdir.join("alt");
+    copy_tree(&s.gitdir.join("objects"), &alt.join("objects"));
+    copy_tree(&s.gitdir.join("refs"), &alt.join("refs"));
+    std::fs::create_dir_all(alt.join("info")).unwrap();
+    std::fs::write(
+        alt.join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\
+             [user]\n\tname = a\n\temail = a@example.com\n\
+             [filter \"pwn\"]\n\tclean = \"touch '{}'; cat\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    for info in [alt.join("info"), s.gitdir.join("info")] {
+        std::fs::write(info.join("attributes"), "* filter=pwn\n").unwrap();
+    }
+    std::fs::write(s.gitdir.join("commondir"), "alt\n").unwrap();
+    // Same length as the `base\n` the seed holds, so git has to read it.
+    std::fs::write(wt.join("f.txt"), "bass\n").unwrap();
+
+    // What `omh sNN log`, `omh s` and a sync each do, in that order.
+    let read = s.checkpoints(&wt);
+    let _ = s.unkept(&wt);
+    let kept = s.checkpoint(&wt, "before a sync");
+
+    assert!(
+        !marker.exists(),
+        "a filter the sandbox defined ran on the host, as the user"
+    );
+    // The marker is the consequence; this is the cause, asked directly. It
+    // does not depend on which file git happened to re-read: the host must
+    // not be able to *see* a key that exists only in the directory the
+    // sandbox named.
+    let seen = git(&s.gitdir, &wt, &["config", "--get", "filter.pwn.clean"]);
+    assert!(
+        seen.is_err(),
+        "the host read a config the sandbox wrote: {seen:?}"
+    );
+    // And not by failing. The repository omh made is still whole, so reading
+    // it works and there is still work to keep.
+    assert!(read.is_ok(), "the read itself still works: {read:?}");
+    assert!(
+        kept.as_ref().is_ok_and(Option::is_some),
+        "and the edit to f.txt is still kept: {kept:?}"
+    );
+}
+
+/// A repository omh will not look inside is not a repository with nothing in
+/// it.
+///
+/// `--ignore-submodules` is what keeps `status` out of a nested repository,
+/// and the price is that `status` no longer says whether anything inside one
+/// changed. So the count `omh sNN rm` refuses over went to zero for a session
+/// whose only unkept work sat in a repository of its own: the same collapse
+/// as a listing omh could not make reading as an empty one, introduced by the
+/// fix for something else.
+///
+/// Counted without looking, because looking is the thing omh will not do: a
+/// pointer in the index is work at stake whatever is behind it.
+#[test]
+fn a_nested_repository_counts_as_work_omh_has_not_kept() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    let (_, before) = s.unkept(&wt).unwrap();
+    nested_repository(&wt, "sub", &marker);
+    as_the_agent(&s.gitdir, &wt, &["add", "sub"]);
+    as_the_agent(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]);
+
+    let (_, uncommitted) = s.unkept(&wt).unwrap();
+
+    assert_eq!(before, 0, "the seed took everything the fixture holds");
+    assert!(
+        uncommitted > before,
+        "work inside a nested repository read as no work at all: {uncommitted}"
+    );
+    assert!(!marker.exists(), "and counting it did not mean entering it");
+}
+
+/// Reading a session does not run git inside a repository the agent nested
+/// in its worktree.
+///
+/// The second way in, and it needs no `commondir`. An entry of mode 160000 in
+/// the index — the agent's index, since it commits through this gitdir — makes
+/// `status` and `diff` ask whether that repository is dirty, and git answers
+/// by running `git status` *inside it*, under its config. That config is a
+/// file in `/work`.
+///
+/// Measured 2026-10-10 against git 2.56.0. The `-c` keys do travel to the
+/// child, so `core.fsmonitor` is already closed; a clean filter is not, and no
+/// key can close it because the agent picks the filter's name. `.gitmodules`
+/// is the agent's too and says `ignore = none`, which outranks
+/// `diff.ignoreSubmodules` — only `--ignore-submodules` on the command line
+/// is beyond its reach.
+#[test]
+fn reading_a_session_never_enters_a_repository_nested_in_its_worktree() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    nested_repository(&wt, "sub", &marker);
+    std::fs::write(
+        wt.join(".gitmodules"),
+        "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n\tignore = none\n",
+    )
+    .unwrap();
+    as_the_agent(&s.gitdir, &wt, &["add", "sub", ".gitmodules"]);
+    as_the_agent(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]);
+    assert!(!marker.exists(), "the fixture must not trip its own wire");
+
+    let read = s.checkpoints(&wt);
+    let unkept = s.unkept(&wt);
+
+    assert!(
+        !marker.exists(),
+        "a host-side read ran git inside a repository the agent wrote"
+    );
+    assert!(read.is_ok(), "and the read still answers: {read:?}");
+    assert!(unkept.is_ok(), "both of them: {unkept:?}");
+}
+
+/// Keeping a session's work refuses a nested repository, by name, rather
+/// than entering it.
+///
+/// `git add` has no `--ignore-submodules`. Asked to update an index that
+/// already holds the pointer, it runs `git status` inside the repository the
+/// pointer names — measured, same day, same git. So the staging every
+/// checkpoint and harvest does cannot be made safe by a flag, and what it
+/// would have recorded is not the work anyway: a commit carries a nested
+/// repository as a commit id that exists nowhere else, and none of its files.
+#[test]
+fn keeping_work_refuses_a_nested_repository_instead_of_entering_it() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    nested_repository(&wt, "sub", &marker);
+    as_the_agent(&s.gitdir, &wt, &["add", "sub"]);
+    as_the_agent(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]);
+    // Something of the session's own to keep, so the checkpoint has a reason
+    // to stage at all.
+    std::fs::write(wt.join("work.rs"), "fn work() {}\n").unwrap();
+
+    let err = s
+        .checkpoint(&wt, "before a sync")
+        .expect_err("a worktree holding a repository of its own is refused");
+    let err = format!("{err:#}");
+
+    assert!(
+        !marker.exists(),
+        "staging ran git inside a repository the agent wrote: {err}"
+    );
+    // In omh's words, not git's. Without the first half of `stage` this still
+    // fails — `add` dies on the backstop — but with `'git status
+    // --porcelain=2' failed in submodule sub`, which names no way out.
+    assert!(
+        err.contains("`sub` is a repository of its own"),
+        "the refusal names what it found: {err}"
+    );
+    assert!(
+        err.contains(".gitignore") && err.contains("`.git`"),
+        "and both ways to make it stop: {err}"
+    );
+}
+
+/// The refusal ends when the nested repository does.
+///
+/// Its own advice is "delete its `.git` to keep the files as ordinary files".
+/// Followed, that leaves the pointer in the index and a plain directory on
+/// disk — and a refusal that reads the index would find the pointer there for
+/// the rest of the session. Following omh's instructions must not brick omh.
+#[test]
+fn deleting_the_nested_git_directory_is_enough_to_keep_the_files() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    nested_repository(&wt, "sub", &marker);
+    as_the_agent(&s.gitdir, &wt, &["add", "sub"]);
+    as_the_agent(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]);
+    std::fs::write(wt.join("work.rs"), "fn work() {}\n").unwrap();
+    s.checkpoint(&wt, "before a sync")
+        .expect_err("refused while the repository is there");
+
+    std::fs::remove_dir_all(wt.join("sub/.git")).unwrap();
+    let kept = s.checkpoint(&wt, "before a sync");
+
+    assert!(
+        kept.as_ref().is_ok_and(Option::is_some),
+        "the advice the refusal gave has to work: {kept:?}"
+    );
+    let tracked = git(&s.gitdir, &wt, &["ls-files", "-s"]).unwrap();
+    assert!(
+        tracked
+            .lines()
+            .any(|l| l.starts_with("100644 ") && l.ends_with("\tsub/g.txt")),
+        "and what it kept is the file, not a pointer to it: {tracked}"
+    );
+    assert!(
+        !tracked.lines().any(|l| l.starts_with("160000 ")),
+        "with no pointer left behind: {tracked}"
+    );
+    assert!(!marker.exists());
+}
+
+/// The backstop behind that refusal fails closed.
+///
+/// The refusal looks at the index and then stages, and the agent can write the
+/// index in between — the container is usually running. What cannot be raced
+/// is the add itself: the pointer back in the index, the nested repository
+/// unchanged, and `add -A .` through this module's own helper. It has to stop
+/// before git reads a byte of that repository, not report the visit afterwards.
+#[test]
+fn an_add_that_would_enter_a_nested_repository_fails_before_it_does() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    nested_repository(&wt, "sub", &marker);
+    as_the_agent(&s.gitdir, &wt, &["add", "sub"]);
+
+    let added = git(&s.gitdir, &wt, &["add", "-A", "."]);
+
+    assert!(
+        !marker.exists(),
+        "`add` ran git inside a repository the agent wrote"
+    );
+    assert!(
+        added.is_err(),
+        "and it says it stopped, rather than staging around it in silence"
+    );
+
+    // …while an ordinary add is left alone — a guard that failed every add
+    // would pass everything above.
+    let (_d2, wt2, shadow2) = fixture();
+    let plain = Shadow::new(&shadow2, "s01");
+    plain.ensure(&wt2, &[]).unwrap();
+    std::fs::write(wt2.join("work.rs"), "fn work() {}\n").unwrap();
+    git(&plain.gitdir, &wt2, &["add", "-A", "."]).expect("an ordinary add still works");
+}
+
+/// Every host-side `git` over the sandbox's repository is built in one place.
+///
+/// Seven call sites named `--git-dir` by hand, and the ones in `preflight`
+/// and `write_config` carried none of what the rest did. A pin that lives at
+/// each call site is a pin the next call site forgets, so the argument appears
+/// once and this counts it.
+#[test]
+fn every_host_git_over_the_sandbox_is_built_in_one_place() {
+    let sources = crate::testsrc::production();
+    let (_, body) = sources
+        .iter()
+        .find(|(path, _)| path.ends_with("src/shadow.rs"))
+        .expect("src/shadow.rs is production");
+    assert_eq!(
+        body.matches("\"--git-dir\"").count(),
+        1,
+        "a `git` that names the sandbox's gitdir for itself is one that can \
+         leave out `GIT_COMMON_DIR` — go through the one constructor"
+    );
+}
+
+/// omh never hands the user a `git` command to run over the sandbox's
+/// repository themselves.
+///
+/// Five messages did — `git --git-dir=<the sandbox's repository> checkout …`
+/// to reattach a HEAD, `… log` to read what omh could not number. Typed on the
+/// host that is git with none of what `host_git` adds, in a directory whose
+/// `hooks/` the agent can write. Measured 2026-10-10 against git 2.56.0: the
+/// `checkout` omh printed for a detached HEAD ran a `post-checkout` hook the
+/// agent had left there, as the user. And a detached HEAD is the agent's to
+/// arrange, so the refusal that carried the command was the agent's to
+/// provoke.
+///
+/// The same verbs inside the sandbox are the agent's own git, which is where
+/// its hooks belong.
+#[test]
+fn no_message_tells_the_user_to_run_git_over_the_sandbox_repository() {
+    let sources = crate::testsrc::production();
+    // By name, not by count: these are the files that carried the five
+    // messages, and a scan that stopped reading any of them would pass.
+    for carried in ["src/shadow.rs", "src/report.rs", "src/cmd/harvest.rs"] {
+        assert!(
+            sources
+                .iter()
+                .any(|(path, body)| path.ends_with(carried) && !body.is_empty()),
+            "the scan no longer reads {carried}"
+        );
+    }
+    let told: Vec<String> = sources
+        .into_iter()
+        .filter(|(_, body)| body.contains("git --git-dir="))
+        .map(|(path, _)| path.display().to_string())
+        .collect();
+    assert!(
+        told.is_empty(),
+        "a host-side `git --git-dir=…` is printed for the user to run: {told:?}"
+    );
+}
+
+/// A checkpoint refuses a nested repository even when nothing else changed.
+///
+/// `checkpoint` is the first thing a sync does and the only thing it does
+/// before it starts writing, so this is where a sync has to stop. It used to
+/// ask `status` first and return *nothing to commit* — and `status` is told
+/// to say nothing about a pointer that has not moved. The sync then merged,
+/// rewrote the worktree, moved the branch, and was refused by `stage` at
+/// `record_base_moved`: a sync reported as failed with every one of its
+/// effects in place, which is the half-finished state the refusal exists to
+/// prevent. The fix for one thing, again, making another.
+#[test]
+fn a_checkpoint_refuses_a_nested_repository_before_a_sync_writes_anything() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    nested_repository(&wt, "sub", &marker);
+    as_the_agent(&s.gitdir, &wt, &["add", "sub"]);
+    as_the_agent(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]);
+    // Nothing else is changed: the only thing in the way is the repository.
+
+    let err = s
+        .checkpoint(&wt, "before a sync")
+        .expect_err("a sync must not start beside a nested repository");
+    let err = format!("{err:#}");
+
+    assert!(
+        err.contains("`sub` is a repository of its own"),
+        "refused by name, up front: {err}"
+    );
+    assert!(!marker.exists());
+}
+
+/// A harvest refuses a nested repository the agent committed, rather than
+/// landing a pointer to it.
+///
+/// With nothing uncommitted a harvest stages nothing, so `stage` never sees
+/// it — and the agent's own commit, pointer included, was fetched and
+/// replayed onto the user's branch. A commit id that exists nowhere else, on
+/// a branch the user is about to push.
+#[test]
+fn a_harvest_refuses_a_nested_repository_the_agent_committed() {
+    let (d, wt, shadow_dir) = fixture();
+    let checkout = d.path().join("checkout");
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let marker = d.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    nested_repository(&wt, "sub", &marker);
+    as_the_agent(&s.gitdir, &wt, &["add", "sub"]);
+    as_the_agent(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]);
+    let before = git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap();
+
+    let err = match s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All) {
+        Ok(_) => panic!("a harvest landed a pointer to a nested repository"),
+        Err(e) => format!("{e:#}"),
+    };
+
+    assert!(
+        err.contains("`sub` is a repository of its own"),
+        "refused by name: {err}"
+    );
+    assert_eq!(
+        git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap(),
+        before,
+        "and the branch did not move"
+    );
+    assert!(!marker.exists());
+}
