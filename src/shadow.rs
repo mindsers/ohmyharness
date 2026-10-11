@@ -1429,6 +1429,14 @@ impl Shadow {
                 "protocol.file.allow=always",
                 "fetch",
                 "-q",
+                // One ref is asked for and one ref is what arrives. A fetch
+                // that names a destination also *follows tags* — any tag
+                // pointing into the history being fetched lands in the user's
+                // own `refs/tags/`. Measured 2026-10-10 against git 2.56.0: a
+                // tag the agent called `main` came with the commits, and
+                // `rev-parse main` in the checkout then meant the agent's
+                // commit.
+                "--no-tags",
                 &self.gitdir.to_string_lossy(),
                 // Forced. The ref is omh's own scratch namespace, and every
                 // failure path leaves it behind — including the carried-secret
@@ -2272,14 +2280,46 @@ impl Shadow {
         // I/O at all before. `Permission denied (os error 13)` with no path is
         // not something a user can act on, and the directory it names is one
         // the agent can chmod.
-        std::fs::create_dir_all(&info).with_context(|| format!("preparing {}", info.display()))?;
+        //
+        // **A directory of omh's own, not whatever is at that name.** `info`
+        // is inside the read-write mount, so by a relaunch it can be a link
+        // to anywhere, and `create_dir_all` is content with a link to a
+        // directory: the list was then written into a directory the agent
+        // chose. Anything there that is not a real directory is removed
+        // rather than followed.
+        match std::fs::symlink_metadata(&info) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                std::fs::remove_file(&info)
+                    .with_context(|| format!("clearing {}", info.display()))?;
+                std::fs::create_dir(&info)
+                    .with_context(|| format!("preparing {}", info.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&info)
+                    .with_context(|| format!("preparing {}", info.display()))?;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("preparing {}", info.display()));
+            }
+        }
         // Just what the caller names. `container::plan` derives that from the
         // mounts it is about to make, which already covers omh's staged rules —
         // chaining `carry::STAGED_RULES` here as well only made the list
         // disagree with its own source when a capability changed.
         let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
+        // Replaced, never written in place: `fs::write` opens the name it is
+        // given and a link at that name is opened *through* — which truncated
+        // a host file of the agent's choosing, as the user, on every relaunch.
+        // `replace_record` renames over the name instead, and a rename
+        // replaces a link rather than following it.
+        //
+        // What this does not close is the moment between the check above and
+        // the rename: an agent that swaps `info` for a link in that window
+        // still gets a file called `exclude` where it pointed. Closing that
+        // needs the directory held open rather than named twice.
         let at = info.join("exclude");
-        std::fs::write(&at, body).with_context(|| format!("writing {}", at.display()))?;
+        replace_record(&at, body).with_context(|| format!("writing {}", at.display()))?;
         Ok(())
     }
 

@@ -3804,6 +3804,106 @@ fn no_message_tells_the_user_to_run_git_over_the_sandbox_repository() {
     );
 }
 
+/// A harvest brings the agent's commits and nothing else it named.
+///
+/// The fetch names one ref and a destination for it, and that is exactly the
+/// shape in which git also follows tags: any tag pointing into the history
+/// being fetched comes along, into `refs/tags/` of the user's own repository.
+/// Measured 2026-10-10 against git 2.56.0, with the command `harvest` ran — a
+/// tag the agent called `main` arrived, and `git rev-parse main` then answered
+/// with the agent's commit and a warning about an ambiguous name.
+///
+/// Two things follow from that. A tag named like a branch outranks it in
+/// every command that takes a revision, the user's and omh's. And a tag named
+/// like a release is one `git push --tags` from being one.
+#[test]
+fn a_harvest_brings_no_tag_the_agent_made() {
+    let (d, wt, shadow_dir) = fixture();
+    let checkout = d.path().join("checkout");
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+
+    std::fs::write(wt.join("f.txt"), "one\n").unwrap();
+    as_the_agent(&s.gitdir, &wt, &["commit", "-qam", "the work"]);
+    as_the_agent(&s.gitdir, &wt, &["tag", "main"]);
+    as_the_agent(&s.gitdir, &wt, &["tag", "v9.9.9"]);
+    let trunk = git_in(&checkout, &["rev-parse", "refs/heads/main"]).unwrap();
+
+    s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+        .expect("the harvest itself is ordinary");
+
+    let tags = git_in(&checkout, &["tag", "--list"]).unwrap();
+    assert!(
+        tags.trim().is_empty(),
+        "tags the sandbox made are in the user's repository: {tags}"
+    );
+    assert_eq!(
+        git_in(&checkout, &["rev-parse", "main"]).unwrap(),
+        trunk,
+        "and `main` still means the branch"
+    );
+}
+
+/// A relaunch does not write the exclude list through a link.
+///
+/// `info/` is inside the read-write mount, and every relaunch rewrites
+/// `info/exclude` there — the one write `ensure`'s fast path makes. A link
+/// left at that name sent the write to whatever it pointed at, truncating a
+/// host file of the agent's choosing as the user; a link left at `info`
+/// itself put a file called `exclude` in a directory of its choosing.
+/// `replace_record` exists for exactly this and already guards the note, the
+/// ledger and the events file. This write had been missed.
+#[test]
+#[cfg(unix)]
+fn a_relaunch_does_not_write_the_exclude_list_through_a_link() {
+    let (d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    let listed = [".env".to_string()];
+
+    // The file itself, linked.
+    let precious = d.path().join("precious.txt");
+    std::fs::write(&precious, "the user's own\n").unwrap();
+    let exclude = s.gitdir.join("info/exclude");
+    std::fs::remove_file(&exclude).unwrap();
+    std::os::unix::fs::symlink(&precious, &exclude).unwrap();
+
+    s.ensure(&wt, &listed).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "the user's own\n",
+        "a relaunch wrote through a link the sandbox left"
+    );
+    assert!(
+        !exclude.symlink_metadata().unwrap().file_type().is_symlink(),
+        "and the link is gone rather than stepped around"
+    );
+    assert_eq!(std::fs::read_to_string(&exclude).unwrap(), ".env\n");
+
+    // And the directory it sits in.
+    let elsewhere = d.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let info = s.gitdir.join("info");
+    std::fs::remove_dir_all(&info).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &info).unwrap();
+
+    s.ensure(&wt, &listed).unwrap();
+
+    assert!(
+        !elsewhere.join("exclude").exists(),
+        "a relaunch wrote into a directory the sandbox pointed `info` at"
+    );
+    assert!(
+        info.symlink_metadata().unwrap().is_dir(),
+        "`info` is a directory of omh's own again"
+    );
+    assert_eq!(
+        std::fs::read_to_string(info.join("exclude")).unwrap(),
+        ".env\n"
+    );
+}
+
 /// A checkpoint refuses a nested repository even when nothing else changed.
 ///
 /// `checkpoint` is the first thing a sync does and the only thing it does
