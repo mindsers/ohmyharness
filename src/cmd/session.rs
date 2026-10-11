@@ -741,7 +741,7 @@ fn session_activity(
     // A directory that is not there is "no transcript yet"; a directory omh
     // could not read, or a file in it it could not open, is *unreadable* — a
     // real failure must not be reported as an empty history.
-    let files = match walk_jsonl(&dir) {
+    let files = match open_transcripts(&dir) {
         Ok(files) => files,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(_) => return report::Activity::Unreadable,
@@ -749,18 +749,19 @@ fn session_activity(
     if files.is_empty() {
         return report::Activity::NotRecorded("no transcript written yet".into());
     }
-    let mut jsonl = String::new();
-    for file in files {
-        match std::fs::read_to_string(&file) {
-            Ok(text) => {
-                jsonl.push_str(&text);
-                jsonl.push('\n');
-            }
-            // A transcript file that exists and will not open is unreadable,
-            // not absent.
-            Err(_) => return report::Activity::Unreadable,
+    let jsonl = match read_transcripts(files, TRANSCRIPT_LIMIT) {
+        Ok(jsonl) => jsonl,
+        // A transcript file that exists and will not open is unreadable, not
+        // absent.
+        Err(Unread::Failed) => return report::Activity::Unreadable,
+        // Not *unreadable*: omh never tried, and says how much there was.
+        Err(Unread::TooLarge(bytes)) => {
+            return report::Activity::NotRead(format!(
+                "it is over {} MB, which is more than omh reads into memory",
+                bytes / (1024 * 1024)
+            ))
         }
-    }
+    };
     let summary = crate::transcript::summarise(&jsonl);
     if summary.is_unreadable() {
         return report::Activity::Unreadable;
@@ -768,22 +769,89 @@ fn session_activity(
     report::Activity::Read(summary)
 }
 
-/// Every `.jsonl` under `dir`, one level deep or nested — Claude Code keys
-/// transcripts by project directory, so they sit one subdirectory in.
-fn walk_jsonl(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+/// The most transcript omh reads into memory for one session.
+///
+/// A regular file can be any size the agent likes — a sparse one costs it
+/// nothing to make — and reading one whole reserves all of it. Past this the
+/// answer is that omh did not read it, said with the size, rather than an
+/// allocation that fails and takes the command with it.
+const TRANSCRIPT_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// Why `read_transcripts` has nothing to hand back.
+#[derive(Debug, PartialEq, Eq)]
+enum Unread {
+    /// A transcript that was opened would not read.
+    Failed,
+    /// More than the limit, and at least this many bytes.
+    TooLarge(u64),
+}
+
+/// Read what `open_transcripts` opened, in order, up to `limit` bytes of it.
+fn read_transcripts(
+    files: Vec<(std::path::PathBuf, std::fs::File)>,
+    limit: u64,
+) -> Result<String, Unread> {
+    use std::io::Read as _;
+    let mut jsonl = String::new();
+    let mut read: u64 = 0;
+    for (_, file) in files {
+        // One byte past what is left, so *exactly the limit* and *over it*
+        // are different answers. The size on disk is not asked: it is the
+        // agent's to change while this reads.
+        let room = limit.saturating_sub(read);
+        let mut text = String::new();
+        let took = file
+            .take(room + 1)
+            .read_to_string(&mut text)
+            .map_err(|_| Unread::Failed)? as u64;
+        read += took;
+        if read > limit {
+            return Err(Unread::TooLarge(read));
+        }
+        jsonl.push_str(&text);
+        jsonl.push('\n');
+    }
+    Ok(jsonl)
+}
+
+/// Every `.jsonl` under `root`, **opened** — one level deep or nested, since
+/// Claude Code keys transcripts by project directory and they sit one
+/// subdirectory in.
+///
+/// The directory is mounted writable into the sandbox, so every name in it is
+/// the agent's to make and to change while this runs. It used to be walked
+/// with `Path::is_dir` and read by name: a linked directory was walked into
+/// wherever it pointed — one pointing back at its parent, until the kernel
+/// stopped counting — and a link or a pipe called `x.jsonl` was read whole.
+///
+/// So this holds each directory open and reaches everything below it through
+/// the descriptor ([`crate::held`]). The listing is by path and is only ever
+/// a list of names to try: what a name *is* gets decided by the open, against
+/// the directory that is held, and a link, a pipe, or a directory that has
+/// become one since it was listed does not open.
+///
+/// **A name that will not open fails the walk.** Leaving it out would be
+/// answering from a subset — turns and cost from some of the transcript,
+/// printed as the session's — and the caller already has a word for a
+/// transcript omh could not read.
+fn open_transcripts(
+    root: &std::path::Path,
+) -> std::io::Result<Vec<(std::path::PathBuf, std::fs::File)>> {
     let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for entry in std::fs::read_dir(&d)?.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "jsonl") {
-                out.push(path);
+    let mut stack = vec![(root.to_path_buf(), crate::held::Dir::open(root)?)];
+    while let Some((at, held)) = stack.pop() {
+        for entry in std::fs::read_dir(&at)? {
+            let entry = entry?;
+            let (name, kind) = (entry.file_name(), entry.file_type()?);
+            let path = at.join(&name);
+            if kind.is_dir() {
+                stack.push((path, held.sub(&name)?));
+            } else if kind.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
+                out.push((path, held.file(&name)?));
             }
         }
     }
-    out.sort();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
@@ -3170,6 +3238,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(went, Disposition::Replaced, "a drifted stamp restarts");
+    }
+
+    /// The transcript walk reads what the harness wrote and follows nothing.
+    ///
+    /// The directory is mounted writable into the sandbox — the harness
+    /// writes its transcript there — so every entry in it is the agent's to
+    /// make. The walk asked `Path::is_dir` and took any name ending `.jsonl`:
+    /// a linked directory was walked into wherever it led, one pointing back
+    /// at its own parent was walked until the kernel gave up counting, and a
+    /// link or a pipe called `x.jsonl` was handed on to be read.
+    #[test]
+    #[cfg(unix)]
+    fn the_transcript_walk_follows_nothing_the_sandbox_linked() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("transcripts");
+        let project = dir.join("-work");
+        std::fs::create_dir_all(&project).unwrap();
+        let real = project.join("session.jsonl");
+        std::fs::write(&real, "{}\n").unwrap();
+
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("theirs.jsonl"), "{}\n").unwrap();
+        std::fs::write(d.path().join("a-host-file"), "not a transcript\n").unwrap();
+        use std::os::unix::fs::symlink;
+        symlink(&outside, dir.join("elsewhere")).unwrap();
+        symlink(&dir, project.join("around-again")).unwrap();
+        symlink(d.path().join("a-host-file"), project.join("linked.jsonl")).unwrap();
+        let piped = std::process::Command::new("mkfifo")
+            .arg(project.join("pipe.jsonl"))
+            .status()
+            .unwrap();
+        assert!(piped.success(), "the fixture needs a pipe");
+
+        let found: Vec<_> = open_transcripts(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(found, vec![real], "only the file the harness wrote, once");
+    }
+
+    // Two tests sat here — a transcript swapped for a link after the walk, and
+    // a pipe where one was — written against a read that opened each file by
+    // name. Nothing is opened by name any more: the walk holds each directory
+    // and opens through it, so both properties are `held`'s, and its tests
+    // play the swap in the window where it matters
+    // (`a_directory_swapped_for_a_link_after_it_was_held_is_not_followed`,
+    // `nothing_is_reached_through_a_link`).
+
+    /// A transcript larger than omh will hold is said to be, not read into
+    /// memory until the allocation fails.
+    ///
+    /// A regular file can still be any size the agent likes — a sparse one
+    /// costs it nothing — and `read_to_string` reserves the whole of it.
+    #[test]
+    fn a_transcript_past_the_limit_is_not_read() {
+        let d = tempfile::tempdir().unwrap();
+        let one = d.path().join("one.jsonl");
+        let two = d.path().join("two.jsonl");
+        std::fs::write(&one, "x".repeat(40)).unwrap();
+        std::fs::write(&two, "y".repeat(40)).unwrap();
+
+        let opened = || {
+            vec![
+                (one.clone(), std::fs::File::open(&one).unwrap()),
+                (two.clone(), std::fs::File::open(&two).unwrap()),
+            ]
+        };
+        assert!(
+            read_transcripts(opened(), 200).is_ok(),
+            "under the limit, both are read"
+        );
+        assert!(
+            matches!(read_transcripts(opened(), 60), Err(Unread::TooLarge(_))),
+            "and the limit is on the session's transcript, not on each file of it"
+        );
     }
 
     #[test]
