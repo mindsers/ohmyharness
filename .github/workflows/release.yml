@@ -71,7 +71,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@v7
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: run every test
         run: cargo test --locked -- --include-ignored
       - name: lint, with warnings as errors
@@ -112,8 +112,12 @@ jobs:
       - name: add the target
         run: rustup target add ${{ matrix.target }}
 
+      # By commit, not by tag. This step runs immediately before the build
+      # whose output is the release: a tag is a name its owner can move, and
+      # whoever moves `v2` ships binaries that SHA256SUMS will agree with.
+      # Dependabot reads the trailing comment and moves the pin for review.
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
@@ -252,8 +256,10 @@ jobs:
     steps:
       - name: check out the repo
         uses: actions/checkout@v7
-      - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+      # No cache here, deliberately. This is the one job that holds
+      # CARGO_REGISTRY_TOKEN, and a cache action is third-party code running
+      # beside it to save a build that happens once per release. A crates.io
+      # publish cannot be withdrawn.
       - name: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -380,7 +386,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@v7
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: package the crate
         run: cargo package --locked
       - name: list what would ship
