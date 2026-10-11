@@ -6,7 +6,7 @@ branch**, which many harnesses take turns inhabiting.
 ```
        omh new claude ──┐
        omh new opencode ┼── exec ──┐
-       omh s attach ────┘  (ssh)   │
+       omh s01 attach ──┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │
@@ -52,15 +52,15 @@ the branch it was given.
 Review is therefore just git:
 
 ```console
-$ omh s diff
+$ omh s01 diff
 $ git log omh/s01
 ```
 
 That git runs on the **host**, and so does the way work leaves a session:
 
 ```console
-$ omh s commit -m "Fix the tap guard"
-$ omh s push fix/tap-guard
+$ omh s01 commit -m "Fix the tap guard"
+$ omh s01 push fix/tap-guard
 ```
 
 Not a stylistic choice. A worktree's `.git` is a file holding an absolute path
@@ -75,7 +75,9 @@ from your own repo without `~/.omh` entering into it.
 What is writable is a short list, and it grew: the worktree, because that is the
 work; credentials, because tokens refresh in place; the sandbox's own repository
 (below); each file `carry_in` hands over, so the agent can edit config it was
-given; and two caches outside `/work` — the code graph and the local note store.
+given; the directory the harness writes its transcript to, which is what
+`omh sNN` reads to say what the agent did; and two caches outside `/work` — the
+code graph and the local note store.
 
 **Nothing else is**, and a test asserts the set by name rather than asserting a
 list of mount strings, so adding one is a decision somebody has to make on
@@ -98,7 +100,7 @@ Until 2026.08 it had none: the dangling pointer meant every command failed with
 an agent spend turns repairing what could not be repaired. That cost the agent
 `status`, `diff`, `log`, `stash` and `reset --hard` — and cost an attached
 editor its source control panel, since the editor runs *inside* the container —
-for the editors that have one; `omh s attach nvim` never did.
+for the editors that have one; `omh s01 attach nvim` never did.
 
 So omh gives it a repository of its own. A gitdir under `~/.omh/shadow/`, seeded
 with a single commit of the tree the session started from — minus everything omh
@@ -143,11 +145,11 @@ a session's start, and say so when they launch. It refuses while the sandbox is 
 believes the tree holds is in its conversation and no file on disk reaches
 that.
 
-**Its commits are not yours until you ask for them.** `omh s commit` squashes the
+**Its commits are not yours until you ask for them.** `omh s01 commit` squashes the
 files into one commit of your own and never looks at that repository;
-`omh s commit --keep` replants the agent's commits, messages and all — every one
+`omh s01 commit --keep` replants the agent's commits, messages and all — every one
 since the last handover, or the ones you name by their number in `omh s01 log`:
-`--keep 1,3-4`. Whichever you use, `omh s rm` takes the repository with the session
+`--keep 1,3-4`. Whichever you use, `omh s01 rm` takes the repository with the session
 — so checkpoints you did not harvest go with it, and after a `git reset --hard`
 in the sandbox those are the only copies there were.
 
@@ -166,7 +168,7 @@ works inside — that is a decision, recorded in a test — so this is a wall
 against a runaway build, not against an agent that wants out.
 
 Worth being precise about what this buys: a sandbox protects your *host*. What
-protects your *repo* is the worktree branch. That is why `omh s rm` never
+protects your *repo* is the worktree branch. That is why `omh s01 rm` never
 deletes a branch that has commits — only an empty one, which held nothing to
 review.
 
@@ -239,7 +241,7 @@ lives in the distribution. Turn it off with `persistence = "none"`.
 ### Why not tmux
 
 tmux is a multiplexer **and** a persistence tool, and omh needs only the second
-half — `omh s attach` means SSH already gives you as many shells against a session
+half — `omh s01 attach` means SSH already gives you as many shells against a session
 as you want.
 
 Adopting tmux would buy one feature we need and one we already have, while

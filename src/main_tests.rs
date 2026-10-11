@@ -600,6 +600,131 @@ fn no_test_attribute_was_stranded_from_its_function() {
     );
 }
 
+/// No message and no page offers a session verb with no session to run it on.
+///
+/// `sync` and `down` act on every session when none is named. The other seven
+/// verbs act on one, and since the hidden *most recent session* default went
+/// they refuse a bare call — `which session? name it` — even when exactly one
+/// exists. The verbs changed and what was written about them did not: `omh
+/// init` went on closing with two next steps that are both refused, a dozen
+/// refusals offered a remedy that is itself refused, and the README's first
+/// screen typed one.
+///
+/// Neither neighbour can see this. `the_lines_omh_prints_are_lines_omh_accepts`
+/// asks clap, and clap accepts every one of these lines — the refusal comes
+/// after the parse, from the resolver. The scan below this one is keyed on
+/// *verbs* that left, and no verb left. This is the shape needle its skill
+/// says did not exist yet.
+///
+/// **What omh prints, and what a user is told to type.** Source with its
+/// comments taken out, so a string is read and the history beside it is not —
+/// a comment recounting what `omh s rm` once did is about the past and has to
+/// be allowed to say so. And every page outside `docs/design/`, for the same
+/// reason turned round: those pages are the record of how the surface got
+/// here.
+///
+/// A line that has to show the refused spelling says so on the line, with
+/// `ON_PURPOSE`.
+#[test]
+fn nothing_offers_a_session_verb_without_naming_the_session() {
+    const ON_PURPOSE: &str = "names no session on purpose";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Assembled, for the reason the needles below this test are: a sweep that
+    // fixes the tree must not be able to fix the guard.
+    let needles: Vec<String> = ["s", "sessions"]
+        .iter()
+        .flat_map(|noun| {
+            ["attach", "resume", "log", "diff", "commit", "push", "rm"]
+                .iter()
+                .map(move |verb| format!("omh {noun} {verb}"))
+        })
+        .collect();
+
+    // What omh prints: production source, minus its comments.
+    let mut corpus: Vec<(std::path::PathBuf, String)> = crate::testsrc::production()
+        .into_iter()
+        .map(|(path, body)| {
+            let code: String = body
+                .lines()
+                .map(|line| match line.trim_start().starts_with("//") {
+                    true => "",
+                    false => line,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (path, code)
+        })
+        .collect();
+    // What a user is told to type.
+    let mut pages = vec![root.join("README.md"), root.join("install.sh")];
+    for dir in ["docs", ".github", "base", "packaging/homebrew"] {
+        for entry in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+            // By extension, because these directories also hold what a
+            // desktop leaves in them, and a `.DS_Store` is not a page.
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|e| ["md", "toml", "tmpl", "yml"].iter().any(|k| e == *k))
+            {
+                pages.push(path);
+            }
+        }
+    }
+    for page in pages {
+        corpus.push((page.clone(), std::fs::read_to_string(&page).unwrap()));
+    }
+    for read in [
+        "README.md",
+        "docs/commands.md",
+        "docs/sessions.md",
+        "src/cmd/init.rs",
+        "src/shadow.rs",
+        "base/2026.08.toml",
+    ] {
+        assert!(
+            corpus
+                .iter()
+                .any(|(path, body)| path.ends_with(read) && !body.is_empty()),
+            "the scan no longer reads {read}"
+        );
+    }
+
+    let mut offered = Vec::new();
+    for (path, body) in &corpus {
+        for (n, line) in body.lines().enumerate() {
+            if line.contains(ON_PURPOSE) {
+                continue;
+            }
+            for needle in &needles {
+                // The verb, and then anything that does not continue the
+                // word: this tree writes a command inside backticks, at the
+                // end of a line, before a flag — never reliably before a
+                // space.
+                let bare = line.match_indices(needle.as_str()).any(|(at, _)| {
+                    !line[at + needle.len()..]
+                        .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                });
+                if bare {
+                    offered.push(format!(
+                        "{}:{}: {}",
+                        path.strip_prefix(root).unwrap_or(path).display(),
+                        n + 1,
+                        line.trim()
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        offered.is_empty(),
+        "{} lines offer a session verb with no session named — omh refuses each \
+         with `which session?`. Name one (`omh s01 …` in an example, `omh sNN …` \
+         in prose), or mark a line that shows the refusal with `{ON_PURPOSE}`: {offered:#?}",
+        offered.len()
+    );
+}
+
 /// No source or document still tells anyone to type a verb that is gone.
 ///
 /// `the_lines_omh_prints_are_lines_omh_accepts` cannot do this, and the
@@ -1133,6 +1258,17 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
                 });
                 owed = word.starts_with('-') && !word.contains('=');
             }
+            // `sNN` is how a page writes *any session*, as omh's own
+            // messages do, and it is filled here the way the sibling scan
+            // fills it. Left as written it is not a word clap knows, so the
+            // line read as omh talking and was skipped: every synopsis that
+            // names a session by its placeholder went unchecked, and the day
+            // the pages stopped offering `omh s log` for `omh sNN log` this
+            // scan read nine lines fewer and would have said nothing had the
+            // map below not been exact.
+            if words.first().is_some_and(|word| word == "sNN") {
+                words[0] = "s01".to_string();
+            }
             let Some(first) = words.first() else {
                 continue;
             };
@@ -1177,7 +1313,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud, and a shape leaving one page while another gains lines is
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
-        ("README.md", 56), // + the omh upgrade command in the list
+        ("README.md", 57), // + the omh upgrade command in the list
         ("accounts.md", 10),
         ("adapters.md", 1),
         ("code-graph.md", 1),
@@ -1187,7 +1323,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("configuration.md", 47), // + `omh use hooks tdd-guard`
         ("decisions.md", 1),
         ("editors.md", 4),
-        ("getting-started.md", 14),
+        ("getting-started.md", 15),
         ("git.md", 18),
         ("memory.md", 4),
         ("profile.md", 3),

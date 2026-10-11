@@ -10,9 +10,9 @@ security` in the subject.
 
 Please do not open a public issue for a vulnerability.
 
-Expect an acknowledgement within a week. This is a one-maintainer project two
-releases old; that is an honest estimate rather than a service level, and it is
-better to say so than to publish a number nobody is on call to meet.
+Expect an acknowledgement within a week. This is a one-maintainer project;
+that is an honest estimate rather than a service level, and it is better to say
+so than to publish a number nobody is on call to meet.
 
 ## What is in scope
 
@@ -21,14 +21,14 @@ it. In rough order of how much they matter:
 
 - **A mount that is writable and should not be.** The invariant is that nothing
   beyond a named set — the worktree, credentials, carried files, the sandbox's
-  own git repository and two caches — is writable from inside
-  the sandbox. A stray `rw` is the difference between a sandbox and a
+  own git repository, the directory the harness writes its transcript to, and
+  two caches — is writable from inside the sandbox. A stray `rw` is the difference between a sandbox and a
   suggestion.
 - **Credentials reaching somewhere they should not** — mounted outside the path
   the harness reads, exposed to another session, or captured into the wrong
   account. Note that an account name is required to be a single path component
   precisely because the alternative mounts the user's real `~` writable.
-- **The sshd used by `omh s attach` reachable off-host.** It is meant to publish
+- **The sshd used by `omh sNN attach` reachable off-host.** It is meant to publish
   on `127.0.0.1` only; anything that binds it wider hands a shell in the
   sandbox to the LAN.
 - **Escape from the session worktree to the host checkout**, or to another

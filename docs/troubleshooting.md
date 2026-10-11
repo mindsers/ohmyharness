@@ -289,7 +289,7 @@ session container is running with `/work` bound to a worktree directory that no
 longer exists. Recreating the directory does not help — a bind mount follows the
 inode, not the path — so every command into that container fails the same way.
 
-Fixed in `v0.3.1`, from both ends. `omh s rm` now takes the container down with
+Fixed in `v0.3.1`, from both ends. `omh sNN rm` now takes the container down with
 the worktree, which is what created the mismatch, and a launch that finds a
 container it cannot enter replaces it instead of exec'ing into it:
 
@@ -336,7 +336,7 @@ separator, so omh guessed: it refused its own long flags typed after a harness
 name and left short ones alone, since `-s` is a flag plenty of harnesses use.
 `omh new` does not guess, so there is nothing left to refuse.
 
-### `omh s rm` says the session "is not a working tree"
+### `omh sNN rm` says the session "is not a working tree"
 
 Worktree registration and the directory on disk disagreed. omh prunes before
 adding and removes the directory outright when git will not, so this should no
@@ -708,7 +708,7 @@ warning does not repeat.
 
 ### `omh will not move a branch the session is not on`
 
-`omh s commit --keep` refuses when the session's worktree has left its branch —
+`omh sNN commit --keep` refuses when the session's worktree has left its branch —
 a `git checkout` to look at something, or an abandoned bisect. Put it back:
 
 ```console
@@ -751,13 +751,13 @@ commit only the agent has.
 
 ### `the sandbox's history no longer reaches …`
 
-`omh s commit --keep` replays from the point it last handed over. An agent that
+`omh sNN commit --keep` replays from the point it last handed over. An agent that
 `reset --hard`s below that point — or rebases across it — leaves a record the
 sandbox's history no longer contains, and omh cannot tell which commits are new
 from what is left. Replaying from the start of the session would offer the
 branch work it already has.
 
-The branch is untouched. Take the files as they stand with `omh s commit -m`,
+The branch is untouched. Take the files as they stand with `omh sNN commit -m`,
 which does not read the sandbox's repository at all.
 
 ### `omh will not rewrite your history to hide a secret`
@@ -768,7 +768,7 @@ or written into a commit message. omh knows the bytes it carried in, so it can
 tell, and it stops rather than quietly rewriting the agent's work.
 
 Drop that commit in the sandbox and harvest again, or take the files without the
-history with `omh s commit -m`. The branch is untouched either way.
+history with `omh sNN commit -m`. The branch is untouched either way.
 
 ### Sessions are piling up
 

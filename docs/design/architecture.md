@@ -20,7 +20,8 @@ the runtime backend is kept swappable.
   shadow/<repo>/<session>.git the repository the sandbox gets, and `.seed` beside it
   keys/<repo>/                per-repo ed25519 keypair
   run/<repo>/<session>/<harness>/  staged profile, regenerated per launch
-  sessions.json               session → container, branch, port
+  run/<repo>/<session>/port   the loopback port that session's sshd is published on
+  memory/<repo>/              the local note store, mounted into every session of the repo
 
 <repo>/.omh/
   settings.toml               COMMITTED — settings, and `[omh]`

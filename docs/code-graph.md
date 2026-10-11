@@ -189,7 +189,7 @@ and querying the wrong one answers confidently about code that is not in this
 worktree.
 
 Three mitigations, no guarantee: `AGENTS.md` names the project, the hook repeats
-it at the moment of choosing, and `omh s rm` drops a session's graph along with
+it at the moment of choosing, and `omh sNN rm` drops a session's graph along with
 the code it describes.
 
 Hard isolation would need a volume per session — a full re-index each time, and

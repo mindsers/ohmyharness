@@ -486,7 +486,7 @@ and nobody is asked about it:
 ```
 
 That line appears at `omh init`, and again at every launch — in the status line
-of `omh new` and `omh sNN resume`, and named individually by `omh s attach` — in
+of `omh new` and `omh sNN resume`, and named individually by `omh sNN attach` — in
 the same list as a hook your harness cannot spell — a held-back hook is never silently absent. It
 is re-decided from the measurement each time, so a sandbox that gains the tool
 gets its hook back with nothing to un-configure.
@@ -1087,7 +1087,7 @@ sandbox's platform.
 
 A carried file is not on the branch, so the agent can put it there — by
 `git add -f`, by copying it under another name, or by pasting a value into
-source. `omh s commit` refuses a harvest that did any of those, and it checks
+source. `omh sNN commit` refuses a harvest that did any of those, and it checks
 two ways: the **path**, and the **content**, by searching the agent's commits
 for lines out of the files you carried.
 
@@ -1128,7 +1128,7 @@ they are **mounted read-only** over their declared filenames. Writing them there
 made omh's staging indistinguishable from the agent's work, and `info/exclude`
 could not help: gitignore semantics say nothing about a file git already tracks,
 so a repo that commits its own `CLAUDE.md` saw a permanent modification nobody
-made, and `omh s commit` published omh's rules over the project's conventions.
+made, and `omh sNN commit` published omh's rules over the project's conventions.
 
 **The mount composes your project's rules rather than replacing them.** The
 repo's own `AGENTS.md` is read before anything is mounted over it and joined
@@ -1180,7 +1180,7 @@ omh: composed CLAUDE.md — rename it to AGENTS.md
 
 `carry_in` is for files git does **not** track. A tracked path is already in the
 worktree, so listing one is a misconfiguration: omh says so at launch and does
-not copy it, and `omh s commit` refuses to publish it if a running session got
+not copy it, and `omh sNN commit` refuses to publish it if a running session got
 one before the list was fixed.
 
 Two traps here, both found by running it rather than reasoning about it:
