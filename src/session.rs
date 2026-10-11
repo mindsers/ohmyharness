@@ -1181,8 +1181,9 @@ impl Session {
                  that nor drop it silently.\n\n  \
                  fix the cause:  omh set carry_in        (carry_in is for files git does not \
                  track; a tracked file is already in the worktree)\n  \
-                 or just this once:  omh s commit --skip-carried",
-                from_your_checkout.join(", ")
+                 or just this once:  omh {} commit --skip-carried",
+                from_your_checkout.join(", "),
+                self.id
             );
             let unstage: Vec<String> = ["reset", "-q", "--"]
                 .iter()
@@ -1302,8 +1303,9 @@ impl Session {
         };
         anyhow::ensure!(
             tracking.remote == "origin",
-            "{branch} tracks {}, not origin — name the branch explicitly:\n  omh s push <name>",
-            tracking.remote
+            "{branch} tracks {}, not origin — name the branch explicitly:\n  omh {} push <name>",
+            tracking.remote,
+            self.id
         );
         Ok(Some(tracking.target.clone()).filter(|name| !name.is_empty()))
     }
@@ -1349,7 +1351,8 @@ impl Session {
             Some(name) => name.to_string(),
             None => self.published_as()?.with_context(|| {
                 format!(
-                    "{branch} is a session id, not a branch name\n  name it:  omh s push <name>"
+                    "{branch} is a session id, not a branch name\n  name it:  omh {} push <name>",
+                    self.id
                 )
             })?,
         };

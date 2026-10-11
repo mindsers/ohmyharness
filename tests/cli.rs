@@ -4714,11 +4714,23 @@ fn init_reports_what_it_did_here_and_not_what_the_machine_has() {
         skills.contains("2 selected"),
         "the count belongs to the capability beside it: {skills:?}"
     );
-    for line in ["omh new claude", "omh s resume", "omh s attach"] {
+    // Each on a line of its own, found whole — `omh s` would otherwise be
+    // satisfied by the `omh sNN resume` under it. The last two name a session
+    // by its placeholder: a bare `omh s resume` is refused now, and that is
+    // what this list asserted `init` said.
+    for line in [
+        "omh new claude",
+        "omh s",
+        "omh sNN resume",
+        "omh sNN attach",
+    ] {
         assert!(
-            said.contains(line),
-            "`{line}` is one of the three, and a reader shown only the first \
-             starts a second session rather than rejoining: {said}"
+            said.lines().any(|printed| {
+                let printed = printed.trim_start();
+                printed == line || printed.starts_with(&format!("{line}  "))
+            }),
+            "`{line}` is one of the lines `init` closes on, and a reader shown \
+             only the first starts a second session rather than rejoining: {said}"
         );
     }
 

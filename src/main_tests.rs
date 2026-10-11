@@ -1754,7 +1754,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
-        ("src/cmd/init.rs", 7),     // + the `omh upgrade` redirect when a repo is already set up
+        ("src/cmd/init.rs", 8),     // + the `omh upgrade` redirect when a repo is already set up
         ("src/cmd/upgrade.rs", 1),  // the `omh init` redirect when a repo is not set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only
@@ -5223,7 +5223,16 @@ fn what_init_says_to_run_next_is_a_command_omh_accepts() {
             "init has to leave somebody with something to run"
         );
         for (said, _) in &lines {
-            let argv: Vec<String> = said.split_whitespace().map(str::to_string).collect();
+            // `sNN` is how omh writes *any session*, and is filled here the
+            // way the printed-line scan fills it. `init` runs before there is
+            // a session to name, so its lines cannot name one — and a line
+            // that names none at all is refused, which is what the two here
+            // used to do.
+            let argv: Vec<String> = said
+                .split_whitespace()
+                .map(|word| if word == "sNN" { "s01" } else { word })
+                .map(str::to_string)
+                .collect();
             let (_, argv) = cli::session_prefix(argv);
             assert!(
                 Cli::try_parse_from(&argv).is_ok(),
@@ -5483,7 +5492,7 @@ fn no_bundled_adapter_shares_a_name_with_an_editor() {
 #[test]
 fn naming_an_editor_where_a_harness_goes_names_the_fix() {
     let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
-    assert!(hint.contains("omh s attach zed"), "got: {hint}");
+    assert!(hint.contains("omh sNN attach zed"), "got: {hint}");
 }
 
 #[test]
@@ -5509,7 +5518,7 @@ fn a_command_typed_as_a_harness_is_no_longer_a_thing_that_can_happen() {
     // mistaken for anything. What survives is the editor half, which is
     // still a real confusion because editors and harnesses are both names.
     let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
-    assert!(hint.contains("omh s attach zed"), "got: {hint}");
+    assert!(hint.contains("omh sNN attach zed"), "got: {hint}");
 }
 
 /// Regression: bundled definitions were written only if absent, so a fix

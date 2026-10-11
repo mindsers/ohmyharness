@@ -44,16 +44,21 @@ pub(crate) fn next_after_init(harness: Option<&str>) -> Vec<(String, String)> {
     };
     vec![
         (format!("omh new {harness}"), "start a session".into()),
-        ("omh s resume".into(), "rejoin it later".into()),
-        // `omh s attach`, not `omh s01 attach zed`. Two guesses in one line:
-        // `s01` is a constant — in a repo already carrying `s01`, `omh new`
-        // makes `s04` and this advice would open an unrelated session,
-        // successfully and silently. And naming `zed`
-        // guesses at the machine in the commit that deleted the `editors` row
-        // for being a fact about the machine. `attach` with no id takes the
-        // session omh picks and `$EDITOR` if you have one, which is right on
-        // every run.
-        ("omh s attach".into(), "open it in your editor".into()),
+        // The listing, because the two lines after it need something from it.
+        // They used to be `omh s resume` and `omh s attach`, written when a
+        // verb with no session named took the one omh picked. It refuses now —
+        // `which session?` — so `init` closed by offering two commands that
+        // do not run.
+        ("omh s".into(), "list sessions, each by its id".into()),
+        // `sNN`, not `s01`. `s01` is a constant: in a repo already carrying
+        // one, `omh new` makes `s04`, and advice naming `s01` would open an
+        // unrelated session, successfully and silently. A placeholder cannot
+        // be pasted, and that is the lesser cost — it also cannot be wrong.
+        ("omh sNN resume".into(), "rejoin one later".into()),
+        // No editor named either: that guesses at the machine, in the commit
+        // that deleted the `editors` row for being a fact about the machine.
+        // `attach` with none takes `$EDITOR` if you have one.
+        ("omh sNN attach".into(), "open it in your editor".into()),
     ]
 }
 

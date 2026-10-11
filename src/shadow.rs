@@ -485,6 +485,13 @@ pub struct Checkpoints {
 }
 
 impl Shadow {
+    /// The session this is the sandbox repository of, for the commands these
+    /// messages offer. A remedy that names no session is one omh refuses —
+    /// `which session?` — so every one of them names this.
+    fn session(&self) -> &str {
+        self.branch.strip_suffix("-scratch").unwrap_or(&self.branch)
+    }
+
     pub fn new(shadow_dir: &Path, session_id: &str) -> Self {
         Self {
             gitdir: shadow_dir.join(format!("{session_id}.git")),
@@ -746,8 +753,9 @@ impl Shadow {
             !landed.is_empty(),
             "{} is empty, which is what an interrupted write leaves behind. omh \
              cannot tell what it last handed over, and will not guess. Take the \
-             files as they stand with `omh s commit -m`",
-            self.landed_record.display()
+             files as they stand with `omh {} commit -m`",
+            self.landed_record.display(),
+            self.session()
         );
         Ok(Some(landed.to_string()))
     }
@@ -1296,9 +1304,10 @@ impl Shadow {
         anyhow::ensure!(
             self.gitdir.exists(),
             "{} has no sandbox repository — nothing has run in it yet, so there \
-             are no commits of its own to keep. `omh s commit -m` takes the \
+             are no commits of its own to keep. `omh {} commit -m` takes the \
              files as they are",
-            worktree.display()
+            worktree.display(),
+            self.session()
         );
 
         // Detached: `git checkout <sha>` to look at an old checkpoint, and the
@@ -1475,8 +1484,9 @@ impl Shadow {
                     "the sandbox's history no longer reaches {}, which is what omh last \
                      kept from it — a `reset --hard` or a rebase below that point, or a \
                      record git can no longer read as a commit. omh will not guess which \
-                     commits are new. Take the files as they stand with `omh s commit -m`",
-                    &landed[..landed.len().min(8)]
+                     commits are new. Take the files as they stand with `omh {} commit -m`",
+                    &landed[..landed.len().min(8)],
+                    self.session()
                 );
                 landed
             }
@@ -1547,7 +1557,7 @@ impl Shadow {
             ],
         )?;
 
-        let curated = Self::replant(&replant, branch, &from, &keep, &scratch)
+        let curated = Self::replant(&replant, branch, &from, &keep, &scratch, self.session())
             .and_then(|()| Self::stamp(&replant, &before));
         // Counted *after* curation, because the number is reported as what was
         // kept and it is not always what was asked for: `--edit` lets the user
@@ -1598,8 +1608,9 @@ impl Shadow {
         .map_err(|e| {
             anyhow::anyhow!(
                 "{e}\n\n{branch} moved while the harvest was running, so nothing was \
-                 written. The work is still at {scratch} — run `omh s commit \
-                 --keep` again"
+                 written. The work is still at {scratch} — run `omh {} commit \
+                 --keep` again",
+                self.session()
             )
         })?;
         // Recorded before the ref goes, because the ref is what names it. From
@@ -1665,7 +1676,14 @@ impl Shadow {
     }
 
     /// The curation pass: the agent's commits onto the branch, the user's shape.
-    fn replant(at: &Path, branch: &str, seed: &str, keep: &Keep, scratch: &str) -> Result<()> {
+    fn replant(
+        at: &Path,
+        branch: &str,
+        seed: &str,
+        keep: &Keep,
+        scratch: &str,
+        session: &str,
+    ) -> Result<()> {
         // A selection is `cherry-pick`, and everything else is `rebase`.
         //
         // The design said a selection would be a generated rebase todo,
@@ -1704,8 +1722,9 @@ impl Shadow {
             // Onto the branch, not onto the fetched tip: this worktree was
             // created at the sandbox's HEAD so `rebase --onto` could move the
             // whole range, and a selection starts from the branch instead.
-            git_in(at, &["reset", "-q", "--hard", branch])
-                .map_err(|e| anyhow::anyhow!("{e}\n\n{}", Self::replant_failed(scratch)))?;
+            git_in(at, &["reset", "-q", "--hard", branch]).map_err(|e| {
+                anyhow::anyhow!("{e}\n\n{}", Self::replant_failed(scratch, session))
+            })?;
             let mut args = vec!["cherry-pick", "--empty=drop"];
             args.extend(ids.iter().map(String::as_str));
             let out = Command::new("git")
@@ -1738,7 +1757,7 @@ impl Shadow {
             return Err(anyhow::anyhow!(
                 "{}\n\n{}",
                 crate::out::untrusted(&said.join("\n")),
-                Self::replant_failed(scratch)
+                Self::replant_failed(scratch, session)
             ));
         }
 
@@ -1759,13 +1778,13 @@ impl Shadow {
             return if ok.success() {
                 Ok(())
             } else {
-                Err(Self::replant_failed(scratch))
+                Err(Self::replant_failed(scratch, session))
             };
         }
 
         git_in(at, &args)
             .map(|_| ())
-            .map_err(|e| anyhow::anyhow!("{e}\n\n{}", Self::replant_failed(scratch)))
+            .map_err(|e| anyhow::anyhow!("{e}\n\n{}", Self::replant_failed(scratch, session)))
     }
 
     /// How far the replay point may move, given what was actually taken.
@@ -1795,12 +1814,12 @@ impl Shadow {
     }
 
     /// What is true after a replant that did not finish, whichever way it went.
-    fn replant_failed(scratch: &str) -> anyhow::Error {
+    fn replant_failed(scratch: &str, session: &str) -> anyhow::Error {
         anyhow::anyhow!(
             "the branch is untouched and nothing is lost — omh fetched the work \
              before replanting, and it is still at {scratch}. Look at it with \
              `git log {scratch}`, or take the files without the history using \
-             `omh s commit -m`"
+             `omh {session} commit -m`"
         )
     }
 
@@ -1886,7 +1905,8 @@ impl Shadow {
                     "{rel} is a carried file and {line} has it. omh will not \
                      rewrite your history to hide a secret — drop that commit in \
                      the sandbox and harvest again, or take the files without the \
-                     history with `omh s commit -m`"
+                     history with `omh {} commit -m`",
+                    self.session()
                 );
             }
             let (found, could_not_read) = Self::needles(&repo.join(rel), rel)?;
@@ -2384,8 +2404,9 @@ const AUTHOR_EMAIL: &str = "sandbox@omh.invalid";
 pub const ARRANGEMENT: &str = "This repository is the sandbox's own, and it is not the branch \
      anyone reviews. Commit as often as you like — that is what it is for, and `git reset --hard` \
      back to a checkpoint is yours to use. What reaches the person you are working with is the \
-     state of the files, which they read with `omh s diff` and commit with `omh s commit` on the \
-     host, pushing with `omh s push` when they are ready. Your commit messages here stay here.\n\n\
+     state of the files, which they read with `omh sNN diff` and commit with `omh sNN commit` on \
+     the host, pushing with `omh sNN push` when they are ready. Your commit messages here stay \
+     here.\n\n\
      There is nothing to push and no remote to push to, and adding one will not work either — \
      the config is not yours to write. That is the arrangement rather than a fault to repair. Say \
      so rather than offering to push, and do not offer to commit on the host — that is theirs to \
@@ -2452,8 +2473,8 @@ pub fn seed_message() -> String {
 /// Why a push cannot work, said where the agent is trying to push.
 const NO_PUSH: &str =
     "omh: nothing to push from here. This repository is the sandbox's own and has no remote — \
-     your work reaches the outside through the host, where `omh s commit` puts it on the branch \
-     and `omh s push` sends it. Say that rather than trying to push yourself.";
+     your work reaches the outside through the host, where `omh sNN commit` puts it on the \
+     branch and `omh sNN push` sends it. Say that rather than trying to push yourself.";
 
 /// What `--keep` was asked to take.
 ///

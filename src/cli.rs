@@ -797,7 +797,7 @@ pub(crate) const RETIRED: &[Retired] = &[
     Retired {
         spellings: &["attach", "a"], // types the retired verb on purpose
         at: At::Verb,
-        said: "`attach` is a session verb now:\n  omh s attach [editor]     the session omh picks\n  omh s01 attach zed        that one",
+        said: "`attach` is a session verb now, and it names its session:\n  omh s01 attach [editor]   that one\n  omh s                     lists them",
     },
     // Also `omh info repo`, which was reaching the right sentence only because
     // the match used to be unscoped. Stated rather than relied on.

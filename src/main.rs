@@ -719,7 +719,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
 /// the message is the entire value of this path.
 pub(crate) fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
     if editors.iter().any(|e| e == name) {
-        return format!("`{name}` is an editor — try `omh s attach {name}`");
+        return format!("`{name}` is an editor — try `omh sNN attach {name}`");
     }
     format!(
         "unknown harness `{name}`\n  available: {}",
