@@ -1,4 +1,7 @@
-# Architecture
+---
+title: Architecture
+description: Images, runtime backends, and the on-disk layout.
+---
 
 **Status: built, except the second backend.** The on-disk layout, the image build and the runtime trait are all shipping. `sbx` is selectable and **unverified** — `runtime = "sbx"` is a valid setting, and `auto` never picks it, because nobody has measured it — but the spike that resolves file mounts, guest paths and IDE attach has not run, so Docker is the only runtime anyone has confirmed works.
 
@@ -39,7 +42,7 @@ Two details that are load-bearing rather than incidental:
 - **Worktrees live outside the repo.** Nested, your IDE would index every
   session's full copy of the codebase.
 
-Where things live is in [Configuration](https://docs.ohmyharness.sh/reference/configuration/#one-catalogue-and-it-is-personal).
+Where things live is in [Configuration](/reference/configuration/#one-catalogue-and-it-is-personal).
 
 ## Images
 
@@ -94,7 +97,7 @@ The network a plan names — one per session, named like its container, so two
 sessions of one repo cannot reach each other's services — has to be *created*,
 too. That gap made every real launch die at `network omh-<repo> not found`
 (the per-project network of the time) while every unit test
-passed — the archetypal case for [`omh doctor`](https://docs.ohmyharness.sh/guides/troubleshooting/).
+passed — the archetypal case for [`omh doctor`](/guides/troubleshooting/).
 
 ### Verified end to end
 
@@ -241,7 +244,7 @@ fine and cannot see its own profile.
 
 Resolving it is a one-afternoon spike — build an opencode kit, try a single-file
 mount, try attaching an IDE — and it gates whether `sbx` becomes the default or
-stays opt-in hardening. See [roadmap](roadmap.md).
+stays opt-in hardening. See [roadmap](/project/roadmap/).
 
 ### Spike: `sbx` 0.39.0, measured 2026-09-06
 

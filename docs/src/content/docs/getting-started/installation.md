@@ -8,7 +8,7 @@ sidebar:
 ## Requirements
 
 - **Docker**, running. It is currently the only verified runtime — see
-  [runtime backends](https://github.com/mindsers/ohmyharness/blob/main/docs/design/architecture.md#runtime-backends).
+  [runtime backends](/concepts/architecture/#runtime-backends).
 - **git**, and a repository to work in. omh refuses to run outside one.
 - **Rust 1.85+**, but only to build from source. Declared as `rust-version` in
   `Cargo.toml`, and CI builds the whole tree on exactly 1.85 — so it is a floor

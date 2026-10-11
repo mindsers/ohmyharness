@@ -689,7 +689,7 @@ file and says so, the way `--layer shared` does today.
 > `omh set` replaces both. The default is the **committed** file, and what keeps
 > a credential out of it is `src/key.rs`, per key. See
 > [Configuration](https://docs.ohmyharness.sh/reference/configuration/) for the rule as shipped and
-> [decisions](decisions.md) for the record of the reversal.
+> [decisions](https://docs.ohmyharness.sh/project/decisions/) for the record of the reversal.
 
 > **Also superseded in 0.7.0.** The paragraph below argues for `enable` /
 > `disable` as a separate verb pair. `omh set <feature> on|off` replaced it —
@@ -911,7 +911,7 @@ by hand into
 somebody remembered and nowhere else. They become base-set entries with
 `kind = "rules"` — a rule section belonging to a feature, exactly as its hooks do
 — so they reach every project, `omh why git-notice` can answer for them, and they
-land in the cost rollup [v1](roadmap.md#v1--accountability) wants instead of
+land in the cost rollup [v1](https://docs.ohmyharness.sh/project/roadmap/#v1--accountability) wants instead of
 being invisible weight. On a `dir` harness they are one more staged file; on a
 `concat` one they are the last section. Same entries, same feature switch, two
 renders.

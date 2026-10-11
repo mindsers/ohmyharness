@@ -534,7 +534,7 @@ pub(crate) fn attach(
 
 /// Stop sessions nobody has used for longer than `policy.idle_timeout`.
 ///
-/// N sessions is N containers — the sprawl `docs/design/risks.md` names. Only
+/// N sessions is N containers — the sprawl the risks page names. Only
 /// the container stops; the worktree and branch survive, so relaunching resumes
 /// exactly where you left off.
 ///
@@ -1604,7 +1604,7 @@ pub(crate) fn leftovers(
     // genuinely has none.
     let live_is_certain = unchecked.recorded() == mark;
 
-    // A sandbox repository with no worktree — [risks](docs/design/risks.md) 8c.
+    // A sandbox repository with no worktree — risk 8c on the risks page.
     // The most valuable orphan of the three: a container is re-creatable and a
     // run directory holds a timestamp, while this holds every commit the agent
     // made and nothing points at it. `omh <id> rm` clears it, and since #58
@@ -2367,7 +2367,7 @@ pub(crate) fn rm(
     // Before anything is taken down, because everything below this line is
     // irreversible and the first of them is the container.
     //
-    // The last piece of [risks](docs/design/risks.md) 2c. The branch survives a
+    // The last piece of risk 2c on the risks page. The branch survives a
     // removal and the worktree's files were on disk until this ran — but the
     // agent's own commits live only in the sandbox's repository, and `reap`
     // deletes it. After a `reset --hard` in the sandbox those were the only

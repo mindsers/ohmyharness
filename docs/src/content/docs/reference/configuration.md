@@ -278,7 +278,7 @@ nobody.
 ### Names omh ships are omh's
 
 `graph-orient`, `graph-first`, `graph-read` and `graph-refresh` are generated
-from the [base set](https://github.com/mindsers/ohmyharness/blob/main/docs/design/base-set.md), not files. A hook file answering to one of those names is an **error naming both**
+from the [base set](/reference/base-set/), not files. A hook file answering to one of those names is an **error naming both**
 — it would not override omh's, and it would not run, and a hook that is
 committed, reviewed and silently inert is worse than one that refuses to start.
 To be rid of omh's, switch the feature off with `[omh]`.
@@ -304,7 +304,7 @@ is simply silent on `.rs` files rather than pretending to cover them.
 **A guard is discipline, not containment.** `tools: ["edit"]` matches
 Claude's `Edit|Write|MultiEdit` — a shell redirect or `sed -i` reaches the
 same file through `Bash` and is never seen. No guard adds a shell arm to
-close that: the [base set](https://github.com/mindsers/ohmyharness/blob/main/docs/design/base-set.md) already argues the identical
+close that: the [base set](/reference/base-set/) already argues the identical
 point about `git push`, and its own pattern for matching `git` at all shipped
 broken once by missing a multi-line script. The sandbox — the worktree the
 agent cannot escape — is what actually contains a session; a guard is a
@@ -534,7 +534,7 @@ nothing should not be spelled like the two that decide everything. See
 [`omh settings`](/reference/commands/#omh-settings).
 
 Undebuggable without provenance — the standard complaint about oh-my-zsh, and
-the thing [trust](https://github.com/mindsers/ohmyharness/blob/main/docs/design/trust.md) exists to prevent. So every effective value
+the thing [trust](/concepts/trust/) exists to prevent. So every effective value
 reports where it came from and what it beat:
 
 ```console
@@ -831,7 +831,7 @@ and hands you the exact command for whichever is missing. Run it before your
 first launch on `sbx`.
 
 > **Status.** The `sbx` backend is provisional. Its CLI and runtime behaviour
-> are measured (see [architecture](https://github.com/mindsers/ohmyharness/blob/main/docs/design/architecture.md#runtime-backends)),
+> are measured (see [architecture](/concepts/architecture/#runtime-backends)),
 > but omh's own launch path on `sbx` is not yet wired end to end, so treat it as
 > hardening under test rather than a finished backend.
 
@@ -875,7 +875,7 @@ Nobody retypes MCP servers they have already configured, so `import` is the
 on-ramp. It is the exact inverse of the renderers, which forces a real
 constraint: **every format that renders must also parse, and the pair must
 round-trip.** Otherwise import silently drops fields. That is a test, not a hope
-— see [Adapters](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adapters.md#renderers).
+— see [Adapters](/reference/adapters/#renderers).
 
 Import never clobbers. Each server is added, recognised as already identical, or
 reported as a conflict and left alone; re-running is a no-op.
@@ -953,7 +953,7 @@ something you have since edited.
 `omh init` names what it can see across all of these and acts on none of it.
 
 **Planned:** a `plugin` capability that reads Claude marketplace plugins and
-re-renders them for other harnesses. See [roadmap](https://github.com/mindsers/ohmyharness/blob/main/docs/design/roadmap.md).
+re-renders them for other harnesses. See [roadmap](/project/roadmap/).
 
 ## `ca_cert`
 
@@ -1151,7 +1151,7 @@ only place an order can really come from is the list you wrote. `[use]` supplies
 one when it lands.
 
 **omh's own sections come last**, generated from the
-[base set](https://github.com/mindsers/ohmyharness/blob/main/docs/design/base-set.md) rather than written into a file. They describe
+[base set](/reference/base-set/) rather than written into a file. They describe
 the sandbox — what git does here, where notes go, which graph answers what — and
 a convention the project wrote down should not have omh's account of the box
 sitting in front of it. Each is an entry: `omh why git-rules` states what it

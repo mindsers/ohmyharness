@@ -16,7 +16,7 @@ it was earned by a bug that shipped.
 - [ ] If you added a base-set entry: all four fields, the cost **measured**
       with its method and date, and anything you rejected recorded as
       `[[rejected]]` so nobody re-litigates it. See
-      [proposing an entry](../docs/design/base-set.md#proposing-an-entry).
+      [proposing an entry](https://docs.ohmyharness.sh/reference/base-set/#proposing-an-entry).
 - [ ] `omh doctor` — **required if you touched an adapter, an image, or a mount.**
       `cargo test` passing tells you nothing about those; they assert facts
       about external software and break silently.

@@ -1,4 +1,7 @@
-# Risks
+---
+title: Risks
+description: What is weak, stated plainly.
+---
 
 **Status: current, and deliberately not tidied.** Closed risks stay on the page struck through, with the pull request that closed them, because a risk that vanishes teaches nobody what it cost.
 
@@ -11,11 +14,11 @@ against your code should not make you go looking.
 volume, so a compromised agent can read and exfiltrate its own token. `sbx`
 injects secrets at the egress proxy and the agent never holds one. Adopting that
 is the single largest security improvement available, and it is gated on the
-[backend spike](architecture.md#declared-capabilities-and-honest-unknowns).
+[backend spike](/concepts/architecture/#declared-capabilities-and-honest-unknowns).
 Several accounts widens this gap rather than narrowing it.
 
 **2. A sandbox protects the host, not the repo.** What protects the repo is the
-worktree branch — which is why `omh s rm` never deletes one. Conflating the two
+worktree branch — which is why `omh sNN rm` never deletes one. Conflating the two
 is how people end up surprised by what an agent could reach.
 
 **2b. The sandbox's own git repository is agent-writable, and its push wall is a
@@ -51,7 +54,7 @@ untouched. Measured with `chflags uchg` standing in for a
 read-only bind mount — both make a rename-over fail — so the claim owes a check
 inside a real container, which is `doctor`'s job.
 
-**2c. ~~`omh s rm` destroys the agent's own commits.~~** *(Closed in #58.
+**2c. ~~`omh sNN rm` destroys the agent's own commits.~~** *(Closed in #58.
 `omh sNN rm` refuses over checkpoints no branch has, naming how many and what
 to do, before it takes anything down; `--yes` is the way past. Everything
 below is what it was answering.)* *(Previously: partly addressed — what
@@ -60,7 +63,7 @@ the window is what the agent has done since the last landing rather than the
 whole session. `omh sNN log` (#54) shows them and counts them; refusing over
 them is step 12.)* The worktree's content is
 already on disk and the branch survives, but checkpoints the agent made and you
-did not harvest with `omh s commit --keep` go with the session — and after a
+did not harvest with `omh sNN commit --keep` go with the session — and after a
 `git reset --hard` in the sandbox, those were the only copies. `rm` asks for the count now and stands on it — and the count is deliberately
 wider than the numbered list `log` prints. `seed..HEAD` cannot see work the
 agent threw away with `reset --hard`, which is the sentence above; measured,
@@ -141,7 +144,7 @@ make — its rendered rules, `.mcp.json`, the files you carried in — and wrote
 list once, when the repository was created. A capability switched on later, or a
 `carry_in` entry added later, mounted a document the existing sandbox neither
 tracked nor excluded, so the agent's own `git add -A` swept omh's rendered file —
-MCP environment included — into a history `omh s commit --keep` replays onto your
+MCP environment included — into a history `omh sNN commit --keep` replays onto your
 branch. The list is rewritten on every launch now, which touches no commit.
 
 **4e. `ca_cert` widens what the sandbox trusts, on purpose.** Behind a
@@ -182,8 +185,8 @@ session can reach the network freely.
 
 This page used to read *"the allowlist is designed and not wired"*, which
 implied an omh feature somebody had failed to finish.
-[Decisions](decisions.md) has recorded egress as **inherited from the runtime**
-throughout, and [architecture](architecture.md#runtime-backends) puts egress
+[Decisions](/project/decisions/) has recorded egress as **inherited from the runtime**
+throughout, and [architecture](/concepts/architecture/#runtime-backends) puts egress
 policy in the `sbx` backend beside its keychain-backed credential injection.
 Those two were right and this one was out of step — worth naming, because a
 risk page that misattributes a gap sends the reader looking for the wrong fix.
@@ -192,7 +195,7 @@ So it is not on omh's list to wire. It arrives with a backend that has it, or
 it does not arrive. That also means it shares a fix with **risk 1** — `sbx`
 injects secrets at the egress proxy, so the agent never holds its own token —
 and the two are one piece of work rather than two, gated on the
-[v0.5 spike](roadmap.md).
+[v0.5 spike](/project/roadmap/).
 
 Until then: a Docker session has unrestricted egress, and omh does not claim
 otherwise.
@@ -232,7 +235,7 @@ at this boundary, and **not one was catchable by the test suite.**
 
 Git is the case nobody noticed: it is the external binary omh leans on hardest,
 and `doctor` has never probed it — not a version, not a behaviour. The [git
-work](git.md) adds a version-dependent claim (`merge-tree --write-tree`, git
+work](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) adds a version-dependent claim (`merge-tree --write-tree`, git
 ≥ 2.38), which is the occasion to close both — and to pin what
 `cherry-pick --empty=` needs, which #56 made a dependency of `--keep
 <selection>` without being able to measure the floor.
@@ -246,11 +249,11 @@ running `claude` natively, but no better, and the worktree makes it easier to
 forget that you are both in there.
 
 **8b. Closed.** Three measured defects on the host side of git, all fixed.
-`omh s rm` deleted a branch it could not count — a count with no answer now
+`omh sNN rm` deleted a branch it could not count — a count with no answer now
 keeps the branch and says so. A session could be created on trunk itself, where
 git's remote DWIM overrode `worktree add -b` — the start point is a resolved
 commit now, and `default_branch` returns a ref this checkout can answer about.
-And `omh s commit --keep` was not repeatable, replaying from where the session
+And `omh sNN commit --keep` was not repeatable, replaying from where the session
 started, so a second run offered commits already on the branch and died applying
 them — it replays from what it last handed over now, and refuses rather than
 guessing when the sandbox has rewound below that point.
@@ -259,7 +262,7 @@ guessing when the sandbox has rewound below that point.
 takes its id.~~** *(Closed in #59: `omh s` looks at them now, beside the
 containers and run directories it already reported. `omh <id> rm` clears one,
 and since #58 says what it would take with it first.)* Ids are the highest `sNN` plus one, so they come back around, and
-`omh s rm` deletes the repository with the session precisely to stop this. A
+`omh sNN rm` deletes the repository with the session precisely to stop this. A
 worktree removed outside omh — which `omh s` already expects, since it reports
 what a hand `git worktree remove` strands — leaves the gitdir and its seed
 behind, and the next session with that id opens on the previous one's history,
@@ -335,7 +338,7 @@ gone says nothing about who is running it — that needs the in-use check
 **9. Sandbox sprawl.** One container per session. `idle_timeout` stops
 sessions nobody has used, on the next launch — but it is **unset by default**,
 so sprawl is opt-out rather than prevented, and a machine that never launches
-again never reaps. The [git work](git.md) narrows it from the other end: a
+again never reaps. The [git work](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) narrows it from the other end: a
 dashboard saying which sessions hold nothing you have not already taken is what
 makes deleting them safe, and an `rm` that refuses over unharvested commits is
 what would make a stronger default policy safe to set.
@@ -349,7 +352,7 @@ project, and it is not a technical one.
 
 - An agent can query **another session's graph** for the same repo. Mitigated by
   naming the project in three places, not prevented. See
-  [code graph](https://docs.ohmyharness.sh/guides/code-graph/#what-the-agent-can-still-see).
+  [code graph](/guides/code-graph/#what-the-agent-can-still-see).
 - **`.claude.json` is a single-file mount** that cannot be atomically replaced.
   `doctor` reports it rather than pretending otherwise.
 - **Only `claude` has been driven for real work.** `codex`, `opencode` and `omp` pass
@@ -357,7 +360,7 @@ project, and it is not a technical one.
   carries one gap beyond that: its login probe greps for a field name read out
   of oh-my-pi's source, and no logged-in run has confirmed it.
 - **A seeded profile and the shipped base set drift by design.** `init` copies
-  the [base set](base-set.md) into your profile once and never rewrites it, so
+  the [base set](/reference/base-set/) into your profile once and never rewrites it, so
   your edits survive — but an upgrade moves the manifest and not your copy.
   `omh why` reports the difference and deliberately does **not** say who caused
   it, because it cannot tell an edit from an upgrade. Recording the version a

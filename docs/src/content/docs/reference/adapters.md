@@ -1,4 +1,7 @@
-# Adapters
+---
+title: Adapters
+description: Harnesses and editors as data, and how to add one.
+---
 
 **Status: built.** Adapters are data and four ship — `claude`, `codex`, `opencode`, `omp`. Only `claude` has been driven for real work; the other three pass `omh doctor`, which proves their paths and nothing about their behaviour.
 
@@ -203,7 +206,7 @@ unverified claims about external software that ships weekly**, and they break
 your profile.
 
 A green unit suite proves omh mounted a path faithfully. It cannot prove
-anything read it. See [Troubleshooting](https://docs.ohmyharness.sh/guides/troubleshooting/#why-it-exists).
+anything read it. See [Troubleshooting](/guides/troubleshooting/#why-it-exists).
 
 ### The bar for shipping one
 
@@ -241,7 +244,7 @@ args = ["$URL"]
 ```
 
 Editors attach from outside over SSH rather than running inside the sandbox, so
-they have no capabilities to declare. See [Editors](https://docs.ohmyharness.sh/guides/editors/).
+they have no capabilities to declare. See [Editors](/guides/editors/).
 
 ## Breadth is capped on purpose
 
@@ -265,4 +268,4 @@ the only place a hook is written once.
 A third adapter that had taught omh nothing would not have been worth its
 maintenance, whatever it cost to write.
 
-See the [roadmap](roadmap.md) for when that cap lifts.
+See the [roadmap](/project/roadmap/) for when that cap lifts.

@@ -1,4 +1,7 @@
-# Roadmap
+---
+title: Roadmap
+description: What ships when, and what gates what.
+---
 
 **Status: intent, with ✅ for what landed.** Nothing here is built by virtue of being written down. The ✅ marks are the claim; anything unmarked is a plan. Sections headed *done* record work that shipped outside a milestone.
 
@@ -14,16 +17,16 @@ verified runtime.
 ## v0 — the base set, one harness
 
 ✅ `omh init` that decides · ✅ images · ✅ sandbox + worktree · ✅ persistence ·
-✅ `omh auth` · ✅ `omh s attach` · ✅ `omh doctor` · ✅ `carry_in` ·
+✅ `omh auth` · ✅ `omh sNN attach` · ✅ `omh doctor` · ✅ `carry_in` ·
 ✅ code graph · ✅ `omh graph` · ✅ stack hooks ·
-🔶 [memory](memory.md) — the store, retrieval and staleness
+🔶 [memory](https://github.com/mindsers/ohmyharness/blob/main/docs/design/memory.md) — the store, retrieval and staleness
 ship; hub pages do not
 
 **Success criterion:** `omh init && omh new claude` is visibly better than raw
 `claude`, with zero questions asked.
 
 *Not in v0: further adapters, memory, breadth in the capability superset.*
-[Breadth before depth is how distributions die.](adapters.md#breadth-is-capped-on-purpose)
+[Breadth before depth is how distributions die.](/reference/adapters/#breadth-is-capped-on-purpose)
 
 ## v0.5 — backends
 
@@ -37,12 +40,12 @@ It is **opt-in** (`runtime = "sbx"`); `auto` never picks it. What decides
 whether it becomes the default is the full live acceptance — a real `omh doctor
 --harness claude` under `sbx` — which has not run. Until it does, **Docker is
 the only end-to-end-verified runtime** and the
-[credential weakness](risks.md#security) `sbx` addresses stays unaddressed on
+[credential weakness](/concepts/risks/#security) `sbx` addresses stays unaddressed on
 Docker.
 
 ## v1 — accountability
 
-✅ [`omh why`](trust.md) · ⬜ cost accounting
+✅ [`omh why`](/concepts/trust/) · ⬜ cost accounting
 
 `why` ships: every base-set entry answers who installed it, what it costs, what
 was considered instead and how to remove it — and the four fields are enforced
@@ -57,7 +60,7 @@ rather than typed, which is the shape the rest should take. The ones needing a
 live MCP connection are `doctor` territory rather than a pure function.
 
 This is deliberately *not* a benchmark. The reasoning is in
-[measure the cost, argue the benefit](trust.md#measure-the-cost-argue-the-benefit)
+[measure the cost, argue the benefit](/concepts/trust/#measure-the-cost-argue-the-benefit)
 — briefly, an eval suite over a stochastic metric costs real money per decision,
 measures tokens rather than correctness, and becomes the thing the base set is
 tuned to pass. Distributions have never earned legitimacy that way.
@@ -70,7 +73,7 @@ forces the other conversation, and it is free to produce.
 ## The git repairs — done (#46–#52)
 
 Not a milestone. Four measured defects in the path that gets work out of a
-session, one of which deleted unreviewed commits — [risks](risks.md) 4b and 8b.
+session, one of which deleted unreviewed commits — [risks](/concepts/risks/) 4b and 8b.
 They landed first, each with its failing test before the fix, because the
 milestone below rested on them.
 
@@ -80,7 +83,7 @@ which mattered once omh started reading that gitdir from the host.
 
 ## v1.5 — the work loop ✅ (0.6.0)
 
-[Git](git.md), built. All twelve steps in that page's ledger landed across
+[Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md), built. All twelve steps in that page's ledger landed across
 #53–#67, and the page names the pull request behind each one.
 
 `omh sNN log` makes the sandbox's commits visible, `--turns` reads the
@@ -98,7 +101,7 @@ typing `git` and without knowing that a session is a worktree. **Met.**
 What this cost is worth reading before proposing the next one: a third of those
 pull requests were corrections to the ones before them, and the recurring defect
 was not a wrong answer but a confident one — a question omh could not answer
-rendering identically to an answer. [Git](git.md) records each, with the
+rendering identically to an answer. [Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) records each, with the
 measurement that settled it.
 
 ## The command surface — done (0.7.0, #69–#90)
@@ -120,7 +123,7 @@ layer that already declares the key, else the key's own classification decides,
 and `--local` or `--save` names a file on purpose. What keeps a credential out
 of git moved from the command's default to `src/key.rs`, per key — fail-safe by
 enumeration rather than by destination, which is a real trade and is recorded
-in [decisions](decisions.md).
+in [decisions](/project/decisions/).
 
 **`omh init` reported what existed, not what it did.** It opened with the
 machine's harnesses and editors — true before the command ran. That is
@@ -165,7 +168,7 @@ worktree, what a dry run leaves on disk.
 
 Not a milestone either. An audit of 0.7.0 found the engineering sound and the
 weaknesses concentrated in things that **did not fail** — which is why they had
-survived. Two were already written down on [risks](risks.md) and unfixed.
+survived. Two were already written down on [risks](/concepts/risks/) and unfixed.
 
 **Two checkouts of the same name shared everything** (8d). Worktrees, run
 state, keys, sandbox repositories, the note store, the cache volume, the
@@ -189,7 +192,7 @@ dependency wall instead of a lint. Nothing failed; the lint simply never ran.
 `scripts/check.sh` compares the rustc clippy was built against with the one
 you have, and the crate's MSRV with both.
 
-**`omh eject`** ships — the exit [trust](trust.md) has argued for since it was
+**`omh eject`** ships — the exit [trust](/concepts/trust/) has argued for since it was
 written. It also names the files it wrote that still reference `/omh`, `/work`
 or `$OMH_*`, because handing somebody a directory and saying *these are yours
 now* while several of the files silently do not work is the same defect in a
@@ -228,7 +231,7 @@ that changes how omh behaves with nothing else saying so.
 
 **A TLS-inspecting proxy looked like a broken build** (#94). Behind a corporate
 root, image builds failed deep inside docker with no line naming the cause.
-[`ca_cert`](https://docs.ohmyharness.sh/reference/configuration/#ca_cert) puts the root in the sandbox's trust
+[`ca_cert`](/reference/configuration/#ca_cert) puts the root in the sandbox's trust
 store — all three layers, not just the base — and doctor says whether traffic is
 being inspected and whether omh has been told about it.
 
@@ -241,7 +244,7 @@ has, instead of refusing and telling you to retype the command with `--force`.
 
 ## v2 — portability
 
-Second adapter driven for real work, ✅ [`omh eject`](trust.md) (0.8.0), full `omh import`
+Second adapter driven for real work, ✅ [`omh eject`](/concepts/trust/) (0.8.0), full `omh import`
 covering rules, skills, hooks and commands rather than MCP alone.
 
 None of these were ever gated on evidence — an earlier version of this roadmap

@@ -184,7 +184,7 @@ never holds its own token at all. omh mounts a credential volume, so a
 compromised agent **can** read and exfiltrate its own token.
 
 Several accounts widens that gap rather than narrowing it. See
-[risks](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md) and [runtime backends](https://github.com/mindsers/ohmyharness/blob/main/docs/design/architecture.md#runtime-backends).
+[risks](/concepts/risks/) and [runtime backends](/concepts/architecture/#runtime-backends).
 
 ## Verifying
 

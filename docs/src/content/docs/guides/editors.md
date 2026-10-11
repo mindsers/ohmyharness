@@ -63,7 +63,7 @@ boundary of what works.
 ## Editors are data
 
 `omh sNN attach <name>` means *attach this tool to that session*. Adding one is a
-TOML file, not a code change, for the same reason [adapters](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adapters.md)
+TOML file, not a code change, for the same reason [adapters](/reference/adapters/)
 are data:
 
 ```toml

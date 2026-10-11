@@ -163,7 +163,7 @@ error suggests `git remote add`, and it is bypassable by `--no-verify`. Checked
 against git 2.55.0 rather than assumed, both directions.
 
 Nothing here contains a determined agent, and nothing ever did — the container
-has `curl` and outbound network. See [Risks](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md). What it does
+has `curl` and outbound network. See [Risks](/concepts/risks/). What it does
 contain is an accident: the sandbox drops every Linux capability and takes back
 the eight the entrypoint and sshd need, holds at most 2048 processes, and takes
 the memory and CPU ceiling `sandbox_memory` and `sandbox_cpus` set. `sudo` still
@@ -281,7 +281,7 @@ prints](/reference/commands/#what-every-command-prints).
 
 Sessions idle longer than `idle_timeout` are stopped on the next launch — but only when their harness has exited. A session whose agent is still running in the container is left alone however old its marker, because stopping it would take the agent's conversation with it, and a container omh cannot probe is left alone too.
 N sessions means N containers, so this is not a nicety — see
-[risks](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md).
+[risks](/concepts/risks/).
 
 Only the **container** stops; the worktree and branch survive, so
 `omh sNN resume` puts you back exactly where you left off. The clock measures when you

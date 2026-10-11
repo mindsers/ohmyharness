@@ -6,7 +6,7 @@ Companion to [the specification](memory.md). That page says **what to build**;
 this one says **why**, what was tried, and what this design got wrong on the way.
 
 Kept rather than deleted because most of it is reversals, and a reversal is the
-most useful thing a design document holds — [decisions](decisions.md) makes the
+most useful thing a design document holds — [decisions](https://docs.ohmyharness.sh/project/decisions/) makes the
 same argument. If you are about to change something in the spec, the reason is
 probably here.
 
@@ -307,7 +307,7 @@ That principle is already load-bearing in omh under other names, and is worth
 recognising as one rule rather than three coincidences:
 
 - [`omh s rm`](https://docs.ohmyharness.sh/concepts/sessions/) keeps a branch that holds commits
-- [idle reaping](risks.md) leaves a session with no recorded use alone, because
+- [idle reaping](https://docs.ohmyharness.sh/concepts/risks/) leaves a session with no recorded use alone, because
   *"stopping a container on a guess is worse than one extra container"*
 - the writable mounts are a short named set
 
@@ -410,7 +410,7 @@ rerun. The half that did: **writing memory tolerates a cheap model once guards
 keep it honest; reading it is where a strong model earns its cost.**
 
 Not actionable today — omh
-[does not choose your model](decisions.md#decisions-deliberately-not-made) — but
+[does not choose your model](https://docs.ohmyharness.sh/project/decisions/#decisions-deliberately-not-made) — but
 it is the argument that would justify a cheap curator later.
 
 ### A safety result, with its footnote

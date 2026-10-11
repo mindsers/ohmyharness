@@ -1,6 +1,6 @@
 //! Stopping sessions nobody is using.
 //!
-//! N sessions is N containers, which `docs/design/risks.md` names as sandbox
+//! N sessions is N containers, which the risks page names as sandbox
 //! sprawl and answers with `policy.idle_timeout`. The setting existed, resolved
 //! through every layer, and was read by nothing — so a user who set it got
 //! provenance for a value that did nothing.

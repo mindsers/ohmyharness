@@ -45,7 +45,7 @@ omh init — decided, asked nothing
     omh sNN attach  open it in your editor
 ```
 
-The base set is [a versioned file](https://github.com/mindsers/ohmyharness/blob/main/docs/design/base-set.md), not something buried in
+The base set is [a versioned file](/reference/base-set/), not something buried in
 the binary — `init` seeds from it and `omh why` explains from it, which is why
 they cannot disagree about what you just got.
 
@@ -75,7 +75,7 @@ you add to your catalogue afterwards is not in it, so the launcher names what is
 not selected — see [Configuration](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue).
 
 Step 4 **never overwrites what you already wrote**, and writes no rules file at
-all: omh's own sections are [base-set entries](https://github.com/mindsers/ohmyharness/blob/main/docs/design/base-set.md), composed
+all: omh's own sections are [base-set entries](/reference/base-set/), composed
 into every session from the manifest. Your `AGENTS.md` or `CLAUDE.md` is read
 and composed with them — see [Configuration](/reference/configuration/#keeping-the-agents-git-status-clean).
 
@@ -162,4 +162,4 @@ That is not a questionnaire. init still decided; it just showed its work.
 
 - [Commands](/reference/commands/) — the full surface
 - [Configuration](/reference/configuration/) — the catalogue, and where your settings go
-- [Why a distribution](https://github.com/mindsers/ohmyharness/blob/main/docs/design/distribution.md) — what omh is actually for
+- [Why a distribution](/concepts/distribution/) — what omh is actually for

@@ -3729,7 +3729,7 @@ mod tests {
 
     /// The session's sshd takes the key omh hands it and nothing else.
     ///
-    /// `docs/design/risks.md` said "no password auth" was asserted by a test,
+    /// The risks page said "no password auth" was asserted by a test,
     /// and no test asserted it: the entrypoint started sshd on the Debian
     /// package's stock config, which accepts passwords, and the `agent` user
     /// has none — so the claim happened to hold by an accident of the base
