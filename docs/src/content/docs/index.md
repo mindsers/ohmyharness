@@ -24,7 +24,7 @@ be paths, arrived in 0.12.0,
 [which hooks fired](/reference/commands/#omh-snn-shows-which-hooks-fired) and the opt-in
 [guards](/reference/configuration/#guards-and-their-bypass) in 0.11.0,
 [`omh upgrade`](/reference/commands/#omh-upgrade) and the checks `omh sNN commit` runs
-before landing in 0.10.0, the [silent failures](/project/roadmap/)
+before landing in 0.10.0, the [silent failures](/project/retrospectives/#the-silent-failures--done-080-9192)
 closed in 0.8.0, the [command surface](https://github.com/mindsers/ohmyharness/blob/main/docs/design/profile.md) landed in 0.7.0 and
 the [work loop](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) in 0.6.0.
 
@@ -82,6 +82,7 @@ change — most of them record something that was tried and cost something.
 | [Risks](/concepts/risks/) | what is weak, stated plainly |
 | [Decisions](/project/decisions/) | every load-bearing choice with its reasoning |
 | [Roadmap](/project/roadmap/) | what ships when, and what gates what |
+| [Retrospectives](/project/retrospectives/) | four bodies of work that shipped outside a milestone, and what each one cost |
 
 ### Design pages
 
