@@ -1132,6 +1132,12 @@ pub enum Activity {
     NotRecorded(String),
     /// A transcript omh opened and could make nothing of.
     Unreadable,
+    /// A transcript that is there and that omh chose not to read, with why.
+    ///
+    /// Apart from `Unreadable` because that one is a failure and this is a
+    /// decision, and apart from `NotRecorded` because the harness *did* record
+    /// it — the three are different things to do next.
+    NotRead(String),
 }
 
 /// What this session's hooks did, read back from the decision ledger.
@@ -1501,6 +1507,15 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
                 p.paint(out::WARN, "omh could not read this session's transcript")
             ));
         }
+        Activity::NotRead(why) => {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!("omh did not read this session's transcript — {why}")
+                )
+            ));
+        }
     }
     if let Some(check) = &focus.check {
         let (style, text) = match check {
@@ -1660,6 +1675,7 @@ fn focus_json(focus: &Focus) -> serde_json::Value {
         }),
         Activity::NotRecorded(why) => json!({ "state": "not-recorded", "why": why }),
         Activity::Unreadable => json!({ "state": "unreadable" }),
+        Activity::NotRead(why) => json!({ "state": "not-read", "why": why }),
     };
     let check = focus.check.as_ref().map(|c| match c {
         CheckState::Passed(n) => json!({ "state": "passed", "count": n }),

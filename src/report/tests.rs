@@ -815,6 +815,27 @@ fn the_scoped_row_carries_cost_only_when_a_transcript_was_read() {
         unreadable.human(&p)
     );
     assert!(!unreadable.human(&p).contains('$'));
+
+    // A fourth, and not a shade of the third: omh did not try, and says why.
+    // Spelled apart in the document as well, because *could not* and *would
+    // not* are different things for a script to do something about.
+    let not_read = focused(Activity::NotRead(
+        "it is over 256 MB, which is more than omh reads into memory".into(),
+    ));
+    let text = not_read.human(&p);
+    assert!(
+        text.contains("did not read") && text.contains("256 MB"),
+        "{text}"
+    );
+    assert!(!text.contains("could not read"), "{text}");
+    let doc = not_read.json();
+    assert_eq!(doc["focus"]["activity"]["state"], "not-read", "{doc}");
+    assert!(
+        doc["focus"]["activity"]["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("256 MB")),
+        "{doc}"
+    );
 }
 
 fn focused(activity: Activity) -> Sessions {

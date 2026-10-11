@@ -749,18 +749,19 @@ fn session_activity(
     if files.is_empty() {
         return report::Activity::NotRecorded("no transcript written yet".into());
     }
-    let mut jsonl = String::new();
-    for file in files {
-        match std::fs::read_to_string(&file) {
-            Ok(text) => {
-                jsonl.push_str(&text);
-                jsonl.push('\n');
-            }
-            // A transcript file that exists and will not open is unreadable,
-            // not absent.
-            Err(_) => return report::Activity::Unreadable,
+    let jsonl = match read_transcripts(&files, TRANSCRIPT_LIMIT) {
+        Ok(jsonl) => jsonl,
+        // A transcript file that exists and will not open is unreadable, not
+        // absent.
+        Err(Unread::Failed) => return report::Activity::Unreadable,
+        // Not *unreadable*: omh never tried, and says how much there was.
+        Err(Unread::TooLarge(bytes)) => {
+            return report::Activity::NotRead(format!(
+                "it is over {} MB, which is more than omh reads into memory",
+                bytes / (1024 * 1024)
+            ))
         }
-    }
+    };
     let summary = crate::transcript::summarise(&jsonl);
     if summary.is_unreadable() {
         return report::Activity::Unreadable;
@@ -768,17 +769,83 @@ fn session_activity(
     report::Activity::Read(summary)
 }
 
+/// The most transcript omh reads into memory for one session.
+///
+/// A regular file can be any size the agent likes — a sparse one costs it
+/// nothing to make — and reading one whole reserves all of it. Past this the
+/// answer is that omh did not read it, said with the size, rather than an
+/// allocation that fails and takes the command with it.
+const TRANSCRIPT_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// Why `read_transcripts` has nothing to hand back.
+#[derive(Debug, PartialEq, Eq)]
+enum Unread {
+    /// Something that should have been a transcript would not open as one.
+    Failed,
+    /// More than the limit, and at least this many bytes.
+    TooLarge(u64),
+}
+
+/// Read the files `walk_jsonl` found — and only if each is still a file.
+///
+/// The walk and this are two looks at one name with the sandbox running in
+/// between, so a transcript can be a link by the time it is opened. Opened
+/// without following, then, and the thing that was opened is asked what it
+/// is: the descriptor cannot be swapped. `O_NONBLOCK` because a pipe opened
+/// for reading waits for a writer, which is the agent, which need never come.
+fn read_transcripts(files: &[std::path::PathBuf], limit: u64) -> Result<String, Unread> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut jsonl = String::new();
+    let mut read: u64 = 0;
+    for file in files {
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(file)
+            .map_err(|_| Unread::Failed)?;
+        if !opened.metadata().is_ok_and(|meta| meta.is_file()) {
+            return Err(Unread::Failed);
+        }
+        // One byte past what is left, so *exactly the limit* and *over it*
+        // are different answers. The size on disk is not asked: it is the
+        // agent's to change while this reads.
+        let room = limit.saturating_sub(read);
+        let mut text = String::new();
+        let took = opened
+            .take(room + 1)
+            .read_to_string(&mut text)
+            .map_err(|_| Unread::Failed)? as u64;
+        read += took;
+        if read > limit {
+            return Err(Unread::TooLarge(read));
+        }
+        jsonl.push_str(&text);
+        jsonl.push('\n');
+    }
+    Ok(jsonl)
+}
+
 /// Every `.jsonl` under `dir`, one level deep or nested — Claude Code keys
 /// transcripts by project directory, so they sit one subdirectory in.
+///
+/// **By what each entry is, not by what it leads to.** The directory is
+/// mounted writable into the sandbox, so every name in it is the agent's to
+/// make. `Path::is_dir` follows links: a linked directory was walked into
+/// wherever it pointed, one pointing back at its parent was walked until the
+/// kernel stopped counting, and anything called `x.jsonl` — a link, a pipe —
+/// was handed on to be read. `file_type` reads the entry itself, so a link is
+/// a link and is left alone, and only a regular file is a transcript.
 fn walk_jsonl(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for entry in std::fs::read_dir(&d)?.flatten() {
+            let kind = entry.file_type()?;
             let path = entry.path();
-            if path.is_dir() {
+            if kind.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "jsonl") {
+            } else if kind.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
                 out.push(path);
             }
         }
@@ -3170,6 +3237,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(went, Disposition::Replaced, "a drifted stamp restarts");
+    }
+
+    /// The transcript walk reads what the harness wrote and follows nothing.
+    ///
+    /// The directory is mounted writable into the sandbox — the harness
+    /// writes its transcript there — so every entry in it is the agent's to
+    /// make. The walk asked `Path::is_dir` and took any name ending `.jsonl`:
+    /// a linked directory was walked into wherever it led, one pointing back
+    /// at its own parent was walked until the kernel gave up counting, and a
+    /// link or a pipe called `x.jsonl` was handed on to be read.
+    #[test]
+    #[cfg(unix)]
+    fn the_transcript_walk_follows_nothing_the_sandbox_linked() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("transcripts");
+        let project = dir.join("-work");
+        std::fs::create_dir_all(&project).unwrap();
+        let real = project.join("session.jsonl");
+        std::fs::write(&real, "{}\n").unwrap();
+
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("theirs.jsonl"), "{}\n").unwrap();
+        std::fs::write(d.path().join("a-host-file"), "not a transcript\n").unwrap();
+        use std::os::unix::fs::symlink;
+        symlink(&outside, dir.join("elsewhere")).unwrap();
+        symlink(&dir, project.join("around-again")).unwrap();
+        symlink(d.path().join("a-host-file"), project.join("linked.jsonl")).unwrap();
+        let piped = std::process::Command::new("mkfifo")
+            .arg(project.join("pipe.jsonl"))
+            .status()
+            .unwrap();
+        assert!(piped.success(), "the fixture needs a pipe");
+
+        assert_eq!(
+            walk_jsonl(&dir).unwrap(),
+            vec![real],
+            "only the file the harness wrote, once"
+        );
+    }
+
+    /// And a file that became a link after the walk is still not read.
+    ///
+    /// The walk and the read are two looks at one name, with the sandbox
+    /// running between them. So the read opens without following, and asks
+    /// the thing it opened what it is.
+    #[test]
+    #[cfg(unix)]
+    fn a_transcript_swapped_for_a_link_after_the_walk_is_not_read() {
+        let d = tempfile::tempdir().unwrap();
+        let secret = d.path().join("a-host-file");
+        std::fs::write(&secret, "{\"not\":\"a transcript\"}\n").unwrap();
+        let at = d.path().join("session.jsonl");
+        std::os::unix::fs::symlink(&secret, &at).unwrap();
+
+        assert_eq!(
+            read_transcripts(&[at], TRANSCRIPT_LIMIT),
+            Err(Unread::Failed),
+            "a link where a transcript was is not followed"
+        );
+    }
+
+    /// A pipe where a transcript was is refused, and not waited on.
+    ///
+    /// Opening one for reading blocks until something opens it for writing,
+    /// and the only thing that could is the agent. So the open does not wait,
+    /// and what it opened has to be a regular file before a byte is read.
+    #[test]
+    #[cfg(unix)]
+    fn a_pipe_where_a_transcript_was_is_refused_without_waiting() {
+        let d = tempfile::tempdir().unwrap();
+        let at = d.path().join("session.jsonl");
+        let piped = std::process::Command::new("mkfifo")
+            .arg(&at)
+            .status()
+            .unwrap();
+        assert!(piped.success(), "the fixture needs a pipe");
+
+        assert_eq!(
+            read_transcripts(&[at], TRANSCRIPT_LIMIT),
+            Err(Unread::Failed)
+        );
+    }
+
+    /// A transcript larger than omh will hold is said to be, not read into
+    /// memory until the allocation fails.
+    ///
+    /// A regular file can still be any size the agent likes — a sparse one
+    /// costs it nothing — and `read_to_string` reserves the whole of it.
+    #[test]
+    fn a_transcript_past_the_limit_is_not_read() {
+        let d = tempfile::tempdir().unwrap();
+        let one = d.path().join("one.jsonl");
+        let two = d.path().join("two.jsonl");
+        std::fs::write(&one, "x".repeat(40)).unwrap();
+        std::fs::write(&two, "y".repeat(40)).unwrap();
+
+        assert!(
+            read_transcripts(&[one.clone(), two.clone()], 200).is_ok(),
+            "under the limit, both are read"
+        );
+        assert!(
+            matches!(read_transcripts(&[one, two], 60), Err(Unread::TooLarge(_))),
+            "and the limit is on the session's transcript, not on each file of it"
+        );
     }
 
     #[test]
