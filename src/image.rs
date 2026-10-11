@@ -1825,6 +1825,19 @@ pub fn container_remove(backend: &Backend, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear a *stopped* container out from under a name, and leave a running one.
+///
+/// `container_remove` is for a container omh has decided should go. This is
+/// for a launch that only wants the name free: see `Runtime::clear_stopped_args`
+/// for why the two are different verbs rather than one verb and a check.
+pub fn container_clear_stopped(backend: &Backend, name: &str) -> Result<()> {
+    let out = backend.output(&backend.clear_stopped_args(name))?;
+    if !out.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
 /// The tags a freshly built one replaces.
 ///
 /// A tag omh chooses is a hash of the recipe that produced it, so once a recipe
