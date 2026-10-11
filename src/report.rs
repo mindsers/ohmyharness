@@ -1248,7 +1248,14 @@ impl Report for Sessions {
                     &format!(
                         "{} both change {}",
                         spoken(&overlap.sessions),
-                        overlap.paths.join(", ")
+                        // Byte for byte what the agent named the file:
+                        // `status -z` never quotes, which is why it is used.
+                        overlap
+                            .paths
+                            .iter()
+                            .map(|path| out::untrusted(path))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )
                 )
             ));

@@ -357,15 +357,6 @@ pub fn hint(p: &Palette, msg: &str) -> String {
     format!("{}\n", p.paint(DIM, msg))
 }
 
-/// The whole of why a command failed, cause chain and all. **stderr.**
-///
-/// anyhow's own `Error:` is `{:?}`'s doing — a debug format, chosen by nobody,
-/// which leads with a word that is not the program's name. Worse, the obvious
-/// replacement (`e.to_string()`) prints **only the outermost context**, so
-/// `writing ~/.omh/facts.json` arrives with no hint that the reason was a full
-/// disk. The context chain exists precisely so the innermost cause survives,
-/// and dropping it is how an error message becomes something the user has to
-/// reproduce under `strace` to act on.
 /// Text omh did not write, made safe to print.
 ///
 /// Everything the sandbox names reaches a terminal eventually: git quotes the
@@ -377,20 +368,52 @@ pub fn hint(p: &Palette, msg: &str) -> String {
 /// Newline survives because git's messages are several lines and reflowing them
 /// into one is its own kind of lie. Everything else in C0 and C1 goes, which
 /// takes ESC with it and so takes every escape sequence built on it.
+///
+/// **And the nine that reorder.** The bidirectional embeddings, overrides and
+/// isolates are format characters, not control characters, so `is_control`
+/// lets them through — and a terminal that honours them draws what follows in
+/// the other direction. A subject can then read as one sentence and be
+/// another with no escape in it. Only those nine: the joiners and the
+/// direction *marks* are how people write Persian, Arabic and a family emoji,
+/// and a sanitiser that mangles somebody's language is one that gets turned
+/// off.
 pub fn untrusted(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '\n' => c,
             c if c.is_control() => '\u{fffd}',
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => '\u{fffd}',
             c => c,
         })
         .collect()
 }
 
+/// The whole of why a command failed, cause chain and all. **stderr.**
+///
+/// anyhow's own `Error:` is `{:?}`'s doing — a debug format, chosen by nobody,
+/// which leads with a word that is not the program's name. Worse, the obvious
+/// replacement (`e.to_string()`) prints **only the outermost context**, so
+/// `writing ~/.omh/facts.json` arrives with no hint that the reason was a full
+/// disk. The context chain exists precisely so the innermost cause survives,
+/// and dropping it is how an error message becomes something the user has to
+/// reproduce under `strace` to act on.
+///
+/// **Sanitised here, whoever wrote the words.** Most of a chain is omh's own
+/// sentences and the rest is quoted — a line of a note, git's stderr naming a
+/// path the agent chose. Each site that quotes is meant to pass it through
+/// `untrusted` first, and that is a rule every new error has to remember: a
+/// note's own frontmatter line, quoted back in a parse error, had not been.
+/// This is the one place every failure passes, so it is the one place that
+/// cannot be forgotten. The paint goes on after, around omh's own
+/// two words.
 pub fn problem(p: &Palette, e: &anyhow::Error) -> String {
-    let mut out = format!("{}: {}\n", p.paint(BAD, ME), e);
+    let mut out = format!("{}: {}\n", p.paint(BAD, ME), untrusted(&e.to_string()));
     for cause in e.chain().skip(1) {
-        out.push_str(&format!("  {} {cause}\n", p.paint(DIM, "because")));
+        out.push_str(&format!(
+            "  {} {}\n",
+            p.paint(DIM, "because"),
+            untrusted(&cause.to_string())
+        ));
     }
     out
 }
@@ -601,6 +624,59 @@ mod tests {
         );
     }
     use super::*;
+
+    /// An error is printed safe whoever wrote the words in it.
+    ///
+    /// `problem` is where every failure ends up, and it printed the chain as
+    /// it came. Most of a chain is omh's own sentences; the rest is quoted —
+    /// a line out of a note the agent wrote, git's stderr naming a path or a
+    /// ref the agent chose — and each site that quotes is supposed to
+    /// sanitise first. A note's frontmatter line, quoted in the error for one
+    /// that does not parse, was not. A rule every call site has to remember
+    /// is one the next call site forgets, so the sink does it.
+    #[test]
+    fn a_failure_is_printed_safe_whatever_it_quotes() {
+        let quoted = anyhow::anyhow!("line 3: \x1b[2K\x1b[1Gcommitted to main")
+            .context("reading a note the agent wrote \x1b[31m");
+
+        let said = problem(&Palette::plain(), &quoted);
+
+        assert!(
+            !said.contains('\x1b'),
+            "an escape sequence reached the terminal through an error: {said:?}"
+        );
+        assert!(
+            said.contains("committed to main") && said.contains("reading a note"),
+            "and the words are still there to read: {said:?}"
+        );
+    }
+
+    /// Text that reorders itself on screen is not printed as written.
+    ///
+    /// The bidirectional controls are not control characters as far as
+    /// `char::is_control` is concerned — they are format characters, and a
+    /// terminal that honours them draws the bytes after an override in the
+    /// opposite order. A commit subject can then *read* as one thing and be
+    /// another, with no escape sequence in it.
+    #[test]
+    fn text_that_reorders_itself_is_not_printed_as_written() {
+        for control in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}',
+        ] {
+            let forged = format!("fix: tidy {control}niam ot dettimmoc");
+            assert!(
+                !untrusted(&forged).contains(control),
+                "U+{:04X} survived",
+                control as u32
+            );
+        }
+        // And the letters people write in are untouched, joiners included —
+        // a family emoji and a Persian word both need them.
+        for theirs in ["👨‍👩‍👧 café", "می‌خواهم", "日本語"] {
+            assert_eq!(untrusted(theirs), theirs);
+        }
+    }
 
     /// A column is as wide as the terminal draws it, not as wide as its bytes.
     ///

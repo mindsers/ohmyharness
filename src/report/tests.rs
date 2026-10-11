@@ -183,6 +183,29 @@ fn the_turn_view_never_borrows_the_numbers_that_land_work() {
 
 /// Three sessions and two files are one sentence a person can read.
 ///
+/// A path two sessions both change is printed safe.
+///
+/// These come from `status -z`, which `Session::changed` uses precisely
+/// because it never quotes — so a file name arrives byte for byte, escape
+/// sequences included, and the collision line is the one the listing calls
+/// its most consequential. The agent names the file.
+#[test]
+fn a_colliding_path_cannot_repaint_the_listing() {
+    let mut listing = sessions(vec![session("s01", Work::Uncommitted(1))]);
+    listing.overlaps = vec![Overlap {
+        sessions: vec!["s01".into(), "s02".into()],
+        paths: vec!["notes\x1b[2K\x1b[1Gs01 and s02 are clean.rs".into()],
+    }];
+
+    let said = listing.human(&out::Palette::plain());
+
+    assert!(
+        !said.contains('\x1b'),
+        "an escape sequence in a file name reached the terminal: {said:?}"
+    );
+    assert!(said.contains("both change notes"), "{said:?}");
+}
+
 /// Both separators are the identity with two sessions and one path, which
 /// is what the end-to-end test has — so `s01, s02 and s03` and
 /// `src/base.rs, src/render.rs`, the whole reason `spoken` exists, were
