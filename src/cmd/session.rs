@@ -2651,6 +2651,25 @@ pub(crate) fn rm(
             )
         }
     };
+    // **What did not go, on the answer itself.** `unreached` was built for
+    // this whole function and printed by one branch of it — the one above,
+    // for a worktree still on disk. With the worktree gone, a sandbox
+    // repository that would not delete went into the list and the list went
+    // nowhere: `removed session s01`, exit 0, and a document with no field
+    // for it. That repository holds every commit the agent made.
+    //
+    // Still a success, as it is for a container that would not stop: the
+    // session is gone and `omh s` will find what stayed. But a consequence is
+    // part of what happened, so it is a note on the answer and a field in the
+    // document — always there, and empty when nothing stayed, so a script can
+    // ask without first asking whether the key exists.
+    let mut action = action;
+    action.data["left_behind"] = serde_json::json!(unreached);
+    if !unreached.is_empty() {
+        action = action
+            .note(format!("left behind: {}", unreached.join(", ")))
+            .next(format!("omh {id} rm"));
+    }
     ctx.say(&action);
 
     // The review moment rides on something already happening rather than a
