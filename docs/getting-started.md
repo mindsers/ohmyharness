@@ -92,8 +92,9 @@ omh init — decided, asked nothing
 
   next
     omh new claude  start a session
-    omh s resume    rejoin it later
-    omh s attach    open it in your editor
+    omh s           list sessions, each by its id
+    omh sNN resume  rejoin one later
+    omh sNN attach  open it in your editor
 ```
 
 The base set is [a versioned file](design/base-set.md), not something buried in
@@ -159,11 +160,11 @@ profile mounted where Claude Code actually reads it. Your checkout is not
 mounted and the agent cannot reach it.
 
 ```console
-$ omh s diff              # what the agent changed
-$ omh s commit -m "..."   # commit it onto the session branch
-$ omh s push fix/thing    # push it to origin under a name a reviewer can read
-$ omh s attach            # open the same session in your editor
-$ omh graph               # browse the codebase as a graph
+$ omh s01 diff              # what the agent changed
+$ omh s01 commit -m "..."   # commit it onto the session branch
+$ omh s01 push fix/thing    # push it to origin under a name a reviewer can read
+$ omh s01 attach            # open the same session in your editor
+$ omh graph                 # browse the codebase as a graph
 ```
 
 Those run on the host, against the worktree you never have to visit. The agent

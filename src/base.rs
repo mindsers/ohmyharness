@@ -1315,7 +1315,7 @@ mod tests {
     #[test]
     fn the_git_section_names_what_the_human_runs() {
         let body = section_body("git-rules");
-        for cmd in ["omh s diff", "omh s commit", "omh s push"] {
+        for cmd in ["omh sNN diff", "omh sNN commit", "omh sNN push"] {
             assert!(
                 body.contains(cmd),
                 "the agent has to be able to name {cmd}: {body}"

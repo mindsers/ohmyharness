@@ -1497,7 +1497,7 @@ fn the_shadow_refuses_to_push() {
     // mention of omh at all, while a test asserting failure stayed green.
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(
-        said.contains("omh s commit"),
+        said.contains("omh sNN commit"),
         "a refusal has to say where work actually leaves: {said}"
     );
     assert!(
@@ -2829,8 +2829,8 @@ fn a_sandbox_that_rewound_past_what_you_kept_is_refused() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("omh s commit -m"),
-        "a refusal has to say what to do instead: {err}"
+        err.contains("omh s01 commit -m"),
+        "a refusal has to say what to do instead, and for which session: {err}"
     );
 }
 

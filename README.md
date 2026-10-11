@@ -9,7 +9,7 @@
 ```console
 $ omh init              # detects your stack, decides, reports. no questions.
 $ omh new claude        # sandboxed, curated, your setup already inside
-$ omh sessions attach   # open that same session in your editor
+$ omh s01 attach        # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
@@ -94,7 +94,7 @@ Running `omh new claude` instead of `claude` buys five things:
 
 **A sandbox that protects your repo, not just your host.** The agent works in a
 git worktree on its own branch. Your checkout is never mounted. Review with
-`omh sessions diff`, ship with `omh sessions commit` and `omh sessions push`,
+`omh s01 diff`, ship with `omh s01 commit` and `omh s01 push`,
 discard by deleting a branch. You never go near the worktree directory itself.
 
 > **`sessions` is the command; `s` is its alias, and a session id can lead the
@@ -103,7 +103,7 @@ discard by deleting a branch. You never go near the worktree directory itself.
 > here on.
 
 The agent gets git too — its own repository, holding one commit and none of your
-history, so `stash` and `reset --hard` are its to use. `omh s commit --keep`
+history, so `stash` and `reset --hard` are its to use. `omh s01 commit --keep`
 brings its commits onto your branch with the messages it wrote — all of them in
 order, or the ones you name: `omh s01 commit --keep 1,3-4`.
 
@@ -122,7 +122,7 @@ $ omh s
 
 `omh s01 sync` brings trunk in, merged on the host rather than inside the
 sandbox. A conflict still lands in the worktree with its markers — labelled
-`main` and `s01`, so which side is yours is obvious — and `omh s commit` refuses
+`main` and `s01`, so which side is yours is obvious — and `omh s01 commit` refuses
 to land a file that still holds them. An agent that commits nothing leaves a
 timeline anyway: omh photographs the worktree at the end of every turn, and
 `omh s01 log --turns` reads them back.
@@ -139,7 +139,7 @@ part you can check, which is that your setup is in one place and
 refreshed after every turn (0.14s), with hooks that point the agent at it when
 it is about to grep or read a whole file.
 
-**Your editor attached to the same place.** `omh s attach` opens VS Code, Zed,
+**Your editor attached to the same place.** `omh s01 attach` opens VS Code, Zed,
 Cursor or Neovim over SSH *into the sandbox* — one dependency tree, shared with
 the agent, instead of a second one on your host that silently diverges.
 
@@ -205,8 +205,9 @@ omh init — decided, asked nothing
 
   next
     omh new claude  start a session
-    omh s resume    rejoin it later
-    omh s attach    open it in your editor
+    omh s           list sessions, each by its id
+    omh sNN resume  rejoin one later
+    omh sNN attach  open it in your editor
 ```
 
 `init` **decides and reports** — it never asks. Every question is hassle the tool
@@ -352,7 +353,7 @@ harnesses take turns inhabiting.
 ```
     omh new claude ───────┐
     omh new opencode ─────┼── exec ──┐
-    omh s attach ─────────┘  (ssh)   │
+    omh s01 attach ───────┘  (ssh)   │
                                      ▼
  ┌───────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │
@@ -579,7 +580,7 @@ whether anything reads it. That gap is what `doctor` closes.
 
 Known rough edges: the graph store is shared across sessions of one repo, so an
 agent can query another session's graph (mitigated, not prevented);
-`.claude.json` is a file mount that cannot be atomically replaced; `omh s rm`
+`.claude.json` is a file mount that cannot be atomically replaced; `omh sNN rm`
 keeps a session branch whenever omh cannot prove trunk already holds its work,
 so a squash it could not match leaves a branch behind and says so; upgrading to 0.8.0 leaves
 the old `omh-cache-<name>` volume and `omh-<name>` network behind and nothing

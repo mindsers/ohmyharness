@@ -40,9 +40,9 @@ That rule exists because the flag used to be accepted and discarded —
 
 ## The shape of the CLI
 
-Noun-verb groups with single-letter aliases: `omh s log`, `omh s01 commit`,
-`omh d claude`. The noun on its own is the listing — `omh s` is every session,
-and `omh s01` is that one.
+Noun-verb groups with single-letter aliases: `omh s sync`, `omh s01 commit`,
+`omh d --harness claude`. The noun on its own is the listing — `omh s` is every
+session, and `omh s01` is that one.
 
 **Every command is a named command.** A bare name used to be a harness —
 the bare name launched — which meant any word could be a launch and so no word
@@ -53,7 +53,7 @@ reading was meant.
 `omh new claude` costs one word and removes the class. There is no bare slot to
 shadow, so the list and the double parse are both gone. Harnesses and editors
 still share a namespace, but only inside their own verbs — `omh new zed` and
-`omh s attach zed` say which they mean.
+`omh s01 attach zed` say which they mean.
 
 ### Flags mean one thing everywhere
 
@@ -63,12 +63,12 @@ A flag learned on one command is true on the next, or it is not there.
 |---|---|
 | `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
 | `--to <dir>` | Write here: `omh eject`. |
-| `--yes` `-y` | *Yes, I have read the warning — answer the prompt in advance.* `omh s rm`, for runs with nobody to ask. It does not force the removal, only the answer. |
+| `--yes` `-y` | *Yes, I have read the warning — answer the prompt in advance.* `omh sNN rm`, for runs with nobody to ask. It does not force the removal, only the answer. |
 | `--all` | Every one, not the one named: `omh use --all`. On session verbs there is no `--all` — naming no session already means every session. |
 | `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
 | `--json` | The answer as JSON, or a refusal from a command that hands you a program and has none — [below](#what-every-command-prints). |
 
-`omh s rm --yes`, `omh s commit --allow-conflicts` and `omh settings mcp import
+`omh sNN rm --yes`, `omh sNN commit --allow-conflicts` and `omh settings mcp import
 --replace` were all `--force` until 0.10, which made three meanings for one word
 — and `--force` on `rm` did not even force the removal, only the answer to its
 prompt. Each is now named for what it does. `--force` parsed on all three as a
@@ -243,13 +243,13 @@ omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment)
 Which credential set a launch uses is `omh set account <name>`, per project. See
 [Accounts](accounts.md).
 
-## `omh s attach [editor]` · `omh s a`
+## `omh sNN attach [editor]` · `omh sNN a`
 
 Opens the session in an editor over SSH. With no argument it resolves
 `$OMH_EDITOR` then `$EDITOR`, and falls back to printing every recipe:
 
 ```console
-$ omh s attach
+$ omh s01 attach
 session s01 is up
 
   ssh://omh-ohmyharness-3f9a2c1b-s01/work
@@ -411,7 +411,7 @@ That last row is why rejections are recorded at all: without them the same
 candidate gets re-litigated every time somebody rediscovers it.
 
 A name matching nothing prints what *is* known rather than guessing — the same
-rule as `omh s attach emacs`.
+rule as `omh s01 attach emacs`.
 
 ## `omh info`
 
@@ -425,22 +425,22 @@ are one command because *what you have* is one question asked at two scopes.
 ## `omh sessions …` · `s`
 
 ```
-omh s                 sessions, their branches and state
-omh s01               that one, with what to run next
-omh s log [--turns]   what the agent committed inside the sandbox, or what omh
-                       photographed at the end of each turn
-omh s diff [n] [-p]   what changed — the session, or one checkpoint
-omh s commit [-m …]   commit that work onto the session branch
-omh s commit --keep [n,m-o] [--edit]   keep the agent's own commits
-omh s sync [--down]   bring trunk into the session, merged on the host
-omh s push [name]     push it to origin under a name a reviewer can read
-omh s resume          rejoin it, running the harness it ran before
-omh s down            stop the container, keep the worktree and branch
-omh s rm [--yes]      remove the session — its container, its worktree, its staging,
-                       and the repository the sandbox had. Asks first over work
-                       no branch has; `--yes` answers that in advance for runs
-                       with nobody to ask, and does not make the removal itself
-                       try harder.
+omh s                   sessions, their branches and state
+omh s01                 that one, with what to run next
+omh sNN log [--turns]   what the agent committed inside the sandbox, or what omh
+                         photographed at the end of each turn
+omh sNN diff [n] [-p]   what changed — the session, or one checkpoint
+omh sNN commit [-m …]   commit that work onto the session branch
+omh sNN commit --keep [n,m-o] [--edit]   keep the agent's own commits
+omh s sync [--down]     bring trunk into every session, merged on the host
+omh sNN push [name]     push it to origin under a name a reviewer can read
+omh sNN resume          rejoin it, running the harness it ran before
+omh s down              stop every container, keep the worktrees and branches
+omh sNN rm [--yes]      remove the session — its container, its worktree, its staging,
+                         and the repository the sandbox had. Asks first over work
+                         no branch has; `--yes` answers that in advance for runs
+                         with nobody to ask, and does not make the removal itself
+                         try harder.
 ```
 
 **The noun on its own is the listing, and a session on its own is one row of
@@ -669,7 +669,7 @@ omh: omh recorded a harness for s03 and cannot read it back: …/.harness is emp
 ```
 
 The middle one covers a session older than this release, one whose run
-directory was cleared, and one `omh s attach <editor>` created — attaching an
+directory was cleared, and one `omh sNN attach <editor>` created — attaching an
 editor makes a session without running a harness in it, so there is nothing to
 record. The last one is a marker omh wrote and cannot read now, which is
 different news and says so.
@@ -693,7 +693,7 @@ of opencode built, with nothing on screen to say so.
 ### `omh sNN log` — what the agent has committed
 
 Newest first, and until this existed you could not tell the agent had been
-committing at all: its work first became visible when `omh s commit --keep`
+committing at all: its work first became visible when `omh sNN commit --keep`
 opened a rebase todo, which is late to find out there are eleven of them.
 
 ```console
@@ -795,7 +795,7 @@ $ omh s01 diff 4 -p
 ```
 
 `-p` hands the terminal to git, so it is git's own pager and git's own colours
-— the same arrangement `omh s commit` uses for your editor. Under `--json` it
+— the same arrangement `omh sNN commit` uses for your editor. Under `--json` it
 never pages: the patch is a field in the answer, because a pager between a
 script and the object it asked for is a hang with no error.
 
@@ -1082,9 +1082,9 @@ you should never have to go there. `commit` and `push` are how the work comes
 out, run on the host — the same place `diff` already runs:
 
 ```console
-$ omh s diff
-$ omh s commit -m "Fix the tap guard"
-$ omh s push fix/tap-guard --pr
+$ omh s01 diff
+$ omh s01 commit -m "Fix the tap guard"
+$ omh s01 push fix/tap-guard --pr
   omh/s01 → origin/fix/tap-guard
 ```
 
@@ -1097,14 +1097,12 @@ commit. The rules are mounted rather than written, so git does not see them at
 all; carried files are a different matter:
 
 ```console
-$ omh s commit -m "Fix the tap guard"
-Error: config.toml is listed in carry_in and git tracks it, so what is in the
-worktree is your local copy rather than the branch's.
+$ omh s01 commit -m "Fix the tap guard"
+omh: config.toml is listed in carry_in and git tracks it, so what is in the worktree is your local copy rather than the branch's.
   omh will neither publish that nor drop it silently.
 
-  fix the cause:  omh set carry_in        (carry_in is for files git does not
-                  track; a tracked file is already in the worktree)
-  or just this once:  omh s commit --skip-carried
+  fix the cause:  omh set carry_in        (carry_in is for files git does not track; a tracked file is already in the worktree)
+  or just this once:  omh s01 commit --skip-carried
 ```
 
 `carry_in` is for files git does **not** track, so this means the list needs
@@ -1118,9 +1116,9 @@ when the work happened rather than what it was, and on origin it outlives the
 session that would explain it — so omh refuses rather than choosing for you:
 
 ```console
-$ omh s push
-Error: omh/s01 is a session id, not a branch name
-  name it:  omh s push <name>
+$ omh s01 push
+omh: omh/s01 is a session id, not a branch name
+  name it:  omh s01 push <name>
 ```
 
 `--pr` opens the pull request with `gh` when it is installed, and prints the
@@ -1134,7 +1132,7 @@ branch — see [Sessions](sessions.md#the-agent-has-git-and-it-is-not-yours).
 `--keep` brings those commits here instead of squashing the files into one:
 
 ```console
-$ omh s commit --keep
+$ omh s01 commit --keep
 ```
 
 On its own it takes every checkpoint since the last handover, in order, and
@@ -1179,7 +1177,7 @@ your branch.
   that `reset --hard`s below it, or a record that is unreadable, empty or no
   longer a commit git knows. Replaying from the start of the session would offer
   the branch work it already has, so omh stops and says to take the files with
-  `omh s commit -m`.
+  `omh sNN commit -m`.
 
 `--keep` is repeatable otherwise: land some work, let the agent carry on, land
 the rest. Each round takes only what the last one did not.
@@ -1778,7 +1776,7 @@ claimed twice is what `omh memory lint` calls `DuplicateKey`.
 that repo and never committed. It lives outside the checkout on purpose: a
 session is a git worktree holding tracked files only, and removing one runs
 `git worktree remove --force`, so a store inside the repo would be invisible to
-the sandbox and destroyed by `omh s rm`. Inside the sandbox it is mounted at
+the sandbox and destroyed by `omh sNN rm`. Inside the sandbox it is mounted at
 `/omh/memory`.
 
 It was `~/.omh/notes/<repo>/local/` until 0.14, when the committed layer went
@@ -1902,7 +1900,7 @@ removed credentials-are-a-named-volume
 
 **Deletion never cascades**, and neighbours are never rewritten. A dangling link
 is visible and the lint finds it; a silently pruned neighbourhood is neither.
-This is the same rule that makes `omh s rm` keep a branch holding commits.
+This is the same rule that makes `omh sNN rm` keep a branch holding commits.
 
 `--at` is the repair path for two files claiming one key, which
 `omh memory lint` reports as `DuplicateKey`. It takes any trailing run of path

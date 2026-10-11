@@ -172,8 +172,8 @@ code. A later login on the host does not reach the account either way.
 ## The invariant this bends
 
 > The writable mounts are a short named set — the worktree, credentials,
-> carried files, the sandbox's own git repository, and two caches.
-> **Nothing else is.**
+> carried files, the sandbox's own git repository, the harness's transcript
+> directory, and two caches. **Nothing else is.**
 
 This is the weakest part of the current security model, and it is weaker than
 what `sbx` offers: there, secrets are injected at the egress proxy and the agent
