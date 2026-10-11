@@ -310,7 +310,9 @@ pub(crate) fn log_report(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
             "{} has a sandbox repository at {} and no record of where it started. omh \
              cannot tell you what the agent committed, and `omh {} rm` would remove the \
-             repository. Read it directly first:\n  git --git-dir={} log",
+             repository. Read a copy of it first, never the repository itself — \
+             its hooks are the agent's to write, and git run there runs them:\n  \
+             git clone --no-local {} <somewhere>\n  git -C <somewhere> log --all",
             session.id,
             shadow.gitdir.display(),
             session.id,
@@ -958,7 +960,15 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
             AtStake::Nothing if session.worktree.is_dir() => {
                 let out = std::process::Command::new("git")
                     .current_dir(&session.worktree)
-                    .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                    // The worktree's files are the agent's, and a `status`
+                    // asked about a repository nested among them answers by
+                    // running git inside it. See `shadow::out_of_nested`.
+                    .args(shadow::out_of_nested(&[
+                        "status",
+                        "--porcelain=v1",
+                        "-z",
+                        "--untracked-files=all",
+                    ]))
                     .output();
                 match out {
                     Ok(out) if !out.status.success() => AtStake::Unknown(format!(

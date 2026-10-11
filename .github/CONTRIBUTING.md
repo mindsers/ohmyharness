@@ -159,6 +159,13 @@ product, not fixing a test.
 | writing a note never rewrites its link text | the shape of the vendor's own remaining quality gap, guarded on omh's renderer. A byte comparison catches a rewrite that differs each pass; an idempotent one is caught only by asserting the link is still there, since both writes agree |
 | `stale` never reports "cannot tell" as "still current" | it makes the command a liar rather than merely incomplete |
 | an image digest a note pins is stable across toolchains | `DefaultHasher` marks every pinned note stale on a Rust upgrade |
+| host-side git over the sandbox's repository reads the `config` omh wrote | a `commondir` file in the gitdir names another one, and a filter defined there runs on the host as the user |
+| git on the host never runs inside a repository nested in a worktree | git asks one whether it is dirty by running `git status` in it, under a config the agent wrote |
+| a nested repository is refused by name, never committed around | the commit reads as the session's work and is missing a directory of it |
+| a submodule nobody touched is left exactly as it was | keeping `add` away from a pointer by dropping it deletes the user's submodule |
+| no message hands the user a `git` to run over the sandbox's repository | its hooks are the agent's to write, and the refusal carrying the command is the agent's to provoke |
+| a harvest brings no tag the agent made | a tag named like a branch outranks it in every command that takes a revision |
+| a write into the sandbox's gitdir goes through no link and no second look at a name | the agent can swap either between the check and the write, and the file lands where it pointed |
 
 Notice how many of them are about **failing loudly**. That is the recurring
 lesson of this codebase: the expensive bugs were not crashes, they were things

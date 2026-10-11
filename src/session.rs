@@ -1016,12 +1016,19 @@ impl Session {
         // — the choice of ref is not what is wrong, the worktree is. So this
         // refuses instead, and a review that cannot be trusted is never handed
         // over as one that can.
+        //
+        // `-q` on the command it prints is not tidiness. `checkout` ends by
+        // reporting what is still changed, and for a pointer whose directory
+        // the agent made a repository that report is git run inside it — the
+        // thing every call in this module is built to avoid, handed to the
+        // user to type instead. Measured, and held by a test that runs the
+        // printed line.
         let head = git(&self.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         anyhow::ensure!(
             head.trim() == branch,
             "{} is on {} rather than {branch}; omh will not report a diff from a worktree that \
              left its branch — the session's commits are not in it. Put it back with `git -C {} \
-             checkout {branch}`",
+             checkout -q {branch}`",
             self.id,
             head.trim(),
             self.worktree.display()
@@ -1050,7 +1057,9 @@ impl Session {
         // about rather than refuses, so the case is reachable.
         let index = index.path();
         git_with_index(&self.worktree, index, &["read-tree", "HEAD"])?;
-        git_with_index(&self.worktree, index, &["add", "-A", "."])?;
+        let add = everything_but_pointers(&self.worktree, Some(index))?;
+        let add: Vec<&str> = add.iter().map(String::as_str).collect();
+        git_with_index(&self.worktree, index, &add)?;
 
         // The same unstage `commit` does, from the same list, because the
         // reason is the same: omh mounts its rules over a placeholder it writes
@@ -1093,7 +1102,50 @@ impl Session {
             head.trim()
         );
 
-        git(&self.worktree, &["add", "-A", "."])?;
+        git_owned(
+            &self.worktree,
+            &everything_but_pointers(&self.worktree, None)?,
+        )?;
+
+        // Before anything else looks at what was staged. Two shapes, and one
+        // refusal: a submodule of the user's that the agent ran `git init`
+        // in, whose pointer the `add` above stepped around; and a directory
+        // that was never a submodule, which `add` has just recorded as a
+        // pointer — a commit id that exists nowhere but the sandbox, and none
+        // of the files.
+        //
+        // Not only about what omh runs. The commit below runs the user's own
+        // hooks, and a hook that asks git for a status would be asking it
+        // inside that repository.
+        let held = populated(&self.worktree, pointers_in(&self.worktree, None)?);
+        if !held.is_empty() {
+            // A pointer `add` made a moment ago is not the branch's, and left
+            // in the index it outlives the refusal: once its `.git` is gone
+            // the `add` above steps around it too, and the next commit would
+            // carry it. So the ones this staging added come back out. The
+            // user's own are not touched.
+            let added = git(
+                &self.worktree,
+                &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"],
+            )?;
+            let mut unstage: Vec<&str> = vec!["update-index", "--force-remove", "--"];
+            unstage.extend(
+                held.iter()
+                    .map(String::as_str)
+                    .filter(|path| added.split('\0').any(|a| a == *path)),
+            );
+            if unstage.len() > 3 {
+                git(&self.worktree, &unstage)?;
+            }
+            anyhow::bail!(
+                "{} inside this session's worktree, and omh will not commit beside \
+                 one — git run on the host would be run inside it, under a config \
+                 the agent wrote. Nothing was committed, and a commit could only \
+                 have carried a pointer to it, not its files. In the sandbox, \
+                 delete its `.git` — the files stay — then run this again",
+                crate::shadow::of_their_own(&held)
+            );
+        }
 
         // A backstop, not the fix. The rules are mounted rather than written
         // into the worktree, so on a healthy launch there is nothing here to
@@ -1209,6 +1261,18 @@ impl Session {
                 records.next();
             }
             changed.push(path.to_string());
+        }
+        // Plus any pointer whose directory the agent turned into a
+        // repository, whether or not `status` had anything to say about it.
+        // `git` keeps `status` out of one, so a pointer that moved is reported
+        // and one that did not is passed over in silence — and a repository
+        // omh will not look inside is not a directory nothing happened in. A
+        // submodule is empty in a fresh worktree; one that is not is a change
+        // by itself.
+        for path in populated(&self.worktree, pointers_in(&self.worktree, None)?) {
+            if !changed.contains(&path) {
+                changed.push(path);
+            }
         }
         Ok(changed)
     }
@@ -1764,8 +1828,6 @@ fn git_owned(cwd: &Path, args: &[String]) -> Result<String> {
     git(cwd, &borrowed)
 }
 
-/// `git` against an index of our own, so a read-only command can stage the
-/// worktree without disturbing the one the user's git shares.
 /// Whether git ignores `path` in this worktree: `info/exclude`, where
 /// `carry::apply` lists what it carried, and the project's own ignore files.
 ///
@@ -1790,11 +1852,15 @@ fn ignored_here(worktree: &Path, path: &str) -> Result<bool> {
     }
 }
 
+/// `git` against an index of our own, so a read-only command can stage the
+/// worktree without disturbing the one the user's git shares.
 fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(cwd)
         .env("GIT_INDEX_FILE", index)
-        .args(args)
+        // See `git`, below: the same two, for the same reason.
+        .args(crate::shadow::before_the_verb(args))
+        .args(crate::shadow::out_of_nested(args))
         .output()
         .context("running git")?;
     if !out.status.success() {
@@ -1805,6 +1871,69 @@ fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The pointers an index holds: the real one, or a review's own.
+///
+/// Read from the index rather than the worktree, and that is what makes the
+/// answer exact rather than a guess that can go stale: neither index is the
+/// agent's to write. The session's lives in the checkout's `.git`, which the
+/// sandbox never sees, and a review's is a temporary file on the host.
+fn pointers_in(worktree: &Path, index: Option<&Path>) -> Result<Vec<String>> {
+    let listing = match index {
+        Some(index) => git_with_index(worktree, index, &["ls-files", "-s", "-z"])?,
+        None => git(worktree, &["ls-files", "-s", "-z"])?,
+    };
+    Ok(crate::shadow::pointers(&listing))
+}
+
+/// `add -A` over the worktree, with every pointer the index holds left out of
+/// what it may touch.
+///
+/// **Left out, never dropped.** `add` asks a pointer already in the index
+/// whether its repository is dirty — by running git inside it — whenever that
+/// repository claims the commit the pointer records, and a `HEAD` file is
+/// forty characters the agent writes. A path the pathspec excludes is skipped
+/// before that question comes up (measured: nothing runs, nothing is staged
+/// for it).
+///
+/// Removing the entry instead would also keep `add` away from it, and is how
+/// `shadow::stage` does it. Here it would delete the user's submodule: in a
+/// fresh worktree every submodule is an empty directory, `add` does not put an
+/// empty directory back, and the commit that followed would carry the
+/// deletion. `a_submodule_nobody_touched_is_left_exactly_as_it_was` holds
+/// that: with this function rewritten to drop them, its review opens with
+/// `vendor/lib | 1 -`.
+///
+/// The cost is that this staging never moves a pointer, in either direction.
+/// That is the right answer rather than a limitation: the sandbox's repository
+/// has no submodules to update, so a pointer that moved in there moved to a
+/// commit only the agent has.
+///
+/// `literal`, because a path is a string git handed back and `*` in a
+/// directory name is not a request to match anything.
+fn everything_but_pointers(worktree: &Path, index: Option<&Path>) -> Result<Vec<String>> {
+    Ok(["add", "-A", "--", "."]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(
+            pointers_in(worktree, index)?
+                .iter()
+                .map(|path| format!(":(exclude,literal){path}")),
+        )
+        .collect())
+}
+
+/// The pointers whose directory is a repository right now.
+///
+/// A `.git` of any kind — a directory, or the file a worktree or a real
+/// submodule checkout uses. Whether it is a *valid* repository is git's
+/// question, and asking git is the thing this exists to avoid.
+fn populated(worktree: &Path, pointers: Vec<String>) -> Vec<String> {
+    pointers
+        .into_iter()
+        .filter(|path| worktree.join(path).join(".git").symlink_metadata().is_ok())
+        .collect()
 }
 
 /// Whether something is still on disk — with "could not tell" kept apart from
@@ -2175,10 +2304,28 @@ fn patch_ids(repo: &Path, patch: &[u8]) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
+/// `git` in the user's own repository — their checkout, or a session's
+/// worktree of it.
+///
+/// Their config, their hooks, and none of what `shadow` pins: this is not the
+/// sandbox's repository and nothing in its `.git` is the agent's to write.
+/// **The files are.** A worktree's files include any directory the agent ran
+/// `git init` in, and git's answer to *is that repository dirty* is to run
+/// `git status` inside it, under its config. Measured 2026-10-11 against git
+/// 2.56.0, in a checkout with a submodule: the `status` behind `omh s` ran a
+/// filter and a monitor the agent had named, with nothing committed and
+/// nothing landed.
+///
+/// So the two by-verb halves `shadow` uses go on here as well — `status` and
+/// `diff` told to skip that question, `add` told to stop rather than ask it.
+/// What `add` would otherwise enter is kept out of its way by
+/// `everything_but_pointers`; this is what makes a call that forgot to use it
+/// fail instead of run.
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(cwd)
-        .args(args)
+        .args(crate::shadow::before_the_verb(args))
+        .args(crate::shadow::out_of_nested(args))
         .output()
         .context("running git")?;
     if !out.status.success() {
@@ -5069,5 +5216,373 @@ mod tests {
         s.ensure(&root, "main").unwrap();
         assert_eq!(s.branch.as_deref(), Some("omh/s01"));
         assert_eq!(s.branch_exists(&root), Ok(true));
+    }
+
+    /// The commit a pointer in `repo_with_a_submodule` records. Nothing has
+    /// this id — git does not ask for the object behind a pointer — and that
+    /// is the point: the agent needs only the forty characters.
+    const PINNED: &str = "1111111111111111111111111111111111111111";
+
+    /// A checkout that really has a submodule, the way a user's does: the
+    /// pointer committed at `vendor/lib`, and nothing behind it in a fresh
+    /// worktree but an empty directory.
+    fn repo_with_a_submodule() -> (tempfile::TempDir, PathBuf) {
+        let (dir, root) = repo();
+        std::fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = vendor/lib\n\turl = https://example.com/lib.git\n",
+        )
+        .unwrap();
+        let pointer = format!("160000,{PINNED},vendor/lib");
+        for args in [
+            vec!["add", ".gitmodules"],
+            vec!["update-index", "--add", "--cacheinfo", &pointer],
+            vec!["commit", "-q", "-m", "a submodule"],
+        ] {
+            git(&root, &args).unwrap();
+        }
+        (dir, root)
+    }
+
+    /// A repository inside the worktree, every part of it the agent's: its
+    /// config names a filter and a monitor that each leave `marker` behind,
+    /// and one tracked file is changed without changing its size — which is
+    /// what makes git read the content, and reading it is what runs a filter.
+    ///
+    /// `head` is what its `HEAD` file says. A pointer omh's index already
+    /// holds is only asked about when the two agree, so the agent writes the
+    /// id it wants; no such commit has to exist.
+    fn nested_repository(at: &Path, marker: &Path, head: Option<&str>) {
+        std::fs::create_dir_all(at).unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(at)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "building the nested repository, git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "a@example.com"]);
+        run(&["config", "user.name", "a"]);
+        std::fs::write(at.join("g.txt"), "yyyyy\n").unwrap();
+        std::fs::write(at.join(".gitattributes"), "* filter=pwn\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "inner"]);
+        let touch = format!("touch '{}'", marker.display());
+        run(&["config", "filter.pwn.clean", &format!("{touch}; cat")]);
+        run(&["config", "core.fsmonitor", &format!("{touch}; false")]);
+        std::fs::write(at.join("g.txt"), "zzzzz\n").unwrap();
+        if let Some(head) = head {
+            std::fs::write(at.join(".git/HEAD"), format!("{head}\n")).unwrap();
+        }
+    }
+
+    /// Listing what a session changed does not run git inside a repository
+    /// the agent nested in it.
+    ///
+    /// The worktree is the user's own repository, so nothing in `shadow` is
+    /// in play here — the config is theirs and the index is out of the
+    /// agent's reach. What the agent has is the files. A user's submodule is
+    /// an empty directory in a fresh worktree; `git init` there, and `status`
+    /// asks whether that repository is dirty by running `git status` inside
+    /// it, under a config that is a file in `/work`.
+    ///
+    /// Measured 2026-10-11 against git 2.56.0: `omh s` asks this of every
+    /// session, and the monitor and the filter the agent named both ran on the
+    /// host. No commit, no landing, nothing typed but the listing.
+    #[test]
+    fn listing_what_a_session_changed_never_enters_a_repository_nested_in_it() {
+        let (dir, root) = repo_with_a_submodule();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let marker = dir.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+        nested_repository(&s.worktree.join("vendor/lib"), &marker, None);
+        // The agent's as well, and it outranks `diff.ignoreSubmodules`.
+        std::fs::write(
+            s.worktree.join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = none\n",
+        )
+        .unwrap();
+
+        let changed = s.changed();
+
+        assert!(
+            !marker.exists(),
+            "listing a session ran git inside a repository the agent wrote"
+        );
+        // Not entered is not the same as not seen: a directory that turned
+        // into a repository is a change, and one omh will not look inside.
+        let changed = changed.unwrap();
+        assert!(
+            changed.iter().any(|path| path == "vendor/lib"),
+            "and it is still named as something this session changed: {changed:?}"
+        );
+    }
+
+    /// The same when its `HEAD` agrees with the pointer, which is the state
+    /// `status` cannot see and the one `add` enters.
+    ///
+    /// A review stages the worktree into an index of its own. `add` asks
+    /// about a pointer already in that index only when the nested repository
+    /// claims the commit the pointer records — and a `HEAD` file is forty
+    /// characters the agent writes. Measured the same day: `omh sNN diff`
+    /// ran the agent's filter, then died on `bad object HEAD`.
+    #[test]
+    fn reviewing_a_session_never_enters_a_repository_nested_in_it() {
+        let (dir, root) = repo_with_a_submodule();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let marker = dir.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+        nested_repository(&s.worktree.join("vendor/lib"), &marker, Some(PINNED));
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+
+        let review = s.diff("main", What::Summary);
+        let tree = s.tree("main");
+        let changed = s.changed();
+
+        assert!(
+            !marker.exists(),
+            "a review ran git inside a repository the agent wrote"
+        );
+        let review = review.expect("and the review still answers");
+        assert!(
+            review.contains("work.rs"),
+            "with the session's work in it: {review}"
+        );
+        assert!(tree.is_ok(), "the tree a sync merges, too: {tree:?}");
+        // `status` has nothing to say here — the pointer has not moved — so
+        // this is the one place the repository would go unmentioned.
+        let changed = changed.unwrap();
+        assert!(
+            changed.iter().any(|path| path == "vendor/lib"),
+            "a repository omh will not look inside is still named: {changed:?}"
+        );
+    }
+
+    /// Committing refuses a repository nested in the worktree, by name,
+    /// rather than landing a pointer to it.
+    ///
+    /// `add -A` records a directory holding a `.git` as a commit id and none
+    /// of its files — an id that exists nowhere but the sandbox. That was
+    /// what `omh sNN commit -m` put on the user's branch, and from then on the
+    /// pointer was in the index every `status` reads.
+    #[test]
+    fn committing_refuses_a_nested_repository_instead_of_landing_a_pointer() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let marker = dir.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+        nested_repository(&s.worktree.join("sub"), &marker, None);
+        let before = git(&s.worktree, &["rev-parse", "HEAD"]).unwrap();
+
+        let err = s
+            .commit(Some("the work"), Carried::refusing(&[]))
+            .expect_err("a worktree holding a repository of its own is refused");
+        let err = format!("{err:#}");
+
+        assert!(
+            err.contains("`sub` is a repository of its own"),
+            "the refusal names what it found: {err}"
+        );
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "HEAD"]).unwrap(),
+            before,
+            "and nothing landed"
+        );
+        let staged = git(&s.worktree, &["ls-files", "-s"]).unwrap();
+        assert!(
+            !staged.lines().any(|l| l.starts_with("160000 ")),
+            "with no pointer left in the index for the next `status`: {staged}"
+        );
+
+        // Its own advice has to work: delete the `.git`, and the files are
+        // files.
+        std::fs::remove_dir_all(s.worktree.join("sub/.git")).unwrap();
+        s.commit(Some("the work"), Carried::refusing(&[]))
+            .expect("the advice the refusal gave has to work");
+        let landed = git(&s.worktree, &["ls-tree", "-r", "HEAD"]).unwrap();
+        assert!(
+            landed
+                .lines()
+                .any(|l| l.starts_with("100644 blob ") && l.ends_with("\tsub/g.txt")),
+            "and what lands is the file, not a pointer to it: {landed}"
+        );
+        assert!(!marker.exists());
+    }
+
+    /// And a submodule the agent turned into a repository is refused the same
+    /// way — before `add` gets to ask it anything.
+    ///
+    /// The pointer is the user's and already in the index, so this is the
+    /// case `add` enters: measured, `omh sNN commit -m` ran the agent's
+    /// filter on the way to staging.
+    #[test]
+    fn committing_beside_a_submodule_the_agent_populated_is_refused_too() {
+        let (dir, root) = repo_with_a_submodule();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let marker = dir.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+        nested_repository(&s.worktree.join("vendor/lib"), &marker, Some(PINNED));
+
+        let err = s
+            .commit(Some("the work"), Carried::refusing(&[]))
+            .expect_err("refused while the repository is there");
+        let err = format!("{err:#}");
+
+        assert!(
+            !marker.exists(),
+            "committing ran git inside a repository the agent wrote: {err}"
+        );
+        assert!(
+            err.contains("`vendor/lib` is a repository of its own"),
+            "the refusal names what it found: {err}"
+        );
+
+        std::fs::remove_dir_all(s.worktree.join("vendor/lib/.git")).unwrap();
+        s.commit(Some("the work"), Carried::refusing(&[]))
+            .expect("the advice the refusal gave has to work");
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "HEAD:vendor/lib"])
+                .unwrap()
+                .trim(),
+            PINNED,
+            "and the user's pointer is exactly where they left it"
+        );
+        assert!(!marker.exists());
+    }
+
+    /// A submodule nobody touched is left exactly as it was.
+    ///
+    /// The other half of everything above, and the half that would hurt most
+    /// to get wrong: the tempting way to keep `add` out of a pointer is to
+    /// drop it from the index first, and for a directory with nothing in it
+    /// `add` does not put it back — so the commit deletes the user's
+    /// submodule. An empty directory is what every submodule is in a fresh
+    /// worktree.
+    #[test]
+    fn a_submodule_nobody_touched_is_left_exactly_as_it_was() {
+        let (dir, root) = repo_with_a_submodule();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+
+        assert_eq!(
+            s.changed().unwrap(),
+            vec!["work.rs".to_string()],
+            "an unpopulated submodule is not a change"
+        );
+        let review = s.diff("main", What::Summary).unwrap();
+        assert!(
+            review.contains("work.rs") && !review.contains("vendor/lib"),
+            "nor part of the review: {review}"
+        );
+        s.commit(Some("the work"), Carried::refusing(&[])).unwrap();
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "HEAD:vendor/lib"])
+                .unwrap()
+                .trim(),
+            PINNED,
+            "and the commit carries the pointer it started with"
+        );
+    }
+
+    /// An `add` that forgot to step around a pointer fails rather than
+    /// entering it.
+    ///
+    /// `everything_but_pointers` is a thing a call site has to remember, and
+    /// the next `add` written here will be written by someone who has not read
+    /// it. So the helpers themselves refuse: the plain spelling, through each
+    /// of them, over a submodule the agent populated.
+    #[test]
+    fn an_add_that_forgot_to_step_around_a_pointer_fails_rather_than_entering_it() {
+        let (dir, root) = repo_with_a_submodule();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let marker = dir.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+        nested_repository(&s.worktree.join("vendor/lib"), &marker, Some(PINNED));
+
+        let index = dir.path().join("a-review-index");
+        git_with_index(&s.worktree, &index, &["read-tree", "HEAD"]).unwrap();
+        let reviewed = git_with_index(&s.worktree, &index, &["add", "-A", "."]);
+        let staged = git(&s.worktree, &["add", "-A", "."]);
+
+        assert!(
+            !marker.exists(),
+            "`add` ran git inside a repository the agent wrote"
+        );
+        assert!(
+            reviewed.is_err() && staged.is_err(),
+            "and both say they stopped: {reviewed:?} {staged:?}"
+        );
+    }
+
+    /// The command omh prints for a worktree off its branch is one that can
+    /// be typed.
+    ///
+    /// A refusal that hands over a command is omh running it by other means.
+    /// This one is `git checkout` in the session's worktree, and `checkout`
+    /// ends by reporting what is still changed — which, for a pointer whose
+    /// directory the agent made a repository, means running git inside it.
+    /// Measured 2026-10-11 against git 2.56.0: the line as printed ran the
+    /// agent's monitor; with `-q`, which drops that report, nothing ran. A
+    /// detached worktree is the agent's to arrange, so the refusal carrying
+    /// the command was the agent's to provoke.
+    ///
+    /// Run rather than read: the assertion is on what the printed line does.
+    #[test]
+    fn the_command_printed_for_a_worktree_off_its_branch_can_be_typed() {
+        let (dir, root) = repo_with_a_submodule();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let marker = dir.path().join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+        git(&s.worktree, &["checkout", "-q", "--detach"]).unwrap();
+        nested_repository(&s.worktree.join("vendor/lib"), &marker, Some(PINNED));
+
+        let refused = s
+            .diff("main", What::Summary)
+            .expect_err("a worktree off its branch is not reviewed");
+        let refused = format!("{refused:#}");
+        let printed = refused
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("the refusal prints a command: {refused}"));
+        assert!(printed.starts_with("git -C "), "and it is git: {printed}");
+
+        let ran = Command::new("sh")
+            .arg("-c")
+            .arg(printed)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+
+        assert!(
+            !marker.exists(),
+            "the command omh told the user to run ran git inside a repository \
+             the agent wrote: {printed}"
+        );
+        assert!(
+            ran.status.success(),
+            "and it does what it was printed for: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "omh/s01",
+            "the worktree is back on its branch"
+        );
     }
 }

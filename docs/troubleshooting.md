@@ -712,15 +712,42 @@ warning does not repeat.
 a `git checkout` to look at something, or an abandoned bisect. Put it back:
 
 ```console
-$ git -C ~/.omh/worktrees/<repo>/<session> checkout omh/<session>
+$ git -C ~/.omh/worktrees/<repo>/<session> checkout -q omh/<session>
 ```
+
+Keep the `-q`. Without it `checkout` finishes by reporting what is still
+changed, and for a directory the agent turned into a repository of its own that
+report is git run inside it.
 
 Related refusals from the same command, all meaning "a harvest here would
 silently drop work", all about the sandbox's **own** repository: a detached
 HEAD, an interrupted rebase or merge, and commits no branch there can reach.
-The detached and stranded cases each print a `git --git-dir=…` command — one to
-put it back, one to show you what it found. The interrupted case names the
+The detached and stranded cases each print a `git` command to run **inside the
+sandbox** — one to put it back, one to show you what it found. Not on the host:
+that repository's hooks are the agent's to write. The interrupted case names the
 marker it saw and leaves finishing or aborting to you.
+
+### `… is a repository of its own inside this session's worktree`
+
+`omh sNN commit`, `commit --keep` and `sync` refuse while the worktree holds a
+directory with a `.git` of its own — the agent ran `git clone` or `git init`
+inside `/work`, or did so in the empty directory of one of your submodules.
+
+Two reasons, and the second is the one that matters. A commit cannot carry it:
+git records a nested repository as a commit id and none of its files, and that
+id exists nowhere but the sandbox. And git answers *is that repository dirty*
+by running `git status` **inside it**, under its own config — a file the agent
+wrote. So omh neither stages one nor asks about one.
+
+Inside the sandbox, either delete its `.git`, which leaves the files as
+ordinary files, or add the path to `.gitignore` to leave it out. For one of
+your own submodules only the first applies. Then run the command again.
+
+`omh s` and `omh sNN diff` keep working in the meantime. `omh s` lists the
+directory as changed, and neither looks inside it. `omh sNN commit` never
+stages a change to one of your submodule pointers either way — the sandbox's
+repository has no submodules to update, so one that moved in there moved to a
+commit only the agent has.
 
 ### `the sandbox's history no longer reaches …`
 

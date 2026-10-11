@@ -117,14 +117,20 @@ is the thing that must not cross.
 
 It lives at `~/.omh/shadow/<repo>/<session>.git`, on the branch
 `<session>-scratch` — keyed by the checkout, like every other per-repo path omh
-keeps — so you can read it from the host if you want to:
+keeps.
+
+**Do not run `git` in that directory yourself.** The agent commits through it,
+so its hooks are the agent's to write, and `git --git-dir=… checkout` on the
+host runs them as you. `omh s01 log` numbers those commits and `omh s01 diff 4
+-p` reads one, through a `git` that omh has told to run none of them. If you do
+want it in your own hands, read a copy:
 
 ```console
-$ git --git-dir=~/.omh/shadow/myrepo/s01.git log --oneline
+$ git clone --no-local ~/.omh/shadow/myrepo/s01.git /tmp/s01-copy
+$ git -C /tmp/s01-copy log --oneline
 ```
 
-Reading it directly is no longer necessary: `omh s01 log` numbers those commits
-and `omh s01 diff 4 -p` reads one. [Git](design/git.md) is the design.
+[Git](design/git.md) is the design.
 
 **Trunk can still reach it, one direction only.** `omh s01 sync` merges the
 new base into the session *on the host* and writes the resulting files in, so
