@@ -1049,8 +1049,8 @@ pub fn why_the_build_failed(log: &str, ca_set: bool) -> Option<String> {
              \n    omh set --local ca_cert /path/to/corp-root.pem\n\n\
              On macOS the root is in the keychain rather than on disk:\n\
              \n    security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n\n\
-             See `docs/troubleshooting.md`. If you are not behind a proxy, this \
-             was a different certificate problem and the log above has it."
+             If you are not behind a proxy, this was a different certificate \
+             problem and the log above has it. More:\n\n    https://docs.ohmyharness.sh/guides/troubleshooting/#an-unknown-issuer-error-when-omh-builds-an-image"
         )
     })
 }

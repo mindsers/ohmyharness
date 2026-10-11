@@ -1,0 +1,5 @@
+# The tools the documentation site is built with: run `mise install` once in
+# this folder. CI installs the same two from this file.
+[tools]
+node = "24.21.0"
+pnpm = "12.8.1"

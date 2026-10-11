@@ -203,7 +203,7 @@ unverified claims about external software that ships weekly**, and they break
 your profile.
 
 A green unit suite proves omh mounted a path faithfully. It cannot prove
-anything read it. See [Troubleshooting](../troubleshooting.md#why-it-exists).
+anything read it. See [Troubleshooting](https://docs.ohmyharness.sh/guides/troubleshooting/#why-it-exists).
 
 ### The bar for shipping one
 
@@ -241,7 +241,7 @@ args = ["$URL"]
 ```
 
 Editors attach from outside over SSH rather than running inside the sandbox, so
-they have no capabilities to declare. See [Editors](../editors.md).
+they have no capabilities to declare. See [Editors](https://docs.ohmyharness.sh/guides/editors/).
 
 ## Breadth is capped on purpose
 

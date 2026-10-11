@@ -31,7 +31,7 @@ appear.
 
 **The mechanism.** The worktree, the branch `omh/sNN`, the shadow gitdir, the
 seed, the replay point. omh's private business. It is explained here and in
-[Sessions](../sessions.md), and it appears nowhere else — not in output, not in
+[Sessions](https://docs.ohmyharness.sh/concepts/sessions/), and it appears nowhere else — not in output, not in
 an error message, not in a suggested command.
 
 The rule discriminates correctly at the edge, which is why it is worth writing
@@ -845,7 +845,7 @@ the hardening in step 6 of the order below, this work closes or narrows
 
 | | evidence |
 |---|---|
-| **Landed in #46.** `rm` deleted a branch holding unreviewed commits. `Session::commits` reads a git *failure* as `0`, and `remove` turns `0` into `branch -D`. A base that resolves only as `origin/<name>` — `default_branch` verifies no local ref — makes `rev-list` fail. | `removed session s01; branch omh/s01 dropped (no commits)`, with one commit on it. Contradicts the invariant [commands.md](../commands.md) states outright. |
+| **Landed in #46.** `rm` deleted a branch holding unreviewed commits. `Session::commits` reads a git *failure* as `0`, and `remove` turns `0` into `branch -D`. A base that resolves only as `origin/<name>` — `default_branch` verifies no local ref — makes `rev-list` fail. | `removed session s01; branch omh/s01 dropped (no commits)`, with one commit on it. Contradicts the invariant [commands.md](https://docs.ohmyharness.sh/reference/commands/) states outright. |
 | **Landed.** `worktree add -b` was silently overridden when the base existed only on the remote: git's DWIM won and checked out trunk itself. Every review path then refused, and `omh s` reported a branch that was never created. | `git worktree add -b omh/s02 ../wt2 main` → `Preparing worktree (new branch 'main')`. `--no-guess-remote` does not help; resolving the base to a commit first does. One cause, two symptoms: with only a remote-tracking *ref* and no remote configured, the same base instead fails outright with `invalid reference: main`. |
 | **Landed.** The carried-secret scan over messages read a pattern, not a literal — and which pattern language depends on the reader's `grep.patternType`. | Measured across all three settings: `*` in a secret is missed by every one, `+` by `extended` and `perl` (the `basic` default finds it), and `[` is fatal everywhere, taking `--keep` down for the session. `-F` matches the bytes regardless. The first measurement of this used a `+` and was taken on a machine configured `perl` — the defect is real, the example was the author's dotfiles. |
 | **Landed (#50).** `--keep` was not idempotent — the replay point is the fix. | The second run listed commits already on the branch in the todo, then `Could not apply 8eac520`. |

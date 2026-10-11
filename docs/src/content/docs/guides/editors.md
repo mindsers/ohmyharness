@@ -1,4 +1,7 @@
-# Editors
+---
+title: Editors
+description: Attaching VS Code, Zed, Cursor or Neovim to a session over SSH.
+---
 
 ```console
 $ omh s01 attach            # $OMH_EDITOR, then $EDITOR, then print every recipe
@@ -60,7 +63,7 @@ boundary of what works.
 ## Editors are data
 
 `omh sNN attach <name>` means *attach this tool to that session*. Adding one is a
-TOML file, not a code change, for the same reason [adapters](design/adapters.md)
+TOML file, not a code change, for the same reason [adapters](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adapters.md)
 are data:
 
 ```toml

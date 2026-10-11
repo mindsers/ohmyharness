@@ -6,7 +6,7 @@ This is the product. Everything else in omh is a place to put it.
 
 It lives in a versioned TOML file — `~/.omh/base/2026.08.toml`, shipped with the
 binary and installed by `init` the same way [adapters](adapters.md) and editors
-are. **Every session is built from it and [`omh why`](../commands.md#omh-why-thing)
+are. **Every session is built from it and [`omh why`](https://docs.ohmyharness.sh/reference/commands/#omh-why-thing)
 explains from it**, so the two cannot disagree about what is installed or why.
 
 ## An entry
@@ -105,7 +105,7 @@ naming a specific file was stale on the commit that introduced it.
 So where a cost **can** be computed, it is: `grep_nudge()` builds the string
 from the same literals the hook ships, and a test recomputes it and fails if the
 manifest disagrees. That is the shape every in-process cost should take. The
-rest need a container, which is [`doctor`](../troubleshooting.md) territory —
+rest need a container, which is [`doctor`](https://docs.ohmyharness.sh/guides/troubleshooting/) territory —
 the same boundary that makes adapter paths unverifiable in-process.
 
 ## Rejections are artifacts
@@ -206,7 +206,7 @@ What is left is a set where every hook advises, and `graph-first` states the
 rule: *a nudge, not a wall — a hook that blocks correct work gets disabled.* The
 distinction became load-bearing when a second harness arrived, because advising
 and blocking are one field apart on Claude Code and two different mechanisms on
-opencode; see [`refuse`](../configuration.md#advising-is-not-blocking).
+opencode; see [`refuse`](https://docs.ohmyharness.sh/reference/configuration/#advising-is-not-blocking).
 
 A manifest **hook** name is omh's, on or off. A file answering to one is an
 error naming both, never an override: with the feature on the generated hook

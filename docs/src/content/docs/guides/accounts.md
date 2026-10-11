@@ -1,4 +1,7 @@
-# Accounts
+---
+title: Accounts
+description: Logging in with omh auth, and keeping several logins per harness.
+---
 
 ```console
 $ omh auth claude --name personal
@@ -17,7 +20,7 @@ provider still each need their own login, and there is no useful sense in which
 they share one.
 
 Which account a session uses is a **project-level setting**, resolved through
-the [usual two layers](configuration.md#settings-and-their-two-layers) — because that is
+the [usual two layers](/reference/configuration/#settings-and-their-two-layers) — because that is
 how it genuinely varies. This repo is work; that one is personal.
 
 One name usually fits every harness. When it does not — accounts are captured
@@ -181,7 +184,7 @@ never holds its own token at all. omh mounts a credential volume, so a
 compromised agent **can** read and exfiltrate its own token.
 
 Several accounts widens that gap rather than narrowing it. See
-[risks](design/risks.md) and [runtime backends](design/architecture.md#runtime-backends).
+[risks](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md) and [runtime backends](https://github.com/mindsers/ohmyharness/blob/main/docs/design/architecture.md#runtime-backends).
 
 ## Verifying
 
@@ -192,4 +195,4 @@ every token save performs:
   ✓ token      /home/agent/.claude/.credentials.json (atomic write)
 ```
 
-It is non-destructive by construction. See [Troubleshooting](troubleshooting.md).
+It is non-destructive by construction. See [Troubleshooting](/guides/troubleshooting/).

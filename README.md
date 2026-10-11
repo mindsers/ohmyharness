@@ -60,12 +60,12 @@ shipped to fire on nothing, and opencode logs in with `/connect`.
 
 **Codex you can log in to, and see into.** The pinned Codex's only sign-in
 waited for a browser redirect inside the sandbox, where no browser arrives.
-[`omh auth codex`](docs/accounts.md#a-login-that-cannot-finish-in-a-sandbox)
+[`omh auth codex`](https://docs.ohmyharness.sh/guides/accounts/#a-login-that-cannot-finish-in-a-sandbox)
 now takes a device code, or `--import` copies the login this machine already
 has — read in full before anything is written, and offered only where there is
 one to copy. Codex runs omh's hooks, rendered into the system layer it trusts
 without a hash, and `omh sNN` reads its rollouts for what the agent did. An
-[`account`](docs/accounts.md#keyed-by-harness-not-by-provider) can name one
+[`account`](https://docs.ohmyharness.sh/guides/accounts/#keyed-by-harness-not-by-provider) can name one
 harness's login — `omh set account codex:work` — where it used to be one name
 every harness had to share. And two more reads that could not look now say
 so: an unreadable `worktrees/` no longer makes `omh s` print *no sessions*, and
@@ -81,7 +81,7 @@ sandbox off; the container is the sandbox, as it is for every harness.
 — and Codex's interactive app could not save that it trusts `/work`, because
 omh mounted a file where Codex rewrites its own config. Codex now finds `/work`
 trusted and its config writable, and
-[`omh doctor`](docs/troubleshooting.md#omh-doctor) asks first whether the
+[`omh doctor`](https://docs.ohmyharness.sh/guides/troubleshooting/#omh-doctor) asks first whether the
 harness starts at all, which every other row it has would have missed.
 
 [What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
@@ -133,7 +133,7 @@ reads — a harness is a TOML file, not a code change. Whether that survives
 switching harness is the claim this project has not yet earned: `opencode` and
 `omp` render and pass `omh doctor`, and nobody has worked in them. Believe the
 part you can check, which is that your setup is in one place and
-[`omh eject`](docs/commands.md#omh-eject-harness---to-dir) hands it back.
+[`omh eject`](https://docs.ohmyharness.sh/reference/commands/#omh-eject-harness---to-dir) hands it back.
 
 **A code graph that is current and actually used.** Indexed per session,
 refreshed after every turn (0.14s), with hooks that point the agent at it when
@@ -340,7 +340,7 @@ passes `--verbose` to claude, not to omh.
 `--dry-run` runs everything and writes nothing; a command that cannot yet
 answer it refuses the flag rather than running.
 
-**[Commands](docs/commands.md) is the full reference** — every flag, and what
+**[Commands](https://docs.ohmyharness.sh/reference/commands/) is the full reference** — every flag, and what
 each command prints.
 
 ## How it works
@@ -406,7 +406,7 @@ Absent means everything, so upgrading changes nothing and a new checkout is
 useful before it's configured. Settings are `omh set <key> <value>`, and the
 key decides which file it lands in: one that can name a credential is kept out
 of git, everything else is committed so a teammate cloning gets it —
-[Configuration](docs/configuration.md#two-scopes-two-commands) has the rest.
+[Configuration](https://docs.ohmyharness.sh/reference/configuration/#two-scopes-two-commands) has the rest.
 
 A hook can also **refuse** a call instead of advising around it — `tdd-guard`
 and `config-guard` ship this way, opt-in (`omh use hooks tdd-guard`), never
@@ -414,7 +414,7 @@ turned on by `omh init` itself. One name covers every stack it knows (go,
 python, node), so a monorepo names it once. Discipline, not containment: the
 worktree is what actually contains a session; a guard is a reminder at the
 moment its rule is broken —
-[Guards, and their bypass](docs/configuration.md#guards-and-their-bypass).
+[Guards, and their bypass](https://docs.ohmyharness.sh/reference/configuration/#guards-and-their-bypass).
 
 ### The base set is data too, and it has to justify itself
 
@@ -571,7 +571,7 @@ whether anything reads it. That gap is what `doctor` closes.
 
 | | |
 |---|---|
-| **Memory** | mostly [built](docs/commands.md#omh-memory-) — the store, its schemas, retrieval and `remember` / `recall` as MCP tools all ship. One store per repo, shared by its sessions, never committed: the committed layer and its promotion gate were removed in 0.14. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
+| **Memory** | mostly [built](https://docs.ohmyharness.sh/reference/commands/#omh-memory-) — the store, its schemas, retrieval and `remember` / `recall` as MCP tools all ship. One store per repo, shared by its sessions, never committed: the committed layer and its promotion gate were removed in 0.14. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
 | **`sbx` backend** | the spike ran (against `sbx` 0.39.0) and the backend was rewritten from what it measured — image delivery, the stage-and-symlink model for file mounts and guest paths, label-free session reuse. It is **opt-in** (`runtime = "sbx"`), and `auto` never picks it. What remains is the full live `omh doctor --harness claude` acceptance and a doctor row for its setup prerequisites; Docker is still the only end-to-end-verified runtime. |
 | **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](docs/design/decisions.md) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |
@@ -607,15 +607,15 @@ change an adapter, run `omh doctor`.
 
 ## Documentation
 
-Full docs live in [`docs/`](docs/README.md), which indexes them.
+Full docs are at [docs.ohmyharness.sh](https://docs.ohmyharness.sh/).
 
-Start with [Getting started](docs/getting-started.md) — install to first session.
-[Commands](docs/commands.md) is the whole surface and what each one prints;
-[Configuration](docs/configuration.md), [Sessions](docs/sessions.md),
-[Accounts](docs/accounts.md) and [Editors](docs/editors.md) cover the parts in
+Start with [Getting started](https://docs.ohmyharness.sh/getting-started/installation/) — install to first session.
+[Commands](https://docs.ohmyharness.sh/reference/commands/) is the whole surface and what each one prints;
+[Configuration](https://docs.ohmyharness.sh/reference/configuration/), [Sessions](https://docs.ohmyharness.sh/concepts/sessions/),
+[Accounts](https://docs.ohmyharness.sh/guides/accounts/) and [Editors](https://docs.ohmyharness.sh/guides/editors/) cover the parts in
 depth.
 
-Read the [design pages](docs/README.md#understanding-omh) before changing
+Read the [design pages](https://docs.ohmyharness.sh/#understanding-omh) before changing
 architecture — most record something that was tried and cost something, and
 [Risks](docs/design/risks.md) states plainly what is still weak.
 

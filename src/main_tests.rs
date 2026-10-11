@@ -666,9 +666,9 @@ fn no_test_attribute_was_stranded_from_its_function() {
 /// **What omh prints, and what a user is told to type.** Source with its
 /// comments taken out, so a string is read and the history beside it is not —
 /// a comment recounting what `omh s rm` once did is about the past and has to
-/// be allowed to say so. And every page outside `docs/design/`, for the same
-/// reason turned round: those pages are the record of how the surface got
-/// here.
+/// be allowed to say so. And every page the site publishes, but not
+/// `docs/design/`, for the same reason turned round: those pages are the
+/// record of how the surface got here.
 ///
 /// A line that has to show the refused spelling says so on the line, with
 /// `ON_PURPOSE`.
@@ -702,13 +702,23 @@ fn nothing_offers_a_session_verb_without_naming_the_session() {
             (path, code)
         })
         .collect();
-    // What a user is told to type.
+    // What a user is told to type. The site's pages are a tree and are read
+    // to the bottom of it; the other three directories are read one level
+    // deep.
     let mut pages = vec![root.join("README.md"), root.join("install.sh")];
-    for dir in ["docs", ".github", "base", "packaging/homebrew"] {
-        for entry in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+    let mut dirs: Vec<(std::path::PathBuf, bool)> = vec![(root.join(SITE_PAGES), true)];
+    dirs.extend([".github", "base", "packaging/homebrew"].map(|dir| (root.join(dir), false)));
+    while let Some((dir, deep)) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
             // By extension, because these directories also hold what a
             // desktop leaves in them, and a `.DS_Store` is not a page.
             let path = entry.path();
+            if path.is_dir() {
+                if deep {
+                    dirs.push((path, true));
+                }
+                continue;
+            }
             if path
                 .extension()
                 .is_some_and(|e| ["md", "toml", "tmpl", "yml"].iter().any(|k| e == *k))
@@ -722,8 +732,8 @@ fn nothing_offers_a_session_verb_without_naming_the_session() {
     }
     for read in [
         "README.md",
-        "docs/commands.md",
-        "docs/sessions.md",
+        "docs/src/content/docs/reference/commands.md",
+        "docs/src/content/docs/concepts/sessions.md",
         "src/cmd/init.rs",
         "src/shadow.rs",
         "base/2026.08.toml",
@@ -956,8 +966,14 @@ fn nothing_still_offers_a_verb_that_was_retired() {
                 // stale spelling in a machine-local file failed this guard
                 // on a maintainer's laptop and passed on CI, which is
                 // worse than either being wrong consistently.
+                //
+                // `node_modules` is what installing the documentation site
+                // leaves beside it. Other people's files, and no more ours to
+                // read than `target` is.
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let skipped = name == "target" || (name.starts_with('.') && name != ".github");
+                let skipped = name == "target"
+                    || name == "node_modules"
+                    || (name.starts_with('.') && name != ".github");
                 if !skipped {
                     stack.push(path);
                 }
@@ -1023,7 +1039,7 @@ fn nothing_still_offers_a_verb_that_was_retired() {
     for must in [
         "README.md",
         "src/main.rs",
-        "docs/commands.md",
+        "docs/src/content/docs/reference/commands.md",
         "base/2026.08.toml",
         "packaging/homebrew/omh.rb.tmpl",
     ] {
@@ -1051,9 +1067,13 @@ fn under_src(file: &std::path::Path) -> String {
     full.strip_prefix(&root).unwrap_or(&full).to_string()
 }
 
+/// The pages the documentation site publishes, from the repository root.
+/// `docs/design/` is beside them and is read where it lies.
+const SITE_PAGES: &str = "docs/src/content/docs";
+
 /// The command lines the **docs** print are lines omh accepts.
 ///
-/// A synopsis block in `docs/commands.md` is the one artefact in this repo
+/// A synopsis block in the commands reference is the one artefact in this repo
 /// that is neither compiled nor parsed nor grepped for arity, and it is the
 /// first thing a migrating reader looks at. The 0.7.0 rename left four
 /// wrong lines in a five-line block, under a heading naming the command
@@ -1086,26 +1106,26 @@ fn under_src(file: &std::path::Path) -> String {
 /// beneath it stops being true.
 #[test]
 fn the_lines_the_docs_print_are_lines_omh_accepts() {
-    let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir("docs")
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "md"))
-        .collect();
-    pages.extend(
-        std::fs::read_dir("docs/design")
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "md")),
-    );
-    pages.push("README.md".into());
+    // The site's pages, to the bottom of their tree, and the design pages
+    // beside them.
+    let mut pages: Vec<std::path::PathBuf> = vec!["README.md".into()];
+    let mut dirs: Vec<std::path::PathBuf> = vec![SITE_PAGES.into(), "docs/design".into()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                pages.push(path);
+            }
+        }
+    }
     pages.sort();
     // Named, not counted: a walk that stopped early and a walk that found
     // nothing look the same from a total.
     for must in [
-        "docs/commands.md",
-        "docs/configuration.md",
+        "docs/src/content/docs/reference/commands.md",
+        "docs/src/content/docs/reference/configuration.md",
         "docs/design/profile.md",
         "README.md",
     ] {
@@ -1133,7 +1153,10 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     let mut refused: Vec<String> = Vec::new();
     for page in &pages {
         let body = std::fs::read_to_string(page).unwrap();
-        let name = page.file_name().unwrap().to_string_lossy().to_string();
+        // By path, not by name: two sections can each hold an `index.md`, and
+        // a line moving from one to the other would leave a count keyed on
+        // the name unchanged.
+        let name = page.to_string_lossy().replace('\\', "/");
         let mut fenced = false;
         // A shell continuation is one line to the reader and to omh.
         let mut joined: Vec<(usize, String)> = Vec::new();
@@ -1361,22 +1384,24 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("README.md", 57), // + the omh upgrade command in the list
-        ("accounts.md", 10),
-        ("adapters.md", 1),
-        ("code-graph.md", 1),
+        ("docs/design/adapters.md", 1),
+        ("docs/design/decisions.md", 1),
+        ("docs/design/git.md", 18),
+        ("docs/design/memory.md", 4),
+        ("docs/design/profile.md", 3),
+        ("docs/design/trust.md", 2),
+        ("docs/src/content/docs/concepts/sessions.md", 11),
+        // Getting started was one page until it became two, and all fifteen
+        // of its lines are on this half: installing omh runs no omh.
+        ("docs/src/content/docs/getting-started/first-session.md", 15),
+        ("docs/src/content/docs/guides/accounts.md", 10),
+        ("docs/src/content/docs/guides/code-graph.md", 1),
+        ("docs/src/content/docs/guides/editors.md", 4),
+        ("docs/src/content/docs/guides/troubleshooting.md", 13),
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
         // then `omh s` and `omh s01 rm` in the landed-branch block
-        ("commands.md", 145),
-        ("configuration.md", 47), // + `omh use hooks tdd-guard`
-        ("decisions.md", 1),
-        ("editors.md", 4),
-        ("getting-started.md", 15),
-        ("git.md", 18),
-        ("memory.md", 4),
-        ("profile.md", 3),
-        ("sessions.md", 11),
-        ("troubleshooting.md", 13),
-        ("trust.md", 2),
+        ("docs/src/content/docs/reference/commands.md", 145),
+        ("docs/src/content/docs/reference/configuration.md", 47), // + `omh use hooks tdd-guard`
     ]
     .into_iter()
     .map(|(f, n)| (f.to_string(), n))

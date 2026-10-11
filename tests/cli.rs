@@ -9788,7 +9788,7 @@ fn a_focused_listing_leaves_other_sessions_leftovers_to_the_wide_one() {
     );
 }
 
-/// The promise in `docs/commands.md`, pinned against the command that broke it.
+/// The promise in the commands reference, pinned against the command that broke it.
 ///
 /// *stdout is the answer; stderr is everything else* was documented and then
 /// contradicted by this exact invocation: the leftovers warning and its
@@ -10881,7 +10881,7 @@ fn eject_names_the_files_that_still_point_into_a_sandbox() {
 
 /// `--to` inside the checkout is refused, because three places promise it.
 ///
-/// `src/cmd/eject.rs`, `src/cli.rs` and `docs/commands.md` all say eject
+/// `src/cmd/eject.rs`, `src/cli.rs` and the commands reference all say eject
 /// "deliberately does not write into your checkout". Nothing enforced it, and
 /// `write_file` is an unconditional `fs::write` — so `omh eject claude --to .`
 /// overwrote the working tree. The claude adapter renders rules to both
@@ -11030,7 +11030,7 @@ fn eject_says_one_entry_for_a_directory_holding_one() {
 /// This is the exact class 0.7.0's release notes describe as fixed: *"a flag
 /// said one thing and did another… `omh --dry-run use --all` wrote the file
 /// and printed `wrote →`"*. One command was missed, and
-/// [Commands](../docs/commands.md) has been promising **"everything runs;
+/// the commands reference has been promising **"everything runs;
 /// nothing is written"** on its behalf ever since.
 #[test]
 fn import_writes_nothing_on_a_dry_run() {
@@ -11729,7 +11729,7 @@ fn omh_does_not_warn_about_the_snapshot_it_writes_under_run() {
     );
     assert_eq!(
         detail, "none — nothing orphaned on this machine",
-        "a clean machine reads as one — this is the line docs/troubleshooting.md \
+        "a clean machine reads as one — this is the line the troubleshooting guide \
          quotes: {detail}"
     );
 

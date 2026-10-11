@@ -349,7 +349,7 @@ project, and it is not a technical one.
 
 - An agent can query **another session's graph** for the same repo. Mitigated by
   naming the project in three places, not prevented. See
-  [code graph](../code-graph.md#what-the-agent-can-still-see).
+  [code graph](https://docs.ohmyharness.sh/guides/code-graph/#what-the-agent-can-still-see).
 - **`.claude.json` is a single-file mount** that cannot be atomically replaced.
   `doctor` reports it rather than pretending otherwise.
 - **Only `claude` has been driven for real work.** `codex`, `opencode` and `omp` pass

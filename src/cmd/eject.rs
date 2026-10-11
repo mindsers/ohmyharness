@@ -194,7 +194,7 @@ fn names_a_sandbox_path(body: &str) -> bool {
 
 /// A destination inside the checkout is refused.
 ///
-/// The module doc, `cli.rs` and `docs/commands.md` all promised this and
+/// The module doc, `cli.rs` and the commands reference all promised this and
 /// nothing enforced it. `write_file` is an unconditional `fs::write`, so
 /// `omh eject claude --to .` wrote over the working tree — and because the
 /// claude adapter renders rules to both `/work/CLAUDE.md` and

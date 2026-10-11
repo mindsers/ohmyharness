@@ -228,7 +228,7 @@ mod rendered {
     /// meaning "give up, allow") refused instead, on exactly the paths a
     /// guard is documented to allow: no git repository, `git` erroring.
     /// One line, opposite meanings, and the fail-open promise in
-    /// `docs/configuration.md` broken on every harness but one.
+    /// the configuration reference broken on every harness but one.
     ///
     /// Only `hooks/`: a stack's `when` in `stacks/*.toml` is a different
     /// evaluator with its own exit-code contract, spelled out in
@@ -502,7 +502,7 @@ mod rendered {
     /// (`SHELL_BRIDGE`'s `sh`) and reads its exit code as the predicate's
     /// answer — 0 means *true* there, so `exit 0` on a `git` failure read as
     /// "the predicate held" and the guard **refused**, exactly backwards
-    /// from "fail open" and from what `docs/configuration.md` promises. The
+    /// from "fail open" and from what the configuration reference promises. The
     /// fix replaces `|| exit 0` with `&&`, so a `git` failure's own nonzero
     /// status propagates as the predicate's answer on every renderer, inline
     /// or not.

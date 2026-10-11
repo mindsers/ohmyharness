@@ -1,4 +1,7 @@
-# Code graph
+---
+title: Code graph
+description: The graph every session is indexed into, the four hooks, and omh graph.
+---
 
 Every session is indexed into a graph the agent can query structurally, instead
 of re-deriving the shape of your codebase by grepping it every task.
@@ -53,7 +56,7 @@ removed and disabled together.
 | `graph-read` | `before-tool`, `read` | 0 unless it speaks | **1,511 bytes** for one symbol instead of a whole module |
 | `graph-refresh` | `turn-end` | 0.14s per turn | a graph describing the code as it is *now* |
 
-Those are omh's words, not a harness's — see [writing a hook](configuration.md#writing-a-hook).
+Those are omh's words, not a harness's — see [writing a hook](/reference/configuration/#writing-a-hook).
 What `session-start` is called inside Claude Code is the adapter's business.
 
 ¹ For a `ohmyharness-s01`-length project name, which the nudge interpolates
@@ -205,9 +208,9 @@ replaces — not evidence that it makes an agent better at tasks overall.
 That distinction is deliberate and permanent. omh measures cost and argues
 benefit, rather than running an eval suite over a stochastic metric that would
 cost real money per decision and become the thing the base set is tuned to pass:
-[measure the cost, argue the benefit](design/trust.md#measure-the-cost-argue-the-benefit).
+[measure the cost, argue the benefit](https://github.com/mindsers/ohmyharness/blob/main/docs/design/trust.md#measure-the-cost-argue-the-benefit).
 
 So the honest claim for the graph is *"it costs 2.3 KB per context rebuild and
 0.14s per turn, and structural questions beat re-grepping"* — the first half
 measured, the second half a judgment you are free to disagree with, and to
-[remove](design/trust.md) in one command.
+[remove](https://github.com/mindsers/ohmyharness/blob/main/docs/design/trust.md) in one command.

@@ -390,7 +390,7 @@ pub(crate) fn import_cmd(
 /// Copy into the catalogue what a harness already holds, entry by entry.
 ///
 /// **Into `~/.omh/`, not the repo** — the opposite of hooks, and for the reason
-/// `docs/configuration.md` gives: a skill is a way *you* work and travels with
+/// the configuration reference gives: a skill is a way *you* work and travels with
 /// you across projects, while a hook binds to one repo's commands. Importing a
 /// skill into a repo would be a skill you only had in one place.
 ///
@@ -471,7 +471,7 @@ pub(crate) fn import_entries(
         // --dry-run` copied into the catalogue and then printed `wrote → …`,
         // which is the preview's own wording for what it *would* have done.
         // That is the shape 0.7.0 records as fixed — one command was missed,
-        // and `docs/commands.md` promised "everything runs; nothing is
+        // and the commands reference promised "everything runs; nothing is
         // written" on its behalf for a release.
         if dry_run {
             considered.push(report::Considered {

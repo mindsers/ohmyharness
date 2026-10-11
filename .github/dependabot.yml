@@ -13,13 +13,27 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  # The documentation site in docs/: Astro, Starlight and what they bring. The
+  # lockfile is what CI and a release install from, so nothing here changes
+  # what is built until one of these pull requests merges.
+  - package-ecosystem: npm
+    directory: "/docs"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      docs-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
   # The workflows pin actions by major tag and this is what moves them — except
   # dtolnay/rust-toolchain, which publishes no tags, so it is pinned to a branch
   # and floats. Nothing here can bump that one.
   #
-  # And except the cache action in release.yml, which is pinned by commit with
-  # its version in a trailing comment: that workflow builds what ships. This
-  # moves those too, as a pull request that shows the new commit.
+  # And except the cache action in release.yml and every action in docs.yml,
+  # which are pinned by commit with the version in a trailing comment: those
+  # workflows build what ships and what readers are served. This moves those
+  # too, as a pull request that shows the new commit.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

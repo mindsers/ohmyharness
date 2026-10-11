@@ -6,7 +6,7 @@
 > from the base manifest, `[omh]` switches a feature off per repo, there is one
 > catalogue, hooks are authored in omh's own vocabulary and translated per
 > harness at staging, and `[use]` says which catalogue entries a repo takes.
-> [Configuration](../configuration.md) describes the storage model as it now is.
+> [Configuration](https://docs.ohmyharness.sh/reference/configuration/) describes the storage model as it now is.
 > P5 has landed too: opencode grew a plugin system, omh generates one, and the
 > translation is exercised end to end — a hook written once in omh's words
 > blocks a git call on a harness that is not Claude Code.
@@ -688,7 +688,7 @@ file and says so, the way `--layer shared` does today.
 >
 > `omh set` replaces both. The default is the **committed** file, and what keeps
 > a credential out of it is `src/key.rs`, per key. See
-> [Configuration](../configuration.md) for the rule as shipped and
+> [Configuration](https://docs.ohmyharness.sh/reference/configuration/) for the rule as shipped and
 > [decisions](decisions.md) for the record of the reversal.
 
 > **Also superseded in 0.7.0.** The paragraph below argues for `enable` /
@@ -965,7 +965,7 @@ result to append to. Three of omh's five hooks were `before-tool` injects, and
 work gets disabled"* — so translating them to a throw would have broken a stated
 rule, silently, in a way that looks exactly like working.
 
-That is why the format gained [`refuse`](../configuration.md#writing-a-hook): a
+That is why the format gained [`refuse`](https://docs.ohmyharness.sh/reference/configuration/#writing-a-hook): a
 hook now says whether it advises or blocks, and each harness spells both in
 data. `git-unavailable` was the base set's one refusal, for as long as git
 genuinely could not work in the sandbox: advising and letting the call through

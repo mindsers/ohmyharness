@@ -1,4 +1,7 @@
-# Commands
+---
+title: Commands
+description: Every command, what it does, and what it prints.
+---
 
 ```
 omh init                          set this repo up (once)
@@ -170,7 +173,7 @@ how a script reads a launch plan.
 ## `omh init`
 
 Sets up the current repo, once. Decides everything, asks nothing, reports all of
-it. Covered in [Getting started](getting-started.md#what-it-actually-did).
+it. Covered in [Getting started](/getting-started/first-session/#what-it-actually-did).
 
 **A one-time command.** The first run stamps the repo (`seeded-by`); running it
 again in a repo already set up refuses and points at `omh upgrade`, which is the
@@ -241,7 +244,7 @@ omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment)
 ```
 
 Which credential set a launch uses is `omh set account <name>`, per project. See
-[Accounts](accounts.md).
+[Accounts](/guides/accounts/).
 
 ## `omh sNN attach [editor]` · `omh sNN a`
 
@@ -266,7 +269,7 @@ One row per editor omh has, keyed by the name it knows it under —
 `ssh` alias above; it is not an editor omh ships a recipe for.
 
 An editor that is not installed is **not an error** — omh says so and prints the
-URL. See [Editors](editors.md).
+URL. See [Editors](/guides/editors/).
 
 You do not need an editor to get a shell: the `ssh` alias above reaches the
 session directly, and `omh sNN` prints it as a next action while the session is
@@ -284,7 +287,7 @@ omh: graph at http://127.0.0.1:56286
 ```
 
 One service per repo, not per session, and it needs no session to exist. See
-[Code graph](code-graph.md#omh-graph).
+[Code graph](/guides/code-graph/#omh-graph).
 
 ## `omh auth <harness> [--name <account>] [--import]`
 
@@ -308,13 +311,13 @@ $ omh auth codex --name work --import
   copied from /Users/you/.codex/auth.json
 ```
 
-See [Accounts](accounts.md).
+See [Accounts](/guides/accounts/).
 
 ## `omh doctor [--harness <name>]` · `d`
 
 Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See
-[Troubleshooting](troubleshooting.md).
+[Troubleshooting](/guides/troubleshooting/).
 
 **It gathers the host first, and reports it whatever happens next.** Computed
 before any container work: whether the container runtime is **answering** (not
@@ -393,7 +396,7 @@ taken *and how*, and one predating the current base-set version is marked stale
 — so re-cutting the base set puts every carried-over number up for
 re-affirmation. The `because` line is a judgment you are free to disagree with —
 see
-[measure the cost, argue the benefit](design/trust.md#measure-the-cost-argue-the-benefit).
+[measure the cost, argue the benefit](https://github.com/mindsers/ohmyharness/blob/main/docs/design/trust.md#measure-the-cost-argue-the-benefit).
 
 ### Seven answers, because authorship differs
 
@@ -1106,7 +1109,7 @@ omh: config.toml is listed in carry_in and git tracks it, so what is in the work
 ```
 
 `carry_in` is for files git does **not** track, so this means the list needs
-fixing — see [Configuration](configuration.md#keeping-the-agents-git-status-clean).
+fixing — see [Configuration](/reference/configuration/#keeping-the-agents-git-status-clean).
 `--skip-carried` commits everything else meanwhile. omh refuses rather than
 quietly leaving the file out because it cannot tell a credential you were
 carrying from a change you meant.
@@ -1128,7 +1131,7 @@ is a normal repo.
 ### Keeping the agent's own commits
 
 The agent commits as it works, into a repository of its own that is not this
-branch — see [Sessions](sessions.md#the-agent-has-git-and-it-is-not-yours).
+branch — see [Sessions](/concepts/sessions/#the-agent-has-git-and-it-is-not-yours).
 `--keep` brings those commits here instead of squashing the files into one:
 
 ```console
@@ -1545,7 +1548,7 @@ it on the server in `~/.omh/mcp.json`, where servers live.
 
 MCP lives under `omh settings` because MCP servers **are** configuration. They
 live in your catalogue; a repo overrides a server's environment without
-redeclaring it. See [Configuration](configuration.md).
+redeclaring it. See [Configuration](/reference/configuration/).
 
 **Your catalogue is `omh info`.** This command is your *defaults* — the four
 verbs above all act on `~/.omh`, and what you have in it is part of what
@@ -1641,13 +1644,13 @@ have, and names `omh settings edit` as the way to create it.
 omh's own — `codegraph`, `memory`, the five generated hooks and their rules
 sections — are not selectable in either direction. `omh set <feature> on|off`
 is their switch, because a feature is all or nothing. See
-[Configuration](configuration.md#a-feature-is-not-selectable).
+[Configuration](/reference/configuration/#a-feature-is-not-selectable).
 
 A **guard** — a hook that refuses rather than advises — is a catalogue entry
 like any other and `omh use hooks tdd-guard` finds it, but neither `omh init`
 nor `omh use --all` ever turns one on for you: every other catalogue hook is
 safe to run unattended, and a guard can refuse the agent's first edit. See
-[Guards, and their bypass](configuration.md#guards-and-their-bypass).
+[Guards, and their bypass](/reference/configuration/#guards-and-their-bypass).
 
 ## `omh import <capability> <harness>`
 
@@ -2024,6 +2027,6 @@ degrades to absent with one line at launch rather than failing it.
 ### What is not here yet
 
 Hub pages — notes whose job is joining others — wait on a calibrated lint, and
-that needs a store nobody has grown yet. See [the design](design/memory.md#14-build-order).
+that needs a store nobody has grown yet. See [the design](https://github.com/mindsers/ohmyharness/blob/main/docs/design/memory.md#14-build-order).
 A subcommand that printed "not implemented" would be worse than its absence,
 because `--help` advertises it.
