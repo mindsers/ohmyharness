@@ -33,10 +33,24 @@ secrets are refused on the host, when work crosses back.
 
 **Narrowed.** The gitdir has to be writable because the agent commits into it;
 its `config` does not. omh rewrites that file from its own view at every launch
-and mounts it read-only, which closes the agent-writable-config class —
-textconv drivers, `core.hooksPath`, `core.sshCommand`, `protocol.file.allow` —
-at the mount rather than by omh remembering the right `-c` flag at every call
-site forever.
+and mounts it read-only, which stops the agent editing that file — textconv
+drivers, `core.hooksPath`, `core.sshCommand`, `protocol.file.allow` — at the
+mount rather than by omh remembering the right `-c` flag at every call site
+forever.
+
+**That pin holds one path, and this page said it closed the class.** It did
+not, and #153 is what it cost to find out. Measured against git 2.56.0: a
+`commondir` file in the gitdir root sends git to a `config` the agent wrote, and
+the `status` behind `omh sNN log` ran a clean filter from it, on the host. A
+repository nested in the worktree and staged in the agent's index was entered
+by `status`, `diff` and `add`, under its own config. And the
+`git --git-dir=… checkout` omh printed for a detached HEAD ran a
+`post-checkout` hook the agent had left in the gitdir. Every host-side git over
+that repository now goes through one constructor, which sets `GIT_COMMON_DIR`;
+`status` and `diff` pass `--ignore-submodules=dirty`, staging refuses a nested
+repository by name, and omh no longer prints a host-side `git --git-dir=` for
+anyone to run. Refs still follow `commondir` — git's ref store does not ask the
+variable — which hands the agent nothing it did not already own.
 
 Measured inside a real container: `commit`, `checkout -b` and `reset --hard`
 never write that file and do not notice it, while `git config` and

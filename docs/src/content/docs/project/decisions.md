@@ -11,13 +11,13 @@ these, the reason is what you need to argue with.
 | Decision | Choice | Why |
 |---|---|---|
 | Category | **distribution** | the parts exist; assembly and subtraction are the value |
-| Runtime | **pluggable backend** | `sbx` where available, Docker as fallback; no vendor lock |
+| Runtime | **pluggable backend** | Docker unless you say otherwise; `podman` and `sbx` are opt-in through `runtime`, and `sbx` is unmeasured. No vendor lock |
 | Repo exposure | **git worktree, auto-branch** | the agent cannot reach your checkout or `main`; review is `git diff` |
 | Git in the sandbox | **a repository of its own** | your checkout is never mounted, so the agent gets a gitdir holding one commit and none of your history |
 | Getting work back | **`omh sNN commit`, squash or `--keep`** | you choose at commit time whether the agent's own commits and messages land |
 | Code graph | **wire an existing MCP server** | distributions package, they don't reinvent |
 | Language | **Rust** | single binary; `omh` wraps every invocation, so startup is felt |
-| LLM routing | **not ours** | one env var in `settings.toml` |
+| LLM routing | **not ours** | the harness logs in as itself and reaches whatever it is configured to; omh passes no model and proxies nothing |
 | Unit of work | **long-lived session** | keeps the index warm, makes harness switching instant |
 | Session persistence | **`dtach`, not tmux** | omh needs detach/reattach; SSH already provides multiplexing |
 | IDE access | **SSH into the session** | one dependency tree, shared with the agent |
@@ -47,7 +47,7 @@ This is the product. Everything else is a place to put it.
 
 ```
 omh init             → base system. no questions.
-                     → stack rules and hooks, derived from what init detected.
+                     → a toolchain and hooks, derived from the stack init detected.
 omh settings mcp add …
                      → the archive is still there, one command away,
                        and not in your face.
@@ -56,7 +56,7 @@ omh settings mcp add …
 | Component | Status | Justification |
 |---|---|---|
 | sandbox + worktree branch | ✅ | safety; non-negotiable |
-| `AGENTS.md` from detected stack | ✅ | the thing everyone writes badly |
+| rules, composed with the repo's own | ✅ | omh's sections are base-set entries composed into every session; it writes no `AGENTS.md` |
 | `omh sNN attach` | ✅ | IDE attach |
 | **`codegraph`** | ✅ | structural queries instead of re-grepping every task |
 | test-on-stop + format-on-edit hooks | ✅ | `init` detects the commands and wires them |
@@ -75,8 +75,8 @@ The base set is also the part of omh with the least evidence behind it. See
 
 ## Decisions deliberately not made
 
-- **Which model you use.** One env var. Routing is a solved problem with several
-  good solutions and no reason for omh to have an opinion.
+- **Which model you use.** The harness's own setting. Routing is a solved
+  problem with several good solutions and no reason for omh to have an opinion.
 - **Which editor you use.** [Editors are data](/guides/editors/#editors-are-data),
   and the integration point is an SSH config include rather than a plugin, so
   editors omh has never heard of work anyway.
