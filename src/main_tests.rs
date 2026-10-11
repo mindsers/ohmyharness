@@ -3081,6 +3081,76 @@ fn a_missing_shadow_does_not_hide_uncommitted_worktree_files() {
     );
 }
 
+/// Asking what a removal would lose does not run git inside a repository
+/// nested in the worktree.
+///
+/// The one `status` in a session's worktree that did not go through
+/// `session`'s helper, and the one whose answer decides whether `rm` asks
+/// first. A pointer in the index and a `git init` in its directory, and git
+/// answers *is it dirty* by running there, under a config the agent wrote —
+/// measured 2026-10-11 against git 2.56.0, in `session`'s own tests.
+#[test]
+fn asking_what_a_removal_would_lose_never_enters_a_nested_repository() {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::remove_dir_all(&shadow.gitdir).unwrap();
+    std::fs::remove_file(&shadow.seed_record).unwrap();
+    let marker = paths.root.join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
+
+    // A pointer the index already holds — a submodule of the user's — and
+    // the repository the agent made of its directory.
+    let sub = session.worktree.join("vendor/lib");
+    let host = |at: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(at)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    host(
+        &session.worktree,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,vendor/lib",
+        ],
+    );
+    std::fs::create_dir_all(&sub).unwrap();
+    host(&sub, &["init", "-q", "-b", "main"]);
+    host(&sub, &["config", "user.email", "a@example.com"]);
+    host(&sub, &["config", "user.name", "a"]);
+    std::fs::write(sub.join("g.txt"), "yyyyy\n").unwrap();
+    host(&sub, &["add", "-A"]);
+    host(&sub, &["commit", "-q", "-m", "inner"]);
+    host(
+        &sub,
+        &[
+            "config",
+            "core.fsmonitor",
+            &format!("touch '{}'; false", marker.display()),
+        ],
+    );
+    std::fs::write(sub.join("g.txt"), "zzzzz\n").unwrap();
+
+    let stake = cmd::harvest::at_stake(&paths, &session);
+
+    assert!(
+        !marker.exists(),
+        "asking what `rm` would lose ran git inside a repository the agent wrote"
+    );
+    assert!(
+        matches!(stake, cmd::harvest::AtStake::Work(_)),
+        "and a pointer that moved is still work at stake"
+    );
+}
+
 /// The count says what it counted, and says it in the singular when there
 /// is one of it.
 ///

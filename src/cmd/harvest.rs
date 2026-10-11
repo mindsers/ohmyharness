@@ -960,7 +960,15 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
             AtStake::Nothing if session.worktree.is_dir() => {
                 let out = std::process::Command::new("git")
                     .current_dir(&session.worktree)
-                    .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                    // The worktree's files are the agent's, and a `status`
+                    // asked about a repository nested among them answers by
+                    // running git inside it. See `shadow::out_of_nested`.
+                    .args(shadow::out_of_nested(&[
+                        "status",
+                        "--porcelain=v1",
+                        "-z",
+                        "--untracked-files=all",
+                    ]))
                     .output();
                 match out {
                     Ok(out) if !out.status.success() => AtStake::Unknown(format!(
