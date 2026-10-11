@@ -16,6 +16,10 @@ updates:
   # The workflows pin actions by major tag and this is what moves them — except
   # dtolnay/rust-toolchain, which publishes no tags, so it is pinned to a branch
   # and floats. Nothing here can bump that one.
+  #
+  # And except the cache action in release.yml, which is pinned by commit with
+  # its version in a trailing comment: that workflow builds what ships. This
+  # moves those too, as a pull request that shows the new commit.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
