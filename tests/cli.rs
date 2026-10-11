@@ -28,6 +28,10 @@ struct Sandbox {
     /// Prepended to `PATH`, so a test can put a recording `docker` in front of
     /// the developer's real one.
     bin: PathBuf,
+    /// Whether this sandbox reaches a real container runtime — only
+    /// `real_sandbox` says yes. What it leaves in that runtime is taken back
+    /// out when it is dropped.
+    real: bool,
 }
 
 fn sandbox() -> Sandbox {
@@ -54,15 +58,113 @@ fn sandbox() -> Sandbox {
     )
     .unwrap();
     std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // A `docker`, for every run, for the reason there is an `$EDITOR` for
+    // every run: without one the suite finds the developer's. `omh s` asks the
+    // runtime what is running, so most of this file reached a real daemon —
+    // and gave three different answers on three machines. No Docker at all
+    // (the macOS job), a daemon that is up (the linux job), and a CLI with the
+    // daemon stopped, which is a laptop with Docker Desktop closed and was the
+    // one nobody had run: `a_sandbox_repository_with_no_session_is_reported`
+    // went red there, on a line about a daemon it never meant to ask.
+    //
+    // It answers as a daemon that is up and holds nothing, which is what the
+    // linux job's real one says to a sandbox that started nothing. Listings
+    // are empty; anything asked for by name is not there; and nothing can be
+    // run, built or entered — a test that means to do those names its own
+    // stand-in with `fake_docker`, or asks for the real thing with
+    // `real_sandbox`.
+    let docker = bin.join("docker");
+    std::fs::write(
+        &docker,
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+         \x20 ps|images|version|info) exit 0 ;;\n\
+         \x20 volume|network|image|container) case \"$2\" in ls|list) exit 0 ;; esac ;;\n\
+         esac\n\
+         echo \"Error response from daemon: no such object (the suite's stand-in holds nothing): $*\" >&2\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&docker, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     Sandbox {
         _dir: dir,
         repo,
         home,
         bin,
+        real: false,
+    }
+}
+
+/// A sandbox whose `docker` is the machine's own — for the tests that are
+/// `#[ignore]`d because a stand-in is exactly what they cannot use.
+///
+/// Whatever it starts is removed when it goes out of scope. Each run of these
+/// used to leave a session's container up and its networks behind, on a
+/// daemon whose address pool is finite: enough runs and the next launch dies
+/// on `all predefined address pools have been fully subnetted`, which
+/// AGENTS.md already tells people to go and clear by hand.
+fn real_sandbox() -> Sandbox {
+    sandbox().real()
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        if !self.real {
+            return;
+        }
+        // Everything omh names for this checkout starts with the checkout's
+        // id — `omh-<id>-sNN`, `omh-<id>`, `omh-graph-<id>` — and the id holds
+        // a digest of a temporary path, so nothing of anyone else's can match.
+        // Asked of omh, like every other use of it here; a sandbox that never
+        // got as far as having one left nothing to clear.
+        let out = self.omh(&["info", "--repo", "--json"]);
+        let Some(id) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .ok()
+            .and_then(|v| v["repo_id"].as_str().map(str::to_string))
+        else {
+            return;
+        };
+        let named = |listing: &[&str]| -> Vec<String> {
+            Command::new("docker")
+                .args(listing)
+                .output()
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|name| {
+                            name.starts_with(&format!("omh-{id}"))
+                                || *name == format!("omh-graph-{id}")
+                        })
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // Containers first: a network with something still on it will not go.
+        for container in named(&["ps", "-a", "--format", "{{.Names}}"]) {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &container])
+                .output();
+        }
+        for network in named(&["network", "ls", "--format", "{{.Name}}"]) {
+            let _ = Command::new("docker")
+                .args(["network", "rm", &network])
+                .output();
+        }
     }
 }
 
 impl Sandbox {
+    /// Take the stand-in off this sandbox's `PATH`, so `docker` is the
+    /// machine's. For a sandbox something else built — `staged_for` — that has
+    /// to reach a real runtime after all.
+    fn real(mut self) -> Self {
+        std::fs::remove_file(self.bin.join("docker")).unwrap();
+        self.real = true;
+        self
+    }
+
     fn omh(&self, args: &[&str]) -> Output {
         self.omh_in(&self.repo.clone(), args)
     }
@@ -2389,7 +2491,7 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
 #[test]
 #[ignore]
 fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
     assert!(
@@ -2438,7 +2540,7 @@ fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
 #[test]
 #[ignore]
 fn a_new_launch_never_lands_in_a_session_that_already_exists() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -2730,7 +2832,7 @@ fn a_launch_with_no_account_points_at_omh_auth() {
 #[test]
 #[ignore]
 fn doctor_checks_the_memory_server_before_any_launch() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -2779,7 +2881,7 @@ fn doctor_checks_the_memory_server_before_any_launch() {
 #[test]
 #[ignore]
 fn doctor_makes_the_host_key_rather_than_letting_the_mount_make_it() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
 
@@ -2802,7 +2904,7 @@ fn doctor_makes_the_host_key_rather_than_letting_the_mount_make_it() {
 #[test]
 #[ignore]
 fn auth_makes_the_host_key_rather_than_letting_the_mount_make_it() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
     let network = format!("omh-{}", sb.repo_id());
@@ -2848,7 +2950,7 @@ impl Drop for DockerNetworkCleanup {
 #[test]
 #[ignore]
 fn a_previewed_doctor_does_not_cross_build_anything() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -2893,7 +2995,7 @@ fn a_previewed_doctor_does_not_cross_build_anything() {
 #[test]
 #[ignore]
 fn a_launched_session_answers_ssh() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -2965,7 +3067,7 @@ fn a_launched_session_answers_ssh() {
 #[test]
 #[ignore]
 fn a_resumed_session_runs_the_harness_it_ran_before() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -3110,7 +3212,7 @@ fn resuming_as_a_different_harness_says_it_is_a_switch() {
 #[test]
 #[ignore]
 fn a_session_omh_cannot_name_a_harness_for_is_refused_rather_than_guessed() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -3151,7 +3253,7 @@ fn a_session_omh_cannot_name_a_harness_for_is_refused_rather_than_guessed() {
 #[test]
 #[ignore]
 fn omh_new_hands_the_harness_what_follows_a_double_dash() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -3209,7 +3311,7 @@ fn omh_new_hands_the_harness_what_follows_a_double_dash() {
 #[test]
 #[ignore]
 fn a_dry_run_names_the_catalogue_entries_this_repo_is_not_using() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     assert!(
         sb.omh(&["init"]).status.success(),
@@ -4616,7 +4718,7 @@ fn set_and_settings_are_never_inferred_from_each_other() {
 #[test]
 #[ignore]
 fn init_seeds_the_repo_from_your_template_and_says_so() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_base();
     std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
@@ -4673,7 +4775,7 @@ fn init_seeds_the_repo_from_your_template_and_says_so() {
 #[test]
 #[ignore]
 fn init_reports_what_it_did_here_and_not_what_the_machine_has() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_base();
     sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
@@ -4761,7 +4863,7 @@ fn init_reports_what_it_did_here_and_not_what_the_machine_has() {
 #[test]
 #[ignore]
 fn a_probe_that_could_not_run_is_not_a_clean_bill_of_health() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_base();
     // **No stack**, deliberately. With one there are provisioning conditions
@@ -4812,7 +4914,7 @@ fn a_probe_that_could_not_run_is_not_a_clean_bill_of_health() {
 #[test]
 #[ignore]
 fn a_hook_measurement_that_did_not_happen_says_which_gate_stopped_it() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_base();
     // A stack, so there are conditions to ask about — with none, "asked
@@ -5050,7 +5152,7 @@ fn init_is_one_time_and_a_second_run_redirects_to_upgrade() {
 #[test]
 #[ignore]
 fn init_claims_no_seed_over_a_settings_file_that_was_already_there() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_base();
     std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
@@ -5183,7 +5285,7 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
 #[test]
 #[ignore]
 fn a_repo_nobody_has_configured_reports_nothing_configured() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     sb.seed_base();
     assert!(sb.omh(&["init"]).status.success());
@@ -7223,7 +7325,7 @@ fn a_missing_container_runtime_still_leaves_the_repo_configured() {
 #[test]
 #[ignore]
 fn init_writes_the_selection_expanded() {
-    let sb = sandbox();
+    let sb = real_sandbox();
     sb.git_init();
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
     sb.catalogue(&["skills/review-diff/SKILL.md"]);
@@ -13105,7 +13207,7 @@ fn the_surface_runs_without_a_container() {
 #[test]
 #[ignore]
 fn the_surface_runs_with_a_container() {
-    let sb = staged_for(Needs::Session);
+    let sb = staged_for(Needs::Session).real();
     let _teardown = Teardown { sb: &sb };
     for e in EXERCISES.iter().filter(|e| e.runtime) {
         exercise(&sb, e);
