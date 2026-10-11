@@ -39,7 +39,7 @@ Two details that are load-bearing rather than incidental:
 - **Worktrees live outside the repo.** Nested, your IDE would index every
   session's full copy of the codebase.
 
-Where things live is in [Configuration](../configuration.md#one-catalogue-and-it-is-personal).
+Where things live is in [Configuration](https://docs.ohmyharness.sh/reference/configuration/#one-catalogue-and-it-is-personal).
 
 ## Images
 
@@ -94,7 +94,7 @@ The network a plan names — one per session, named like its container, so two
 sessions of one repo cannot reach each other's services — has to be *created*,
 too. That gap made every real launch die at `network omh-<repo> not found`
 (the per-project network of the time) while every unit test
-passed — the archetypal case for [`omh doctor`](../troubleshooting.md).
+passed — the archetypal case for [`omh doctor`](https://docs.ohmyharness.sh/guides/troubleshooting/).
 
 ### Verified end to end
 

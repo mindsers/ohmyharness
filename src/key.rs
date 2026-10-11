@@ -476,7 +476,7 @@ mod tests {
     /// `default_layer` has not been inverted, simplified away, or given a
     /// per-key override that disagrees with it.
     ///
-    /// It is the executable half of the rule `docs/configuration.md` states as
+    /// It is the executable half of the rule the configuration reference states as
     /// prose — *the protection moved from the command to the key*. The prose it
     /// used to quote said *the committed file is never reached by accident,
     /// only on purpose*, which was a property of a command that sent every

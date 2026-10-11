@@ -3,7 +3,7 @@
 > **Status: M1–M4 are built, except hub pages.** The store, its schemas, the
 > key templates, retrieval, the MCP surface, `invalidated_by`, and `omh memory`
 > / `lint` / `rm` / `stale` ship — see
-> [commands](../commands.md#omh-memory-) and §14 for what each milestone
+> [commands](https://docs.ohmyharness.sh/reference/commands/#omh-memory-) and §14 for what each milestone
 > deferred. Hub pages remain specification, because their lint needs a
 > threshold §7 will not let anyone guess. The reasoning
 > behind each decision, the survey that picked the server, the benchmark that

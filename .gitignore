@@ -2,3 +2,8 @@
 .claude/
 .DS_Store
 /.omh/
+
+# The documentation site (docs/)
+node_modules/
+/docs/dist/
+.astro/

@@ -962,7 +962,7 @@ because = "cargo is how a rust project is built and tested"
     /// `[provision]` exists for — has a literal in a file omh does not own.
     /// Change the speller and that line stops matching anything and is
     /// silently ignored: the provide is installed anyway, exit 0, no
-    /// diagnostic. `docs/configuration.md` and every repo already using it
+    /// diagnostic. The configuration reference and every repo already using it
     /// spell it this way.
     #[test]
     fn a_provision_key_is_stack_slash_provide() {

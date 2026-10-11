@@ -1,0 +1,15 @@
+# Supply-chain protections for installing the site's dependencies.
+
+# Wait a day before installing a newly published version: most malicious
+# releases are found and removed within hours.
+minimumReleaseAge: 1440
+# Refuse a version published with weaker trust evidence than earlier ones
+# (for example, without provenance after releases that had it).
+trustPolicy: no-downgrade
+# No dependency may run install scripts unless listed here.
+strictDepBuilds: true
+onlyBuiltDependencies: []
+# Install scripts not needed: esbuild comes with Astro and ships its binary as
+# a platform-specific optional dependency.
+allowBuilds:
+  esbuild: false

@@ -1,4 +1,7 @@
-# Troubleshooting
+---
+title: Troubleshooting
+description: omh doctor, and the failures it exists to catch.
+---
 
 ## `omh doctor`
 
@@ -121,7 +124,7 @@ in to one of them.
 ### The harness starts but does not see my rules or skills
 
 Run `omh doctor`. If a path fails there, the adapter is wrong — that is a bug,
-and [`docs/design/adapters.md`](design/adapters.md) covers how to fix it.
+and [`docs/design/adapters.md`](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adapters.md) covers how to fix it.
 
 If doctor passes, check whether the capability was dropped at launch:
 
@@ -149,7 +152,7 @@ $ omh auth codex --import            # or copy the login this machine has
 ```
 
 With `account` set for the repo, use that name: `omh auth codex --name <it>`.
-See [Accounts](accounts.md#a-login-that-cannot-finish-in-a-sandbox).
+See [Accounts](/guides/accounts/#a-login-that-cannot-finish-in-a-sandbox).
 
 ### Codex says "Failed to set trust for /work … failed to persist config.toml"
 
@@ -176,7 +179,7 @@ The token was written somewhere that does not persist. `omh doctor` names it:
   ✗ token      /home/agent/.claude.json cannot be renamed over
 ```
 
-Background in [Accounts](accounts.md#mount-the-directory-never-the-token-file).
+Background in [Accounts](/guides/accounts/#mount-the-directory-never-the-token-file).
 
 ### `nvim did not open the session` — and neither does any other editor
 
@@ -385,7 +388,7 @@ Before 0.8.0 omh keyed a checkout's state by its **directory name**, so
 `~/work/api` and `~/oss/api` were one repo: they shared worktrees, sandbox
 repositories, the note store, the cache volume and container names, and the
 second one's `omh new` resumed into the first one's session. That is
-[risk 8d](design/risks.md), and 0.8.0 closes it by keying on the name *and* a
+[risk 8d](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md), and 0.8.0 closes it by keying on the name *and* a
 digest of where the checkout is.
 
 The first omh command you run in each checkout after upgrading moves its state
@@ -445,7 +448,7 @@ keep or delete.
 ### `the carried-file scan could not read these`
 
 At launch and at harvest, omh searches the agent's commits for lines from the
-files you [carried in](configuration.md#carry_in) — and this says which of
+files you [carried in](/reference/configuration/#carry_in) — and this says which of
 those files it could not turn into lines:
 
 ```console
@@ -527,7 +530,7 @@ sandbox's trust store, which is the one thing a successful build does not
 prove. `update-ca-certificates` exits 0 when it skips a certificate it cannot
 parse.
 
-[`ca_cert`](configuration.md#ca_cert) has the detail, including which
+[`ca_cert`](/reference/configuration/#ca_cert) has the detail, including which
 toolchains need telling separately from the system store.
 
 If the file you have is a DER `.crt` rather than PEM, omh says so and gives you
@@ -537,7 +540,7 @@ editing your certificate — strip it to the `BEGIN`/`END` block.
 
 ### `no usable base manifest` or `declares no base-set entries`
 
-omh could not find a readable [base set](design/base-set.md) in `~/.omh/base`,
+omh could not find a readable [base set](https://github.com/mindsers/ohmyharness/blob/main/docs/design/base-set.md) in `~/.omh/base`,
 or the newest one names nothing. `omh init` reinstalls it.
 
 This is deliberately loud. It used to be silent: a stray `.toml` in that
@@ -545,12 +548,12 @@ directory became the base set, `init` seeded no MCP servers and reported success
 anyway, and every session came up running hooks that pointed at a server which
 was not installed.
 
-### `a hook does nothing without `run` or `inject``
+### `` a hook does nothing without `run` or `inject` ``
 
 A file in a `hooks/` directory is not a usable hook: truncated, half-written, or
 written in a harness's words rather than omh's. Related messages from the same
 check: ``unknown field `event` `` (that is Claude Code's vocabulary — see
-[writing a hook](configuration.md#writing-a-hook)), ``a hook either `run`s
+[writing a hook](/reference/configuration/#writing-a-hook)), ``a hook either `run`s
 something or `inject`s text, not both``, and ``$` in `inject` must name a
 variable`.
 
@@ -641,7 +644,7 @@ longer pick the file — the key does. (`omh memory rm --layer` is gone too, in
 value there can name a credential; everything else is committed, because it is
 a fact about the project a teammate cloning should get. `omh why <key>` says
 which a key is, and `--save` or `--local` overrides it for one write. See
-[Configuration](configuration.md#two-scopes-two-commands).
+[Configuration](/reference/configuration/#two-scopes-two-commands).
 
 ### `your catalogue has no skills called …`
 
@@ -778,7 +781,7 @@ $ omh s01 down
 ```
 
 N sessions is N containers. `idle_timeout` stops unused ones; see
-[Sessions](sessions.md#lifecycle).
+[Sessions](/concepts/sessions/#lifecycle).
 
 ### `omh: removed omh/claude:… this build replaced`
 
@@ -811,12 +814,12 @@ decision to you.
 ### The graph shows a project I do not recognise
 
 Graphs are shared per repo across sessions, so `list_projects` shows all of
-them. Expected, and [documented](code-graph.md#what-the-agent-can-still-see) —
+them. Expected, and [documented](/guides/code-graph/#what-the-agent-can-still-see) —
 your session's own project name is in `$OMH_GRAPH_PROJECT`.
 
 ### Something else
 
 The things most likely to be wrong are the things omh asserts about other
 people's software. If you are debugging one of those, start with `omh doctor`,
-then read the relevant page in [design](design/adapters.md) — several of them
+then read the relevant page in [design](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adapters.md) — several of them
 record a failure that looked exactly like the one you are probably having.

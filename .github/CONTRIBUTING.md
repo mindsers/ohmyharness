@@ -173,9 +173,11 @@ that worked, said so, and were wrong.
 
 ## Documentation
 
-Docs live in [`docs/`](../docs/README.md) and are tested — `tests/docs.rs` checks that
-every relative link resolves and that no page is orphaned. Add a page, link it
-from [`docs/README.md`](../docs/README.md).
+Docs are published at [docs.ohmyharness.sh](https://docs.ohmyharness.sh/) from
+[`docs/`](../docs/README.md), and are tested — `tests/docs.rs` checks that every
+link resolves, to a page and to the heading it names, and that no page is
+orphaned. Add a page under `docs/src/content/docs/`, in the folder of the
+section it belongs to: the sidebar lists it from there.
 
 Where a number appears, it should be a measurement, and it should say what it
 measured. Where something is unverified, say so. The project's credibility rests

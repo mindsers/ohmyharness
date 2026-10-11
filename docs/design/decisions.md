@@ -34,8 +34,8 @@ these, the reason is what you need to argue with.
 | Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
 
 Each is expanded where it applies: [architecture](architecture.md) for runtime
-and images, [sessions](../sessions.md) for the session model and persistence,
-[configuration](../configuration.md) for the layers, [adapters](adapters.md) for
+and images, [sessions](https://docs.ohmyharness.sh/concepts/sessions/) for the session model and persistence,
+[configuration](https://docs.ohmyharness.sh/reference/configuration/) for the layers, [adapters](adapters.md) for
 the capability floor.
 
 ## The base set
@@ -74,7 +74,7 @@ The base set is also the part of omh with the least evidence behind it. See
 
 - **Which model you use.** One env var. Routing is a solved problem with several
   good solutions and no reason for omh to have an opinion.
-- **Which editor you use.** [Editors are data](../editors.md#editors-are-data),
+- **Which editor you use.** [Editors are data](https://docs.ohmyharness.sh/guides/editors/#editors-are-data),
   and the integration point is an SSH config include rather than a plugin, so
   editors omh has never heard of work anyway.
 - **Whether to trust the sandbox over the branch.** Both. A sandbox protects the
@@ -122,7 +122,7 @@ them.**
 **Credentials mounted at a private path → mounted where the harness reads.** The
 first version mounted a credential volume at `$HOME/.omh-creds`, which no
 harness has ever read. It tested green. See
-[accounts](../accounts.md#mount-the-directory-never-the-token-file).
+[accounts](https://docs.ohmyharness.sh/guides/accounts/#mount-the-directory-never-the-token-file).
 
 **The write default lived in the command → it lives in the key.** `config set`
 and `repo set` had opposite defaults and one flag could not express both, so

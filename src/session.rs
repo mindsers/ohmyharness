@@ -2165,7 +2165,7 @@ impl History for GitHistory<'_> {
     /// Makefile recipe indented with a tab and the same line indented with
     /// spaces share an id; and its ability to tell two binaries at one path
     /// apart comes from reading the `index` line's oids, which git only learned
-    /// in **2.39** while `docs/commands.md` says omh needs 2.38. `--verbatim`
+    /// in **2.39** while the commands reference says omh needs 2.38. `--verbatim`
     /// would fix the first and cannot be combined with `--stable`. Comparing
     /// the bytes fixes both, on every version, and costs one `git show` per
     /// candidate — of which there is almost always zero or one.

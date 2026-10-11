@@ -408,7 +408,7 @@ pub(crate) fn doctor_cmd(
                  what it fetches from {}. Set the corporate root:\n\n    \
                  security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n    \
                  omh set --local ca_cert ~/corp-root.pem\n\n\
-                 See docs/troubleshooting.md.",
+                 More:\n\n    https://docs.ohmyharness.sh/guides/troubleshooting/#an-unknown-issuer-error-when-omh-builds-an-image",
                     hosts.join(" and "),
                     if hosts.len() == doctor::FETCHES.len() {
                         "the network"

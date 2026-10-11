@@ -1,6 +1,6 @@
 # Trust
 
-**Status: built, except cost accounting.** `omh why` ships and answers for what omh installed, what it rejected and what you added, and [`omh eject`](../commands.md#omh-eject-harness---to-dir) ships as of 0.8.0. What does not is the rollup that would measure what the whole set injects — the one thing here that would give the base set a reason to shrink.
+**Status: built, except cost accounting.** `omh why` ships and answers for what omh installed, what it rejected and what you added, and [`omh eject`](https://docs.ohmyharness.sh/reference/commands/#omh-eject-harness---to-dir) ships as of 0.8.0. What does not is the rollup that would measure what the whole set injects — the one thing here that would give the base set a reason to shrink.
 
 The standard complaint about oh-my-zsh is opacity: a slow shell nobody can
 diagnose. *"Without the hassle of understanding"* curdles into *"unable to
@@ -41,12 +41,12 @@ using
   skills     review-diff             (1 not selected: refactor)
 ```
 
-See [Configuration](../configuration.md#two-scopes-two-commands).
+See [Configuration](https://docs.ohmyharness.sh/reference/configuration/#two-scopes-two-commands).
 
 ## `omh doctor` — verification ✅
 
 Proves an adapter's claims against a real container. Covered in
-[Troubleshooting](../troubleshooting.md).
+[Troubleshooting](https://docs.ohmyharness.sh/guides/troubleshooting/).
 
 Belongs in this list because it is the answer to *"how do I know omh actually
 did what it said?"* — and because the answer is not "the tests pass."
@@ -116,7 +116,7 @@ The rest: *omh's choice*, *not installed here*, and *considered, not in the base
 set* — which is how a rejection stops being re-litigated every time somebody
 rediscovers it.
 
-Full output in [Commands](../commands.md#omh-why-thing).
+Full output in [Commands](https://docs.ohmyharness.sh/reference/commands/#omh-why-thing).
 
 ## Measure the cost, argue the benefit
 
@@ -164,7 +164,7 @@ you notice.** It also produces the retirement trigger that was actually wanted �
 *"the base set costs 4.1 KB before you type anything, up from 2.3"* is a fact
 that forces a conversation, and it is free to produce.
 
-The numbers already in [code graph](../code-graph.md#current-used-and-visible)
+The numbers already in [code graph](https://docs.ohmyharness.sh/guides/code-graph/#current-used-and-visible)
 are exactly this shape: 2,300 B for orientation, 1,511 bytes for one symbol
 instead of a whole file, 0.14s to re-index. All real, none of them requiring an
 eval harness — and the one that used to name a specific file's byte count is

@@ -1293,7 +1293,7 @@ impl Report for Sessions {
     ///
     /// Both lines used to be appended to the table above, so
     /// `omh s > sessions.txt` wrote them into the file — the exact case
-    /// `docs/commands.md` promises they stay out of. They are still in `json`
+    /// the commands reference promises they stay out of. They are still in `json`
     /// as `leftovers`, where a script wanted them all along.
     fn asides(&self) -> out::Asides {
         let mut asides = out::Asides::default();

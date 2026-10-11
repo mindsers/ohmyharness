@@ -1,4 +1,7 @@
-# Sessions
+---
+title: Sessions
+description: What a session is, the git the agent gets, persistence, and worktrees.
+---
 
 A session is not a launch. It is a **running container, a git worktree, and a
 branch**, which many harnesses take turns inhabiting.
@@ -132,7 +135,7 @@ $ git clone --no-local ~/.omh/shadow/myrepo/s01.git /tmp/s01-copy
 $ git -C /tmp/s01-copy log --oneline
 ```
 
-[Git](design/git.md) is the design.
+[Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) is the design.
 
 **Trunk can still reach it, one direction only.** `omh s01 sync` merges the
 new base into the session *on the host* and writes the resulting files in, so
@@ -160,7 +163,7 @@ error suggests `git remote add`, and it is bypassable by `--no-verify`. Checked
 against git 2.55.0 rather than assumed, both directions.
 
 Nothing here contains a determined agent, and nothing ever did — the container
-has `curl` and outbound network. See [Risks](design/risks.md). What it does
+has `curl` and outbound network. See [Risks](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md). What it does
 contain is an accident: the sandbox drops every Linux capability and takes back
 the eight the entrypoint and sshd need, holds at most 2048 processes, and takes
 the memory and CPU ceiling `sandbox_memory` and `sandbox_cpus` set. `sudo` still
@@ -269,16 +272,16 @@ $ omh s01 rm              # remove the session — the branch survives its work
 The branch survives whenever dropping it could lose something: it goes only
 when it holds no commits, or when omh can prove trunk already has their content
 under another sha — a squash merge — in which case `rm` names the commit it
-landed as. See [`omh sNN rm`](commands.md#omh-snn-rm--and-what-it-refuses-to-take-with-it).
+landed as. See [`omh sNN rm`](/reference/commands/#omh-snn-rm--and-what-it-refuses-to-take-with-it).
 
 `omh s` reports state as English for you and as fields for a script: `omh s
 --json` gives each session's `running`, `behind` and `work.state` without
 anyone parsing the table — see [what every command
-prints](commands.md#what-every-command-prints).
+prints](/reference/commands/#what-every-command-prints).
 
 Sessions idle longer than `idle_timeout` are stopped on the next launch — but only when their harness has exited. A session whose agent is still running in the container is left alone however old its marker, because stopping it would take the agent's conversation with it, and a container omh cannot probe is left alone too.
 N sessions means N containers, so this is not a nicety — see
-[risks](design/risks.md).
+[risks](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md).
 
 Only the **container** stops; the worktree and branch survive, so
 `omh sNN resume` puts you back exactly where you left off. The clock measures when you
@@ -302,4 +305,4 @@ worktree and branch.
 One thing they **share** is the code graph store, keyed by repo. That is what
 keeps the index warm across a harness switch, and it means an agent in one
 session can query another session's graph. Mitigated, not prevented — see
-[Code graph](code-graph.md#what-the-agent-can-still-see).
+[Code graph](/guides/code-graph/#what-the-agent-can-still-see).

@@ -147,7 +147,7 @@ Worth reading before the next surface change, in two parts.
 **The guards did more of the work than the sweeps did**, and where a guard
 could not see, the sweep shipped falsehoods. A rename applied by spelling
 inverted every historical sentence it touched; needles that could not span a
-line break hid four sites; and a synopsis block in `docs/commands.md` was the
+line break hid four sites; and a synopsis block in the commands reference was the
 one artefact neither compiled nor parsed, which is where the four wrong lines
 landed. Each is now scanned.
 
@@ -228,7 +228,7 @@ that changes how omh behaves with nothing else saying so.
 
 **A TLS-inspecting proxy looked like a broken build** (#94). Behind a corporate
 root, image builds failed deep inside docker with no line naming the cause.
-[`ca_cert`](../configuration.md#ca_cert) puts the root in the sandbox's trust
+[`ca_cert`](https://docs.ohmyharness.sh/reference/configuration/#ca_cert) puts the root in the sandbox's trust
 store — all three layers, not just the base — and doctor says whether traffic is
 being inspected and whether omh has been told about it.
 

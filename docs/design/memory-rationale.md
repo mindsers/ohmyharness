@@ -67,7 +67,7 @@ ledger.** If it is growing, something belongs in the graph.
 ## The hard problem: retrieval requires knowing to retrieve
 
 This repo already learned this once. From
-[code graph](../code-graph.md#current-used-and-visible): *"An MCP server on its
+[code graph](https://docs.ohmyharness.sh/guides/code-graph/#current-used-and-visible): *"An MCP server on its
 own is inert — indexed once, never refreshed, never reached for."* Four hooks
 were what turned it into something used.
 
@@ -78,7 +78,7 @@ convention exists has no reason to ask whether one does.
 ## Survey: what already exists
 
 The base set was chosen by surveying candidates and disqualifying most of them
-([code graph](../code-graph.md#why-this-one)). Memory got the same treatment.
+([code graph](https://docs.ohmyharness.sh/guides/code-graph/#why-this-one)). Memory got the same treatment.
 
 This space is **crowded**, which is itself a finding — it argues against building
 a server and for choosing one.
@@ -112,7 +112,7 @@ Not on features — features were never what disqualified a candidate there.
   — *"a service to run is a decision `omh init` promised to remove"*.
   ([M0](memory-m0.md#2-it-is-not-a-single-static-binary) later measured this:
   the no-database half holds, the single-static-binary half is wrong.)
-- **It is also an LSP.** The editor [attached to the session](../editors.md) and
+- **It is also an LSP.** The editor [attached to the session](https://docs.ohmyharness.sh/guides/editors/) and
   the agent read the same graph. Nothing else on the list does this.
 
 Basic Memory is the more established project by a wide margin, and that is a real
@@ -285,7 +285,7 @@ because *"the population most likely to skip the guard is exactly the one that
 needs it"*.
 
 This matters here because omh has **both audiences on one store, by design**. The
-[editor is SSH'd into the same session](../editors.md) as the agent, so a human
+[editor is SSH'd into the same session](https://docs.ohmyharness.sh/guides/editors/) as the agent, so a human
 edits notes by hand in exactly the directory the agent writes to over MCP. A tool
 enforcing uniformly would have to pick which of the two to annoy.
 
@@ -306,7 +306,7 @@ follow text-editing intuition instead.
 That principle is already load-bearing in omh under other names, and is worth
 recognising as one rule rather than three coincidences:
 
-- [`omh s rm`](../sessions.md) keeps a branch that holds commits
+- [`omh s rm`](https://docs.ohmyharness.sh/concepts/sessions/) keeps a branch that holds commits
 - [idle reaping](risks.md) leaves a session with no recorded use alone, because
   *"stopping a container on a guess is worse than one extra container"*
 - the writable mounts are a short named set
@@ -543,4 +543,4 @@ with what would close each:
 - ~~**Nothing was run in an omh container**~~ — closed by [M0](memory-m0.md),
   which ran iwe in exactly that container and found it does not execute there.
   What stays open is narrower: retrieval quality, `iwes`, and anything above ten
-  notes. The bar [`doctor`](../troubleshooting.md) exists to enforce is unchanged.
+  notes. The bar [`doctor`](https://docs.ohmyharness.sh/guides/troubleshooting/) exists to enforce is unchanged.
