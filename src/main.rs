@@ -23,6 +23,7 @@ mod editor;
 mod facts;
 mod guard;
 mod hash;
+mod held;
 mod hook;
 mod idle;
 mod image;

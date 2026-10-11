@@ -821,10 +821,11 @@ pub(crate) fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// and then has to resolve inside the store like anything else — and a link
 /// to nothing does not resolve.
 ///
-/// What this cannot close is the moment after it returns. The store is
-/// mounted into a running sandbox, and an agent that swaps a directory for a
-/// link between this check and the write still wins. That needs the directory
-/// held open rather than named twice.
+/// **This is the refusal in words, not the wall.** The store is mounted into a
+/// running sandbox, and an agent that swaps a directory for a link after this
+/// returns would win against any check made by path. The write does not go by
+/// path — see `write_held` — so what this adds is a sentence naming the link
+/// it found, for the case where it is simply there.
 pub(crate) fn contained(root: &Path, path: &Path) -> Result<()> {
     let anchor = root
         .canonicalize()
@@ -853,6 +854,31 @@ pub(crate) fn contained(root: &Path, path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Write a note at `path`, which is under `root`, through directories held
+/// open from the root down.
+///
+/// The half of this that `contained` cannot be. Each directory on the way is
+/// opened without following and the next step taken through its descriptor,
+/// so there is no moment between a check and a write for the agent to move
+/// something in: a name that is a link does not open, and a directory moved
+/// aside after it was opened is still the directory that gets written to.
+pub(crate) fn write_held(root: &Path, path: &Path, body: &[u8]) -> Result<()> {
+    let rel = path
+        .strip_prefix(root)
+        .with_context(|| format!("{} is not in the store", path.display()))?;
+    let mut steps: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    let leaf = steps.pop().context("a note has a name")?;
+    let mut dir =
+        crate::held::Dir::open(root).with_context(|| format!("opening {}", root.display()))?;
+    for step in steps {
+        dir = dir
+            .sub_or_create(step)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    dir.replace(leaf, body)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Every note in one directory.
@@ -1340,9 +1366,7 @@ pub fn remember_in(
     // created, so a symlinked namespace cannot be walked into on the way.
     std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
     contained(root, &path)?;
-    std::fs::create_dir_all(path.parent().unwrap())
-        .with_context(|| format!("creating {}", root.display()))?;
-    std::fs::write(&path, &rendered).with_context(|| format!("writing {}", path.display()))?;
+    write_held(root, &path, rendered.as_bytes())?;
 
     match replacing {
         Some(stale) => {
@@ -2477,6 +2501,47 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
         let err = wrote.expect_err("and the write is refused, not redirected");
         assert!(format!("{err:#}").contains("link"), "got: {err:#}");
+    }
+
+    /// The write goes through no link by itself, with nothing checked first.
+    ///
+    /// `contained` runs before every write and refuses a link it finds — and a
+    /// check made by path is a check the agent can make true and then change.
+    /// So the write is called here on its own, over a namespace that is a
+    /// link and over a note's name that is one: what `contained` would have
+    /// said is not what keeps the file inside the store.
+    #[test]
+    #[cfg(unix)]
+    fn the_write_itself_goes_through_no_link() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("store");
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("ns")).unwrap();
+        std::os::unix::fs::symlink(outside.join("planted.md"), root.join("note.md")).unwrap();
+
+        let through = write_held(&root, &root.join("ns/key.md"), b"a note\n");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "a note landed outside the store through a linked namespace: {through:?}"
+        );
+        assert!(through.is_err(), "and that is an error: {through:?}");
+
+        // A link at the note's own name is replaced, not followed: the store
+        // ends up holding a note, and the file the link named is never made.
+        write_held(&root, &root.join("note.md"), b"a note\n").unwrap();
+        assert!(!outside.join("planted.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.md")).unwrap(),
+            "a note\n"
+        );
+        assert!(!root
+            .join("note.md")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     /// The write guard and the read guard are separate: refusing to write

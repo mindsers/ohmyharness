@@ -191,8 +191,7 @@ pub fn write(dir: &Path, note: &Note, if_exists: crate::memory::IfExists) -> Res
     if let Some(first) = crate::memory::check(&parsed).first() {
         anyhow::bail!("`{}` would be refused: {}", note.key, first.detail);
     }
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, rendered).with_context(|| format!("writing {}", path.display()))?;
+    crate::memory::write_held(dir, &path, rendered.as_bytes())?;
     Ok(true)
 }
 
