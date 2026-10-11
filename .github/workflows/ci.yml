@@ -90,6 +90,33 @@ jobs:
       - name: exercise every path it can take
         run: ./scripts/test-install.sh
 
+  # tests/docs.rs holds the pages' links, in every test job above, because the
+  # site's own build checks none of them. What only a build can say is whether
+  # these are pages the site can publish at all: front matter it can parse, a
+  # configuration that loads, a lockfile that still installs. The same install
+  # and build as docs.yml, which is the one that publishes.
+  docs:
+    name: build (documentation site)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # each page shows when it last changed, read from git
+      - name: install node and pnpm, at the versions docs/mise.toml pins
+        uses: jdx/mise-action@v5
+        with:
+          working_directory: docs
+      - name: install the site's dependencies, exactly as locked
+        run: pnpm install --frozen-lockfile
+      - name: check the site's types
+        run: pnpm typecheck
+      - name: build the site
+        run: pnpm build
+
   # The MSRV in Cargo.toml is a claim about who can build this, and an unchecked
   # claim is the thing this repo distrusts most. `build` rather than `check`,
   # because the job says "builds" and `cargo check` stops before codegen.

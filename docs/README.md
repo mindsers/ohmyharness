@@ -26,5 +26,8 @@ $ cd docs
 $ mise install      # node and pnpm, at the versions mise.toml pins
 $ pnpm install
 $ pnpm dev          # the site on your machine, reloading as you edit
-$ pnpm build        # the site, built into dist/
+$ pnpm build        # what CI runs, and what a release publishes
 ```
+
+It is published to GitHub Pages when a release is tagged — see
+[`.github/workflows/docs.yml`](../.github/workflows/docs.yml).
