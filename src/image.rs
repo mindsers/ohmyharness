@@ -3121,12 +3121,30 @@ mod tests {
             "and the file the cross-build mounts — one reading, so they agree"
         );
 
-        // Relative: readable from this directory, which is what made it silent.
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let (_d2, paths) = ca_fixture(Some("corp.pem"));
+        // Relative, and readable from here — which is what made it silent.
+        //
+        // Spelled from the directory the suite runs in to the file, rather
+        // than by moving the process to the file. This test did the second,
+        // for four lines, and the working directory is one value for every
+        // test in the binary: a child another test spawned in those four
+        // lines inherited a directory this one deleted on its way out. That
+        // was the one-run-in-eight failure of
+        // `a_corporate_ca_reaches_the_image_and_moves_its_tag`, and #102.
+        let here = std::env::current_dir().unwrap();
+        let up: std::path::PathBuf = here
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .map(|_| "..")
+            .collect();
+        let relative = up.join(at.strip_prefix("/").unwrap());
+        assert!(
+            relative.is_relative()
+                && std::fs::read_to_string(&relative).is_ok_and(|pem| pem == PEM),
+            "the premise: a relative path that reads fine from here — {}",
+            relative.display()
+        );
+        let (_d2, paths) = ca_fixture(Some(&relative.display().to_string()));
         let got = ca_for(&paths);
-        std::env::set_current_dir(cwd).unwrap();
 
         let e = format!("{:#}", got.unwrap_err());
         assert!(

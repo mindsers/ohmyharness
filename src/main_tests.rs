@@ -507,6 +507,53 @@ fn manifests() -> Vec<std::path::PathBuf> {
     out
 }
 
+/// No test moves the process's working directory.
+///
+/// `set_current_dir` is one value for the whole process, and the suite runs
+/// its tests on threads of one process. A test in `image` moved it to a
+/// temporary directory for four lines and moved it back — and any other test
+/// that spawned a child in those four lines handed it a working directory
+/// that was deleted before the child looked. Reproduced on demand by running
+/// the test binary from a directory that no longer exists:
+///
+/// - `image::tests::a_corporate_ca_reaches_the_image_and_moves_its_tag` — git
+///   exits 128 with `Unable to read current working directory`, the line that
+///   was in the log of the one-run-in-eight failure;
+/// - `hook::tests::every_accepted_inject_reaches_the_agent_intact` — `sh`
+///   exits **0** and writes `shell-init: error retrieving current directory`
+///   to stderr, which that test reads as the hook having failed. That is
+///   #102, observed once and not reproduced until this.
+///
+/// Read by name as well as counted, because a scan that stopped reading
+/// `src/image.rs` would pass.
+#[test]
+fn no_test_moves_the_working_directory() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Spelled in two halves so this file is not the one it finds.
+    let moves = concat!("set_current", "_dir(");
+    let sources: Vec<_> = ["src", "tests"]
+        .iter()
+        .flat_map(|dir| crate::testsrc::classify(&root.join(dir)))
+        .collect();
+    for read in ["src/image.rs", "src/hook.rs", "tests/cli.rs"] {
+        assert!(
+            sources
+                .iter()
+                .any(|s| s.path.ends_with(read) && !s.body.is_empty()),
+            "the scan no longer reads {read}"
+        );
+    }
+    let found: Vec<String> = sources
+        .iter()
+        .filter(|s| s.body.contains(moves))
+        .map(|s| s.path.display().to_string())
+        .collect();
+    assert!(
+        found.is_empty(),
+        "the working directory belongs to every test at once, and these move it: {found:?}"
+    );
+}
+
 /// A scan that stopped early agrees with anything.
 ///
 /// Named files rather than a count alone: a count answers *did it read
