@@ -38,9 +38,14 @@ concurrency:
 # Actions are pinned by commit here, with the version in a trailing comment,
 # the way release pins its cache: this workflow builds what readers are served.
 # Dependabot moves them, as a pull request that shows the new commit.
+#
+# The names are not verify's. That workflow has a `build (documentation site)`
+# of its own, and a pull request that edits this file runs both: two checks
+# under one name cannot be told apart in the list, or by a rule that requires
+# one of them.
 jobs:
   build:
-    name: build (documentation site)
+    name: build (pages artifact)
     runs-on: ubuntu-latest
     defaults:
       run:
