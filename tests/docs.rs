@@ -478,6 +478,38 @@ fn every_address_on_the_site_is_a_page() {
     );
 }
 
+/// A line with every link pinned to a commit taken out of it.
+///
+/// `…/blob/<forty hex digits>/docs/design/gone.md` names the path a page had
+/// *at that commit*, which is the one way left to cite a page that has gone,
+/// and it goes on resolving whatever happens to the tree afterwards. Forty
+/// digits and nothing shorter: an abbreviation is unique until the repository
+/// grows another object that starts the same way.
+fn without_pinned_links(line: &str) -> String {
+    let pinned = format!("{REPOSITORY}/blob/");
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(at) = rest.find(&pinned) {
+        let after = &rest[at + pinned.len()..];
+        let commit = after.split('/').next().unwrap_or("");
+        let is_commit = commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit());
+        let end = match is_commit {
+            // To where the address ends, as the scan for the site's own does.
+            true => after
+                .find(|c: char| c.is_whitespace() || "`\"'()<>[]{},\\".contains(c))
+                .unwrap_or(after.len()),
+            false => 0,
+        };
+        out.push_str(&rest[..at]);
+        if !is_commit {
+            out.push_str(&pinned);
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Every page that has left its path: the eight that were files directly under
 /// `docs/` until the site was built, the eight design pages that followed them
 /// into it, and the design pages that have been dissolved since.
@@ -509,6 +541,7 @@ fn nothing_names_a_page_by_the_path_it_left() {
         "design/risks",
         "design/roadmap",
         "design/trust",
+        "design/git",
         "design/memory",
         "design/memory-benchmark",
         "design/memory-m0",
@@ -528,6 +561,7 @@ fn nothing_names_a_page_by_the_path_it_left() {
         };
         read.insert(shown(&file));
         for (n, line) in body.lines().enumerate() {
+            let line = without_pinned_links(line);
             if left.iter().any(|path| line.contains(path.as_str())) {
                 found.push(format!("{}:{}: {}", shown(&file), n + 1, line.trim()));
             }
@@ -913,4 +947,34 @@ fn a_line_that_opens_with_a_hash_is_not_always_a_heading() {
         BTreeSet::from(["a-heading".to_string()]),
         "only the first of these lines is a heading"
     );
+}
+
+/// What the path guard lets through is a link pinned to a whole commit id,
+/// and only that.
+#[test]
+fn only_a_link_pinned_to_a_commit_may_name_a_path_that_is_gone() {
+    let pinned = format!(
+        "{REPOSITORY}/blob/{}/docs/design/gone.md#then",
+        "a".repeat(40)
+    );
+    for (line, kept) in [
+        (
+            format!("see [the design]({pinned}) for it"),
+            "see [the design]() for it".to_string(),
+        ),
+        (
+            format!("{REPOSITORY}/blob/main/docs/design/gone.md"),
+            format!("{REPOSITORY}/blob/main/docs/design/gone.md"),
+        ),
+        (
+            format!("{REPOSITORY}/blob/abc1234/docs/design/gone.md"),
+            format!("{REPOSITORY}/blob/abc1234/docs/design/gone.md"),
+        ),
+        (
+            "`docs/design/gone.md` said so".to_string(),
+            "`docs/design/gone.md` said so".to_string(),
+        ),
+    ] {
+        assert_eq!(without_pinned_links(&line), kept, "for the line {line}");
+    }
 }

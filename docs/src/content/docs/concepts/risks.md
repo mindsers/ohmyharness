@@ -68,6 +68,17 @@ untouched. Measured with `chflags uchg` standing in for a
 read-only bind mount — both make a rename-over fail — so the claim owes a check
 inside a real container, which is `doctor`'s job.
 
+**Not the way to make the wall firmer: an `.invalid` remote.** Configuring one
+so that the agent meets a refusal sooner does the opposite, because `pre-push`
+runs *after* git checks the remote. Measured 2026-08-21: against an unreachable
+remote the push dies on `Could not resolve host` and the hook never runs, while
+the same hook fires normally against a reachable one. It also puts
+`origin/<branch> [gone]` into every `git status`, and turns "attempts nothing"
+into "attempts a DNS lookup", which is not nothing on a network whose resolver
+answers for names that do not exist. Worth remembering only as a note that a
+hostname is a delivery surface — the error quotes the URL verbatim — should a
+remote ever have to exist for another reason.
+
 **2c. ~~`omh sNN rm` destroys the agent's own commits.~~** *(Closed in #58.
 `omh sNN rm` refuses over checkpoints no branch has, naming how many and what
 to do, before it takes anything down; `--yes` is the way past. Everything
@@ -248,8 +259,8 @@ re-run rather than trusted once. Almost every bug this project has shipped lived
 at this boundary, and **not one was catchable by the test suite.**
 
 Git is the case nobody noticed: it is the external binary omh leans on hardest,
-and `doctor` has never probed it — not a version, not a behaviour. The [git
-work](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) adds a version-dependent claim (`merge-tree --write-tree`, git
+and `doctor` has never probed it — not a version, not a behaviour. The
+[work loop](/project/roadmap/#v15--the-work-loop--060) adds a version-dependent claim (`merge-tree --write-tree`, git
 ≥ 2.38), which is the occasion to close both — and to pin what
 `cherry-pick --empty=` needs, which #56 made a dependency of `--keep
 <selection>` without being able to measure the floor.
@@ -347,12 +358,22 @@ an image is content-addressed and shared, so the checkout that built it being
 gone says nothing about who is running it — that needs the in-use check
 `image::superseded` already implements, and it has not been wired up.
 
+**8e. The git omh runs on the host inherits the environment omh was run
+in.** Nothing clears `GIT_*` before a host-side call. The calls over the
+sandbox's repository name their gitdir, so an ambient `GIT_DIR` does not
+redirect those; the ones in your checkout and in a session's worktree rely on
+the directory they are run from, and a `GIT_DIR` or `GIT_WORK_TREE` already in
+the environment — omh run from inside a hook, or from `rebase --exec` — would
+send them somewhere else wholesale. **Argued, not measured**: no report of it,
+and no test that sets one. The environment is yours rather than the agent's,
+which is why this is here and not under Security.
+
 ## Operational
 
 **9. Sandbox sprawl.** One container per session. `idle_timeout` stops
 sessions nobody has used, on the next launch — but it is **unset by default**,
 so sprawl is opt-out rather than prevented, and a machine that never launches
-again never reaps. The [git work](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) narrows it from the other end: a
+again never reaps. The [work loop](/project/roadmap/#v15--the-work-loop--060) narrows it from the other end: a
 dashboard saying which sessions hold nothing you have not already taken is what
 makes deleting them safe, and an `rm` that refuses over unharvested commits is
 what would make a stronger default policy safe to set.

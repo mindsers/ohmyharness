@@ -160,6 +160,8 @@ product, not fixing a test.
 | git on the host never runs inside a repository nested in a worktree | git asks one whether it is dirty by running `git status` in it, under a config the agent wrote |
 | a nested repository is refused by name, never committed around | the commit reads as the session's work and is missing a directory of it |
 | a submodule nobody touched is left exactly as it was | keeping `add` away from a pointer by dropping it deletes the user's submodule |
+| the sandbox's repository holds no commit from your checkout | seeded by cloning, or by pointing at the real object store to save disk, it hands the agent every branch you have |
+| `rm` refuses over checkpoints no branch has, until it is meant | after a `git reset --hard` in the sandbox those were the only copies |
 | no message hands the user a `git` to run over the sandbox's repository | its hooks are the agent's to write, and the refusal carrying the command is the agent's to provoke |
 | a harvest brings no tag the agent made | a tag named like a branch outranks it in every command that takes a revision |
 | a write into the sandbox's gitdir goes through no link and no second look at a name | the agent can swap either between the check and the write, and the file lands where it pointed |

@@ -1188,6 +1188,18 @@ impl Shadow {
     /// The base's id goes in the message as **text**, never as a parent: no
     /// commit from the user's checkout may enter this repository, and a sha in
     /// a subject is a string that happens to look like one.
+    ///
+    /// **The replay point does not move here**, and the design this was built
+    /// from said it should. Advancing it past this commit does stop a harvest
+    /// replaying trunk's changes as the agent's — and it also marks the
+    /// checkpoint a sync takes first as handed over, because the replay point
+    /// is one ancestor pointer and everything below it is already taken. That
+    /// checkpoint holds the agent's pre-sync work, so a sync followed by
+    /// `--keep` harvests nothing, and
+    /// `a_sync_brings_trunk_over_and_leaves_the_agents_work_harvestable` fails
+    /// on *the harvest took something*. What the advance was for holds without
+    /// it, since `cherry-pick` drops a commit whose changes are already on the
+    /// branch.
     pub fn record_base_moved(
         &self,
         worktree: &Path,
