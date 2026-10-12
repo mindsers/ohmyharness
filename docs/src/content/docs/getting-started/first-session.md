@@ -148,6 +148,18 @@ A question earns its place only if it is **not derivable**, **actionable** (omh
 does something different with the answer), and **answerable well right now**.
 "What is your job" fails all three.
 
+Four kinds of unknown, told apart by where and when the answer can be known:
+
+| | Knowable | Example | What omh does |
+|---|---|---|---|
+| 1 | from the repo, on your machine | `Cargo.toml` means rust | derives it, for free |
+| 2 | only in the sandbox | does `cargo` resolve; does this repo declare pnpm | asks the sandbox, once |
+| 3 | nobody has written it down | what command tests this project | asks you once, and records the answer |
+| 4 | only you know | "these hooks are mine, keep them" | `omh import` |
+
+Every question is pushed up a row if it can be. Most things that feel like they
+need asking are in a file the repo already commits.
+
 The strongest permitted form is *derive, then confirm* — state the hypothesis
 and make it correctable:
 

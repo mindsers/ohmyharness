@@ -21,7 +21,8 @@ and so does CI.
 
 Four more used to be ignored because they shell out to git, which could not run
 inside an omh sandbox. That stopped being true in 2026.08 — see
-[adoption](../docs/design/adoption.md) — and they run with everything else now.
+[the agent has git, and it is not yours](https://docs.ohmyharness.sh/concepts/sessions/#the-agent-has-git-and-it-is-not-yours)
+— and they run with everything else now.
 
 ## Proposing a base-set entry
 

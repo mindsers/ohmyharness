@@ -10,9 +10,8 @@
 //!
 //! So for the ecosystems the catalogue cannot answer for, omh reads the files
 //! the project already commits — a lockfile, a `package.json`, a `Makefile` —
-//! and writes a hook into `<repo>/.omh/hooks/`. That is tier 1 of
-//! `docs/design/adoption.md`'s table: knowable from the repo, on the host, for
-//! free.
+//! and writes a hook into `<repo>/.omh/hooks/`. That is the cheapest kind of
+//! unknown there is: knowable from the repo, on the host, for free.
 //!
 //! ## This module executes nothing
 //!

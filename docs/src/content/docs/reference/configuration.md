@@ -456,10 +456,18 @@ An opt-out changes what goes **into** the image. It does not change what omh
 says **about** it: if one of your hooks needs the program, omh still asks the
 sandbox whether it is there, and still holds the hook back by name if it is not.
 
-Keyed `"<stack>/<provide>"`. `omh why` names what each one buys and what it
-costs. `omh upgrade` is the honest fix for drift — swap a `yarn.lock` for a
-`pnpm-lock.yaml` and the yarn entry goes, because the table describes what is
-true now.
+Keyed `"<stack>/<provide>"`; [Stacks](/reference/stacks/) has what a provide is
+and how its condition is read.
+
+**Nothing asks again after the first `init`.** `init` refuses a repo that is
+already set up, and `omh upgrade` refreshes the catalogue and rebuilds the
+images without re-reading the conditions. So a table written in April and a
+`yarn.lock` swapped for a `pnpm-lock.yaml` in May disagree, and the table
+wins: the image still has yarn. What tells you is a hook — `pnpm` does not
+resolve, so the hook that needs it is
+[held back by name](#hooks-your-sandbox-cannot-run). The fix is to edit the
+table: take out the entry that stopped being true and add the one that
+started.
 
 These layer like every other setting, so a provide you want left out on **your**
 machine belongs in `settings.local.toml`, where it says nothing to anyone else —
@@ -504,6 +512,18 @@ run, a deleted cache or an unreadable one holds nothing back, and every hook
 ships. The failure has to fall that way round: the other direction would switch
 off every hook on the machine in a session that otherwise looks completely
 normal.
+
+Two things the measurement cannot see:
+
+- **It asks whether a program is installed, not whether what you run with it
+  exists.** `npm` is in the base image, so a hook running `npm run format`
+  passes whether or not the repo has a `format` script. The hooks omh
+  [works out for you](#hooks-omh-works-out-for-you) are read from your scripts
+  for that reason; one you wrote by hand is yours to get right.
+- **It measures the image, not the session.** A tool that arrives at launch —
+  mounted in, or installed by a hook that runs when the session starts — is
+  there at run time and was not there when omh looked, so its hooks are held
+  back wrongly. Nothing lets you say otherwise yet.
 
 > **`[toolchain]` was removed.** It recorded an answer to *"this sandbox lacks
 > `cargo`, shall I switch the hook off?"* — a question that asked you to

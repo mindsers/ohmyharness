@@ -405,8 +405,8 @@ fn ecosystem_name(name: &str, at: &str) -> Result<()> {
 ///
 /// The one case where `init` has nothing to fall back on: the repo plainly *is*
 /// something, no stack claims it, and no lockfile or runner says how to test
-/// it. So omh asks — which is tier 3 of `docs/design/adoption.md`'s table, and
-/// the only question left in `init`.
+/// it. So omh asks — nobody has encoded the answer, which is the one kind of
+/// unknown it asks about — and this is the only question left in `init`.
 ///
 /// Deliberately **not** a stack file with no provides. The answer to the
 /// question is written as `<repo>/.omh/stacks/<name>.toml`, and a shipped stack
@@ -493,9 +493,8 @@ pub fn unclaimed<'a>(markers: &'a [Marker], stacks: &[Definition], repo: &Path) 
 ///
 /// A repo writes `<repo>/.omh/stacks/<name>.toml` to describe an ecosystem omh
 /// has never heard of — a proprietary internal toolchain that will never be
-/// upstreamed, and still has to be installable. That is the escape hatch
-/// `docs/design/adoption.md` §1.2 reserves, scoped to the project that needs it
-/// so shared opinion stays versioned.
+/// upstreamed, and still has to be installable. That is the escape hatch,
+/// scoped to the project that needs it so shared opinion stays versioned.
 ///
 /// **It adds; it never shadows.** A repo file answering to a name omh ships is
 /// an error naming both paths. `merge_hooks` applies the same rule to a hook
