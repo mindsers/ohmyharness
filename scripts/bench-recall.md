@@ -4,7 +4,7 @@
 
 > `./scripts/bench-recall.sh [--with-iwe] [--answers DIR]`
 
-Every remaining question about [memory](memory.md) is empirical — is our
+Every remaining question about [memory](https://docs.ohmyharness.sh/reference/memory/) is empirical — is our
 retrieval good enough, would iwe's be better, does declaring a note's questions
 help, is a 90 MB embedding model worth it — and none of them can be settled by
 argument. This is how they get numbers instead.
@@ -32,9 +32,9 @@ commit bodies and the queries are your commit subjects. Nobody chooses which
 questions get asked, and nobody chooses what counts as the right answer — the
 commit that produced the note *is* the answer.
 
-That is not a nicety. §13 of the spec requires it: *"whoever writes the
-questions must not write the curation prompt."* The first attempt at this
-measurement ignored it and was worthless — queries were lifted verbatim out of
+That is not a nicety. *Whoever writes the questions must not write the
+ranker* is the rule this measurement was designed around, and the first attempt
+at it ignored that and was worthless — queries were lifted verbatim out of
 document bodies, which is exact-token matching's home turf, and omh "won" 83% to
 66%. Inflecting the wording collapsed omh to 12.5% while BM25 held flat. The
 number was real and meant nothing.
@@ -55,13 +55,14 @@ notes where omh returns 8.
 Two things follow, and the second matters more:
 
 - **The engine is not the risk.** Adopting iwe would not measurably improve
-  retrieval, and it cannot carry a note's layer, does not run on omh's base
-  image, and rewrites identity on `rename` ([M0](memory-m0.md)).
+  retrieval, and the spike that ran it found costs of its own: its `rename`
+  rewrites a link to a title, which omh's schema refuses, and its server
+  offers fourteen tools where a session needs two.
 - **Neither engine is good at this.** ~50% P@1 means the right note is not
   first half the time, because paraphrase is what a lexical ranker is worst at
-  and neither does semantic retrieval. The mitigation is the one
-  [§9.2](memory.md#92-recall) already specifies: return the neighbourhood, not
-  the node. 90% of the time the answer is inside the budget of 8.
+  and neither does semantic retrieval. The mitigation is what `recall`
+  already does: return the neighbourhood, not the node. 90% of the time the
+  answer is inside the budget of 8.
 
 ## The open experiment
 
@@ -110,16 +111,15 @@ demonstrating anything.
 So the resting position is unchanged and, on this evidence, correct: **the
 declared questions are recorded and indexed, and not weighted.** They cost
 nothing, they are discipline, and a human reading the store wants them. The
-weight stays out until a store exists that can justify it — which is what M1's
-two-week gate produces, and what §13 wants for the real measurement anyway.
+weight stays out until a store exists that can justify it.
 
 Two ways to get power, when it matters: run this against another repo with a
 substantial commit history, or wait for a real store of agent-written notes.
 
 ## What this does not measure
 
-- **Whether an agent answers better with memory than without.** That is §13's
-  actual question and it needs a harness running real sessions.
+- **Whether an agent answers better with memory than without.** That is the
+  question that matters, and it needs a harness running real sessions.
 - **Scale.** Forty notes. BM25's length normalisation matters more at a
   thousand.
 - **Ingested doc stubs.** Those are a different question shape — navigational

@@ -19,7 +19,7 @@ verified runtime.
 ✅ `omh init` that decides · ✅ images · ✅ sandbox + worktree · ✅ persistence ·
 ✅ `omh auth` · ✅ `omh sNN attach` · ✅ `omh doctor` · ✅ `carry_in` ·
 ✅ code graph · ✅ `omh graph` · ✅ stack hooks ·
-🔶 [memory](https://github.com/mindsers/ohmyharness/blob/main/docs/design/memory.md) — the store, retrieval and staleness
+🔶 [memory](/reference/memory/) — the store, retrieval and staleness
 ship; hub pages do not
 
 **Success criterion:** `omh init && omh new claude` is visibly better than raw

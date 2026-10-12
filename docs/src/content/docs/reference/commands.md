@@ -2027,6 +2027,6 @@ degrades to absent with one line at launch rather than failing it.
 ### What is not here yet
 
 Hub pages — notes whose job is joining others — wait on a calibrated lint, and
-that needs a store nobody has grown yet. See [the design](https://github.com/mindsers/ohmyharness/blob/main/docs/design/memory.md#14-build-order).
+that needs a store nobody has grown yet.
 A subcommand that printed "not implemented" would be worse than its absence,
 because `--help` advertises it.
