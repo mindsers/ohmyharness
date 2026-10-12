@@ -1126,7 +1126,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     for must in [
         "docs/src/content/docs/reference/commands.md",
         "docs/src/content/docs/reference/configuration.md",
-        "docs/design/profile.md",
+        "docs/design/sandbox-remote.md",
         "README.md",
     ] {
         assert!(
@@ -1384,7 +1384,6 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("README.md", 57), // + the omh upgrade command in the list
-        ("docs/design/profile.md", 3),
         ("docs/src/content/docs/concepts/sessions.md", 11),
         ("docs/src/content/docs/concepts/trust.md", 2),
         // Getting started was one page until it became two, and all fifteen

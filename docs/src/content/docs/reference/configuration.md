@@ -154,6 +154,18 @@ Recorded, not built: a catalogue entry could carry a `source` and `omh sync`
 could fetch the missing ones, which restores team sharing without putting
 content back in the repo.
 
+**A committed hook is executable content, and cloning a repo runs it.** Hooks
+are the one thing a repo can hand you that executes, so the mechanism narrates
+itself: every launch prints `this repo's hooks:` and their names, and under it
+`new or changed since you last ran here:` with the ones that are. A hook runs
+inside the sandbox, as the agent — it reaches what the agent reaches, and
+nothing the agent cannot.
+
+**There is no `<repo>/.omh/rules/`.** Hooks earned a place in the repo by
+binding to commands only that repo has. Rules did not: a project's rules are
+its `AGENTS.md`, which is tracked, reviewed and shared, and anything of yours
+that applies here is a rule in your catalogue that this repo selects.
+
 ## What goes in the catalogue
 
 Most of what you already have needs no translation, which is what makes
@@ -254,6 +266,18 @@ Mention one in any body and omh reads it for you — `${OMH_TOOL_FILE:-none}`
 counts too. Mention neither and your hook pays for nothing, which matters:
 `before-tool` on `read` fires on the most frequent tool there is.
 
+Three more are set in every sandbox, whatever the tool call:
+
+| | |
+|---|---|
+| `$OMH_SESSION` | the session's id — `s01` |
+| `$OMH_GRAPH_PROJECT` | the name this session's code graph is indexed under |
+| `$OMH_IMAGE_RECIPE` | the digest of the base image's recipe, which is what a note pinned to `image:current` records. Empty when omh could not work it out |
+
+**Parameterize through the environment, never through the file.**
+`$OMH_GRAPH_PROJECT` and `/work` are what let omh's graph hooks be the same
+text in every repo; a repo's name written into the hook would not be.
+
 ### Three rules about `inject` and `refuse`
 
 Both are prose that reaches a shell, and that combination fails quietly, so all
@@ -282,6 +306,11 @@ from the [base set](/reference/base-set/), not files. A hook file answering to o
 — it would not override omh's, and it would not run, and a hook that is
 committed, reviewed and silently inert is worse than one that refuses to start.
 To be rid of omh's, switch the feature off with `[omh]`.
+
+A rules file is held to the same rule. `graph-rules`, `git-rules` and
+`memory-rules` are sections omh generates, so `~/.omh/rules/git-rules.md` is an
+error naming the file and the feature to switch off — it is not composed, and
+it does not override omh's.
 
 ### Guards, and their bypass
 

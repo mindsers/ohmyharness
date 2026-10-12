@@ -25,7 +25,7 @@ be paths, arrived in 0.12.0,
 [guards](/reference/configuration/#guards-and-their-bypass) in 0.11.0,
 [`omh upgrade`](/reference/commands/#omh-upgrade) and the checks `omh sNN commit` runs
 before landing in 0.10.0, the [silent failures](/project/retrospectives/#the-silent-failures--done-080-9192)
-closed in 0.8.0, the [command surface](https://github.com/mindsers/ohmyharness/blob/main/docs/design/profile.md) landed in 0.7.0 and
+closed in 0.8.0, the [command surface](/project/retrospectives/#the-command-surface--done-070-6990) landed in 0.7.0 and
 the [work loop](/project/roadmap/#v15--the-work-loop--060) in 0.6.0.
 
 `0.14.1` is repairs: no editor could attach to a session, a fresh install's
@@ -44,7 +44,7 @@ starts at all.
 One harness (`claude`) has been driven for real work; `opencode`, `omp` and
 `codex` pass `omh doctor`, which proves their paths and nothing about their
 behaviour. Docker is the only end-to-end-verified runtime; `podman` and `sbx`
-are opt-in. Several design pages describe work that is **partly
+are opt-in. Several pages describe work that is **partly
 built** — each says which parts, at the top. See the [roadmap](/project/roadmap/).
 
 ## Start here
@@ -88,12 +88,11 @@ change — most of them record something that was tried and cost something.
 
 ### Design pages
 
-Two more are kept beside the source and read on GitHub. Each records how one
-part of omh was designed, and says at the top how much of that is built.
+One more is kept beside the source and read on GitHub: a proposal, which says
+at the top that none of it is built.
 
 | | |
 |---|---|
-| [The profile](https://github.com/mindsers/ohmyharness/blob/main/docs/design/profile.md) | built — one catalogue, `[use]` per repo, rules composed with the repo's own, omh's hooks and sections generated from the base set, and the command surface 0.7.0 settled on top of it |
 | [The sandbox's repository becomes a remote](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md) | proposed, not built — the only git the host runs against the sandbox's repository is a fetch, and everything else runs in a repository the host owns |
 
 ## Contributing
