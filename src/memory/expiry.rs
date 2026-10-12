@@ -1,6 +1,6 @@
 //! When a note stops being true.
 //!
-//! §8: `invalidated_by` takes one of a **closed set** omh can evaluate itself.
+//! `invalidated_by` takes one of a **closed set** omh can evaluate itself.
 //! `omh memory stale` is a join against facts omh already holds, never a
 //! judgement — there is no "old enough to be suspect" here, because that is a
 //! threshold nobody calibrated pretending to be knowledge.
@@ -13,7 +13,7 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// §8's closed set. Parsed, never a free string: omh must be able to evaluate
+/// The closed set. Parsed, never a free string: omh must be able to evaluate
 /// every one of these itself, and a kind it cannot evaluate is a note
 /// advertising an expiry it does not have.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,7 +281,7 @@ pub fn normalise_path(raw: &str, repo: &Path) -> String {
 /// Pure. The entire decision table is a unit test over hand-built facts.
 pub fn evaluate(trigger: Option<&Trigger>, facts: &Facts) -> Verdict {
     let Some(trigger) = trigger else {
-        // §8's honest residue: derived from experience, carrying a date and
+        // The honest residue: derived from experience, carrying a date and
         // nothing else. Never "old enough to be suspect" — that is a threshold
         // nobody calibrated dressed as knowledge.
         return Verdict::NoTrigger;
@@ -982,8 +982,8 @@ mod tests {
 
     #[test]
     fn a_note_with_no_trigger_is_never_stale() {
-        // Not "stale after N days". §8 forbids a judgement, and a day count is
-        // a threshold nobody calibrated wearing the clothes of a fact.
+        // Not "stale after N days". `stale` is forbidden a judgement, and a day
+        // count is a threshold nobody calibrated wearing the clothes of a fact.
         assert_eq!(evaluate(None, &facts()), Verdict::NoTrigger);
     }
 

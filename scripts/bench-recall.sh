@@ -79,7 +79,7 @@ for h in git('log','--format=%H',ref).split():
             f"## Observed\n{paras[1] if len(paras)>1 else paras[0]}\n\n"
             f"## Evidence\n{' '.join(paras[2:])[:1200] or 'see the commit'}\n\n"
             # Left EMPTY on purpose. Whoever writes these must not be whoever
-            # wrote the ranker; see docs/design/memory-benchmark.md.
+            # wrote the ranker; see scripts/bench-recall.md.
             f"## Answers\n\n")
     p = os.path.join(out,'notes',key+'.md')
     os.makedirs(os.path.dirname(p),exist_ok=True)

@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// whether a human reviewed it.
 ///
 /// There is no constructor that takes a key without a date. That is the whole
-/// of invariant 1, expressed as a type rather than as a rule.
+/// of the provenance guarantee, expressed as a type rather than as a rule.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cite {
     pub key: String,
@@ -208,7 +208,7 @@ struct Indexed<'a> {
     /// wrong call. Weighting `## Answers` like the key cost 10 points of P@1
     /// on a 40-note store whose declared questions were mediocre, while
     /// indexing them at ordinary weight was exactly neutral. The weight was an
-    /// uncalibrated constant, and §7 does not let one ship. It can be
+    /// uncalibrated constant, and none of those ships. It can be
     /// revisited against a store of real agent-written questions, which is the
     /// only thing that could justify it.
     asked: BTreeSet<String>,
@@ -312,7 +312,7 @@ pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
 ///
 /// The agent is better at paraphrase than any ranker here and already has the
 /// question in context — so the paraphrasing is done by the thing that is good
-/// at it, without becoming the multi-turn walk §9.2 rejects.
+/// at it, without becoming the multi-turn walk `recall` exists to avoid.
 ///
 /// Each phrasing is scored separately and a note keeps its **best** one.
 /// Pooling the words instead would let two vague phrasings outweigh a precise
@@ -433,9 +433,9 @@ pub fn render(n: &Neighbourhood) -> String {
     // Width comes from the rendered label — tree prefix included — plus a gap
     // that cannot close. Deriving it from the bare key let a long child's key
     // run straight into its layer (`…-returns-ebusylocal · 2026-08-08`), which
-    // is invariant 1 broken in the only text an agent ever reads. Counted in
-    // characters, not bytes, because the tree glyphs are multi-byte and
-    // `{:width$}` pads by character.
+    // is the provenance guarantee broken in the only text an agent ever reads.
+    // Counted in characters, not bytes, because the tree glyphs are multi-byte
+    // and `{:width$}` pads by character.
     let width = n
         .hits
         .iter()
@@ -464,10 +464,10 @@ pub fn render(n: &Neighbourhood) -> String {
 
 /// Parse the rendered tree back into the citations it claims to carry.
 ///
-/// Test-only, and load-bearing: this is the half of invariant 1 a `contains`
-/// assertion cannot fake. **Strict and total** — any non-empty line it cannot
-/// fully decompose is an error, so a dropped layer becomes a failure rather
-/// than a line that quietly does not match.
+/// Test-only, and load-bearing: this is the half of the provenance guarantee a
+/// `contains` assertion cannot fake. **Strict and total** — any non-empty line
+/// it cannot fully decompose is an error, so a dropped layer becomes a failure
+/// rather than a line that quietly does not match.
 #[cfg(test)]
 pub fn parse_rendered(rendered: &str) -> Result<Vec<Cite>> {
     let mut out = Vec::new();
@@ -564,7 +564,7 @@ mod tests {
         ]
     }
 
-    /// **Invariant 1 — a note is never retrieved without its date and layer.**
+    /// **A note is never retrieved without its date and layer.**
     ///
     /// Asserted as a bijection, not a containment. `rendered.contains("team")`
     /// passes while every line carries the same date, while a child inherits
@@ -625,9 +625,9 @@ mod tests {
     /// Found by running the server, not by the suite: a child whose key is the
     /// longest in the neighbourhood got zero padding, because the column width
     /// was computed from bare key lengths while the label also carries a tree
-    /// prefix. The rendered line read
-    /// `surprise/…-returns-ebusylocal · 2026-08-08` — key and layer fused,
-    /// which is invariant 1 broken in the output an agent actually reads.
+    /// prefix. The rendered line read `surprise/…-returns-ebusylocal ·
+    /// 2026-08-08` — key and layer fused, which is the provenance guarantee
+    /// broken in the output an agent actually reads.
     ///
     /// The fixture in `store()` could never catch it: its keys were similar
     /// enough that the padding happened to work. So this one is built the
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(found.hits.len(), 2);
     }
 
-    /// §9.2: retrieval never picks a winner. Contradicting notes both return,
+    /// Retrieval never picks a winner. Contradicting notes both return,
     /// and the agent reconciles with layers and dates in hand — which is what
     /// an LLM is good at and an indexer is not.
     #[test]
@@ -680,8 +680,8 @@ mod tests {
         assert_eq!(both.len(), 2, "both claims come back; neither is filtered");
     }
 
-    /// Recency leads, and nothing else does. §9.2 leaves reconciling two
-    /// claims to the agent, so an order that put one first on any other
+    /// Recency leads, and nothing else does. Reconciling two claims
+    /// is the agent's, so an order that put one first on any other
     /// ground would present a reconciliation the indexer is not entitled to
     /// make.
     ///
@@ -883,7 +883,7 @@ mod tests {
 
     /// The agent is better at paraphrase than any ranker here, and it already
     /// has the question in context. Asking two ways costs one call, which is
-    /// the shape §9.2 requires — not the multi-turn walk that was measured to
+    /// the shape `recall` has — not the multi-turn walk that was measured to
     /// be the worst arm.
     #[test]
     fn an_alternative_phrasing_finds_what_the_first_one_missed() {
@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     /// The strict parser is a guard, so it has to actually be strict — a
-    /// lenient one would make invariant 1's bijection vacuous.
+    /// lenient one would make that guarantee's bijection vacuous.
     #[test]
     fn the_rendered_form_parser_rejects_a_line_missing_its_provenance() {
         assert!(parse_rendered("just-a-key\n").is_err());

@@ -1818,12 +1818,17 @@ machine for laundering guesses into facts.
 $ omh memory remember \
     --expected "A bind mount of the token file would persist the login." \
     --observed "Mounting a credential file returns EBUSY." \
-    --evidence 'EBUSY from the mount syscall'
+    --evidence 'EBUSY from the mount syscall' \
+    --answers "why does mounting the token file fail?"
 recorded /home/you/.omh/memory/omh-1a2b3c4d/surprise/mounting-a-credential-file-returns-ebusy.md
 ```
 
-The three arguments are the discipline. Something with nothing to put in
+The first three arguments are the discipline. Something with nothing to put in
 `--expected` has learned nothing worth recording, so the filter runs for free.
+The fourth is what makes the note findable: the question it answers, in the
+words somebody would later ask it in. Repeat `--answers` for several, and leave
+it out and the note is refused. [Memory](/reference/memory/) has the file this
+writes.
 
 **The key is derived, never chosen.** It comes from a template in
 `.omh/memory.toml`, so the same observation cannot be recorded twice under two
@@ -1832,9 +1837,8 @@ credential  file returns ebusy` produce one key, and the second write is a
 conflict that says *update that note instead*:
 
 ```console
-$ omh memory remember --expected … --observed "mounting a  credential FILE returns ebusy" --evidence …
-Error: `surprise/mounting-a-credential-file-returns-ebusy` is already recorded;
-       update that note instead
+$ omh memory remember --expected … --observed "mounting a  credential FILE returns ebusy" --evidence … --answers …
+omh: `surprise/mounting-a-credential-file-returns-ebusy` is already recorded; update that note instead
 ```
 
 The slug is the observation's **first sentence**, and the terminators are `.`,
@@ -1863,15 +1867,15 @@ rule, with no questions asked and no model pass.
 
 ```console
 $ omh memory lint
-refused  local  a `surprise` note needs a `## Evidence` section
-warning  team   `deploy` links to `rollback`, which is not in the store
-warning  team   nothing in the store links to `deploy`
-warning  local  nothing in the store links to `surprise/mounting-a-credential-file-returns-ebusy`
+refused  a `surprise` note needs a `## Evidence` section
+warning  `deploy` links to `rollback`, which is not in the store
+warning  nothing in the store links to `deploy`
+warning  nothing in the store links to `surprise/mounting-a-credential-file-returns-ebusy`
 
-    1  MissingSection
-    1  DanglingLink
-    2  Orphan
-Error: 1 violation the schema refuses
+  1  MissingSection
+  1  DanglingLink
+  2  Orphan
+omh: 1 violation the schema refuses
 ```
 
 `Orphan` fires on every note nothing links to, so a young store is mostly
@@ -1892,7 +1896,7 @@ Three rules are worth naming because they describe the store rather than one
 note's shape. `UnclosedFence` refuses a note whose code fence never closes:
 everything after it is quoted, including headings and `[[links]]`, so the note
 does not mean what it looks like. `DuplicateKey` warns when one key is claimed
-by two files — §6 makes a key a primary key, `remember` refuses to create a
+by two files — a key is a primary key, `remember` refuses to create a
 second, and this is how one that arrived by hand becomes visible. `Orphan`
 warns about a note nothing links to, which is the store's shape rather than one
 note's, so it never refuses a write.
@@ -1918,8 +1922,7 @@ the store-relative form:
 
 ```console
 $ omh memory rm surprise/the-mount-failed
-Error: `surprise/the-mount-failed` is one key over 2 files — name one
-       with --at: ns/dup.md, surprise/the-mount-failed.md
+omh: `surprise/the-mount-failed` is one key over 2 files — name one with --at: ns/dup.md, surprise/the-mount-failed.md
 ```
 
 A `--at` that names no note is an error, never a fall-through to a different
@@ -1935,27 +1938,26 @@ would be a threshold nobody calibrated wearing the clothes of a fact.
 ```console
 $ omh memory stale
 stale:
-  surprise/the-base-set-pins-its-version   local  2026-08-10  — the base set is
-                                                                2026.08; this note
-                                                                pinned 2020.01
-  surprise/the-entrypoint-is-tiny          local  2026-08-10  — `src/main.rs` was
-                                                                f328e4d…, is now
-                                                                8370720…
+  surprise/the-base-set-pins-its-version  2026-08-10  — the base set is 2026.08; this note pinned 2020.01
+  surprise/the-entrypoint-is-tiny         2026-08-10  — `src/main.rs` was f328e4d9d04c31d0d70d16d21a07d1613be9d577, is now 75275760623f7f5fe5ad07f415dc5b1a374c87cd
 
 omh cannot tell:
-  surprise/a-symbol-nobody-can-check       local  2026-08-10  — no indexed code
-                                                                graph reachable
-                                                                from the host
+  surprise/a-symbol-nobody-can-check  2026-08-10  — no indexed code graph reachable from the host
 
 no expiry — carries only its date:
-  surprise/nothing-pins-this-at-all        local  2026-08-10
+  surprise/nothing-pins-this-at-all  2026-08-10
 
 1 still current
+omh: 2 notes the world has moved past
 ```
 
 Three groups because they are three different claims. **"omh cannot tell" is
 never folded into "still current"** — that is the one failure that would make
 this command a liar rather than merely incomplete.
+
+The exit code keeps them apart too: 1 when anything is stale, 2 when nothing
+is and something could not be told, 0 when every note that declares an expiry
+is still current.
 
 A note declares its expiry with `--invalidated-by`, from a closed set omh can
 evaluate itself:
@@ -1990,24 +1992,26 @@ itself rather than pointing the harness at a graph server directly, because the
 guarantee below cannot be enforced on a server the agent talks to on its own.
 
 **`recall(question)`** ranks, expands one hop, and returns the neighbourhood in
-one call. Every line carries the note's date and layer:
+one call. Every line carries the note's date:
 
 ```
-credentials-are-a-named-volume            team · 2026-06-12
-└─ mounting-a-credential-file-returns-ebusy  local · 2026-08-07
+surprise/mounting-a-credential-file-returns-ebusy  2026-08-07
+└─ credentials-are-a-named-volume                  2026-08-05
 ```
 
 Ranking is by how *rare* the question's words are in this store — a word in
 every note cannot tell two notes apart, so it barely counts. Ties break on
-recency, then on what the rest of the store points at. **Layer is never a
-tiebreak**: contradicting notes both come back, and reconciling them is the
-agent's job, done with the dates in hand.
+recency, then on what the rest of the store points at. **Nothing picks a
+winner**: contradicting notes both come back, and reconciling them is the
+agent's job, done with the dates in hand. [What recall matches](/reference/memory/#what-recall-matches)
+has the rest.
 
-**`remember(expected, observed, evidence)`** records a surprise. The three
-arguments are the filter — something with nothing to put in `expected` has
-learned nothing. It cannot pass a source or an override: provenance is omh's
+**`remember(expected, observed, evidence, answers)`** records a surprise. The
+first three are the filter — something with nothing to put in `expected` has
+learned nothing — and `answers` is the questions the note will be found by. It
+cannot pass a source or an override: provenance is omh's
 (the session from its environment, the harness from the MCP handshake), and
-strict mode has no off switch over MCP.
+no argument turns the schema off.
 
 The tool description carries a census of the store — counts, never titles, so
 what it costs stops growing with the graph. It is recomputed on every
@@ -2027,6 +2031,6 @@ degrades to absent with one line at launch rather than failing it.
 ### What is not here yet
 
 Hub pages — notes whose job is joining others — wait on a calibrated lint, and
-that needs a store nobody has grown yet. See [the design](https://github.com/mindsers/ohmyharness/blob/main/docs/design/memory.md#14-build-order).
+that needs a store nobody has grown yet.
 A subcommand that printed "not implemented" would be worse than its absence,
 because `--help` advertises it.

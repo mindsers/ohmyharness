@@ -478,9 +478,9 @@ fn every_address_on_the_site_is_a_page() {
     );
 }
 
-/// Every page that has moved into the site, by the path it had before: the
-/// eight that were files directly under `docs/` until the site was built, and
-/// the eight design pages that followed them.
+/// Every page that has left its path: the eight that were files directly under
+/// `docs/` until the site was built, the eight design pages that followed them
+/// into it, and the design pages that have been dissolved since.
 ///
 /// Keyed on what left, like the scan for retired verbs and for its reason: a
 /// guard that reads the links which exist cannot see a path that is no longer
@@ -509,6 +509,10 @@ fn nothing_names_a_page_by_the_path_it_left() {
         "design/risks",
         "design/roadmap",
         "design/trust",
+        "design/memory",
+        "design/memory-benchmark",
+        "design/memory-m0",
+        "design/memory-rationale",
     ]
     .iter()
     .map(|page| format!("docs/{page}.md"))

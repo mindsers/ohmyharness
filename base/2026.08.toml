@@ -281,12 +281,12 @@ args    = [
   [[entry.measured]]
   what  = "the surface it replaces"
   value = "14 tools, 3787 B"
-  how   = "iwec v0.19.0 answering tools/list in a container, measured during M0 — see docs/design/memory-m0.md"
+  how   = "iwec v0.19.0 answering tools/list over an MCP handshake in a container, in the spike that ran iwe before omh served tools of its own"
   on    = "2026-08-08"
 
   [[entry.instead_of]]
   name = "iwe's own MCP server (iwec)"
-  why  = "cannot carry a note's layer — it is the directory, not a field — and `iwe rename` rewrites links to titles, producing notes omh's schema refuses"
+  why  = "`iwe rename` rewrites links to titles, producing notes omh's schema refuses, and it puts fourteen tools in front of a session that needs two"
 
   [[entry.instead_of]]
   name = "an AGENTS.md section listing what the store holds"
@@ -294,7 +294,7 @@ args    = [
 
   [[entry.instead_of]]
   name = "letting the agent grep the notes directory"
-  why  = "grep cannot attach a note's date and layer, and an undated claim of unknown origin cannot be judged"
+  why  = "grep cannot attach a note's date, and an undated claim cannot be judged"
 
 [[entry]]
 name    = "memory-rules"

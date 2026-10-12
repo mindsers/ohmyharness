@@ -1,6 +1,6 @@
 //! What the repo already documents, as notes that point rather than restate.
 //!
-//! §10: `docs/` and `detect::seeds()` become **stubs** — one note per
+//! `docs/` and `detect::seeds()` become **stubs** — one note per
 //! document, a link, and the questions it answers. Deliberately not summaries:
 //! curation summarises away the verbatim detail coding work needs — the flag,
 //! the path, the error string — and a distilled copy drifts from `docs/`
@@ -73,11 +73,12 @@ fn read(repo: &Path, path: &str) -> Option<Document> {
 /// `{{path}}` for a document: its repo-relative path, extension dropped, every
 /// segment canonicalised.
 ///
-/// The shipped template is `{{path}}` rather than §6's `docs/{{path}}`,
-/// because the path already carries its directory — prefixing `docs/` would
-/// key `docs/design/memory.md` as `docs/docs/design/memory`. Canonicalising
-/// per segment is what makes `docs/README.md` and `docs/readme.md` one key on
-/// a case-insensitive filesystem, which is invariant 6 at the ingest boundary.
+/// The shipped template is `{{path}}` rather than the `docs/{{path}}` first
+/// specified, because the path already carries its directory — prefixing
+/// `docs/` would key `docs/design/notes.md` as `docs/docs/design/notes`.
+/// Canonicalising per segment is what makes `docs/README.md` and
+/// `docs/readme.md` one key on a case-insensitive filesystem, which is *one
+/// input, one key* at the ingest boundary.
 pub fn path_key(path: &str) -> Result<String> {
     let trimmed = path.strip_suffix(".md").unwrap_or(path);
     let parts: Result<Vec<String>> = trimmed.split('/').map(crate::memory::slug).collect();
@@ -117,9 +118,9 @@ pub fn stub(doc: &Document, templates: &BTreeMap<Kind, String>, today: &str) -> 
 
 /// The facts `omh init` derives about the repo, as one note.
 ///
-/// One topic, richly filled — §3's definition — rather than one note per fact.
-/// This is where `detect::seeds()` finally lands: it has been deriving these
-/// and printing them to a terminal nobody reads twice.
+/// One topic, richly filled — what a `topic` is — rather than one note per
+/// fact. This is where `detect::seeds()` finally lands: it has been deriving
+/// these and printing them to a terminal nobody reads twice.
 pub fn overview(
     repo_name: &str,
     seeds: &[crate::detect::Seed],
@@ -227,27 +228,24 @@ mod tests {
     const DOC: &str =
         "# Memory\n\nSome prose about the design.\n\n## Storage\n\nmore\n\n## Identity\n\nmore\n";
 
-    /// §10 chose stubs over summaries for a reason: a summary drifts from the
+    /// Stubs rather than summaries, and for a reason: a summary drifts from the
     /// document undetectably, and it summarises away exactly the verbatim
     /// detail — the flag, the path, the error string — that coding work needs.
     #[test]
     fn a_stub_points_at_its_document_rather_than_restating_it() {
         let doc = Document {
-            path: "docs/design/memory.md".into(),
+            path: "docs/design/notes.md".into(),
             title: "Memory".into(),
             answers: vec!["Storage".into(), "Identity".into()],
         };
         let note = stub(&doc, &shipped_templates(), "2026-08-08").unwrap();
 
-        assert!(note.body.contains("docs/design/memory.md"), "{}", note.body);
+        assert!(note.body.contains("docs/design/notes.md"), "{}", note.body);
         assert!(
             !note.body.contains("Some prose"),
             "a stub carries no prose of its own"
         );
-        assert_eq!(
-            note.source, "docs/design/memory.md",
-            "provenance is the doc"
-        );
+        assert_eq!(note.source, "docs/design/notes.md", "provenance is the doc");
     }
 
     /// Verbatim and in order, because that is the text a question-shaped query
@@ -296,7 +294,7 @@ mod tests {
         }
     }
 
-    /// Invariant 6 at the ingest boundary. `docs/README.md` and
+    /// One input, one key, at the ingest boundary. `docs/README.md` and
     /// `docs/readme.md` are the same document on a case-insensitive
     /// filesystem, and two keys for one document is the same failure as two
     /// spellings of one observation.
@@ -307,22 +305,22 @@ mod tests {
             path_key("docs/readme.md").unwrap()
         );
         assert_eq!(
-            path_key("docs/Design/Memory.md").unwrap(),
-            "docs/design/memory"
+            path_key("docs/Design/Notes.md").unwrap(),
+            "docs/design/notes"
         );
     }
 
-    /// The path already carries its directory. §6's `docs/{{path}}` would key
-    /// `docs/design/memory.md` as `docs/docs/design/memory`.
+    /// The path already carries its directory. A `docs/{{path}}` template would
+    /// key `docs/design/notes.md` as `docs/docs/design/notes`.
     #[test]
     fn a_stubs_key_names_the_document_once() {
         let doc = Document {
-            path: "docs/design/memory.md".into(),
+            path: "docs/design/notes.md".into(),
             title: "Memory".into(),
             answers: vec!["Storage".into()],
         };
         let note = stub(&doc, &shipped_templates(), "2026-08-08").unwrap();
-        assert_eq!(note.key, "docs/design/memory");
+        assert_eq!(note.key, "docs/design/notes");
     }
 
     /// The store ingests itself otherwise — one stub per note, every run.
@@ -384,7 +382,7 @@ mod tests {
             .is_none());
     }
 
-    /// §6: skip-if-exists is a mode you ask for. Without it, running `init`
+    /// Skip-if-exists is a mode you ask for. Without it, running `init`
     /// twice doubles the store.
     #[test]
     fn a_second_ingest_of_an_unchanged_repo_writes_nothing() {
@@ -504,7 +502,7 @@ mod tests {
     #[cfg(unix)]
     fn seeding_does_not_write_a_stub_through_a_link() {
         let doc = Document {
-            path: "docs/design/memory.md".into(),
+            path: "docs/design/notes.md".into(),
             title: "Memory".into(),
             answers: vec!["Storage".into()],
         };

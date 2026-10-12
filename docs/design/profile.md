@@ -81,7 +81,7 @@ scope is**, and hooks are the one capability whose scope is the repo.
 established, and it says what the file is rather than what one of its tables
 holds. `memory.toml` replaces `keys.toml` for the same reason: key templates are
 one table of the memory subsystem's configuration, not the whole of it —
-[expiry](memory.md) has settings of its own coming.
+[expiry](https://docs.ohmyharness.sh/reference/commands/#omh-memory-stale) has settings of its own coming.
 
 **The `keys.toml` rename needs a check, not a fallback.** `templates()` treats a
 missing file as "use the shipped defaults", so renaming without one would take an

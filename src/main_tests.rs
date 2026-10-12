@@ -1385,7 +1385,6 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     let expected: std::collections::BTreeMap<String, usize> = [
         ("README.md", 57), // + the omh upgrade command in the list
         ("docs/design/git.md", 18),
-        ("docs/design/memory.md", 4),
         ("docs/design/profile.md", 3),
         ("docs/src/content/docs/concepts/sessions.md", 11),
         ("docs/src/content/docs/concepts/trust.md", 2),
@@ -1402,6 +1401,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // then `omh s` and `omh s01 rm` in the landed-branch block
         ("docs/src/content/docs/reference/commands.md", 145),
         ("docs/src/content/docs/reference/configuration.md", 47), // + `omh use hooks tdd-guard`
+        ("docs/src/content/docs/reference/memory.md", 1),
     ]
     .into_iter()
     .map(|(f, n)| (f.to_string(), n))
