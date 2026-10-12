@@ -3,8 +3,8 @@
 # A marker here is a file omh knows names a real ecosystem, for which no stack
 # ships. Meeting one is the single case where `omh init` has nothing derivable
 # to fall back on: the repo plainly *is* something, and omh cannot say what its
-# sandbox needs. So it asks — once, recording the answer in the repo — which is
-# tier 3 of docs/design/adoption.md's table.
+# sandbox needs. So it asks — once, recording the answer in the repo — because
+# nobody has encoded it, which is the one kind of unknown omh asks about.
 #
 # This is deliberately **not** a stack file with no provides. Those two would
 # collide: the answer to the question is written as

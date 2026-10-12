@@ -505,6 +505,18 @@ ships. The failure has to fall that way round: the other direction would switch
 off every hook on the machine in a session that otherwise looks completely
 normal.
 
+Two things the measurement cannot see:
+
+- **It asks whether a program is installed, not whether what you run with it
+  exists.** `npm` is in the base image, so a hook running `npm run format`
+  passes whether or not the repo has a `format` script. The hooks omh
+  [works out for you](#hooks-omh-works-out-for-you) are read from your scripts
+  for that reason; one you wrote by hand is yours to get right.
+- **It measures the image, not the session.** A tool that arrives at launch —
+  mounted in, or installed by a hook that runs when the session starts — is
+  there at run time and was not there when omh looked, so its hooks are held
+  back wrongly. Nothing lets you say otherwise yet.
+
 > **`[toolchain]` was removed.** It recorded an answer to *"this sandbox lacks
 > `cargo`, shall I switch the hook off?"* — a question that asked you to
 > configure around a broken environment, and whose answer outlived the breakage.

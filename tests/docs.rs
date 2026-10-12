@@ -542,6 +542,7 @@ fn nothing_names_a_page_by_the_path_it_left() {
         "design/roadmap",
         "design/trust",
         "design/git",
+        "design/adoption",
         "design/memory",
         "design/memory-benchmark",
         "design/memory-m0",

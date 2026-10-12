@@ -10,8 +10,8 @@
 //! - **what command tests a project nothing else could speak for.** Nothing omh
 //!   could read named one — and there is still, usually, a command.
 //!
-//! Both are tier 3 of `docs/design/adoption.md`'s table: nobody has encoded it,
-//! so ask once and record the answer where it belongs. The recording is what
+//! Both are the one kind of unknown omh asks about: nobody has encoded it, so
+//! ask once and record the answer where it belongs. The recording is what
 //! makes it one question rather than a wizard — a question re-asked every
 //! `init` is exactly the thing omh sells itself as not having.
 //!

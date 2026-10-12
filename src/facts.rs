@@ -8,8 +8,8 @@
 //!
 //! ## Why the tag, and not a digest of the recipe
 //!
-//! `docs/design/adoption.md` gestured at `image::recipe_digest`, which shells
-//! out to `git hash-object`. The tag is already content-addressed on the recipe
+//! The design gestured at `image::recipe_digest`, which shells out to
+//! `git hash-object`. The tag is already content-addressed on the recipe
 //! (`tag_for` hashes the adapter's install; `stack_tag` hashes the whole
 //! layered Dockerfile), which is the property the digest was wanted for, and it
 //! costs no subprocess at all.
