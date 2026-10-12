@@ -72,8 +72,10 @@ forces the other conversation, and it is free to produce.
 
 ## v1.5 — the work loop ✅ (0.6.0)
 
-[Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md), built. All twelve steps in that page's ledger landed across
-#53–#67, and the page names the pull request behind each one.
+The loop around the sandbox's repository, built. All twelve steps of
+[its design](https://github.com/mindsers/ohmyharness/blob/afad736a609fd6e3921e09f784c420e05caca115/docs/design/git.md#order) landed across #53–#67, and that page — kept in the
+repository's history, as it last stood — names the pull request behind each
+one.
 
 `omh sNN log` makes the sandbox's commits visible, `--turns` reads the
 end-of-turn snapshots omh takes for an agent that commits nothing, `diff` grew
@@ -90,8 +92,8 @@ typing `git` and without knowing that a session is a worktree. **Met.**
 What this cost is worth reading before proposing the next one: a third of those
 pull requests were corrections to the ones before them, and the recurring defect
 was not a wrong answer but a confident one — a question omh could not answer
-rendering identically to an answer. [Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) records each, with the
-measurement that settled it.
+rendering identically to an answer. [The design](https://github.com/mindsers/ohmyharness/blob/afad736a609fd6e3921e09f784c420e05caca115/docs/design/git.md#foundations) records
+each, with the measurement that settled it.
 
 ## v2 — portability
 

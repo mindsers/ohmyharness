@@ -26,7 +26,7 @@ be paths, arrived in 0.12.0,
 [`omh upgrade`](/reference/commands/#omh-upgrade) and the checks `omh sNN commit` runs
 before landing in 0.10.0, the [silent failures](/project/retrospectives/#the-silent-failures--done-080-9192)
 closed in 0.8.0, the [command surface](https://github.com/mindsers/ohmyharness/blob/main/docs/design/profile.md) landed in 0.7.0 and
-the [work loop](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) in 0.6.0.
+the [work loop](/project/roadmap/#v15--the-work-loop--060) in 0.6.0.
 
 `0.14.1` is repairs: no editor could attach to a session, a fresh install's
 [`omh doctor`](/guides/troubleshooting/#omh-doctor) ended red on a memory server it
@@ -94,7 +94,7 @@ part of omh was designed, and says at the top how much of that is built.
 |---|---|
 | [The profile](https://github.com/mindsers/ohmyharness/blob/main/docs/design/profile.md) | built — one catalogue, `[use]` per repo, rules composed with the repo's own, omh's hooks and sections generated from the base set, and the command surface 0.7.0 settled on top of it |
 | [Adoption](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adoption.md) | partly built — what `init` decides when it meets a repo, the toolchain probe, and what `omh import` still has to migrate |
-| [Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) | built in 0.6.0 — the loop around the sandbox's repository: reading a session's work, landing it in stages, staying current with trunk, and reaching several sessions from one place. Twelve steps, each naming the pull request that landed it |
+| [The sandbox's repository becomes a remote](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md) | proposed, not built — the only git the host runs against the sandbox's repository is a fetch, and everything else runs in a repository the host owns |
 
 ## Contributing
 

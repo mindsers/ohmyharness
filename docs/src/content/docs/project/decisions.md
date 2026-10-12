@@ -32,8 +32,8 @@ these, the reason is what you need to argue with.
 | Write default | **the key decides, not the command** | it was *a value never lands in the committed file; a name may*, which held while `repo set` sent every value to the gitignored file. `omh set` serves every key from one command, so the judgement moved into `src/key.rs`: per key, whether a value there can name a credential. Committed is the default now — most settings are facts about the project — and the table is what keeps a secret out of it |
 | Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
 | Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
-| Naming a session | **`sNN` first, one form** | several sandboxes of one repo are reached from one place, so the selector leads and everything after it is unchanged — designed, see [git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) |
-| Staying current | **`omh sNN sync`, merged on the host** | no commit of yours may enter the sandbox, so it receives files and conflict markers rather than history — designed, see [git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) |
+| Naming a session | **`sNN` first, one form** | several sandboxes of one repo are reached from one place, so the selector leads and everything after it is unchanged — see [the shape of the CLI](/reference/commands/#the-shape-of-the-cli) |
+| Staying current | **`omh sNN sync`, merged on the host** | no commit of yours may enter the sandbox, so it receives files and conflict markers rather than history — see [`omh sNN sync`](/reference/commands/#omh-snn-sync--trunk-moved-and-the-session-catches-up) |
 | Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
 
 Each is expanded where it applies: [architecture](/concepts/architecture/) for runtime
@@ -84,10 +84,40 @@ The base set is also the part of omh with the least evidence behind it. See
   host; the worktree branch protects the repo. They are not substitutes, and
   conflating them is how people end up surprised.
 
+## What the work loop refuses to do
+
+Reading a session's work, landing it and staying current with trunk are omh's.
+These are not.
+
+- **No omh verb for anything you could run on the host.** No `omh sNN rebase`,
+  `cherry-pick`, `stash` or `blame`. The moment you want real git you are on the
+  host with real git; omh's job is to make that always possible and never
+  dangerous.
+- **No merge UI.** Conflicts are markers in files. The agent fixes them, or you
+  do, with your own tools.
+
+Considered and not built, with the reason:
+
+- **Moving work between sessions** (`omh s01 take --into s03`). A real workflow,
+  and omh is well placed for it — but it is a second way to land work, and one
+  landing path is why `-m` and `--keep` are mutually exclusive.
+- **Forking a session from another.** Cheap, and useful for parallel
+  exploration, but it is a launch flag rather than a git feature.
+- **Comparing two sessions** (`omh s01 diff --against s03`). The payoff of
+  parallel exploration, and the one worth revisiting soonest. Held back while
+  `diff` was growing a patch and a checkpoint argument.
+
+And one that is open rather than refused:
+
+- **Naming sessions.** `omh sNN push <name>` refuses to invent a branch name,
+  correctly. A session that carried a name from the start would answer that
+  once instead of at the end — but `omh new claude` asking a question at launch
+  would cost the thing `init` exists to protect.
+
 ## Deviations from a written design, ratified
 
 **A `--keep` selection is a `cherry-pick`, not a generated rebase todo (#56).**
-[Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) specified the todo, delivered through `GIT_SEQUENCE_EDITOR`
+[The design](https://github.com/mindsers/ohmyharness/blob/afad736a609fd6e3921e09f784c420e05caca115/docs/design/git.md) specified the todo, delivered through `GIT_SEQUENCE_EDITOR`
 pointed at omh's own binary. The implementation used `cherry-pick` instead, and
 the first justification given for that was wrong — it claimed the designed
 mechanism could not be reached by a test, when `tests/cli.rs` runs the real

@@ -135,7 +135,8 @@ $ git clone --no-local ~/.omh/shadow/myrepo/s01.git /tmp/s01-copy
 $ git -C /tmp/s01-copy log --oneline
 ```
 
-[Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) is the design.
+What is proposed next for that repository — the host reading it only through
+a fetch — is [a design page](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md).
 
 **Trunk can still reach it, one direction only.** `omh s01 sync` merges the
 new base into the session *on the host* and writes the resulting files in, so
