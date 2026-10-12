@@ -57,7 +57,8 @@ pub enum Expect {
     /// host-side test proves the tool list is right about a host directory,
     /// which is circular in exactly the way this module exists to break.
     ///
-    /// It does **not** prove invariant 9. `doctor` replaces the launch command
+    /// It does **not** prove that a harness reads the tool description each
+    /// session. `doctor` replaces the launch command
     /// with this probe, so no harness ever runs, and a tool description is
     /// consumed by a model rather than written anywhere inspectable. What this
     /// proves is the precondition.

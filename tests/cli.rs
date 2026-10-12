@@ -861,9 +861,8 @@ fn note(key: &str, body: &str) -> String {
 const WHOLE: &str =
     "## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n\n## Answers\n\n- what happens here\n";
 
-/// §14 makes this exit code M1's entire stand-in for the refused write the
-/// agent does not get yet. A gate that cannot fail gates nothing: no hook, no
-/// CI step and no `&&` can read it.
+/// This exit code is the only thing that refuses a note written by hand. A gate
+/// that cannot fail gates nothing: no hook, no CI step and no `&&` can read it.
 #[test]
 fn lint_fails_the_command_when_the_schema_refused_something() {
     let sb = sandbox();
@@ -987,7 +986,7 @@ fn note_expiring(key: &str, trigger: &str) -> String {
 /// **`stale` said nothing at the only boundary a script reads.** Four notes
 /// stale exited 0; git missing so that not one probe could be answered exited
 /// 0; an empty store exited 0. `lint` in the same file has bothered to bail
-/// since M1, and CI cannot tell "the store is clean" from "omh checked
+/// from the start, and CI cannot tell "the store is clean" from "omh checked
 /// nothing".
 #[test]
 fn stale_fails_the_command_when_a_note_is_out_of_date() {

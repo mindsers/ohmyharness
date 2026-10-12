@@ -1,6 +1,6 @@
 //! What the store contains, in one sentence.
 //!
-//! §9.3: the index rides in the tool description. The agent has direct access
+//! The index rides in the tool description. The agent has direct access
 //! to the graph, so injection only ever solved the *trigger* problem — and a
 //! description arrives attached to the call rather than competing inside a
 //! document that decays as context grows.
@@ -123,7 +123,7 @@ mod tests {
 
     /// **The economic claim, tested rather than asserted.** Listing titles "to
     /// be helpful" makes the injected cost grow with the graph, which is the
-    /// one thing §9.3 exists to prevent.
+    /// one thing counting rather than listing exists to prevent.
     ///
     /// Compared with digits stripped, so there is no constant to calibrate:
     /// two stores of wildly different size must produce the same sentence

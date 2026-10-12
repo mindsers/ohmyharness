@@ -22,8 +22,8 @@ pub mod tools;
 /// Where the note store is mounted inside the sandbox.
 ///
 /// Deliberately not under `/work`: the code graph would index notes as source,
-/// `git status` would show them, and an agent running `git add -A` would
-/// commit them onto its session branch — which is the one thing §9.1 forbids.
+/// `git status` would show them, and an agent running `git add -A` would commit
+/// them onto its session branch — where a guess arrives looking reviewed.
 pub const GUEST_MEMORY: &str = "/omh/memory";
 
 /// What `move_old_store` did.
@@ -226,11 +226,12 @@ pub fn parse(raw: &str, path: &Path) -> Result<Note> {
         );
     }
 
-    // §8's closed set is checked by `check` and refused at the write path, not
-    // here. `invalidated_by` was free text through M1–M3, so a legacy value is
-    // a file already sitting on somebody's disk — and refusing it at *load*
-    // made one hand-edited line take down `ls`, `recall`, `stale` and the MCP
-    // read path together, then blocked every subsequent write.
+    // The closed set of triggers is checked by `check` and refused at the write
+    // path, not here. `invalidated_by` was free text when it first shipped, so
+    // a legacy value is a file already sitting on somebody's disk — and
+    // refusing it at *load* made one hand-edited line take down `ls`, `recall`,
+    // `stale` and the MCP read path together, then blocked every subsequent
+    // write.
 
     let kind: Kind = required(&fields, "type", path)?
         .parse()
@@ -269,9 +270,9 @@ pub fn render(note: &Note) -> String {
     out
 }
 
-/// `\d{4}-\d{2}-\d{2}` is the rule §5 states, and it is the weak version: it
-/// accepts `2026-13-45`. A note's date is the only thing an unverified claim
-/// can be judged by, so it has to be a date that exists.
+/// `\d{4}-\d{2}-\d{2}` is the rule as first written, and it is the weak
+/// version: it accepts `2026-13-45`. A note's date is the only thing an
+/// unverified claim can be judged by, so it has to be a date that exists.
 pub(crate) fn is_calendar_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
@@ -310,7 +311,7 @@ fn is_leap(year: u32) -> bool {
 
 /// Canonicalise free text into one key component.
 ///
-/// One input, one key (invariant 6). Every run of non-alphanumerics collapses
+/// One input, one key. Every run of non-alphanumerics collapses
 /// to a single `-`, which is what makes two spellings of one event agree —
 /// and, incidentally, what makes a separator unable to survive into a key.
 /// *Both keys being unique is not the same as the identity being unique.*
@@ -582,8 +583,8 @@ pub fn check(note: &Note) -> Vec<Violation> {
         })
     };
 
-    // §8's closed set, asked here rather than at load: a note that already
-    // exists must still be readable, and this is what makes the bad one
+    // The closed set of triggers, asked here rather than at load: a note that
+    // already exists must still be readable, and this is what makes the bad one
     // visible instead of fatal.
     if let Some(raw) = note.invalidated_by.as_deref().filter(|v| !v.is_empty()) {
         if let Err(e) = expiry::Trigger::parse(raw) {
@@ -715,9 +716,8 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
         }
     }
 
-    // §6 makes a key a primary key, and `remember` refuses to break that —
-    // but hand-written notes are the only writer M1 gives the agent, so the
-    // store can already hold two.
+    // A key is a primary key, and `remember` refuses to break that — but a
+    // note can also be written by hand, so the store can already hold two.
     let mut by_key: BTreeMap<&str, Vec<&Path>> = BTreeMap::new();
     for note in notes {
         by_key
@@ -994,7 +994,7 @@ fn parse_templates(raw: &str) -> Result<BTreeMap<Kind, String>> {
 ///
 /// A missing file is the shipped set rather than an error: `remember` has to
 /// work in a repo where `init` has not run, and inventing a key on the spot is
-/// the one thing §6 forbids.
+/// the one thing deriving it from a template rules out.
 pub fn templates(paths: &Paths) -> Result<BTreeMap<Kind, String>> {
     let path = paths.repo.join(".omh").join(TEMPLATES);
 
@@ -1061,9 +1061,9 @@ pub fn lint(paths: &Paths) -> Result<Vec<Violation>> {
 
 /// How many of these the schema refuses.
 ///
-/// §14 makes `lint` M1's stand-in for the refused write the agent does not
-/// get yet, and a command that always exits 0 cannot stand in for anything —
-/// no hook, no CI step and no `&&` can read it. Only refusals decide: hygiene
+/// `lint` is where a note written by hand meets the schema, and a command
+/// that always exits 0 cannot refuse anything — no hook, no CI step and no
+/// `&&` can read it. Only refusals decide: hygiene
 /// warns about the store as a whole, and `Orphan` fires on every note nothing
 /// links to, so gating on warnings would gate on the store's shape.
 pub fn refused(violations: &[Violation]) -> usize {
@@ -1083,7 +1083,7 @@ pub fn tally(violations: &[Violation]) -> BTreeMap<Rule, usize> {
 
 // ── remember ────────────────────────────────────────────────────────────────
 
-/// `remember`'s parameters (§9.1) plus the two omh supplies.
+/// `remember`'s parameters plus the two omh supplies.
 ///
 /// A struct rather than seven arguments because the signature *is* the
 /// discipline: adding a field is a visible change to what a writer must
@@ -1126,17 +1126,16 @@ pub enum Wrote {
     Created(PathBuf),
     /// An `--if-exists override` that destroyed a note to make room. Its own
     /// variant because reporting it as a creation is how a destructive write
-    /// passes for a harmless one, and §6 only permits it when it was named.
+    /// passes for a harmless one, and it is only permitted when it was named.
     Replaced(PathBuf),
     Skipped(String),
 }
 
 /// Parse a trigger, and rewrite a `file:` path relative to the repo.
 ///
-/// Parsing here as well as at load is what makes §8's set closed at the only
-/// door an agent uses.
-/// The write path's share of §8: fold what only makes sense here, and refuse
-/// what omh could never evaluate.
+/// Parsing here as well as at load is what makes the set closed at the only
+/// door an agent uses. The write path's share of expiry: fold what only makes
+/// sense here, and refuse what omh could never evaluate.
 ///
 /// Spelled out rather than ending in a binding catch-all. This function exists
 /// because a value that means one thing where it was written means another
@@ -1261,7 +1260,7 @@ pub fn remember_in(
         &[("slug", &slug_of_observation(&input.observed)?)],
     )?;
 
-    // §6 makes the key the primary key, so the conflict is on the *key*, not
+    // The key is the primary key, so the conflict is on the *key*, not
     // on `{key}.md`. Those differ whenever a note sits somewhere other than
     // its own key — which nothing prevents, because `KeyDisagreesWithPath`
     // compares only the leaf. Checking the path let a second note land under
@@ -1302,8 +1301,8 @@ pub fn remember_in(
         _ => match held_at(&key) {
             Some(existing) => match if_exists {
                 IfExists::Skip => return Ok(Wrote::Skipped(key)),
-                // The replacement lands at the key's own path and the old
-                // file goes, so overriding *restores* invariant 5 rather than
+                // The replacement lands at the key's own path and the old file
+                // goes, so overriding *restores* one file per key rather than
                 // preserving a mislocated note. Writing to `existing` instead
                 // made the key disagree with its filename, and `check` then
                 // refused the very write it had been told to force.
@@ -1516,7 +1515,7 @@ pub fn from_session<'a>(notes: &'a [Note], session: &str) -> Vec<&'a Note> {
         .collect()
 }
 
-/// §12's review moment, riding on something already happening. `None` when the
+/// The review moment, riding on something already happening. `None` when the
 /// session recorded nothing — an unconditional `0 notes` line is noise, and it
 /// trains people to stop reading the removal report.
 pub fn session_nudge(notes: &[Note], session: &str) -> Option<String> {
@@ -1652,9 +1651,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// Invariant 4. Each field dropped in turn, and the error must name the
-    /// field that is missing — a parser that reads an absent key as
-    /// `String::new()` produces a note with an empty identity instead.
+    /// Every note carries its four fields. Each dropped in turn, and the error
+    /// must name the field that is missing — a parser that reads an absent key
+    /// as `String::new()` produces a note with an empty identity instead.
     #[test]
     fn a_note_missing_a_required_field_is_refused_by_name() {
         for field in ["key", "type", "source", "recorded"] {
@@ -1697,9 +1696,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
     }
 
-    /// §5 writes this rule as `\d{4}-\d{2}-\d{2}`, which is the weak version:
-    /// it accepts `2026-13-45`. A note's date is the only thing an undated
-    /// claim can be judged by, so it must be a date that exists.
+    /// This rule was first written `\d{4}-\d{2}-\d{2}`, which is the weak
+    /// version: it accepts `2026-13-45`. A note's date is the only thing an
+    /// undated claim can be judged by, so it must be a date that exists.
     #[test]
     fn the_recorded_date_must_be_a_real_calendar_date() {
         let with = |d: &str| {
@@ -1782,13 +1781,13 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── keys ────────────────────────────────────────────────────────────────
 
-    /// Invariant 6, and the whole of it. A key is a primary key, so two
+    /// One input, one key, and the whole of it. A key is a primary key, so two
     /// spellings of one event must not mint two of them.
     ///
     /// The naive `to_lowercase().replace(' ', "-")` passes none of these: a
     /// double space becomes `--`, a trailing full stop survives, and an em
     /// dash survives with its spaces. Each produces a second key for an event
-    /// already recorded, and §6's conflict error never fires.
+    /// already recorded, and the conflict error never fires.
     #[test]
     fn every_spelling_of_one_observation_derives_the_same_key() {
         let want = "mounting-a-credential-file-returns-ebusy";
@@ -1836,8 +1835,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     /// A word cap is an uncalibrated number sitting in the identity path:
     /// reword one early word and the cut moves, minting a second key for one
-    /// event. A sentence boundary has no number in it — §7 applied where it
-    /// costs most.
+    /// event. A sentence boundary has no number in it — *prefer
+    /// the check with no number*, applied where it costs most.
     #[test]
     fn key_derivation_stops_at_a_sentence_boundary_not_a_word_count() {
         let key =
@@ -1899,9 +1898,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     }
 
     /// The guard belongs at the mint, not at one call site. `remember` is the
-    /// only caller today, but M2 adds a second (`stub = "docs/{{path}}"`,
-    /// binding a repo path into an identity) and a guard it has to remember
-    /// to call is a guard it will ship without.
+    /// only caller this was written for; ingest became the second (`stub`,
+    /// binding a repo path into an identity), and a guard each caller has to
+    /// remember to call is a guard one of them ships without.
     #[test]
     fn a_template_that_escapes_the_store_never_becomes_a_key() {
         let err = expand_key("../../escaped/{{slug}}", &[("slug", "x")])
@@ -1972,7 +1971,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     /// The weak version is `body.contains("Expected")`, which is satisfied by
     /// the word appearing in a sentence. That is the staleness guard's exact
-    /// recorded failure, and this is the test in M1 most likely to be written
+    /// recorded failure, and this is the test most likely to be written
     /// that way.
     #[test]
     fn a_note_missing_a_required_section_for_its_type_is_refused() {
@@ -2056,8 +2055,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// §7 gives the two layers different powers, and nothing else enforces
-    /// that split. A schema rule that only warned would let a note omh cannot
+    /// Schemas refuse and hygiene warns, and nothing else enforces that
+    /// split. A schema rule that only warned would let a note omh cannot
     /// serve onto disk; a hygiene rule that refused would fail the agent's
     /// write because of somebody else's note.
     #[test]
@@ -2111,7 +2110,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// `## Evidence` exists to hold the command that surprised you, and a
     /// command can contain `[[`. Scanning to the next `]]` swallows the next
     /// real link, so `rm` reports an empty neighbourhood for a note two
-    /// others point at — §8's one guarantee, inverted.
+    /// others point at — `rm`'s one guarantee, inverted.
     #[test]
     fn an_unclosed_bracket_does_not_swallow_the_next_link() {
         let body = "## Evidence\nthe agent typed `[[` in a sample\n\n## Related\n\n- [[a-real-note]]\n- [[another]]\n";
@@ -2285,8 +2284,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert_eq!(keys(&load(&paths).unwrap()), ["surprise/ebusy"]);
     }
 
-    /// A link into the other layer is not dangling — §4 says both retrieve —
-    /// and treating it as one buries the real dangling links in noise.
+    /// A link to a note the store holds is not dangling, and reporting it as
+    /// one buries the real dangling links in noise.
     #[test]
     fn a_dangling_link_is_found_and_names_both_ends() {
         let (_d, paths) = fixture();
@@ -2394,7 +2393,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         out
     }
 
-    /// Invariant 3, at the only call site that exists in M1. Asserted by
+    /// `remember` writes the store and nothing else, at the call site the
+    /// command line uses. Asserted by
     /// walking the whole tree rather than by checking one path: that catches
     /// both a write to the committed layer and a key that escaped through
     /// `../`, and it survives a refactor that moves the store.
@@ -2624,7 +2624,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert_eq!(templates(&paths).unwrap()[&Kind::Surprise], "mine/{{slug}}");
     }
 
-    /// §6 derives keys from a template in the repo, so the template is input
+    /// Keys are derived from a template in the repo, so the template is input
     /// omh does not control — a clone carries one. `remember` creates the
     /// key's parent directories, so a template that leaves the store is an
     /// arbitrary write, and `slug`'s separator rule guards only the variable.
@@ -2654,7 +2654,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
     }
 
-    /// Invariant 5 is about keys, not filenames. `path.exists()` enforces it
+    /// *A key is claimed at most once* is about keys, not filenames.
+    /// `path.exists()` enforces it
     /// only while every note sits at exactly its key — which nothing checks,
     /// because `KeyDisagreesWithPath` compares the leaf alone. The result is
     /// two notes under one key, which `rm` then cannot separate.
@@ -2664,7 +2665,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let taken = derived_key(&paths, &observation());
 
         // The same key, stored somewhere else — what a hand-written note
-        // produces, which in M1 is the only writer the agent has.
+        // produces.
         let elsewhere = paths.memory().join("hand-written.md");
         std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
         let mut note = note_with(Kind::Surprise, &taken, &surprise_body());
@@ -2683,7 +2684,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// consequence is a write, not a read. The result was two notes under one
     /// key, silently, through the sanctioned path.
     ///
-    /// So the write is refused. A deliberate exception to §7's "a store-wide
+    /// So the write is refused. A deliberate exception to "a store-wide
     /// problem must never refuse somebody else's write": this is not an
     /// unrelated problem elsewhere in the store, it is omh being unable to
     /// verify the invariant *this* write depends on. A refused write is
@@ -2749,7 +2750,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// `skip` is §6's mode for idempotent ingest, so it has to recognise the
+    /// `skip` is the mode for idempotent ingest, so it has to recognise the
     /// key as taken wherever the note holding it sits — otherwise a repeated
     /// ingest writes a second copy of what it was told to leave alone.
     #[test]
@@ -2831,8 +2832,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert!(!shown.contains("zebras"), "keyed off the guess: {shown}");
     }
 
-    /// §9.1 makes provenance a parameter that cannot be omitted rather than a
-    /// rule that can be violated. Defaulting a blank one to `agent` turns it
+    /// Provenance is a parameter that cannot be omitted rather than a rule
+    /// that can be violated. Defaulting a blank one to `agent` turns it
     /// straight back into a rule.
     #[test]
     fn provenance_is_not_the_agents_to_supply() {
@@ -2848,7 +2849,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert!(note.is_empty(), "and nothing was written anyway");
     }
 
-    /// The filter §9.1 says runs for free: an agent with nothing to put in
+    /// The filter that runs for free: an agent with nothing to put in
     /// `expected` has learned nothing worth recording.
     #[test]
     fn an_observation_with_nothing_expected_is_refused() {
@@ -2866,7 +2867,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
     }
 
-    /// §6: writing an existing key is a conflict whose message says *update
+    /// Writing an existing key is a conflict whose message says *update
     /// instead*. The alternative is a truncating write that loses the earlier
     /// observation with no trace.
     #[test]
@@ -2900,7 +2901,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// §6. Making `Skip` the default for convenience makes every genuine
+    /// Making `Skip` the default for convenience makes every genuine
     /// conflict disappear silently.
     #[test]
     fn skip_if_exists_is_an_explicit_mode_not_a_fallback() {
@@ -2937,7 +2938,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert_eq!(load(&paths).unwrap().len(), 3);
     }
 
-    /// §7 gives the two guards different powers. `remember` calling `lint()`
+    /// Schemas refuse and hygiene warns. `remember` calling `lint()`
     /// would fail the agent's write, unattended, because of somebody else's
     /// note — with no way for it to fix the problem.
     #[test]
@@ -2958,7 +2959,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// §6: *both keys being unique is not the same as the identity being
+    /// *Both keys being unique is not the same as the identity being
     /// unique.* Preserving input order makes an idempotent re-record churn the
     /// file.
     #[test]
@@ -3081,9 +3082,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// Invariant 7. Deleting a neighbour is one failure; *rewriting* one to
-    /// strip the now-dangling link is the other, and only byte identity can
-    /// see the second.
+    /// `rm` never cascades. Deleting a neighbour is one failure; *rewriting*
+    /// one to strip the now-dangling link is the other, and only byte identity
+    /// can see the second.
     #[test]
     fn rm_removes_one_note_and_leaves_every_neighbour_byte_identical() {
         let (dir, paths) = fixture();
@@ -3137,8 +3138,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// *different* dates, because a single date is satisfied by a constant —
     /// which is how a date guard in this repo passed while checking nothing.
     ///
-    /// This is `omh memory`'s render, not the retrieval proxy's. Invariant 1
-    /// belongs to `recall` and this test does not discharge it.
+    /// This is `omh memory`'s render, not the retrieval proxy's. *Never
+    /// retrieved without its date* belongs to `recall` and this test does not
+    /// discharge it.
     #[test]
     fn omh_memory_lists_every_note_with_its_date() {
         let (_d, paths) = fixture();
@@ -3179,7 +3181,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     }
 
     /// Printing `0 notes recorded` on every removal is noise, and it trains
-    /// people to stop reading the one report §12 relies on.
+    /// people to stop reading the one report the review moment relies on.
     #[test]
     fn the_nudge_is_silent_when_the_session_recorded_nothing() {
         assert!(session_nudge(&[], "s1").is_none());
@@ -3248,14 +3250,14 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     }
 
     /// `remember` now refuses to create one, but a store can already hold
-    /// two notes under one key — hand-written notes are the only writer M1
-    /// gives the agent. Nothing could report that state: `KeyDisagreesWithPath`
+    /// two notes under one key — a note can be written by hand. Nothing
+    /// could report that state: `KeyDisagreesWithPath`
     /// compares only the leaf, so two files whose leaves agree were invisible
-    /// and `lint` exited 0 on a violated §6.
+    /// and `lint` exited 0 on a key claimed twice.
     ///
     /// A warning, not a refusal, because it is a property of the store rather
-    /// than of the note being written — §7's split, and the reason `remember`
-    /// is where the refusal lives.
+    /// than of the note being written — hygiene warns — and the reason
+    /// `remember` is where the refusal lives.
     #[test]
     fn two_notes_under_one_key_in_one_layer_are_reported() {
         let (_d, paths) = fixture();
@@ -3282,23 +3284,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert_eq!(Rule::DuplicateKey.severity(), Severity::Warning);
     }
 
-    /// §4 makes `team/deploy` and `local/deploy` two notes on purpose — both
-    /// retrieve, and neither shadows the other. A duplicate check that
-    /// ignored the layer would report the design as a defect.
-    #[test]
-    fn one_key_in_both_layers_is_not_a_duplicate() {
-        let (_d, paths) = fixture();
-        seed(&paths, "deploy", &surprise_body());
-        seed(&paths, "deploy", &surprise_body());
-
-        assert!(
-            !lint(&paths)
-                .unwrap()
-                .iter()
-                .any(|v| v.rule == Rule::DuplicateKey),
-            "a key in both layers is a disagreement, not a duplicate"
-        );
-    }
+    // `one_key_in_both_layers_is_not_a_duplicate` sat here. The layers went in
+    // 0.14, and what was left seeded one file twice and asserted the store
+    // held no duplicate: one note, compared with itself.
 
     /// What makes `omh memory lint` fail. Only refusals may: `Orphan` fires
     /// on every note nothing links to — which is every note `remember` writes
@@ -3351,9 +3339,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// §7's store-quality meter, tested rather than asserted in prose. A rule
-    /// that cannot separate a store you believe in from one you don't is a
-    /// rule that does not ship.
+    /// `lint` as the store-quality meter, tested rather than asserted in prose.
+    /// A rule that cannot separate a store you believe in from one you don't is
+    /// a rule that does not ship.
     #[test]
     fn the_violation_count_separates_a_good_store_from_a_bad_one() {
         let (_d, good) = fixture();
@@ -3382,10 +3370,10 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── the staged rules ────────────────────────────────────────────────────
 
-    /// M1 has no MCP surface, so the only thing that can teach the agent the
-    /// note format is the rules file. A template that does not survive the
-    /// parser teaches a shape the store then refuses — and the agent has no
-    /// way to discover that, because nothing tells it the write failed.
+    /// With no memory server delivered, the only thing that can teach the agent
+    /// the note format is the rules file. A template that does not survive the
+    /// parser teaches a shape the store then refuses — and the agent has no way
+    /// to discover that, because nothing tells it the write failed.
     ///
     /// Filled in with plausible values and pushed through the real parser and
     /// the real schema, which is the only check that cannot drift from them.
@@ -3488,9 +3476,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// §8's set is closed so that `stale` can evaluate every member. A note
-    /// carrying `vibes:soon` advertises an expiry that exists only in the
-    /// reader's mind.
+    /// The set of triggers is closed so that `stale` can evaluate every member.
+    /// A note carrying `vibes:soon` advertises an expiry that exists only in
+    /// the reader's mind.
     ///
     /// The door is the schema, not the parser. Reading such a note has to keep
     /// working — it may already exist — so `check` is what refuses it, which is
@@ -3533,11 +3521,11 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     }
 
     /// **One bad note must not take the store down with it.** `invalidated_by`
-    /// was free text through M1–M3, so a legacy value is a file that already
-    /// exists on somebody's disk. Refusing it at *load* made `ls`, `recall`,
-    /// `stale` and the MCP read path all fail together, and `remember`'s own
-    /// opaque check then refused every subsequent write: one hand-edited line,
-    /// and the memory is gone.
+    /// was free text when it first shipped, so a legacy value is a file that
+    /// already exists on somebody's disk. Refusing it at *load* made `ls`,
+    /// `recall`, `stale` and the MCP read path all fail together, and
+    /// `remember`'s own opaque check then refused every subsequent write: one
+    /// hand-edited line, and the memory is gone.
     #[test]
     fn a_trigger_omh_cannot_evaluate_does_not_take_the_store_down() {
         let (_d, paths) = fixture();

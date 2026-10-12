@@ -166,7 +166,7 @@ impl Server {
                 .get("invalidated_by")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
-            // Never read from `args`. This is the line that makes §9.1's
+            // Never read from `args`. This is the line that makes
             // "provenance cannot be omitted" true rather than aspirational.
             source: self.provenance(),
             recorded: (self.today)(),
@@ -345,7 +345,7 @@ mod tests {
         }
     }
 
-    /// §9.1 makes provenance omh's to supply. omh knows the session from its
+    /// Provenance is omh's to supply. omh knows the session from its
     /// own environment; the harness names itself in the handshake. Neither
     /// comes from the agent, which is what makes the guarantee hold.
     ///
@@ -385,8 +385,9 @@ mod tests {
         );
     }
 
-    /// Invariant 3, re-asserted at the **new** call site. M1's test guards
-    /// M1's path; this is where a `layer` argument would be added "for
+    /// `remember` writes the store and nothing else, re-asserted at the MCP
+    /// call site. The command line's test guards the command line's path;
+    /// this is where a `layer` argument would be added "for
     /// flexibility", and an unattended writer reaching the committed layer
     /// pushes wrong facts to teammates through git, where they arrive with
     /// the authority of a reviewed change.
@@ -407,7 +408,7 @@ mod tests {
         }
     }
 
-    /// §9.1: strict mode is always on over MCP. The population most likely to
+    /// The schema is always on over MCP. The population most likely to
     /// skip a guard is the one that needs it, so the tool must not offer a way
     /// to turn one off — and must ignore an argument that tries.
     #[test]
@@ -445,8 +446,8 @@ mod tests {
     }
 
     /// The signature *is* the discipline. Optional fields dissolve the filter
-    /// §9.1 relies on, and it fails as a store full of contentless notes that
-    /// nobody notices until they are read.
+    /// `remember` relies on, and it fails as a store full of contentless notes
+    /// that nobody notices until they are read.
     #[test]
     fn the_remember_schema_requires_what_makes_a_note_worth_keeping() {
         let mut fx = fixture();
@@ -470,8 +471,8 @@ mod tests {
         }
     }
 
-    /// §9.1 makes provenance a parameter that cannot be omitted rather than a
-    /// rule that can be violated — which only holds if the *agent* is not the
+    /// Provenance is a parameter that cannot be omitted rather than a rule
+    /// that can be violated — which only holds if the *agent* is not the
     /// one supplying it.
     #[test]
     fn provenance_over_mcp_is_omhs_to_supply_not_the_agents() {
@@ -543,7 +544,7 @@ mod tests {
         assert!(why.contains("recal"), "got: {why}");
     }
 
-    /// The description is what makes the tool findable, and §9.3 wants it to
+    /// The description is what makes the tool findable, and it has to
     /// carry a reason to call it rather than a restatement of the name.
     #[test]
     fn the_remember_tool_says_when_to_call_it() {
