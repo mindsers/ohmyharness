@@ -7141,10 +7141,10 @@ fn info_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
 /// A settings file is a file somebody maintains by hand, and comments are part
 /// of what they wrote.
 ///
-/// Before P4 a write to `.omh/settings.toml` was rare — `omh settings set` and
-/// nothing else. Now `omh use`, `omh unuse` and `omh set` all touch it,
-/// and `init` writes it *full* of explanatory comments, so a round trip through
-/// a serializer would have the first `omh use` silently delete everything init
+/// Before `[use]` a write to `.omh/settings.toml` was rare — `omh settings set`
+/// and nothing else. Now `omh use`, `omh unuse` and `omh set` all touch it, and
+/// `init` writes it *full* of explanatory comments, so a round trip through a
+/// serializer would have the first `omh use` silently delete everything init
 /// had just explained. That is data loss, not formatting.
 #[test]
 fn writing_a_setting_keeps_what_you_wrote_around_it() {

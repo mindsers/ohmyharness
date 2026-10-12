@@ -615,7 +615,7 @@ Start with [Getting started](https://docs.ohmyharness.sh/getting-started/install
 [Accounts](https://docs.ohmyharness.sh/guides/accounts/) and [Editors](https://docs.ohmyharness.sh/guides/editors/) cover the parts in
 depth.
 
-Read the [design pages](https://docs.ohmyharness.sh/#understanding-omh) before changing
+Read the pages under [Understanding omh](https://docs.ohmyharness.sh/#understanding-omh) before changing
 architecture — most record something that was tried and cost something, and
 [Risks](https://docs.ohmyharness.sh/concepts/risks/) states plainly what is still weak.
 

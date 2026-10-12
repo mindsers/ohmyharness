@@ -827,7 +827,7 @@ fn write_table(
 ///
 /// `DocumentMut` rather than `toml::Table` and `to_string_pretty`, and the
 /// difference is not cosmetic: a settings file is one somebody maintains by
-/// hand, `omh init` writes it full of explanatory comments, and P4 turned
+/// hand, `omh init` writes it full of explanatory comments, and `[use]` turned
 /// writing it from something `omh settings set` did occasionally into something
 /// `omh use`, `omh unuse` and `omh set <feature> on|off` all do. A serializer round trip
 /// deletes every comment in the file, which is deleting what the user wrote.

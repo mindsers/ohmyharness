@@ -1,9 +1,9 @@
 //! What this repo uses from your catalogue.
 //!
-//! P3 gave content one home. That answered "where is this skill" and left the
-//! other half open: everything in `~/.omh` reached every session, so *"these are
-//! my twelve MCP servers, this project uses three"* was unsayable and the only
-//! lever was uninstalling globally — the opposite of curating.
+//! One catalogue gave content one home. That answered "where is this skill" and
+//! left the other half open: everything in `~/.omh` reached every session, so
+//! *"these are my twelve MCP servers, this project uses three"* was unsayable
+//! and the only lever was uninstalling globally — the opposite of curating.
 //!
 //! ```toml
 //! # <repo>/.omh/settings.toml
@@ -31,6 +31,13 @@
 //! is the state `settings.rs` makes unrepresentable rather than warning about,
 //! and the state that shipped broken once when the graph hooks kept firing
 //! against a server dropped from the document. `[omh]` is the switch for those.
+//!
+//! **It is resolved before any adapter is consulted**, and nothing here could
+//! do otherwise: this module names a capability and never a harness. That is
+//! what makes a selection mean the same thing under every one of them — a name
+//! is in the list or it is not — rather than one code path per capability per
+//! harness. What a harness cannot express is dropped later, where the adapter
+//! is known, and named in the report.
 
 use crate::adapter::Capability;
 use anyhow::{bail, Result};
@@ -434,7 +441,7 @@ mod tests {
         );
     }
 
-    /// The list is the order — the thing P3 said it was deferring, since
+    /// The list is the order — the thing one catalogue left deferred, since
     /// ordering can only really come from a list somebody wrote.
     #[test]
     fn the_declared_order_is_the_order() {

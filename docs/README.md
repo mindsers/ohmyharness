@@ -5,7 +5,7 @@ Published at <https://docs.ohmyharness.sh>, from this folder.
 | | |
 |---|---|
 | `src/content/docs/` | the pages of the site, one folder per section of its sidebar |
-| [`design/`](design/) | design pages, read here rather than on the site: what was tried, what it cost, what was decided |
+| [`design/`](design/) | design pages, read here rather than on the site: what is proposed and not yet built |
 | everything else | the site itself, built with [Astro Starlight](https://starlight.astro.build) |
 
 ## Working on a page

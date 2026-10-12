@@ -543,6 +543,7 @@ fn nothing_names_a_page_by_the_path_it_left() {
         "design/trust",
         "design/git",
         "design/adoption",
+        "design/profile",
         "design/memory",
         "design/memory-benchmark",
         "design/memory-m0",

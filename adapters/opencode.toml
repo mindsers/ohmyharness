@@ -45,7 +45,8 @@ import = "$HOME/.config/opencode/commands"
 # users a feature they had — the capability floor the decisions page
 # calls out. That the mount lands is checked by `omh doctor`; that opencode
 # reads what is in it is a claim about external software, and the frontmatter
-# it accepts is *not* the same as Claude's — see `docs/design/profile.md`.
+# it accepts is *not* the same as Claude's — see *Subagents are the exception*
+# in the configuration reference.
 [capabilities.subagents]
 path   = "$HOME/.config/opencode/agents"
 render = "dir"
@@ -68,9 +69,9 @@ shell = "bash"
 # from `.opencode/plugin/` in a project or `~/.config/opencode/plugin/`
 # globally. Both were verified to load, in that image, at this version.
 #
-# This is why P5 needed a code generator at all. `docs/design/profile.md` said
-# the maps would be complete when P3 landed; they are not, because no second
-# harness expresses hooks as configuration.
+# This is why a second harness needed a code generator at all. The design
+# said the three maps would be complete once hooks had one format; they are
+# not, because no second harness expresses hooks as configuration.
 [capabilities.hooks]
 path   = "$HOME/.config/opencode/plugin/omh.ts"
 render = "opencode-plugin"
