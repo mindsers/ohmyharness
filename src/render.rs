@@ -3930,10 +3930,11 @@ try {{
         assert!(!said.contains("THREW"), "got: {said}");
     }
 
-    /// **The finding P5 exists to produce.** An advisory nudge has no channel
-    /// before a tool runs on this harness, so it is dropped by name rather than
-    /// promoted to a refusal — a nudge that silently became a wall would look
-    /// exactly like working, and `graph-first` says why that is unacceptable.
+    /// **The finding a second harness exists to produce.** An advisory nudge
+    /// has no channel before a tool runs on this harness, so it is dropped by
+    /// name rather than promoted to a refusal — a nudge that silently became a
+    /// wall would look exactly like working, and `graph-first` says why that is
+    /// unacceptable.
     #[test]
     fn a_before_tool_inject_is_dropped_by_name() {
         let doc = plugin(&[(

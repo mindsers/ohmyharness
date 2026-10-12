@@ -2644,10 +2644,11 @@ mod tests {
 
     /// A catalogue you cannot subtract from is not a catalogue.
     ///
-    /// One place for content was P3's answer to "where is this skill". It left
-    /// the other half unanswered: everything in it reaches every session, so
-    /// "these are my twelve skills, this project uses two" was unsayable and the
-    /// only lever was uninstalling globally — which is the opposite of curating.
+    /// One place for content was the catalogue's answer to "where is this
+    /// skill". It left the other half unanswered: everything in it reaches
+    /// every session, so "these are my twelve skills, this project uses two"
+    /// was unsayable and the only lever was uninstalling globally — which is
+    /// the opposite of curating.
     ///
     /// An allowlist, and one mechanism only. Removing something is deleting its
     /// name, and there is one place to look to answer "is this on here".
@@ -3026,9 +3027,10 @@ mod tests {
         assert!(!shadow.events_ledger.exists());
     }
 
-    /// The list is the order — the thing P3 deferred, because ordering can only
-    /// really come from a list somebody wrote. Rules build on each other: a
-    /// general one followed by its exception reads differently reversed.
+    /// The list is the order — the thing one catalogue deferred, because
+    /// ordering can only really come from a list somebody wrote. Rules build on
+    /// each other: a general one followed by its exception reads differently
+    /// reversed.
     #[test]
     fn the_use_list_is_the_rules_order() {
         let fx = fixture();
@@ -3049,8 +3051,9 @@ mod tests {
         );
     }
 
-    /// Without a list, filename order still stands. It is the fallback P3
-    /// shipped and a repo that has not curated must not lose its rules.
+    /// Without a list, filename order still stands. It is the fallback the
+    /// catalogue shipped with, and a repo that has not curated must not lose
+    /// its rules.
     #[test]
     fn rules_fall_back_to_filename_order_without_a_list() {
         let fx = fixture();
@@ -3375,12 +3378,12 @@ mod tests {
     ///
     /// A hook answering to a manifest name stops the launch, naming the file.
     ///
-    /// P2 skipped these silently, which was right while the only such files
-    /// were leftovers omh had seeded into `.omh/profile/hooks/` itself. Nothing
-    /// reads that directory any more, so a file with one of these names is
-    /// something somebody wrote on purpose — and a hook that is committed,
-    /// reviewed, and quietly never runs is worse than one that refuses to
-    /// start.
+    /// These were skipped silently at first, which was right while the only
+    /// such files were leftovers omh had seeded into `.omh/profile/hooks/`
+    /// itself. Nothing reads that directory any more, so a file with one of
+    /// these names is something somebody wrote on purpose — and a hook that is
+    /// committed, reviewed, and quietly never runs is worse than one that
+    /// refuses to start.
     ///
     /// It has to reach the *launch*, not just the renderer: the whole failure
     /// is a hook the user believes is installed.

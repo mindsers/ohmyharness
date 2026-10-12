@@ -563,7 +563,7 @@ mod tests {
 
     /// omh's sections reach the agent once.
     ///
-    /// P2 generated them from the manifest but left `.omh/profile/AGENTS.md`
+    /// Generating them from the manifest left `.omh/profile/AGENTS.md`
     /// composed as a layer, so every repo initialised before generation paid
     /// all three twice per turn and the git notice the manifest calls a single
     /// string arrived as two. That was accepted for one phase with this test

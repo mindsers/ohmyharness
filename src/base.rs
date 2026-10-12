@@ -2092,7 +2092,7 @@ command = "c"
         assert!(h.command.contains(PROJECT_ENV), "got: {}", h.command);
     }
 
-    /// P5's whole point: the translation, exercised by a second harness.
+    /// The whole point: the translation, exercised by a second harness.
     ///
     /// One of the five crosses and four do not, and *which* is the result
     /// rather than a disappointment: `graph-refresh` crosses because it is a
