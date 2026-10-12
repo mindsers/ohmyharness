@@ -1,4 +1,7 @@
-# Decisions
+---
+title: Decisions
+description: Every load-bearing choice, with its reasoning.
+---
 
 **Status: a ledger, not a design.** Every row records a choice already made and the reason it was made. The Status column here is the component's; the *design* for each lives on its own page.
 
@@ -8,13 +11,13 @@ these, the reason is what you need to argue with.
 | Decision | Choice | Why |
 |---|---|---|
 | Category | **distribution** | the parts exist; assembly and subtraction are the value |
-| Runtime | **pluggable backend** | `sbx` where available, Docker as fallback; no vendor lock |
+| Runtime | **pluggable backend** | Docker unless you say otherwise; `podman` and `sbx` are opt-in through `runtime`, and `sbx` is unmeasured. No vendor lock |
 | Repo exposure | **git worktree, auto-branch** | the agent cannot reach your checkout or `main`; review is `git diff` |
 | Git in the sandbox | **a repository of its own** | your checkout is never mounted, so the agent gets a gitdir holding one commit and none of your history |
-| Getting work back | **`omh s commit`, squash or `--keep`** | you choose at commit time whether the agent's own commits and messages land |
+| Getting work back | **`omh sNN commit`, squash or `--keep`** | you choose at commit time whether the agent's own commits and messages land |
 | Code graph | **wire an existing MCP server** | distributions package, they don't reinvent |
 | Language | **Rust** | single binary; `omh` wraps every invocation, so startup is felt |
-| LLM routing | **not ours** | one env var in `settings.toml` |
+| LLM routing | **not ours** | the harness logs in as itself and reaches whatever it is configured to; omh passes no model and proxies nothing |
 | Unit of work | **long-lived session** | keeps the index warm, makes harness switching instant |
 | Session persistence | **`dtach`, not tmux** | omh needs detach/reattach; SSH already provides multiplexing |
 | IDE access | **SSH into the session** | one dependency tree, shared with the agent |
@@ -29,13 +32,13 @@ these, the reason is what you need to argue with.
 | Write default | **the key decides, not the command** | it was *a value never lands in the committed file; a name may*, which held while `repo set` sent every value to the gitignored file. `omh set` serves every key from one command, so the judgement moved into `src/key.rs`: per key, whether a value there can name a credential. Committed is the default now — most settings are facts about the project — and the table is what keeps a secret out of it |
 | Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
 | Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
-| Naming a session | **`sNN` first, one form** | several sandboxes of one repo are reached from one place, so the selector leads and everything after it is unchanged — designed, see [git](git.md) |
-| Staying current | **`omh sNN sync`, merged on the host** | no commit of yours may enter the sandbox, so it receives files and conflict markers rather than history — designed, see [git](git.md) |
+| Naming a session | **`sNN` first, one form** | several sandboxes of one repo are reached from one place, so the selector leads and everything after it is unchanged — designed, see [git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) |
+| Staying current | **`omh sNN sync`, merged on the host** | no commit of yours may enter the sandbox, so it receives files and conflict markers rather than history — designed, see [git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) |
 | Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
 
-Each is expanded where it applies: [architecture](architecture.md) for runtime
-and images, [sessions](https://docs.ohmyharness.sh/concepts/sessions/) for the session model and persistence,
-[configuration](https://docs.ohmyharness.sh/reference/configuration/) for the layers, [adapters](adapters.md) for
+Each is expanded where it applies: [architecture](/concepts/architecture/) for runtime
+and images, [sessions](/concepts/sessions/) for the session model and persistence,
+[configuration](/reference/configuration/) for the layers, [adapters](/reference/adapters/) for
 the capability floor.
 
 ## The base set
@@ -44,7 +47,7 @@ This is the product. Everything else is a place to put it.
 
 ```
 omh init             → base system. no questions.
-                     → stack rules and hooks, derived from what init detected.
+                     → a toolchain and hooks, derived from the stack init detected.
 omh settings mcp add …
                      → the archive is still there, one command away,
                        and not in your face.
@@ -53,8 +56,8 @@ omh settings mcp add …
 | Component | Status | Justification |
 |---|---|---|
 | sandbox + worktree branch | ✅ | safety; non-negotiable |
-| `AGENTS.md` from detected stack | ✅ | the thing everyone writes badly |
-| `omh s attach` | ✅ | IDE attach |
+| rules, composed with the repo's own | ✅ | omh's sections are base-set entries composed into every session; it writes no `AGENTS.md` |
+| `omh sNN attach` | ✅ | IDE attach |
 | **`codegraph`** | ✅ | structural queries instead of re-grepping every task |
 | test-on-stop + format-on-edit hooks | ✅ | `init` detects the commands and wires them |
 | memory | ✅ | survives harness switches — one store per repo, shared by its sessions and never committed; hub pages do not ship, and the committed layer was removed in 0.14 |
@@ -65,16 +68,16 @@ the base set.**
 
 The set lives in a versioned manifest rather than in the binary, and the
 justification is enforced by a test rather than by convention — see
-[the base set](base-set.md).
+[the base set](/reference/base-set/).
 
 The base set is also the part of omh with the least evidence behind it. See
-[the honest weak spot](distribution.md#the-honest-weak-spot).
+[the honest weak spot](/concepts/distribution/#the-honest-weak-spot).
 
 ## Decisions deliberately not made
 
-- **Which model you use.** One env var. Routing is a solved problem with several
-  good solutions and no reason for omh to have an opinion.
-- **Which editor you use.** [Editors are data](https://docs.ohmyharness.sh/guides/editors/#editors-are-data),
+- **Which model you use.** The harness's own setting. Routing is a solved
+  problem with several good solutions and no reason for omh to have an opinion.
+- **Which editor you use.** [Editors are data](/guides/editors/#editors-are-data),
   and the integration point is an SSH config include rather than a plugin, so
   editors omh has never heard of work anyway.
 - **Whether to trust the sandbox over the branch.** Both. A sandbox protects the
@@ -84,7 +87,7 @@ The base set is also the part of omh with the least evidence behind it. See
 ## Deviations from a written design, ratified
 
 **A `--keep` selection is a `cherry-pick`, not a generated rebase todo (#56).**
-[Git](git.md) specified the todo, delivered through `GIT_SEQUENCE_EDITOR`
+[Git](https://github.com/mindsers/ohmyharness/blob/main/docs/design/git.md) specified the todo, delivered through `GIT_SEQUENCE_EDITOR`
 pointed at omh's own binary. The implementation used `cherry-pick` instead, and
 the first justification given for that was wrong — it claimed the designed
 mechanism could not be reached by a test, when `tests/cli.rs` runs the real
@@ -122,7 +125,7 @@ them.**
 **Credentials mounted at a private path → mounted where the harness reads.** The
 first version mounted a credential volume at `$HOME/.omh-creds`, which no
 harness has ever read. It tested green. See
-[accounts](https://docs.ohmyharness.sh/guides/accounts/#mount-the-directory-never-the-token-file).
+[accounts](/guides/accounts/#mount-the-directory-never-the-token-file).
 
 **The write default lived in the command → it lives in the key.** `config set`
 and `repo set` had opposite defaults and one flag could not express both, so

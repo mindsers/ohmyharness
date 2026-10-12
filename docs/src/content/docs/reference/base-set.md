@@ -1,12 +1,15 @@
-# The base set
+---
+title: The base set
+description: omh's opinion as a versioned data file, and the test that makes an entry earn its place.
+---
 
 **Status: built.** The set lives in a versioned manifest, `init` seeds from it and `omh why` explains from it, and the four-field test is enforced by the build. What is not built is cost accounting — the rollup that would give the set a reason to shrink.
 
 This is the product. Everything else in omh is a place to put it.
 
 It lives in a versioned TOML file — `~/.omh/base/2026.08.toml`, shipped with the
-binary and installed by `init` the same way [adapters](adapters.md) and editors
-are. **Every session is built from it and [`omh why`](https://docs.ohmyharness.sh/reference/commands/#omh-why-thing)
+binary and installed by `init` the same way [adapters](/reference/adapters/) and editors
+are. **Every session is built from it and [`omh why`](/reference/commands/#omh-why-thing)
 explains from it**, so the two cannot disagree about what is installed or why.
 
 ## An entry
@@ -70,7 +73,7 @@ belonging to nothing is an entry nobody can switch off.
 
 ## The curation standard is a test, not a convention
 
-`docs/design/distribution.md` says every entry states what it costs, what it
+[Why a distribution](/concepts/distribution/) says every entry states what it costs, what it
 buys, what was considered instead, and how to remove it — and that anything
 unable to fill in all four is taste pretending to be curation.
 
@@ -105,7 +108,7 @@ naming a specific file was stale on the commit that introduced it.
 So where a cost **can** be computed, it is: `grep_nudge()` builds the string
 from the same literals the hook ships, and a test recomputes it and fails if the
 manifest disagrees. That is the shape every in-process cost should take. The
-rest need a container, which is [`doctor`](https://docs.ohmyharness.sh/guides/troubleshooting/) territory —
+rest need a container, which is [`doctor`](/guides/troubleshooting/) territory —
 the same boundary that makes adapter paths unverifiable in-process.
 
 ## Rejections are artifacts
@@ -206,7 +209,7 @@ What is left is a set where every hook advises, and `graph-first` states the
 rule: *a nudge, not a wall — a hook that blocks correct work gets disabled.* The
 distinction became load-bearing when a second harness arrived, because advising
 and blocking are one field apart on Claude Code and two different mechanisms on
-opencode; see [`refuse`](https://docs.ohmyharness.sh/reference/configuration/#advising-is-not-blocking).
+opencode; see [`refuse`](/reference/configuration/#advising-is-not-blocking).
 
 A manifest **hook** name is omh's, on or off. A file answering to one is an
 error naming both, never an override: with the feature on the generated hook
@@ -271,7 +274,7 @@ in `[[rejected]]` rather than in a pull-request comment nobody will find.
 ### Why this is published
 
 Curation is the part of a distribution that never finishes, and
-[risks](risks.md) names it — not any technical problem — as the thing most
+[risks](/concepts/risks/) names it — not any technical problem — as the thing most
 likely to kill this project. A base set only one person can extend has a
 ceiling set by that person's afternoons.
 

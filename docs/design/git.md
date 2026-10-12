@@ -177,7 +177,7 @@ Everything else follows:
 - **`sync` can fold trunk into the shadow** without the harvest later replaying
   trunk's own changes as though the agent had made them.
 - **`rm` can refuse honestly.** *"s01 has 7 commits you have not kept"* becomes
-  a question it can ask, which is what [risks.md](risks.md) 2c is waiting for.
+  a question it can ask, which is what [risks.md](https://docs.ohmyharness.sh/concepts/risks/) 2c is waiting for.
 
 **When the sandbox rewrote history below it** — `reset --hard`, amend, rebase,
 all things the shadow exists to permit — `landed` stops being an ancestor of the
@@ -368,7 +368,7 @@ $ omh s01 commit --keep --edit   # the todo, for people who want it
 **Landed in #56, with one mechanism changed — reviewed and kept.** The two were
 measured against the same history and are user-visibly identical, including that
 both refuse a selected merge; see
-[decisions](decisions.md#deviations-from-a-written-design-ratified). `--keep` and `--keep --edit` are
+[decisions](https://docs.ohmyharness.sh/project/decisions/#deviations-from-a-written-design-ratified). `--keep` and `--keep --edit` are
 a rebase, as designed. A *selection* is `cherry-pick`, which is not what this
 said.
 
@@ -611,7 +611,7 @@ the whole design rests on, and **one config line away from being false**:
 which point `unkept` sees the snapshots through the reflog arm the exclusion
 cannot reach, and `rm` refuses for the rest of the session. The sandbox's
 config is rewritten each launch and pins that key, so an agent that sets it
-gets it back — see [risks](risks.md) 5b.
+gets it back — see [risks](https://docs.ohmyharness.sh/concepts/risks/) 5b.
 
 ## Reading the sandbox from the host is a new trust boundary
 
@@ -841,7 +841,7 @@ Defects measured on 2026-08-21 against git 2.55.0. The first four gate the
 design; each lands with its red test first, and the ones that have landed say
 so rather than being deleted — the evidence is what justifies the order. Between them and
 the hardening in step 6 of the order below, this work closes or narrows
-[risks](risks.md) 2, 2b, 2c, 4b, 4c, 8b, 8c and 9.
+[risks](https://docs.ohmyharness.sh/concepts/risks/) 2, 2b, 2c, 4b, 4c, 8b, 8c and 9.
 
 | | evidence |
 |---|---|
@@ -860,12 +860,12 @@ the hardening in step 6 of the order below, this work closes or narrows
    assert HEAD after.
 3. **Landed (#48).** `-F` on the carried-secret message scan.
 4. **Landed (#49).** The sandbox's exclude list is rewritten on every launch
-   rather than at the first one — [risks](risks.md#security) 4c.
+   rather than at the first one — [risks](https://docs.ohmyharness.sh/concepts/risks/#security) 4c.
 5. **Landed (#50).** The replay point, and `--keep` becomes repeatable.
 6. **Landed (#51).** The neutralised set grows and agent-authored text is
    sanitised at the render boundary — the gate on 7.
 6b. **Landed (#52).** The sandbox's `config` rewritten each launch and mounted
-   read-only, which narrows [risks](risks.md#security) 2b. Split from 6: that
+   read-only, which narrows [risks](https://docs.ohmyharness.sh/concepts/risks/#security) 2b. Split from 6: that
    one is about what a host-side *read* may execute, this about what the sandbox
    may *write*. Verified inside a real container, which the host stand-in got
    right for the wrong reason — `Resource busy`, not `Read-only file system`.
@@ -892,9 +892,9 @@ the hardening in step 6 of the order below, this work closes or narrows
     people learn to ignore. Still open: that a read-only `config` really does
     refuse inside a real container.
 12. **Landed (#58, #59, #62).** `rm` refuses over work no branch has —
-    [risks](risks.md#security) 2c, closed. `omh s` names files two sessions are
+    [risks](https://docs.ohmyharness.sh/concepts/risks/#security) 2c, closed. `omh s` names files two sessions are
     both changing, and reports sandbox repositories with no session left —
-    [risks](risks.md) 8c. The arrangement gained its two sentences. The
+    [risks](https://docs.ohmyharness.sh/concepts/risks/) 8c. The arrangement gained its two sentences. The
     dashboard learned staleness in #62 — `behind N` had been a number with
     nothing to do about it since the command existed, and `sync` is the thing
     to do. `omh s01` alone became that row in #67, which retired the `ls`
@@ -961,7 +961,7 @@ reason.
   instead of at the end — but `omh new claude` asking a question at launch would
   cost the thing `init` exists to protect.
 
-## What this changes in [Decisions](decisions.md), when it lands
+## What this changes in [Decisions](https://docs.ohmyharness.sh/project/decisions/), when it lands
 
 | Decision | Becomes |
 |---|---|

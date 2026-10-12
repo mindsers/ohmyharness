@@ -1384,13 +1384,11 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("README.md", 57), // + the omh upgrade command in the list
-        ("docs/design/adapters.md", 1),
-        ("docs/design/decisions.md", 1),
         ("docs/design/git.md", 18),
         ("docs/design/memory.md", 4),
         ("docs/design/profile.md", 3),
-        ("docs/design/trust.md", 2),
         ("docs/src/content/docs/concepts/sessions.md", 11),
+        ("docs/src/content/docs/concepts/trust.md", 2),
         // Getting started was one page until it became two, and all fifteen
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
@@ -1398,6 +1396,8 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("docs/src/content/docs/guides/code-graph.md", 1),
         ("docs/src/content/docs/guides/editors.md", 4),
         ("docs/src/content/docs/guides/troubleshooting.md", 13),
+        ("docs/src/content/docs/project/decisions.md", 1),
+        ("docs/src/content/docs/reference/adapters.md", 1),
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
         // then `omh s` and `omh s01 rm` in the landed-branch block
         ("docs/src/content/docs/reference/commands.md", 145),
@@ -2894,7 +2894,7 @@ fn removing_unkept_work_needs_force_when_there_is_nobody_to_ask() {
 
 /// A session holding work no branch has is not removed by accident.
 ///
-/// The last piece of [risks](../docs/design/risks.md) 2c. The branch
+/// The last piece of risk 2c on the risks page. The branch
 /// survives a removal and the worktree's files were on disk until it ran,
 /// but the agent's own commits live only in the sandbox's repository and
 /// `reap` deletes it. omh could not ask this until `log` learned to count.

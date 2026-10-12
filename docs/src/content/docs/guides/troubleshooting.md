@@ -124,7 +124,7 @@ in to one of them.
 ### The harness starts but does not see my rules or skills
 
 Run `omh doctor`. If a path fails there, the adapter is wrong — that is a bug,
-and [`docs/design/adapters.md`](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adapters.md) covers how to fix it.
+and [Adapters](/reference/adapters/) covers how to fix it.
 
 If doctor passes, check whether the capability was dropped at launch:
 
@@ -388,7 +388,7 @@ Before 0.8.0 omh keyed a checkout's state by its **directory name**, so
 `~/work/api` and `~/oss/api` were one repo: they shared worktrees, sandbox
 repositories, the note store, the cache volume and container names, and the
 second one's `omh new` resumed into the first one's session. That is
-[risk 8d](https://github.com/mindsers/ohmyharness/blob/main/docs/design/risks.md), and 0.8.0 closes it by keying on the name *and* a
+[risk 8d](/concepts/risks/), and 0.8.0 closes it by keying on the name *and* a
 digest of where the checkout is.
 
 The first omh command you run in each checkout after upgrading moves its state
@@ -540,7 +540,7 @@ editing your certificate — strip it to the `BEGIN`/`END` block.
 
 ### `no usable base manifest` or `declares no base-set entries`
 
-omh could not find a readable [base set](https://github.com/mindsers/ohmyharness/blob/main/docs/design/base-set.md) in `~/.omh/base`,
+omh could not find a readable [base set](/reference/base-set/) in `~/.omh/base`,
 or the newest one names nothing. `omh init` reinstalls it.
 
 This is deliberately loud. It used to be silent: a stray `.toml` in that
@@ -821,5 +821,5 @@ your session's own project name is in `$OMH_GRAPH_PROJECT`.
 
 The things most likely to be wrong are the things omh asserts about other
 people's software. If you are debugging one of those, start with `omh doctor`,
-then read the relevant page in [design](https://github.com/mindsers/ohmyharness/blob/main/docs/design/adapters.md) — several of them
+then read the relevant page in [design](/reference/adapters/) — several of them
 record a failure that looked exactly like the one you are probably having.

@@ -1804,7 +1804,7 @@ fn a_session_omh_cannot_read_is_named_rather_than_left_out() {
 
 /// A sandbox repository with no session is reported, not left to rot.
 ///
-/// [risks](../docs/design/risks.md) 8c. The most valuable of the three orphans
+/// Risk 8c on the risks page. The most valuable of the three orphans
 /// `omh s` looks for: a container is re-creatable and a run directory holds a
 /// timestamp, while this holds every commit an agent made and nothing points
 /// at it.

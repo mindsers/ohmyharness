@@ -331,7 +331,10 @@ fn anchors(body: &str) -> BTreeSet<String> {
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut out = BTreeSet::new();
     for line in outside_fences(body) {
-        if !line.starts_with('#') {
+        // One to six `#` and then a space. `#53` opening a wrapped sentence
+        // is prose, and so is a seventh `#`.
+        let level = line.chars().take_while(|c| *c == '#').count();
+        if !(1..=6).contains(&level) || !line[level..].starts_with(' ') {
             continue;
         }
         let slug = slug(line);
@@ -475,8 +478,9 @@ fn every_address_on_the_site_is_a_page() {
     );
 }
 
-/// The eight pages that were files directly under `docs/` until the site was
-/// built, by the paths they had then.
+/// Every page that has moved into the site, by the path it had before: the
+/// eight that were files directly under `docs/` until the site was built, and
+/// the eight design pages that followed them.
 ///
 /// Keyed on what left, like the scan for retired verbs and for its reason: a
 /// guard that reads the links which exist cannot see a path that is no longer
@@ -497,6 +501,14 @@ fn nothing_names_a_page_by_the_path_it_left() {
         "getting-started",
         "sessions",
         "troubleshooting",
+        "design/adapters",
+        "design/architecture",
+        "design/base-set",
+        "design/decisions",
+        "design/distribution",
+        "design/risks",
+        "design/roadmap",
+        "design/trust",
     ]
     .iter()
     .map(|page| format!("docs/{page}.md"))
@@ -882,4 +894,19 @@ fn a_heading_is_slugged_the_way_the_site_slugs_it() {
     ] {
         assert_eq!(slug(heading), served, "for the heading {heading}");
     }
+}
+
+/// A line of prose can open with a `#` — a wrapped sentence that reaches a
+/// pull request's number at the line break does. Markdown makes a heading of
+/// one to six of them and then a space, and of nothing else: the roadmap had
+/// such a line, the site gave it no id, and this file offered one.
+#[test]
+fn a_line_that_opens_with_a_hash_is_not_always_a_heading() {
+    let page =
+        "## A heading\n\nclosed in\n#53–67 and the rest of the sentence\n\n####### seven\n#tag\n";
+    assert_eq!(
+        anchors(page),
+        BTreeSet::from(["a-heading".to_string()]),
+        "only the first of these lines is a heading"
+    );
 }

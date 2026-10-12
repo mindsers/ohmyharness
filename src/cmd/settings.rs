@@ -5,7 +5,7 @@
 //! classification in `crate::key` decides, else `--local` or `--save` names a
 //! file on purpose. What must not be committed is a property of the key
 //! rather than of the command — fail-safe by enumeration, which is a real
-//! trade and is recorded in `docs/design/decisions.md`.
+//! trade and is recorded on the decisions page.
 
 use crate::adapter::{self, Adapter};
 use crate::out;

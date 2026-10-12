@@ -32,7 +32,7 @@ refusing a symlink at any depth, a name that is a path, and anything already
 yours. `init` reports what it can see and acts on nothing.
 
 What is left is the `plugin` capability — Claude marketplace plugins,
-re-rendered for other harnesses — which is `docs/design/roadmap.md` rather than
+re-rendered for other harnesses — which is the [roadmap](https://docs.ohmyharness.sh/project/roadmap/) rather than
 this page.
 
 Two things happen when `omh init` meets a repo that is not empty. It has to
@@ -145,7 +145,7 @@ version; only one of them needs somebody to know Rust.
 
 **Data does not mean locally editable.** Adapters and the base set land in
 `~/.omh` so the opinion imposed on somebody is reviewable by them — the
-[trust](trust.md) argument — but they are *managed* files. `install_bundled`
+[trust](https://docs.ohmyharness.sh/concepts/trust/) argument — but they are *managed* files. `install_bundled`
 overwrites them on every `init`, saving any edit as `<name>.toml.yours` and
 warning on stderr, precisely so a shipped fix always lands. omh's own hooks go
 further and are never written to disk at all, being generated from the manifest

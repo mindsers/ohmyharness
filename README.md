@@ -274,9 +274,9 @@ manifest so `omh why` and `omh init` cannot disagree, and every entry has to
 say what it costs. **It is not yet a description of what you get.** The
 curated set is eleven entries across three features, with five rejections
 recorded beside them, and one person picks all of it —
-[risks](docs/design/risks.md) names that, rather than any technical problem,
+[risks](https://docs.ohmyharness.sh/concepts/risks/) names that, rather than any technical problem,
 as the thing most likely to kill this project. The submission
-standard is [published](docs/design/base-set.md#proposing-an-entry) so it does
+standard is [published](https://docs.ohmyharness.sh/reference/base-set/#proposing-an-entry) so it does
 not have to stay that way.
 
 ## Commands
@@ -471,7 +471,7 @@ omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
 ```
 
 Editors work the same way — `~/.omh/editors/zed.toml` is four lines.
-[Adapters](docs/design/adapters.md) is the whole schema.
+[Adapters](https://docs.ohmyharness.sh/reference/adapters/) is the whole schema.
 
 ### The code graph
 
@@ -572,9 +572,9 @@ whether anything reads it. That gap is what `doctor` closes.
 | | |
 |---|---|
 | **Memory** | mostly [built](https://docs.ohmyharness.sh/reference/commands/#omh-memory-) — the store, its schemas, retrieval and `remember` / `recall` as MCP tools all ship. One store per repo, shared by its sessions, never committed: the committed layer and its promotion gate were removed in 0.14. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
-| **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
+| **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](https://docs.ohmyharness.sh/concepts/trust/#measure-the-cost-argue-the-benefit). |
 | **`sbx` backend** | the spike ran (against `sbx` 0.39.0) and the backend was rewritten from what it measured — image delivery, the stage-and-symlink model for file mounts and guest paths, label-free session reuse. It is **opt-in** (`runtime = "sbx"`), and `auto` never picks it. What remains is the full live `omh doctor --harness claude` acceptance and a doctor row for its setup prerequisites; Docker is still the only end-to-end-verified runtime. |
-| **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](docs/design/decisions.md) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |
+| **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](https://docs.ohmyharness.sh/project/decisions/) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |
 | **`--dry-run` everywhere** | it runs everything and writes nothing on the commands that can answer it. `init` and the session verbs refuse the flag instead — each has to compute what it *would* do, and a preview that guessed would be worse than none. |
 | **Other harnesses** | `opencode`, `omp` and `codex` pass `doctor`, but only `claude` has been driven for real work. Codex's hooks and transcripts were measured against a stub model, not a logged-in session. Codex's own sandbox cannot start inside omh's container, so omh turns it off and the container is the sandbox, as it is for every harness. |
 
@@ -597,7 +597,7 @@ $ omh doctor                       # the only thing that verifies an adapter
 
 Two rules do most of the work, and [`CONTRIBUTING.md`](.github/CONTRIBUTING.md)
 has the rest with the invariant list. To propose something for the base set,
-[what an entry has to say](docs/design/base-set.md#proposing-an-entry) is the
+[what an entry has to say](https://docs.ohmyharness.sh/reference/base-set/#proposing-an-entry) is the
 bar — four fields, enforced by the build rather than by review. **[TDD,
 always](.github/CONTRIBUTING.md#tdd-always)** — a green suite is not evidence on
 its own, so a bug fix's test goes red before the fix lands. And **adapters
@@ -617,7 +617,7 @@ depth.
 
 Read the [design pages](https://docs.ohmyharness.sh/#understanding-omh) before changing
 architecture — most record something that was tried and cost something, and
-[Risks](docs/design/risks.md) states plainly what is still weak.
+[Risks](https://docs.ohmyharness.sh/concepts/risks/) states plainly what is still weak.
 
 ## Licence
 

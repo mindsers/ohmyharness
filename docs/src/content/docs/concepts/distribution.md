@@ -1,6 +1,9 @@
-# Why a distribution
+---
+title: Why a distribution
+description: The thesis, why not an app store, and who else is in this space.
+---
 
-**Status: an argument, not a system.** This page says what kind of thing omh is and why that shape was chosen. Where it counts what ships, [the base set](base-set.md) is the source of truth — [the roadmap](roadmap.md) is what is planned, and [risks](risks.md) is what is still weak.
+**Status: an argument, not a system.** This page says what kind of thing omh is and why that shape was chosen. Where it counts what ships, [the base set](/reference/base-set/) is the source of truth — [the roadmap](/project/roadmap/) is what is planned, and [risks](/concepts/risks/) is what is still weak.
 
 The single most useful thing to understand about omh: it is a **distribution**.
 Not a framework, not an abstraction layer, not a marketplace.
@@ -79,7 +82,7 @@ is isolation.
 
 There is no benchmark coming to fix that, and pretending otherwise would be its
 own kind of dishonesty — see
-[measure the cost, argue the benefit](trust.md#measure-the-cost-argue-the-benefit).
+[measure the cost, argue the benefit](/concepts/trust/#measure-the-cost-argue-the-benefit).
 What closes the gap is the ordinary work of a distribution: more entries that
 earn their place, each with stated criteria, a measured cost, and a one-line
 way to remove it.
@@ -97,7 +100,7 @@ writing it down.
   as the catalog churns, so the base set is versioned (`2026.08`) and re-cutting
   it marks every carried-over measurement for re-affirmation.
 - **Curation is a recurring commitment**, which is the honest reason a solo
-  distribution is hard. See [risks](risks.md).
+  distribution is hard. See [risks](/concepts/risks/).
 - **The opinion must be escapable.** A distribution whose opinion cannot be
-  overridden is not trustworthy — hence [`omh eject`](trust.md), and hence
+  overridden is not trustworthy — hence [`omh eject`](/concepts/trust/), and hence
   runtime backends staying plural even when one is clearly better.

@@ -42,7 +42,7 @@ import = "$HOME/.config/opencode/commands"
 # https://opencode.ai/docs/agents/ read 2026-08-12.
 #
 # omh declared none here and dropped them at every launch, which cost opencode
-# users a feature they had — the capability floor `docs/design/decisions.md`
+# users a feature they had — the capability floor the decisions page
 # calls out. That the mount lands is checked by `omh doctor`; that opencode
 # reads what is in it is a claim about external software, and the frontmatter
 # it accepts is *not* the same as Claude's — see `docs/design/profile.md`.

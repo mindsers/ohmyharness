@@ -35,7 +35,7 @@ It is **not** a fact store keyed by topic, not a conversation log, and not a
 replacement for `AGENTS.md`. `AGENTS.md` keeps the imperatives; the graph holds
 what a question can reach.
 
-The honest one-line case, since [`distribution.md`](distribution.md) demands one:
+The honest one-line case, since [`distribution.md`](https://docs.ohmyharness.sh/concepts/distribution/) demands one:
 against an agent with `grep`, this wins on **cost, latency and growth — not
 accuracy** — and it is the only way to keep what a removed session learned.
 
@@ -316,7 +316,7 @@ drops from [iwe's 14 tools](memory-m0.md#7-the-per-session-tool-tax-measured) to
 front both graphs.
 
 The cost, stated so it can be revisited: it puts omh **in the request path**, and
-it edges toward the abstraction layer [`distribution.md`](distribution.md) says
+it edges toward the abstraction layer [`distribution.md`](https://docs.ohmyharness.sh/concepts/distribution/) says
 omh is not. The defence is that a proxy adding provenance is not a knowledge
 graph. **If that defence stops holding, this is the first thing to cut.**
 
@@ -397,7 +397,7 @@ removed s03 (2 commits, merged)
 
 ## 13. Measurement
 
-[`base-set.md`](base-set.md) requires a measured cost, a stated benefit,
+[`base-set.md`](https://docs.ohmyharness.sh/reference/base-set/) requires a measured cost, a stated benefit,
 alternatives, and a removal command before this ships as an entry. The removal
 command is `omh set memory off`; the alternatives are in
 [the survey](memory-rationale.md#survey-what-already-exists).
@@ -606,4 +606,4 @@ recorded so they are not rediscovered.
    stays open, and the obvious fix was measured to fail.
 4. Whether the surprise trigger produces enough notes to matter — [§13](#13-measurement).
 5. Whether a cheap model should write while a strong one reads. Not actionable
-   while omh [does not choose your model](decisions.md#decisions-deliberately-not-made).
+   while omh [does not choose your model](https://docs.ohmyharness.sh/project/decisions/#decisions-deliberately-not-made).

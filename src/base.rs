@@ -1201,7 +1201,7 @@ mod tests {
         Manifest::load_dir(Path::new(BUNDLED)).expect("bundled base manifest")
     }
 
-    /// `docs/design/distribution.md` says every base-set entry states what it
+    /// The distribution page says every base-set entry states what it
     /// costs, what it buys, what was considered instead, and how to remove it —
     /// and that anything unable to fill in all four is taste pretending to be
     /// curation.

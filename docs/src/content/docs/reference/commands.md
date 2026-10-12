@@ -396,7 +396,7 @@ taken *and how*, and one predating the current base-set version is marked stale
 — so re-cutting the base set puts every carried-over number up for
 re-affirmation. The `because` line is a judgment you are free to disagree with —
 see
-[measure the cost, argue the benefit](https://github.com/mindsers/ohmyharness/blob/main/docs/design/trust.md#measure-the-cost-argue-the-benefit).
+[measure the cost, argue the benefit](/concepts/trust/#measure-the-cost-argue-the-benefit).
 
 ### Seven answers, because authorship differs
 
