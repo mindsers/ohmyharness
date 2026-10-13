@@ -488,15 +488,16 @@ sandbox whether it is there, and still holds the hook back by name if it is not.
 Keyed `"<stack>/<provide>"`; [Stacks](/reference/stacks/) has what a provide is
 and how its condition is read.
 
-**Nothing asks again after the first `init`.** `init` refuses a repo that is
-already set up, and `omh upgrade` refreshes the catalogue and rebuilds the
-images without re-reading the conditions. So a table written in April and a
-`yarn.lock` swapped for a `pnpm-lock.yaml` in May disagree, and the table
-wins: the image still has yarn. What tells you is a hook — `pnpm` does not
-resolve, so the hook that needs it is
-[held back by name](#hooks-your-sandbox-cannot-run). The fix is to edit the
-table: take out the entry that stopped being true and add the one that
-started.
+**A launch does not ask again; `omh upgrade` does.** So a table written in
+April and a `yarn.lock` swapped for a `pnpm-lock.yaml` in May disagree until
+something looks, and until then the table wins: the image still has yarn. What
+tells you is a hook — `pnpm` does not resolve, so the hook that needs it is
+[held back by name](#hooks-your-sandbox-cannot-run).
+[`omh upgrade`](/reference/commands/#omh-upgrade) is what looks. It asks the
+sandbox the same conditions `init` did, takes out the entry that stopped being
+true, adds the one that started, and builds from the result — leaving every
+`false` where it is, and changing nothing for a condition that could not
+answer.
 
 These layer like every other setting, so a provide you want left out on **your**
 machine belongs in `settings.local.toml`, where it says nothing to anyone else —

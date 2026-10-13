@@ -1397,7 +1397,8 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("docs/src/content/docs/reference/adapters.md", 1),
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
         // then `omh s` and `omh s01 rm` in the landed-branch block
-        ("docs/src/content/docs/reference/commands.md", 145),
+        // + `omh upgrade` above what a second look printed
+        ("docs/src/content/docs/reference/commands.md", 146),
         ("docs/src/content/docs/reference/configuration.md", 47), // + `omh use hooks tdd-guard`
         ("docs/src/content/docs/reference/memory.md", 1),
     ]

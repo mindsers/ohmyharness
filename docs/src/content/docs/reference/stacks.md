@@ -106,7 +106,7 @@ A provide's `when` is shell, and its exit code is read three ways:
 |---|---|
 | `0` | the provide applies |
 | `1` | it does not |
-| anything else | the condition could not answer. `omh init` reports the provide by name with the code, and does not apply it |
+| anything else | the condition could not answer. The provide is reported by name with the code, and nothing changes for it: one that was not recorded is not applied, and one that was is left as it was |
 
 Two values would not do. *False* and *broken* both come back non-zero, and a
 condition that could not run is not a reason to act either way. The split is
@@ -124,10 +124,10 @@ layer exists, and it can read the repo and cannot write to it.
 ecosystem needs is to read a field: `packageManager` in `package.json` is how a
 repo declares pnpm, and no "does this file exist" can see it.
 
-What applied is written to `[provision]` in the repo's committed settings, and
-nothing asks again —
+What applied is written to `[provision]` in the repo's committed settings. A
+launch does not ask again; `omh upgrade` does —
 [Configuration](/reference/configuration/#provision--what-your-sandbox-is-built-with)
-has what that table is and how to correct it.
+has what that table is.
 
 ## When a provide is wrong
 
