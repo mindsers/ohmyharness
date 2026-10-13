@@ -122,10 +122,11 @@ pub fn key(stack: &str, provide: &str) -> String {
 ///   refusal, because a refusal it invented would be indistinguishable in a
 ///   committed file from one somebody made.
 /// - **A `false` is never touched.** It can only have been typed, so it is a
-///   decision, and re-running `init` is not consent to discard it.
+///   decision, and asking the sandbox again is not consent to discard it.
 /// - **A `true` that no longer applies is removed**, not kept and not flipped.
-///   The table describes what is true now, which is what makes re-running
-///   `init` the honest fix for a `yarn.lock` swapped for a `pnpm-lock.yaml`.
+///   The table describes what is true now, which is what makes asking again
+///   — `omh upgrade` does — the honest fix for a `yarn.lock` swapped for a
+///   `pnpm-lock.yaml`.
 ///
 /// Takes the **shared layer's own table**, never the three-layer resolution. A
 /// `false` in `settings.local.toml` is one laptop's decision; reading it here
@@ -144,6 +145,109 @@ pub fn reconcile(
         out.entry(key.clone()).or_insert(true);
     }
     out
+}
+
+/// A provide whose condition could not answer, and what became of its entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unanswered {
+    pub provide: String,
+    /// The condition's exit code, when it could be read.
+    pub exit: Option<i32>,
+    /// Whether the table said `true` for it going in — and therefore still
+    /// does. `false` means there was nothing to keep, and it is not applied.
+    pub kept: bool,
+}
+
+impl Unanswered {
+    /// The line a report says it with. One wording, so `init` and `upgrade`
+    /// cannot describe one event two ways.
+    pub fn says(&self) -> String {
+        format!(
+            "{}'s condition could not answer{} — {}",
+            self.provide,
+            self.exit
+                .map(|c| format!(" (exit {c})"))
+                .unwrap_or_default(),
+            if self.kept {
+                "left as it was"
+            } else {
+                "not applied"
+            }
+        )
+    }
+}
+
+/// What asking the sandbox did to the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reread {
+    /// The provides to hand [`reconcile`]: every one that applies, and every
+    /// one that could not answer and was recorded `true`.
+    pub standing: std::collections::BTreeSet<String>,
+    /// The table that results.
+    pub table: std::collections::BTreeMap<String, bool>,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub unanswered: Vec<Unanswered>,
+}
+
+/// The table after the sandbox has been asked, and what that changed.
+///
+/// [`reconcile`] with one rule added, and it is the rule that makes a *second*
+/// look safe: **a condition that could not answer changes nothing.** Handed to
+/// `reconcile` as it stands, a provide whose condition could not answer is
+/// simply not in the set that fired, and `reconcile` drops every `true` it is
+/// not told about — so a `package.json` caught mid-edit, which `jq` cannot
+/// parse, would take a package manager declared in it out of a committed file
+/// and out of the next image. Measured with the stack omh ships: `jq` exits 5,
+/// and all three of its package managers could not answer.
+///
+/// On a first look there is no entry to lose and the two agree. On every look
+/// after it, *could not tell* has to mean what it means everywhere else here.
+///
+/// A provide nobody asked about is a different thing and is removed as before:
+/// its stack is no longer one this repo is, and that is an answer.
+pub fn reread(
+    shared: &std::collections::BTreeMap<String, bool>,
+    verdicts: &[(String, Verdict)],
+) -> Reread {
+    let recorded = |key: &str| shared.get(key) == Some(&true);
+    let mut standing = std::collections::BTreeSet::new();
+    let mut unanswered = Vec::new();
+    for (key, verdict) in verdicts {
+        match verdict {
+            Verdict::Applies => {
+                standing.insert(key.clone());
+            }
+            Verdict::DoesNot => {}
+            Verdict::CouldNotAnswer(exit) => {
+                if recorded(key) {
+                    standing.insert(key.clone());
+                }
+                unanswered.push(Unanswered {
+                    provide: key.clone(),
+                    exit: *exit,
+                    kept: recorded(key),
+                });
+            }
+        }
+    }
+    let table = reconcile(shared, &standing);
+    let on = |t: &std::collections::BTreeMap<String, bool>, key: &str| t.get(key) == Some(&true);
+    Reread {
+        added: table
+            .keys()
+            .filter(|k| on(&table, k) && !on(shared, k))
+            .cloned()
+            .collect(),
+        removed: shared
+            .keys()
+            .filter(|k| on(shared, k) && !on(&table, k))
+            .cloned()
+            .collect(),
+        standing,
+        table,
+        unanswered,
+    }
 }
 
 /// What a predicate answered.
@@ -1009,6 +1113,104 @@ because = "cargo is how a rust project is built and tested"
     fn nothing_is_invented_for_a_provide_that_never_fired() {
         let out = reconcile(&shared(&[]), &fired(&[]));
         assert!(out.is_empty(), "invented: {out:?}");
+    }
+
+    // ── a second look ───────────────────────────────────────────────────────
+
+    fn said(verdicts: &[(&str, Verdict)]) -> Vec<(String, Verdict)> {
+        verdicts
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    /// The whole of what a second look may do to a table, one entry for each
+    /// way an entry can meet an answer.
+    #[test]
+    fn a_second_look_adds_what_applies_and_removes_what_stopped() {
+        let before = shared(&[("node/yarn", true), ("node/runtime", true)]);
+        let look = reread(
+            &before,
+            &said(&[
+                ("node/runtime", Verdict::Applies),
+                ("node/yarn", Verdict::DoesNot),
+                ("node/pnpm", Verdict::Applies),
+                ("node/bun", Verdict::DoesNot),
+            ]),
+        );
+        assert_eq!(
+            look.table,
+            shared(&[("node/pnpm", true), ("node/runtime", true)])
+        );
+        assert_eq!(look.added, ["node/pnpm"]);
+        assert_eq!(look.removed, ["node/yarn"]);
+        assert!(look.unanswered.is_empty());
+    }
+
+    /// **A condition that could not answer changes nothing**, in either
+    /// direction: an entry it would have removed stays, and one it would have
+    /// added does not arrive.
+    ///
+    /// This is the rule `reconcile` alone does not have. Fed only what
+    /// applied, it drops `node/pnpm` here — a `true` nobody told it about — and
+    /// a `package.json` that `jq` could not parse for one run takes a package
+    /// manager declared in it out of a committed file.
+    #[test]
+    fn a_condition_that_could_not_answer_leaves_its_entry_as_it_was() {
+        let before = shared(&[("node/pnpm", true)]);
+        let look = reread(
+            &before,
+            &said(&[
+                ("node/pnpm", Verdict::CouldNotAnswer(Some(2))),
+                ("node/bun", Verdict::CouldNotAnswer(None)),
+            ]),
+        );
+        assert_eq!(look.table, before, "nothing removed, nothing added");
+        assert!(look.added.is_empty() && look.removed.is_empty());
+        assert_eq!(
+            look.unanswered,
+            [
+                Unanswered {
+                    provide: "node/pnpm".into(),
+                    exit: Some(2),
+                    kept: true
+                },
+                Unanswered {
+                    provide: "node/bun".into(),
+                    exit: None,
+                    kept: false
+                },
+            ],
+            "and both are named, with whether there was anything to keep"
+        );
+    }
+
+    /// A `false` is a decision, whatever the sandbox says about it now — and
+    /// it is not reported as a change, because it is not one.
+    #[test]
+    fn a_second_look_never_touches_a_false() {
+        let before = shared(&[("rust/linker", false)]);
+        for verdict in [
+            Verdict::Applies,
+            Verdict::DoesNot,
+            Verdict::CouldNotAnswer(Some(2)),
+        ] {
+            let look = reread(&before, &said(&[("rust/linker", verdict.clone())]));
+            assert_eq!(look.table, before, "after {verdict:?}");
+            assert!(
+                look.added.is_empty() && look.removed.is_empty(),
+                "after {verdict:?}: {look:?}"
+            );
+        }
+    }
+
+    /// A provide nobody asked about is not one that could not answer. Its
+    /// stack is no longer one this repo is, and its entry goes.
+    #[test]
+    fn a_provide_whose_stack_is_gone_loses_its_entry_on_a_second_look() {
+        let look = reread(&shared(&[("rust/toolchain", true)]), &[]);
+        assert!(look.table.is_empty(), "{look:?}");
+        assert_eq!(look.removed, ["rust/toolchain"]);
     }
 
     // ── predicates ──────────────────────────────────────────────────────────

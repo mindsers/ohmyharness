@@ -2,18 +2,19 @@
 //!
 //! `init` sets a repo up once; `upgrade` applies a newly-installed omh to a
 //! machine that already ran it: it refreshes the managed catalogue from this
-//! binary (keeping edits as `.yours`), rebuilds the images whose recipe moved,
-//! reaps the superseded ones, advances the `seeded-by` stamp, and names any
-//! session still running on an old image.
+//! binary (keeping edits as `.yours`), asks the sandbox again which of this
+//! repo's provides apply, rebuilds the images whose recipe moved, reaps the
+//! superseded ones, advances the `seeded-by` stamp, and names any session still
+//! running on an old image.
 
 use crate::adapter::Adapter;
-use crate::cmd::init::{refresh_catalogue, sandbox, SEEDED_BY};
+use crate::cmd::init::{ask_conditions, record_resolution, refresh_catalogue, sandbox, SEEDED_BY};
 use crate::image::{self, Root};
 use crate::profile::Paths;
-use crate::report::{self, Outcome, StaleImage, StaleSession};
-use crate::{out, runtime, session};
+use crate::report::{self, Outcome, Reprovisioned, StaleImage, StaleSession};
+use crate::{config, out, runtime, session, stack};
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Entry point. Discovers `Paths` itself — the dispatch hands it only the cwd,
@@ -22,9 +23,10 @@ use std::path::Path;
 /// The counterpart to `omh init`, keyed on the same `seeded-by` stamp: `init`
 /// runs when a repo is *not* set up, `upgrade` when it *is*. It refreshes the
 /// managed catalogue from this binary (a pin that moved is what moves a tag),
-/// rebuilds the base, harness and this repo's stack images whose recipe moved,
-/// and advances the stamp so the drift row goes quiet. A dry run decides all of
-/// that and reports it, but builds, refreshes and stamps nothing.
+/// asks the sandbox again which provides apply, rebuilds the base, harness and
+/// this repo's stack images whose recipe moved, and advances the stamp so the
+/// drift row goes quiet. A dry run decides all of that and reports it, but
+/// builds, refreshes, records and stamps nothing.
 pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     // Symmetric with `init`'s refusal: upgrade updates a repo already set up,
@@ -38,7 +40,6 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         runtime::installed(p)
     })?;
     let ca = image::ca_for(&paths)?;
-    let (_own, repo) = crate::cmd::session::resolved(&paths)?;
 
     // Refresh first — moving the pins is what moves the tags. A dry run reads
     // the catalogue as it stands and writes nothing.
@@ -62,6 +63,24 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
     } else {
         Adapter::load_dir(&paths.adapters())?
     };
+
+    // Ask again which provides apply, before anything reads the table — the
+    // recipe every image below is classified and built from comes out of it.
+    // After the refresh, so on a real run a stack omh just shipped a fix to is
+    // the one asked. A dry run reads the stacks on disk, as the classification
+    // below does.
+    let (provision, table) = reprovision(&paths, &backend, ca.as_ref(), &adapters, dry_run, ctx)?;
+    let (_own, mut repo) = crate::cmd::session::resolved(&paths)?;
+    if let Some(table) = table {
+        // A dry run wrote nothing, so the resolution on disk is still the old
+        // one. Classify against the table a real run would have written, as
+        // the layers resolve it — the laptop's own file over the committed one
+        // — or the preview reports `current` for a stack image a real run
+        // rebuilds.
+        let mut would_be = table;
+        would_be.extend(config::read_provision(&paths, config::Layer::Local)?);
+        repo.provision = would_be;
+    }
     let mut current: BTreeSet<String> = BTreeSet::new();
     current.insert(image::base_tag(ca.as_ref().map(Root::pem)));
     let mut harnesses = Vec::new();
@@ -137,6 +156,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
     }
 
     ctx.say(&report::Upgraded {
+        provision: Some(provision),
         harnesses,
         refreshed,
         stale_sessions,
@@ -144,6 +164,101 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         dry_run,
     });
     Ok(())
+}
+
+/// Ask the sandbox again which of this repo's provides apply, and record it.
+///
+/// `init` asks once and writes the answer into the repo's committed
+/// `[provision]`, which every launch then builds from without asking. That is
+/// right for a launch and wrong for ever: a `yarn.lock` swapped for a
+/// `pnpm-lock.yaml` leaves the table describing a repo that no longer exists,
+/// and `init`, being one-time, refuses to look again. This is the look.
+///
+/// The second value is the table a **dry run** would have written, and `None`
+/// otherwise — after a real run the file holds it, and after a question that
+/// could not be put there is no new table at all.
+///
+/// The conditions are asked in a harness image, as `init` asks them, and any
+/// harness's will do: the ones omh ships read the repo with the base image's
+/// tools, and nothing of the harness. One that is already built is preferred. A real run with none
+/// builds the first it can, which the loop after this would have built anyway;
+/// a dry run with none has nowhere to ask, and says so rather than guessing.
+fn reprovision(
+    paths: &Paths,
+    backend: &runtime::Backend,
+    ca: Option<&Root>,
+    adapters: &[Adapter],
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<(Reprovisioned, Option<BTreeMap<String, bool>>)> {
+    let pem = ca.map(Root::pem);
+    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let detected = stack::detected(&defs, &paths.repo);
+    let asking = detected.iter().any(|d| !d.provides.is_empty());
+
+    // Nothing to ask is asked of nothing: `ask_conditions` starts no container
+    // for it, so there is no image to find or build first.
+    let tag = if !asking {
+        String::new()
+    } else if let Some(built) = adapters
+        .iter()
+        .map(|a| image::tag_for(a, pem))
+        .find(|tag| image::exists(backend, tag))
+    {
+        built
+    } else if dry_run {
+        return Ok((
+            Reprovisioned::Unasked(
+                "no harness image is built to ask in, and a dry run builds none".into(),
+            ),
+            None,
+        ));
+    } else {
+        let Some(adapter) = adapters.iter().find(|a| a.version.is_some()) else {
+            return Ok((
+                Reprovisioned::Unasked(
+                    "no harness image is built to ask in, and no harness here pins a \
+                     version omh can build one from"
+                        .into(),
+                ),
+                None,
+            ));
+        };
+        ctx.progress(&format!(
+            "building {} to ask what this repo needs…",
+            image::tag_for(adapter, pem)
+        ));
+        image::ensure(backend, adapter, pem)?;
+        image::tag_for(adapter, pem)
+    };
+
+    let asked = ask_conditions(backend, &tag, &paths.repo, &detected);
+    if let Some(why) = asked.unrecordable() {
+        return Ok((Reprovisioned::Unasked(why), None));
+    }
+
+    let shared = config::read_provision(paths, config::Layer::Shared)?;
+    let look = stack::reread(&shared, &asked.verdicts());
+    let would_be = if dry_run {
+        Some(look.table.clone())
+    } else {
+        // Only when it differs. The write goes through a document editor and
+        // keeps what somebody typed around the table, but a command that
+        // touches a committed file on every run is one whose diff people stop
+        // reading.
+        if look.table != shared {
+            record_resolution(paths, &look.standing)?;
+        }
+        None
+    };
+    Ok((
+        Reprovisioned::Asked {
+            added: look.added,
+            removed: look.removed,
+            unanswered: look.unanswered,
+        },
+        would_be,
+    ))
 }
 
 /// The adapters as this binary ships them — the new pins, read without writing

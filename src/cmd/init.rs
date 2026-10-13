@@ -659,91 +659,61 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // and running it on the host during `init` is the one thing omh exists
         // to avoid.
         let detected = stack::detected(&stack_defs, &paths.repo);
-        let candidates: Vec<(String, Option<&str>)> = detected
-            .iter()
-            .flat_map(|d| {
-                d.provides
-                    .iter()
-                    .map(move |p| (stack::key(&d.name, &p.name), p.when.as_deref()))
-            })
-            .collect();
 
         {
             // No `if !candidates.is_empty()` guard. A repo with nothing to ask
             // has still been answered — the answer is "nothing applies" — and
             // skipping would leave a resolution recorded when this repo *was* a
             // rust project asserting `rust/toolchain = true` for ever.
-            // Why the probe itself failed, when it did. Kept apart from
-            // `hooks_unchecked` so the specific reason outranks the generic
-            // one derived below: *the sandbox could not be asked (exit 3)*
-            // says what to go and fix, and *answered for 0 of 2 conditions*
-            // is the same event counted from the other end.
-            let mut probe_problem: Option<String> = None;
-            let answered = if candidates.is_empty() {
-                Vec::new()
-            } else {
-                match backend.output(&stack::predicate_args(
-                    &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
-                    &paths.repo,
-                    &stack::predicate_script(&candidates),
-                )) {
-                    // A container that ran and failed is not an answer. Only
-                    // `Err` was handled before, so `docker run` failing — image
-                    // gone, mount refused, no space — produced empty stdout,
-                    // read as "nothing applies", and `init` went on to print
-                    // its summary with nothing said. The `Err` arm's own
-                    // comment forbids exactly that.
-                    Ok(out) if !out.status.success() => {
-                        summary.problems.push(format!(
-                            "the sandbox could not be asked ({}) — nothing recorded",
-                            out.status
-                        ));
-                        probe_problem =
-                            Some(format!("the sandbox could not be asked ({})", out.status));
-                        for line in String::from_utf8_lossy(&out.stderr).lines().take(3) {
-                            summary.problems.push(line.to_string());
-                        }
-                        Vec::new()
-                    }
-                    Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
-                    Err(e) => {
-                        // Non-fatal, and never fatal *silently*: `init` sets a
-                        // repo up, and failing that over a diagnostic would be
-                        // the tail wagging the dog — but saying nothing would
-                        // let somebody believe the sandbox had been checked.
-                        summary.problems.push(format!(
-                            "could not ask the sandbox ({e}) — nothing recorded"
-                        ));
-                        probe_problem = Some(format!("could not ask the sandbox ({e})"));
-                        Vec::new()
-                    }
-                }
-            };
-
-            for a in answered.iter().filter(|a| !a.ok) {
-                if let stack::Verdict::CouldNotAnswer(code) = stack::verdict(a) {
-                    summary.problems.push(format!(
-                        "{}'s condition could not answer{} — not applied",
-                        a.name,
-                        code.map(|c| format!(" (exit {c})")).unwrap_or_default()
-                    ));
-                }
-            }
+            let asked = ask_conditions(
+                &backend,
+                &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+                &paths.repo,
+                &detected,
+            );
+            summary.problems.extend(asked.said.iter().cloned());
 
             // Recorded only when something was actually measured. `reconcile`
             // drops every `true` it is not told about, so writing an empty
             // answer would erase the repo's resolution rather than leave it be.
-            if fired_from(candidates.len(), &answered).is_none() {
-                hooks = report::Hooks::Unchecked(probe_problem.unwrap_or_else(|| {
-                    format!(
-                        "the sandbox answered for {} of {} conditions",
-                        answered.len(),
-                        candidates.len()
-                    )
-                }));
+            //
+            // And read against what is already recorded, because this is not
+            // always a first look: the stamp `init` refuses on is per checkout,
+            // so a teammate's `init` meets the table yours committed.
+            let look = match asked.unrecordable() {
+                Some(why) => {
+                    hooks = report::Hooks::Unchecked(why);
+                    None
+                }
+                None => Some(stack::reread(
+                    &config::read_provision(&paths, config::Layer::Shared)?,
+                    &asked.verdicts(),
+                )),
+            };
+            match &look {
+                Some(look) => summary
+                    .problems
+                    .extend(look.unanswered.iter().map(stack::Unanswered::says)),
+                // Nothing was recorded, so nothing was kept or dropped: each is
+                // simply not applied by this run.
+                None => summary
+                    .problems
+                    .extend(asked.verdicts().into_iter().filter_map(|(provide, v)| {
+                        match v {
+                            stack::Verdict::CouldNotAnswer(exit) => Some(
+                                stack::Unanswered {
+                                    provide,
+                                    exit,
+                                    kept: false,
+                                }
+                                .says(),
+                            ),
+                            _ => None,
+                        }
+                    })),
             }
-            if let Some(fired) = fired_from(candidates.len(), &answered) {
-                let recorded = record_resolution(&paths, &fired)?;
+            if let Some(look) = look {
+                let recorded = record_resolution(&paths, &look.standing)?;
                 for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
                     summary.provisioned.push(key.clone());
                 }
@@ -1208,6 +1178,117 @@ pub(crate) fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<
     Ok(true)
 }
 
+/// What the sandbox said when it was asked which provides apply here.
+pub(crate) struct Asked {
+    /// How many provides there were to ask about. None is an answer.
+    pub asked: usize,
+    pub answered: Vec<doctor::Outcome>,
+    /// Why the question could not be put, when it could not.
+    pub problem: Option<String>,
+    /// What to say about that in a report: the reason, and the first lines
+    /// the runtime wrote.
+    pub said: Vec<String>,
+}
+
+impl Asked {
+    pub(crate) fn verdicts(&self) -> Vec<(String, stack::Verdict)> {
+        self.answered
+            .iter()
+            .map(|o| (o.name.clone(), stack::verdict(o)))
+            .collect()
+    }
+
+    /// Why nothing may be recorded from this, when nothing may: the question
+    /// could not be put, or the answer stopped short of it. See [`fired_from`].
+    pub(crate) fn unrecordable(&self) -> Option<String> {
+        if fired_from(self.asked, &self.answered).is_some() {
+            return None;
+        }
+        Some(self.problem.clone().unwrap_or_else(|| {
+            format!(
+                "the sandbox answered for {} of {} conditions",
+                self.answered.len(),
+                self.asked
+            )
+        }))
+    }
+}
+
+/// Ask the sandbox which of these stacks' provides apply to this repo.
+///
+/// One function, because two commands ask — `init`, and `upgrade` when it
+/// looks again — and a second copy of what follows is a second place for a
+/// runtime's failure to be read as an answer. It never fails: a question that
+/// could not be put comes back as `problem`, and what the caller does about
+/// that is the caller's.
+pub(crate) fn ask_conditions(
+    backend: &runtime::Backend,
+    tag: &str,
+    repo: &std::path::Path,
+    detected: &[&stack::Definition],
+) -> Asked {
+    let candidates: Vec<(String, Option<&str>)> = detected
+        .iter()
+        .flat_map(|d| {
+            d.provides
+                .iter()
+                .map(move |p| (stack::key(&d.name, &p.name), p.when.as_deref()))
+        })
+        .collect();
+    // Why the probe itself failed, when it did. Kept apart from the count of
+    // what was answered so the specific reason outranks the generic one:
+    // *the sandbox could not be asked (exit 3)* says what to go and fix, and
+    // *answered for 0 of 2 conditions* is the same event counted from the
+    // other end.
+    let mut problem: Option<String> = None;
+    let mut said: Vec<String> = Vec::new();
+    let answered = if candidates.is_empty() {
+        Vec::new()
+    } else {
+        match backend.output(&stack::predicate_args(
+            tag,
+            repo,
+            &stack::predicate_script(&candidates),
+        )) {
+            // A container that ran and failed is not an answer. Only
+            // `Err` was handled before, so `docker run` failing — image
+            // gone, mount refused, no space — produced empty stdout,
+            // read as "nothing applies", and `init` went on to print
+            // its summary with nothing said. The `Err` arm's own
+            // comment forbids exactly that.
+            Ok(out) if !out.status.success() => {
+                said.push(format!(
+                    "the sandbox could not be asked ({}) — nothing recorded",
+                    out.status
+                ));
+                problem = Some(format!("the sandbox could not be asked ({})", out.status));
+                for line in String::from_utf8_lossy(&out.stderr).lines().take(3) {
+                    said.push(line.to_string());
+                }
+                Vec::new()
+            }
+            Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
+            Err(e) => {
+                // Non-fatal, and never fatal *silently*: `init` sets a
+                // repo up, and failing that over a diagnostic would be
+                // the tail wagging the dog — but saying nothing would
+                // let somebody believe the sandbox had been checked.
+                said.push(format!(
+                    "could not ask the sandbox ({e}) — nothing recorded"
+                ));
+                problem = Some(format!("could not ask the sandbox ({e})"));
+                Vec::new()
+            }
+        }
+    };
+    Asked {
+        asked: candidates.len(),
+        answered,
+        problem,
+        said,
+    }
+}
+
 /// Which provides applied, from what the predicates answered.
 ///
 /// `None` when nothing was answered — the container never ran, the runtime
@@ -1217,9 +1298,12 @@ pub(crate) fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<
 /// a repo's resolution and leave the next launch provisioning nothing.
 ///
 /// A provide that could not answer is simply absent from the set, which is the
-/// safe direction — it is not installed, so it is not recorded, so its `needs`
-/// are not claimed and nothing reports a gap omh invented. Installing on a
-/// coin-flip would be silent either way.
+/// safe direction on a first look — it is not installed, so it is not recorded,
+/// so its `needs` are not claimed and nothing reports a gap omh invented.
+/// Installing on a coin-flip would be silent either way. On a later look it is
+/// not the whole answer: `stack::reread` puts back the ones the table already
+/// recorded, because a `true` dropped over a question nobody could answer is a
+/// change nobody decided.
 ///
 /// `asked` is how many provides there were to ask about, and it separates two
 /// things an empty report cannot: **nothing to ask** is an answer, **nothing
