@@ -1277,6 +1277,22 @@ fn classify_removal(stdout: &str) -> Removal {
     }
 }
 
+/// Some image of this harness that exists, whatever recipe it was built from.
+///
+/// For a caller that needs *a* sandbox rather than *the current* one: a stack's
+/// conditions read the repo with tools every build of the image has, so an
+/// image from before a pin moved answers them as well as one from after. Found
+/// by label, because the tag of an image built by an earlier omh is not one
+/// this omh can compute.
+///
+/// `None` when there is none **or when the runtime would not say** — the
+/// caller's next move is the same either way, and neither is a reason to fail.
+pub fn built_for(backend: &Backend, adapter: &Adapter) -> Option<String> {
+    let mut tags = list_tags(backend, &Kind::Harness(adapter)).ok()?;
+    tags.sort();
+    tags.into_iter().next()
+}
+
 /// Every tag of the same class as the one just built.
 fn list_tags(backend: &Backend, kind: &Kind) -> Result<Vec<String>> {
     let out = backend.output(&kind.list_args())?;

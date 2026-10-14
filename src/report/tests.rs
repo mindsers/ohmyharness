@@ -2500,6 +2500,7 @@ fn an_upgrade_names_each_harness_outcome_and_the_sessions_left_behind() {
             },
         ],
         sessions_unchecked: None,
+        provision: None,
         dry_run: false,
     };
 
@@ -2532,6 +2533,82 @@ fn an_upgrade_names_each_harness_outcome_and_the_sessions_left_behind() {
     assert_eq!(outcomes["opencode"], "current");
     assert_eq!(outcomes["codex"], "unpinned");
     assert_eq!(machine["stale"].as_array().unwrap().len(), 2);
+}
+
+/// What a second look did to `[provision]` reaches a person as one line per
+/// entry, and the three things that can happen to an entry do not read alike.
+///
+/// Nothing at all when the sandbox was asked and agreed — and never nothing
+/// when it could not be asked, which printed the same way would read as
+/// agreement.
+#[test]
+fn an_upgrade_says_what_it_did_to_the_provision_table() {
+    use super::{Reprovisioned, Upgraded};
+    use crate::stack::Unanswered;
+    let plain = out::Palette::plain();
+    let report = |provision| Upgraded {
+        provision: Some(provision),
+        ..Default::default()
+    };
+
+    let changed = report(Reprovisioned::Asked {
+        added: vec!["node/pnpm".into()],
+        removed: vec!["node/yarn".into()],
+        unanswered: vec![
+            Unanswered {
+                provide: "node/bun".into(),
+                exit: Some(2),
+                kept: true,
+            },
+            Unanswered {
+                provide: "rust/linker".into(),
+                exit: None,
+                kept: false,
+            },
+        ],
+    })
+    .human(&plain);
+    for line in [
+        "+ node/pnpm — applies here now",
+        "- node/yarn — no longer applies here",
+        "node/bun's condition could not answer (exit 2) — left as it was",
+        "rust/linker's condition could not answer — not applied",
+    ] {
+        assert!(
+            changed.lines().any(|l| l == line),
+            "`{line}` in:\n{changed}"
+        );
+    }
+
+    let agreed = report(Reprovisioned::Asked {
+        added: vec![],
+        removed: vec![],
+        unanswered: vec![],
+    });
+    assert_eq!(
+        agreed.human(&plain),
+        Upgraded::default().human(&plain),
+        "asked and agreed adds no line"
+    );
+    assert_eq!(
+        agreed.json()["provision"]["unasked"],
+        serde_json::Value::Null,
+        "and a script can tell it from a question that was never put"
+    );
+
+    let unasked = report(Reprovisioned::Unasked("exit status: 125".into()));
+    assert!(
+        unasked
+            .human(&plain)
+            .lines()
+            .any(|l| l == "[provision] left as it was — exit status: 125"),
+        "a question that could not be put is said: {}",
+        unasked.human(&plain)
+    );
+    assert_eq!(
+        unasked.json()["provision"]["unasked"],
+        serde_json::json!("exit status: 125")
+    );
 }
 
 /// A runtime that would not list what is running is reported as a check that

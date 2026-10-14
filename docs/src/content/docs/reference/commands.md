@@ -12,7 +12,7 @@ yours in the table, then follow it to its entry.
 |---|---|
 | **Set up** | |
 | [`omh init`](#omh-init) | Set this repo up, once. Decides everything, asks nothing. |
-| [`omh upgrade`](#omh-upgrade) | Apply a newer omh: refresh the catalogue, rebuild the images whose recipe moved. |
+| [`omh upgrade`](#omh-upgrade) | Apply a newer omh: refresh the catalogue, check again which provides apply, rebuild the images whose recipe moved. |
 | [`omh auth <harness>`](#omh-auth-harness---name-account---import) | Log a harness in once; repeat with `--name` for several accounts. |
 | [`omh doctor`](#omh-doctor---harness-name--d) · `d` | Check, inside a real sandbox, that a harness sees your setup. |
 | **Sessions** | |
@@ -250,7 +250,8 @@ not set up, `upgrade` when it is.
 
 ## `omh upgrade`
 
-Applies a newly-installed omh to a repo you already set up.
+Applies a newly-installed omh to a repo you already set up, and looks again at
+what the repo needs.
 
 ```
 omh upgrade
@@ -258,20 +259,75 @@ omh upgrade --dry-run      decide and report all of it, touch nothing
 ```
 
 Run it after you update omh (a `brew upgrade`, say): the new binary carries
-fresh harness version pins, and this is what makes them take effect. It:
+fresh harness version pins, and this is what makes them take effect. Run it,
+too, when the repo changes what it needs — a new lockfile, a second ecosystem —
+because it is the command that looks at that again. It:
 
 1. refreshes the managed catalogue from the binary — adapters, the base set,
    editors, stacks, hooks, markers — keeping anything you edited as `.yours`,
    just as `init` does;
-2. rebuilds every image whose recipe moved (the base, each harness, and this
+2. asks the sandbox again which of this repo's provides apply, and corrects
+   [`[provision]`](/reference/configuration/#provision--what-your-sandbox-is-built-with)
+   before it builds anything;
+3. rebuilds every image whose recipe moved (the base, each harness, and this
    repo's stack), reaps the superseded ones, and reports one word per harness —
    `rebuilt`, `current`, or `unpinned` (an adapter that pins no version, which
    omh cannot rebuild to anything reproducible);
-3. names any session still running on an image it just superseded — a relaunch
+4. names any session still running on an image it just superseded — a relaunch
    away from the new one — and advances the `seeded-by` stamp, so
    `omh doctor`'s drift row goes quiet.
 
+A repo that has swapped a `yarn.lock` for a `pnpm-lock.yaml` since `init`:
+
+```console
+$ omh upgrade
+```
+
+```text title="omh upgrade"
+refreshed claude, codex, omp, opencode
++ node/pnpm — applies here now
+- node/yarn — no longer applies here
+  rebuilt  claude
+  rebuilt  codex
+  rebuilt  omp
+  rebuilt  opencode
+```
+
+**The `+` and `-` lines are edits to `[provision]`** in your committed
+settings, so they are in `git diff` afterwards and reach your team with the next
+push. When the table is already right there are no such lines, and the file is
+not touched.
+
+**Four things a second look never does:**
+
+- **It never touches a `false`.** That can only have been typed, so it is a
+  decision, and it outlives a condition that now applies.
+- **It never reads "could not answer" as "no".** A condition that exits with
+  anything but 0 or 1 changes nothing: the entry stays as it was, and the line
+  names it with the code. A `package.json` caught half-written, in a repo that
+  declares pnpm there, gets `node/pnpm's condition could not answer (exit 5) —
+  left as it was`, and keeps pnpm.
+- **It never records a silence.** If the sandbox could not be asked at all, the
+  table is left exactly as it was and the report says the question was not put.
+- **It never takes an empty directory for your repo.** The conditions first
+  check that they can see the file each stack was detected by, and refuse to
+  answer when they cannot — see
+  [`the sandbox cannot see …`](/guides/troubleshooting/#the-sandbox-cannot-see--which-is-in-this-repo).
+
+**The table is written before the images are built**, because they are built
+from it. If a build then fails, the error says what had already been written:
+
+```text
+omh: `[provision]` in /Users/you/code/your-project/.omh/settings.toml had already been rewritten when this failed (+ node/pnpm, - node/yarn)
+  because failed to build omh/claude:e3e863b9c2cb4291
+```
+
 **It rebuilds, so it needs Docker; it needs no login.**
+
+**`--dry-run` decides and reports all of it and touches nothing** — it asks the
+sandbox too, which is a read, and prints the `[provision]` lines a real run
+would write. With no harness image built yet it has nowhere to ask, and says
+that instead.
 
 **It runs in a repo already set up**; in one that is not, it refuses and points
 at `omh init`.

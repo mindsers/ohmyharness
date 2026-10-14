@@ -155,6 +155,8 @@ product, not fixing a test.
 | the memory server is pointed at the paths omh mounts | it starts, finds nothing, and "0 notes" reads as an empty store |
 | a generated stub passes the same schema an agent's write does | ingestion half-populates the store while `init` reports success |
 | writing a note never rewrites its link text | the shape of the vendor's own remaining quality gap, guarded on omh's renderer. A byte comparison catches a rewrite that differs each pass; an idempotent one is caught only by asserting the link is still there, since both writes agree |
+| a condition that could not answer changes nothing in `[provision]` | read as "does not apply", a `package.json` caught mid-edit takes the package manager it declares out of a committed file and out of the next image |
+| a dry run of `upgrade` asks about the images a real run would build | classified against the table on disk, it reports `current` for a stack image the real run rebuilds |
 | `stale` never reports "cannot tell" as "still current" | it makes the command a liar rather than merely incomplete |
 | an image digest a note pins is stable across toolchains | `DefaultHasher` marks every pinned note stale on a Rust upgrade |
 | host-side git over the sandbox's repository reads the `config` omh wrote | a `commondir` file in the gitdir names another one, and a filter defined there runs on the host as the user |

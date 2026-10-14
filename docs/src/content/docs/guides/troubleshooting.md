@@ -78,6 +78,7 @@ see [Something else](#something-else).
 | What you see | What to do |
 |---|---|
 | **Building and starting a session** | |
+| `the sandbox cannot see package.json, which is in this repo` from `omh init` or `omh upgrade` | [Let the container runtime see your checkout](#the-sandbox-cannot-see--which-is-in-this-repo) |
 | `unable to get local issuer certificate`, `CERTIFICATE_VERIFY_FAILED` or `UNABLE_TO_VERIFY_LEAF_SIGNATURE` while omh builds an image | [Give omh your network's root certificate](#an-unknown-issuer-error-when-omh-builds-an-image) |
 | `up?` in `omh s`, or `omh could not tell whether the sandbox is running` | [Start the container runtime](#up-in-omh-s-or-omh-could-not-tell-whether-the-sandbox-is-running) |
 | `network omh-<repo>-<session> not found` | [A launch plan that could not run](#network-omh-repo-session-not-found) |
@@ -138,6 +139,40 @@ see [Something else](#something-else).
 ## Common failures
 
 ### Building and starting a session
+
+#### `the sandbox cannot see …, which is in this repo`
+
+```text
+[provision] left as it was — the sandbox could not be asked (exit status: 96): the sandbox cannot see package.json, which is in this repo — the repo is not mounted where its conditions run
+```
+
+**Your container runtime cannot read this checkout's path.** omh asks the
+sandbox which of a stack's provides apply with your repo mounted into it, and
+the first thing it checks there is the file the stack was detected by —
+`package.json` for node, `Cargo.toml` for rust. It was not there, so the
+container was looking at an empty directory. A remote `DOCKER_HOST` cannot see
+your files, and nor can a runtime in a VM that shares some of your directories
+with it and not this one.
+
+<div class="steps">
+
+1. Make the checkout's path visible to the container runtime — share it with
+   the VM, or work from a path the runtime already sees.
+
+2. Run `omh upgrade` again.
+
+</div>
+
+<details>
+<summary>Why omh records nothing rather than an answer</summary>
+
+Run there, every condition would have answered "does not apply", and a second
+look would have taken every provide out of your committed settings. omh records
+nothing instead. `omh init` says the same in its own words — `the sandbox could
+not be asked (exit status: 96) — nothing recorded`, followed by the line naming
+the file.
+
+</details>
 
 #### an unknown-issuer error when omh builds an image
 

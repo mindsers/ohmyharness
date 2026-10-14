@@ -160,16 +160,16 @@ A provide's `when` is shell, and its exit code is read three ways:
 |---|---|
 | `0` | the provide applies |
 | `1` | it does not |
-| anything else | the condition could not answer. `omh init` reports the provide by name with the code, and does not apply it |
+| anything else | the condition could not answer. The provide is reported by name with the code, and nothing changes for it: one that was not recorded is not applied, and one that was is left as it was |
 
 **It runs in the sandbox, with the repo mounted read-only.** Never on your
 machine. It runs in the image omh has built by then, before the stack's own
 layer exists, and it can read the repo and cannot write to it.
 
-**What applied is written to `[provision]`** in the repo's committed settings,
-and nothing asks again —
+**What applied is written to `[provision]`** in the repo's committed settings.
+A launch does not ask again; `omh upgrade` does —
 [Configuration](/reference/configuration/#provision--what-your-sandbox-is-built-with)
-has what that table is and how to correct it.
+has what that table is.
 
 <details>
 <summary>Why three answers rather than two, why shell, and why never on the host</summary>
@@ -209,7 +209,7 @@ resolve.
 <div class="cards">
 
 - [`[provision]`](/reference/configuration/#provision--what-your-sandbox-is-built-with)\
-  The table a stack's answers are written to, and how to correct it.
+  The table a stack's answers are written to, and how `omh upgrade` keeps it current.
 - [Hooks your sandbox cannot run](/reference/configuration/#hooks-your-sandbox-cannot-run)\
   What omh does when a hook needs a program the image lacks.
 - [Architecture](/concepts/architecture/)\

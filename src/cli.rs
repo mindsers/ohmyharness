@@ -264,9 +264,11 @@ pub(crate) enum Cmd {
     ///
     /// The ongoing counterpart to `omh init`, which sets a repo up once. Upgrade
     /// refreshes the managed catalogue from this binary (keeping your edits as
-    /// `.yours`), rebuilds the base, harness and this repo's stack images whose
-    /// pins moved, reaps the superseded ones, and names any session still
-    /// running on an old image. It rebuilds — so it needs Docker — but no login.
+    /// `.yours`), asks the sandbox again which of this repo's provides apply and
+    /// corrects `[provision]`, rebuilds the base, harness and this repo's stack
+    /// images whose recipe moved, reaps the superseded ones, and names any
+    /// session still running on an old image. It rebuilds — so it needs Docker
+    /// — but no login.
     Upgrade,
     /// Who put this here, and on what grounds.
     Why {
