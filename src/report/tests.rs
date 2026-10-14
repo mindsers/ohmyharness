@@ -2600,7 +2600,8 @@ fn an_upgrade_says_what_it_did_to_the_provision_table() {
     assert!(
         unasked
             .human(&plain)
-            .contains("could not ask what this repo needs now: exit status: 125"),
+            .lines()
+            .any(|l| l == "[provision] left as it was — exit status: 125"),
         "a question that could not be put is said: {}",
         unasked.human(&plain)
     );

@@ -3660,13 +3660,7 @@ impl Report for Upgraded {
             }
             Some(Reprovisioned::Unasked(why)) => s.push_str(&format!(
                 "{}\n",
-                p.paint(
-                    out::WARN,
-                    &format!(
-                        "could not ask what this repo needs now: {why} — \
-                         [provision] is as it was"
-                    )
-                )
+                p.paint(out::WARN, &format!("[provision] left as it was — {why}"))
             )),
             None => {}
         }
@@ -3722,6 +3716,7 @@ impl Report for Upgraded {
                     "unanswered": unanswered.iter().map(|one| json!({
                         "provide": one.provide,
                         "exit": one.exit,
+                        "kept": one.kept,
                     })).collect::<Vec<_>>(),
                     "unasked": null,
                 }),

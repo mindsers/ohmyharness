@@ -680,39 +680,23 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             // And read against what is already recorded, because this is not
             // always a first look: the stamp `init` refuses on is per checkout,
             // so a teammate's `init` meets the table yours committed.
-            let look = match asked.unrecordable() {
-                Some(why) => {
-                    hooks = report::Hooks::Unchecked(why);
-                    None
-                }
-                None => Some(stack::reread(
-                    &config::read_provision(&paths, config::Layer::Shared)?,
-                    &asked.verdicts(),
-                )),
-            };
-            match &look {
-                Some(look) => summary
-                    .problems
-                    .extend(look.unanswered.iter().map(stack::Unanswered::says)),
-                // Nothing was recorded, so nothing was kept or dropped: each is
-                // simply not applied by this run.
-                None => summary
-                    .problems
-                    .extend(asked.verdicts().into_iter().filter_map(|(provide, v)| {
-                        match v {
-                            stack::Verdict::CouldNotAnswer(exit) => Some(
-                                stack::Unanswered {
-                                    provide,
-                                    exit,
-                                    kept: false,
-                                }
-                                .says(),
-                            ),
-                            _ => None,
-                        }
-                    })),
+            //
+            // Read whether or not anything will be recorded from this, because
+            // what to say about a condition that could not answer depends on
+            // it: an entry the table already holds is *left as it was*, and
+            // that is true of every entry when nothing is recorded at all.
+            let look = stack::reread(
+                &config::read_provision(&paths, config::Layer::Shared)?,
+                &asked.verdicts(),
+            );
+            summary
+                .problems
+                .extend(look.unanswered.iter().map(stack::Unanswered::says));
+            let unrecordable = asked.unrecordable();
+            if let Some(why) = &unrecordable {
+                hooks = report::Hooks::Unchecked(why.clone());
             }
-            if let Some(look) = look {
+            if unrecordable.is_none() {
                 let recorded = record_resolution(&paths, &look.standing)?;
                 for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
                     summary.provisioned.push(key.clone());
@@ -1188,6 +1172,9 @@ pub(crate) struct Asked {
     /// What to say about that in a report: the reason, and the first lines
     /// the runtime wrote.
     pub said: Vec<String>,
+    /// Those lines on their own — what the runtime, or the script, said for
+    /// itself. The reason above says that it failed; this is usually why.
+    pub detail: Vec<String>,
 }
 
 impl Asked {
@@ -1196,6 +1183,17 @@ impl Asked {
             .iter()
             .map(|o| (o.name.clone(), stack::verdict(o)))
             .collect()
+    }
+
+    /// [`Asked::unrecordable`], with the first thing the runtime said for
+    /// itself. One line rather than a list, for a report that has one field to
+    /// put a reason in.
+    pub(crate) fn why_unasked(&self) -> Option<String> {
+        let why = self.unrecordable()?;
+        Some(match self.detail.first() {
+            Some(line) => format!("{why}: {line}"),
+            None => why,
+        })
     }
 
     /// Why nothing may be recorded from this, when nothing may: the question
@@ -1242,13 +1240,17 @@ pub(crate) fn ask_conditions(
     // other end.
     let mut problem: Option<String> = None;
     let mut said: Vec<String> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    // Each detected stack's marker: a file the host has just seen in the
+    // repo, which the script checks it can see too before it answers.
+    let markers: Vec<&str> = detected.iter().map(|d| d.marker.as_str()).collect();
     let answered = if candidates.is_empty() {
         Vec::new()
     } else {
         match backend.output(&stack::predicate_args(
             tag,
             repo,
-            &stack::predicate_script(&candidates),
+            &stack::predicate_script(&markers, &candidates),
         )) {
             // A container that ran and failed is not an answer. Only
             // `Err` was handled before, so `docker run` failing — image
@@ -1264,6 +1266,7 @@ pub(crate) fn ask_conditions(
                 problem = Some(format!("the sandbox could not be asked ({})", out.status));
                 for line in String::from_utf8_lossy(&out.stderr).lines().take(3) {
                     said.push(line.to_string());
+                    detail.push(line.to_string());
                 }
                 Vec::new()
             }
@@ -1286,6 +1289,7 @@ pub(crate) fn ask_conditions(
         answered,
         problem,
         said,
+        detail,
     }
 }
 
@@ -1685,7 +1689,22 @@ pub(crate) fn sandbox(
     ca: Option<crate::image::Root>,
 ) -> Result<Sandbox> {
     let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
-    let detected = stack::detected(&defs, &paths.repo);
+    sandbox_from(paths, adapter, repo, ca, &defs)
+}
+
+/// [`sandbox`], over stack definitions the caller already holds.
+///
+/// For `omh upgrade --dry-run`, which describes the sandbox a real run would
+/// build — from the stacks that run would have refreshed onto disk first, and
+/// which a dry run reads out of the binary instead.
+pub(crate) fn sandbox_from(
+    paths: &Paths,
+    adapter: &Adapter,
+    repo: &settings::RepoPolicy,
+    ca: Option<crate::image::Root>,
+    defs: &[stack::Definition],
+) -> Result<Sandbox> {
+    let detected = stack::detected(defs, &paths.repo);
     let installs: Vec<String> = installs_for(&detected, &repo.provision)
         .into_iter()
         .map(str::to_string)

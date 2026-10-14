@@ -292,6 +292,11 @@ pub fn verdict(o: &crate::doctor::Outcome) -> Verdict {
     }
 }
 
+/// What the script exits with when it cannot see the repo it was pointed at.
+/// Above 1, like every other *could not answer*, and not a code a shell or a
+/// runtime uses for anything of its own.
+pub const BLIND: i32 = 96;
+
 /// A shell script asking, for each provide, whether it applies to this repo.
 ///
 /// Emits the same `ok|fail\t<key>\t<detail>` wire format as every other probe,
@@ -304,8 +309,28 @@ pub fn verdict(o: &crate::doctor::Outcome) -> Verdict {
 /// and a truncated report read as a complete one is a defect this codebase has
 /// already paid for twice — see `main::fired_from`, which refuses a report
 /// shorter than the question it asked.
-pub fn predicate_script(candidates: &[(String, Option<&str>)]) -> String {
+///
+/// **It first checks that it can see the repo.**
+/// `markers` are files known to be in the checkout — each is how a stack was
+/// detected, on the host, a moment ago. A sandbox that cannot find one is not
+/// looking at the repo: a daemon that does not share the path it was told to
+/// mount hands the container an empty directory instead and says nothing. Run
+/// there, every `test -f` exits 1, which is a perfectly formed *does not
+/// apply* for every provide — and a second look acts on that by taking entries
+/// out of a committed file.
+///
+/// So the script refuses to answer at all, with a code and a line that names
+/// what it could not see. That is a runtime failure to whoever reads it, and
+/// nothing is recorded from one.
+pub fn predicate_script(markers: &[&str], candidates: &[(String, Option<&str>)]) -> String {
     let mut out = String::from("#!/bin/sh\n");
+    for marker in markers {
+        let m = crate::doctor::single_quote(marker);
+        out.push_str(&format!(
+            "[ -e {m} ] || {{ printf 'the sandbox cannot see %s, which is in this repo — \
+             the repo is not mounted where its conditions run\\n' {m} >&2; exit {BLIND}; }}\n"
+        ));
+    }
     for (key, when) in candidates {
         let k = crate::doctor::single_quote(key);
         match when {
@@ -610,7 +635,16 @@ pub fn unclaimed<'a>(markers: &'a [Marker], stacks: &[Definition], repo: &Path) 
 /// In the loader, so `init`, launch, `doctor` and `why` all inherit it. A guard
 /// only `init` applied is a guard any repo bypasses by never being `init`ed.
 pub fn load_all(catalogue: &Path, repo: &Path) -> Result<Vec<Definition>> {
-    let mut out = load_dir(catalogue)?;
+    over(load_dir(catalogue)?, catalogue, repo)
+}
+
+/// [`load_all`] over shipped definitions that are already in hand.
+///
+/// `omh upgrade --dry-run` has them from the binary rather than from
+/// `catalogue`: a real run refreshes that directory first, and a preview that
+/// read it as it stands would describe what an older omh would do.
+pub fn over(shipped: Vec<Definition>, catalogue: &Path, repo: &Path) -> Result<Vec<Definition>> {
+    let mut out = shipped;
     for def in load_dir(repo)? {
         if out.iter().any(|d| d.name == def.name) {
             anyhow::bail!(
@@ -648,13 +682,19 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Definition>> {
         }
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let def: Definition =
-            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-        validate(&def, &path)?;
-        out.push(def);
+        out.push(parse(&raw, &path)?);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// One stack file's text, as a definition. `at` is where it came from, for
+/// the message when it is not one.
+pub fn parse(raw: &str, at: &Path) -> Result<Definition> {
+    let def: Definition =
+        toml::from_str(raw).with_context(|| format!("parsing {}", at.display()))?;
+    validate(&def, at)?;
+    Ok(def)
 }
 
 #[cfg(test)]
@@ -1220,11 +1260,57 @@ because = "cargo is how a rust project is built and tested"
             .iter()
             .map(|(k, w)| ((*k).to_string(), *w))
             .collect();
-        let out = crate::doctor::run_probe_in(&predicate_script(&owned), cwd);
+        let out = crate::doctor::run_probe_in(&predicate_script(&[], &owned), cwd);
         crate::doctor::parse(&out)
             .iter()
             .map(|o| (o.name.clone(), verdict(o)))
             .collect()
+    }
+
+    /// **A script that cannot see the repo does not answer.**
+    ///
+    /// Run in a directory that is not the checkout — which is what a mount the
+    /// daemon could not make looks like from inside — every `test -f` exits 1,
+    /// and the report would be a complete, well-formed "nothing applies". The
+    /// marker is how the stack was detected, so not finding it is not finding
+    /// the repo: the script exits with [`BLIND`] and prints no verdict at all.
+    #[test]
+    fn a_script_that_cannot_see_the_marker_refuses_to_answer() {
+        let candidates = vec![("node/pnpm".to_string(), Some("test -f pnpm-lock.yaml"))];
+        let script = predicate_script(&["package.json"], &candidates);
+
+        let run = |cwd: &Path| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(cwd)
+                .output()
+                .unwrap()
+        };
+
+        let elsewhere = dir_with(&[]);
+        let blind = run(elsewhere.path());
+        assert_eq!(blind.status.code(), Some(BLIND), "{blind:?}");
+        assert!(
+            crate::doctor::parse(&String::from_utf8_lossy(&blind.stdout)).is_empty(),
+            "no verdict from where the repo is not: {blind:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&blind.stderr).contains("package.json"),
+            "and it names what it could not see: {blind:?}"
+        );
+
+        let repo = dir_with(&[("package.json", "{}")]);
+        let sees = run(repo.path());
+        assert!(sees.status.success(), "{sees:?}");
+        assert_eq!(
+            crate::doctor::parse(&String::from_utf8_lossy(&sees.stdout))
+                .iter()
+                .map(|o| (o.name.clone(), verdict(o)))
+                .collect::<Vec<_>>(),
+            [("node/pnpm".to_string(), Verdict::DoesNot)],
+            "and with the repo in front of it, it answers as before"
+        );
     }
 
     /// Exit zero applies, exit one does not. The two ordinary answers, run
@@ -1346,7 +1432,8 @@ because = "cargo is how a rust project is built and tested"
                 }
                 let before = std::fs::read_dir(d.path()).unwrap().flatten().count();
 
-                let out = crate::doctor::run_probe_in(&predicate_script(&candidates), d.path());
+                let out =
+                    crate::doctor::run_probe_in(&predicate_script(&[], &candidates), d.path());
                 let answered = crate::doctor::parse(&out);
                 assert_eq!(
                     answered.len(),
@@ -1451,7 +1538,7 @@ because = "cargo is how a rust project is built and tested"
             (hostile.to_string(), Some("true")),
             ("x/after".to_string(), Some("true")),
         ];
-        let out = crate::doctor::run_probe_in(&predicate_script(&owned), d.path());
+        let out = crate::doctor::run_probe_in(&predicate_script(&[], &owned), d.path());
 
         assert!(
             !out.lines().any(|l| l.trim() == "pwned"),
