@@ -11,7 +11,10 @@
 //! That is how `hook::tests::every_accepted_inject_reaches_the_agent_intact`,
 //! which asserts an empty stderr, failed once under a full parallel run and
 //! passed in isolation (#102). Starting the test binary from a deleted
-//! directory reproduces the failure message exactly.
+//! directory reproduces the failure message exactly. The same move made
+//! `image::tests::a_corporate_ca_reaches_the_image_and_moves_its_tag` fail
+//! intermittently: git exits 128 with `Unable to read current working
+//! directory`.
 //!
 //! `src/image.rs` already states the rule beside its digest test. This gives it
 //! a test that goes red without it: nothing in this crate moves the working
