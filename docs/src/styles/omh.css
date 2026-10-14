@@ -80,6 +80,17 @@
 	margin-top: 2rem;
 }
 
+/* A heading that is a command — every entry of the commands reference — reads
+   as type, not as an inline-code chip blown up to heading size. */
+.sl-markdown-content :is(h2, h3, h4) code {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font-size: 0.92em;
+	font-weight: 600;
+}
+
 /* A page opens with one sentence that says what it is for. */
 .sl-markdown-content > p:first-child {
 	font-size: var(--sl-text-lg);
