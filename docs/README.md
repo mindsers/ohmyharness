@@ -107,6 +107,28 @@ short enough to fit without scrolling.
 
 **Tables** — for options, flags and settings: name, what it does, default.
 
+**Openers** — a page longer than a few screens opens with a map of itself,
+under the purpose sentence:
+
+- a reference or a ledger (commands, decisions, retrospectives) opens with an
+  `## At a glance` table, one row per entry, each linking to its section;
+- an essay (the Concepts pages) opens with an **In short** list of three to
+  five claims, each linking to the section that argues it;
+- a troubleshooting page opens with what you see → the section that fixes it.
+
+**Status** — one legend for the whole site: ✅ shipped, 🔶 partly built, ⬜ not
+started. A page's own status line goes in a `:::note`, after the purpose
+sentence, never before it.
+
+**Alternatives** — when a fix is "do A, or B", use a bullet list with bold
+openings; numbered steps are for things done in order.
+
+**Commands stay in fences** — `src/main_tests.rs` reads every fenced `omh …`
+line on the site, checks omh accepts it, and pins the count per page. A command
+moved into prose is a command nothing checks; keep it fenced, and when a page
+gains or loses one, update its count in that test's map, with a word on what
+changed.
+
 ### Reference entries
 
 Every command and every setting reads the same way, so a reader learns the

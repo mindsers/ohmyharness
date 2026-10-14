@@ -73,7 +73,8 @@ invocation, so startup is felt.
 ### Runtime: a pluggable backend
 
 **The runtime is a pluggable backend: Docker unless you say otherwise.**
-`podman` and `sbx` are opt-in through `runtime`, and `sbx` is unmeasured. No
+`podman` and `sbx` are opt-in through `runtime`. `sbx`'s capabilities were
+measured against sbx 0.39.0, but no full `omh doctor` run has accepted it yet. No
 vendor lock. → [Runtime backends](/concepts/architecture/#runtime-backends)
 
 ### Repo exposure: a git worktree, auto-branched
