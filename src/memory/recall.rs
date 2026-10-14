@@ -33,8 +33,7 @@ use crate::memory::Note;
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// What a note must carry to be judgeable at all: which note, how old, and
-/// whether a human reviewed it.
+/// What a note must carry to be judgeable at all: which note, and how old.
 ///
 /// There is no constructor that takes a key without a date. That is the whole
 /// of the provenance guarantee, expressed as a type rather than as a rule.
@@ -343,7 +342,7 @@ pub fn search_phrased(notes: &[Note], phrasings: &[String], budget: Budget) -> N
     // observation yet, and a new observation is what this feature is for.
     let inbound = inbound_counts(notes);
 
-    // Recency, then connectedness, then key.
+    // Score, then recency, then connectedness, then key.
     scored.sort_by(|(a_score, a), (b_score, b)| {
         b_score
             .cmp(a_score)
@@ -706,7 +705,8 @@ mod tests {
         assert_eq!(both.len(), 2, "both claims come back; neither is filtered");
     }
 
-    /// Recency leads, and nothing else does. Reconciling two claims
+    /// Between two matches that score the same, the newer leads, and nothing
+    /// else decides it. Reconciling two claims
     /// is the agent's, so an order that put one first on any other
     /// ground would present a reconciliation the indexer is not entitled to
     /// make.

@@ -388,9 +388,9 @@ mod tests {
     /// `remember` writes the store and nothing else, re-asserted at the MCP
     /// call site. The command line's test guards the command line's path;
     /// this is where an argument naming somewhere else to write would be
-    /// added "for flexibility", and an unattended writer reaching the
-    /// checkout pushes wrong facts to teammates through git, where they
-    /// arrive with the authority of a reviewed change.
+    /// added "for flexibility", for a writer nobody watches. The walk covers
+    /// the server's whole scratch directory, so a write anywhere in it
+    /// outside the store fails.
     #[test]
     fn remember_over_mcp_writes_only_to_the_store() {
         let mut fx = fixture();
