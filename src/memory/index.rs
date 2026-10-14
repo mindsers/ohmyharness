@@ -175,9 +175,18 @@ mod tests {
     /// querying.
     #[test]
     fn the_description_counts_every_note() {
-        let notes = vec![note("surprise/a"), note("surprise/b")];
-        assert_eq!(Index::of(&notes).total, 2);
-        assert!(describe(&Index::of(&notes)).contains('2'));
+        // Two namespaces and a key with none, so neither the number of groups
+        // nor the notes that have a namespace can pass for the total.
+        let notes = vec![
+            note("surprise/a"),
+            note("surprise/b"),
+            note("topic/c"),
+            note("flat"),
+        ];
+        let index = Index::of(&notes);
+        assert_eq!(index.total, 4);
+        let text = describe(&index);
+        assert!(text.contains("4 notes"), "{text}");
     }
 
     /// A flat key has no namespace, and inventing one group per note would put

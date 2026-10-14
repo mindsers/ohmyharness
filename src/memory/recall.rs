@@ -579,6 +579,7 @@ mod tests {
     /// Mutations this must go red against:
     ///   1. drop the date from the line format    → a line fails to parse
     ///   2. print a constant instead of `recorded` → the dates mismatch
+    ///   3. print every line twice                → the counts differ
     ///
     /// A hit built with its parent's date is **not** caught here — it renders
     /// faithfully wrong. That one belongs to
@@ -596,8 +597,8 @@ mod tests {
 
         assert_eq!(
             cites.len(),
-            rendered.lines().filter(|l| !l.trim().is_empty()).count(),
-            "a line that did not parse is a line missing its provenance:\n{rendered}"
+            found.hits.len(),
+            "one line for each note the search selected, and no more:\n{rendered}"
         );
 
         let got: BTreeSet<Cite> = cites.into_iter().collect();
@@ -611,15 +612,29 @@ mod tests {
     /// `no_note_is_retrieved_without_its_date` cannot see this: a hit built
     /// with the wrong date renders faithfully wrong, and the rendered text
     /// agrees with it. So each hit is compared with the note it names instead.
+    ///
+    /// That comparison passes a neighbour cited as its parent, key and date
+    /// both, since such a cite agrees with itself. So each note must also be
+    /// cited once.
     #[test]
     fn an_expanded_neighbour_carries_its_own_date_not_its_parents() {
         let notes = store();
+        let dates: BTreeSet<&str> = notes.iter().map(|n| n.recorded.as_str()).collect();
+        assert_eq!(
+            dates.len(),
+            notes.len(),
+            "the fixture's dates must be pairwise distinct, or a parent's date \
+             passes for its neighbour's"
+        );
         let found = search(&notes, "credentials", Budget::default());
         assert!(
             found.hits.iter().any(|h| h.depth == 1),
             "the fixture must expand a neighbour: {:?}",
             found.hits
         );
+        let keys: Vec<&str> = found.hits.iter().map(|h| h.cite.key.as_str()).collect();
+        let once: BTreeSet<&str> = keys.iter().copied().collect();
+        assert_eq!(keys.len(), once.len(), "a note is cited once: {keys:?}");
         for hit in &found.hits {
             let named = notes
                 .iter()
@@ -711,19 +726,34 @@ mod tests {
     /// ground would present a reconciliation the indexer is not entitled to
     /// make.
     ///
-    /// Asserted in both directions, because a one-directional check passes on
-    /// an implementation that always keeps the order it was given.
+    /// Asserted in both directions, with the dates swapped between the same
+    /// two notes: one direction alone passes an implementation that keeps the
+    /// order it was given, or that sorts by key. Two keys, because `search`
+    /// keeps one hit per key, and two notes under one key would come back as
+    /// one.
     #[test]
     fn order_follows_recency() {
-        let key = "deploy";
-        let newer_last = vec![note(key, "2026-01-01", &[]), note(key, "2026-09-09", &[])];
-        let newer_first = vec![note(key, "2026-09-09", &[]), note(key, "2026-01-01", &[])];
+        let staging_newer = vec![
+            note("deploy-staging", "2026-09-09", &[]),
+            note("deploy-production", "2026-01-01", &[]),
+        ];
+        let production_newer = vec![
+            note("deploy-staging", "2026-01-01", &[]),
+            note("deploy-production", "2026-09-09", &[]),
+        ];
 
-        for notes in [newer_last, newer_first] {
-            let found = search(&notes, key, Budget::default());
+        for notes in [staging_newer, production_newer] {
+            let found = search(&notes, "deploy", Budget::default());
+            assert_eq!(
+                found.hits.len(),
+                2,
+                "both claims come back: {:?}",
+                found.hits
+            );
             assert_eq!(
                 found.hits[0].cite.recorded, "2026-09-09",
-                "the newer claim leads, whichever order they arrive in"
+                "the newer claim leads, whichever note it is: {:?}",
+                found.hits
             );
         }
     }
