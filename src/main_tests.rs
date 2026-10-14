@@ -6427,30 +6427,45 @@ fn the_global_flags_describe_what_every_command_does_with_them() {
     }
 }
 
-/// `omh memory remember --source` names the default the handler writes.
+/// `omh memory`'s help describes one store.
 ///
-/// It said "Defaults to this session when there is one" after the handler
-/// stopped splicing in a session id from `--session`, so the help promised a
-/// provenance omh no longer wrote.
+/// The committed layer went in 0.14, and `omh memory --help` went on saying
+/// that lint ran "across both layers". Every line of help under `memory` is
+/// read, so a sentence still written for two layers fails by name.
 #[test]
-fn remember_source_help_names_the_default_it_writes() {
+fn the_memory_help_describes_one_store() {
     use clap::CommandFactory;
-    let cmd = Cli::command();
-    let help = cmd
-        .find_subcommand("memory")
-        .and_then(|c| c.find_subcommand("remember"))
-        .and_then(|c| c.get_arguments().find(|a| a.get_id().as_str() == "source"))
-        .and_then(|a| a.get_help())
-        .map(|h| h.to_string())
-        .expect("`omh memory remember --source` has help");
-    let default = format!("`{}`", crate::cmd::memory::CLI_SOURCE);
+    fn walk(cmd: &clap::Command, path: String, said: &mut Vec<(String, String)>) {
+        for text in [cmd.get_about(), cmd.get_long_about()]
+            .into_iter()
+            .flatten()
+        {
+            said.push((path.clone(), text.to_string()));
+        }
+        for arg in cmd.get_arguments() {
+            for text in [arg.get_help(), arg.get_long_help()].into_iter().flatten() {
+                said.push((format!("{path} --{}", arg.get_id()), text.to_string()));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            walk(sub, format!("{path} {}", sub.get_name()), said);
+        }
+    }
+    let cli = Cli::command();
+    let memory = cli.find_subcommand("memory").expect("`omh memory` exists");
+    let mut said = Vec::new();
+    walk(memory, "omh memory".into(), &mut said);
     assert!(
-        help.contains(&default),
-        "--source's help names {default}, the source a blank one becomes: {help}"
+        said.iter().any(|(path, _)| path == "omh memory lint"),
+        "the walk must reach the subcommands: {said:#?}"
     );
+    let layered: Vec<_> = said
+        .iter()
+        .filter(|(_, text)| text.to_lowercase().contains("layer"))
+        .collect();
     assert!(
-        !help.contains("this session"),
-        "--source's help promises a session id omh no longer writes: {help}"
+        layered.is_empty(),
+        "help still written for a store with layers: {layered:#?}"
     );
 }
 

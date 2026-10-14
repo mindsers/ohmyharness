@@ -998,7 +998,7 @@ written in a harness's words rather than omh's. Related messages from the same
 check: ``unknown field `event` `` (that is Claude Code's vocabulary),
 ``a hook does one thing — `run` a command, `inject` advisory text, or `refuse` the call``,
 `` `$(` in `inject` runs a command from inside a sentence ``, and
-`` `$5` is not a variable name ``.
+`… is not a variable name`.
 
 **Rewrite the file in omh's words** — [writing a hook](/reference/configuration/#writing-a-hook)
 has them — or remove it.

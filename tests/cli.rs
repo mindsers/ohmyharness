@@ -915,6 +915,11 @@ fn rm_refuses_an_at_that_names_no_note() {
 
 /// The escape this store's guards exist for, end to end: a key template is a
 /// committed file, so a clone carries it.
+///
+/// It ran without `--answers` after `answers` became required, so `remember`
+/// refused for that and never expanded the template — green whether or not
+/// anything guarded the escape. The line is complete now, and the refusal has
+/// to name the key the template derived.
 #[test]
 fn remember_refuses_a_key_template_that_leaves_the_store() {
     let sb = sandbox();
@@ -934,15 +939,23 @@ fn remember_refuses_a_key_template_that_leaves_the_store() {
         "the mount failed",
         "--evidence",
         "c",
+        "--answers",
+        "d",
     ]);
-    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
     assert!(
-        !escaped_notes(sb.home.parent().unwrap()),
+        said.contains("escaped/the-mount-failed"),
+        "refused for the key the template derived, not for something else: {said}"
+    );
+    assert!(
+        !escaped_notes(sb.home.parent().unwrap(), &sb.store()),
         "a note was written outside the store"
     );
 }
 
-fn escaped_notes(under: &Path) -> bool {
+/// Whether any note under `under` sits outside `store`.
+fn escaped_notes(under: &Path, store: &Path) -> bool {
     let mut stack = vec![under.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -952,9 +965,7 @@ fn escaped_notes(under: &Path) -> bool {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "md")
-                && !path.components().any(|c| c.as_os_str() == "notes")
-            {
+            } else if path.extension().is_some_and(|e| e == "md") && !path.starts_with(store) {
                 return true;
             }
         }
@@ -5898,6 +5909,56 @@ fn a_session_scopes_a_session_verb_and_nothing_else() {
         wrote.status.success(),
         "{}",
         String::from_utf8_lossy(&wrote.stderr)
+    );
+}
+
+/// The default `--source` names in its help is the source a note gets
+/// without it.
+///
+/// The help said "Defaults to this session when there is one" long after
+/// the handler had started writing `cli`. Read from the binary on both
+/// sides, so the help and the handler cannot drift apart again, whichever
+/// one changes.
+#[test]
+fn remember_without_source_writes_the_default_its_help_names() {
+    let sb = sandbox();
+    sb.git_init();
+
+    let help = sb.omh(&["memory", "remember", "--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    let named = help
+        .split("--source")
+        .nth(1)
+        .and_then(|after| after.split("Defaults to `").nth(1))
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("--source's help names no default:\n{help}"));
+
+    let out = sb.omh(&[
+        "memory",
+        "remember",
+        "--expected",
+        "a",
+        "--observed",
+        "b",
+        "--evidence",
+        "c",
+        "--answers",
+        "d",
+    ]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let path = said
+        .trim()
+        .strip_prefix("recorded ")
+        .unwrap_or_else(|| panic!("`remember` names the file it wrote: {said}"));
+    let note = std::fs::read_to_string(path.trim()).unwrap();
+    assert!(
+        note.lines().any(|l| l == format!("source: {named}")),
+        "the help says `{named}`, and the note says otherwise:\n{note}"
     );
 }
 

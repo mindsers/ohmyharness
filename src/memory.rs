@@ -449,7 +449,6 @@ pub enum Rule {
     KeyDisagreesWithPath,
     DuplicateKey,
     DanglingLink,
-    /// A committed note links somewhere a fresh clone cannot follow.
     /// `invalidated_by` names an expiry omh cannot evaluate, so the note
     /// advertises a freshness guarantee nothing will ever check.
     UnevaluatableTrigger,
@@ -1237,8 +1236,8 @@ pub fn remember_in(
     recipe: &expiry::Recipe,
 ) -> Result<Wrote> {
     // `recipe` is handed in rather than resolved here, and that is the whole
-    // point: this function's only caller runs *inside* the sandbox, where the
-    // base recipe cannot be computed at all. It depends on the PEM `ca_cert`
+    // point: one of its callers, `memory serve`, runs *inside* the sandbox,
+    // where the base recipe cannot be computed at all. It depends on the PEM `ca_cert`
     // names, which is a host path nothing mounts into the guest. Resolving it
     // here read a recipe with no certificate while the host built one with it,
     // so every note the agent recorded was born stale — see `expiry::Recipe`.
@@ -2656,7 +2655,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// `path.exists()` enforces it
     /// only while every note sits at exactly its key — which nothing checks,
     /// because `KeyDisagreesWithPath` compares the leaf alone. The result is
-    /// two notes under one key, which `rm` then cannot separate.
+    /// two notes under one key, which `rm` then cannot tell apart without
+    /// `--at`.
     #[test]
     fn a_key_already_in_the_store_is_a_conflict_wherever_it_is_stored() {
         let (_d, paths) = fixture();
@@ -3064,10 +3064,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             err.contains("dup.md") && err.contains("ns/dup.md"),
             "the error must name the files, since the key cannot separate them: {err}"
         );
-        assert!(
-            !err.contains("local and local"),
-            "duplicates are not reported as a conflict between layers: {err}"
-        );
 
         // And the store must be repairable through omh itself.
         let removed = remove(&paths, "dup", Some("ns/dup.md"), false)
@@ -3076,6 +3072,10 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             removed.path.ends_with("ns/dup.md"),
             "got: {}",
             removed.path.display()
+        );
+        assert!(
+            !root.join("ns/dup.md").exists(),
+            "the note it named is gone from disk"
         );
         assert!(
             root.join("dup.md").exists(),
@@ -3135,9 +3135,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── listing and the review moment ───────────────────────────────────────
 
-    /// Every line carries its own date. Two notes with
-    /// *different* dates, because a single date is satisfied by a constant —
-    /// which is how a date guard in this repo passed while checking nothing.
+    /// Every line carries its own date. Two notes with *different* dates,
+    /// because a single date is satisfied by a constant — which is how a date
+    /// guard in this repo passed while checking nothing.
     ///
     /// This is `omh memory`'s render, not the retrieval proxy's. *Never
     /// retrieved without its date* belongs to `recall` and this test does not
@@ -3705,8 +3705,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         };
         let first = std::fs::read(&path).unwrap();
 
-        // Read it back and write it out again by the same route a rename or a
-        // lint pass would.
+        // Read it back and render it again, which is what any rewrite of a
+        // note would do.
         let note = &load(&paths).unwrap()[0];
         std::fs::write(&path, render(note)).unwrap();
 

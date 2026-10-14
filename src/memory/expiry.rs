@@ -581,8 +581,8 @@ mod tests {
 
     /// `validate_key` exists because a path read back off disk becomes a write.
     /// A trigger path is read back off disk and becomes a `metadata` call —
-    /// and the store is mounted writable into every session, so an agent can
-    /// write one.
+    /// and the store is mounted writable into a session that has memory on,
+    /// so an agent can write one.
     ///
     /// Only the forms that are wrong at every stage are refused here. An
     /// absolute path cannot be: `/work/…` is what the agent legitimately

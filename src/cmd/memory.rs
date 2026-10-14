@@ -10,7 +10,7 @@ use crate::{mcp, memory, report};
 use anyhow::Result;
 
 /// The `source` a note written from the command line gets when `--source` is
-/// not given.
+/// absent or blank.
 pub(crate) const CLI_SOURCE: &str = "cli";
 
 /// Record an observation. The key is derived, never chosen: an agent that picks
@@ -153,7 +153,7 @@ pub(crate) fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> 
     Ok(())
 }
 
-/// The store, by layer, with what points at each note.
+/// The store, with what points at each note.
 pub(crate) fn memory_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     ctx.say(&report::Notes {
