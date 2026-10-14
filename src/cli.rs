@@ -727,7 +727,7 @@ pub(crate) enum MemoryCmd {
         /// One of the closed set omh can evaluate itself.
         #[arg(long)]
         invalidated_by: Option<String>,
-        /// Who observed it. Defaults to this session when there is one.
+        /// Who observed it. Defaults to `cli`.
         #[arg(long)]
         source: Option<String>,
         /// What to do when the derived key is taken. Skipping is a mode you
