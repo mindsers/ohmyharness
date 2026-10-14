@@ -1,27 +1,124 @@
 ---
 title: Accounts
-description: Logging in with omh auth, and keeping several logins per harness.
+description: Log in to a harness with omh auth, keep several logins side by side, and choose which one each project uses.
 ---
 
-```console
-$ omh auth claude --name personal
-$ omh auth claude --name work
-$ omh set account work            # which one this project uses
-$ omh new claude
+Log in to a harness once, keep a work and a personal login side by side, and
+choose which one each project uses.
+
+**You need** omh [installed](/getting-started/installation/), Docker running,
+and a git repository.
+
+## Log in and choose an account
+
+<div class="steps">
+
+1. Log in once for each account.
+
+   ```console
+   $ omh auth claude --name personal
+   $ omh auth claude --name work
+   ```
+
+   `omh auth` runs the harness's real login flow and keeps whatever it wrote.
+   An **account is a captured snapshot of a harness's own credential files**,
+   one directory per harness and name — see
+   [Keyed by harness](#keyed-by-harness-not-by-provider).
+
+2. Choose the one this project uses.
+
+   ```console
+   $ omh set account work            # which one this project uses
+   ```
+
+   The account is a project setting, so another repository can stay on
+   `personal`.
+
+3. Start a session.
+
+   ```console
+   $ omh new claude
+   ```
+
+</div>
+
+To check that the login will last past this session, run `omh doctor` — see
+[Verifying](#verifying). Codex's default sign-in cannot finish in a sandbox:
+[log in with a device code, or copy a login](#a-login-that-cannot-finish-in-a-sandbox).
+
+## A login that cannot finish in a sandbox
+
+Codex's default sign-in opens a browser and waits for the redirect on
+`127.0.0.1:1455` — inside the container, where the host's browser never
+arrives. Two ways round it:
+
+- **Device code.** In `omh auth codex`, choose *Sign in with Device Code*:
+  Codex prints a URL and a one-time code to enter in any browser, so no
+  redirect has to reach the sandbox.
+- **Import.** If you are already logged in on this machine, copy that login:
+
+  ```console
+  $ omh auth codex --name work --import
+  `work` captured for codex
+    copied from /Users/you/.codex/auth.json
+  ```
+
+**It is a copy of one login, not a second one.** An API key is a key, and two
+copies of it work side by side. An OAuth login is a refresh chain: when the
+provider replaces the refresh token on each use, whichever copy refreshes
+second is holding a spent one and is logged out. If the host and the sandbox
+both need to stay logged in, give the sandbox its own login with a device
+code. A later login on the host does not reach the account either way.
+
+<details>
+<summary>What <code>--import</code> copies, and when it finds nothing</summary>
+
+`--import` copies the adapter's `token` files and nothing else — not the config
+directory around them, which also holds your config, skills and history, and
+omh stages those separately. Every file is read before anything is written;
+each is staged at `0600` and renamed into place only once all are staged, so a
+file omh cannot read, or a write that fails, leaves the account as it was. A
+harness whose login is not a file (omp keeps its credentials in SQLite) is
+refused.
+
+It only finds a login kept in that file. Claude Code on macOS keeps its login
+in the Keychain, and a harness can be pointed at another home by its own
+environment variable (`CODEX_HOME`); in either case `--import` says what it
+looked at and finds nothing. That is also why a launch offers `--import` only
+when there is a login there to copy.
+
+</details>
+
+## Verifying
+
+`omh doctor` probes the token path by attempting the temp-file-plus-rename that
+every token save performs:
+
+```
+  ✓ token      /home/agent/.claude/.credentials.json (atomic write)
 ```
 
-An **account is a captured snapshot of a harness's own credential files.**
-`omh auth` runs the harness's real login flow and keeps whatever it wrote.
+It is non-destructive by construction — see
+[the credential probe](/guides/troubleshooting/#the-credential-probe). A `✗`
+here is a login the next session will not have:
+[Troubleshooting](/guides/troubleshooting/#i-logged-in-but-the-next-session-is-logged-out)
+says what to do.
 
 ## Keyed by harness, not by provider
 
 A harness is what can actually be captured. Two harnesses talking to the same
 provider still each need their own login, and there is no useful sense in which
-they share one.
+they share one. Each account is a directory of its own:
+
+```
+~/.omh/creds/<harness>/<account>/
+```
 
 Which account a session uses is a **project-level setting**, resolved through
 the [usual two layers](/reference/configuration/#settings-and-their-two-layers) — because that is
 how it genuinely varies. This repo is work; that one is personal.
+
+### A different account for one harness
 
 One name usually fits every harness. When it does not — accounts are captured
 per harness, so a name one has may be one another lacks — name an account for
@@ -55,102 +152,6 @@ A harness's own entry wins at whatever layer it is set. A plain
 `omh set account <name>` sets `default`; `omh unset account codex` takes back
 codex's entry, and the table goes back to one string once no harness differs.
 
-```
-~/.omh/creds/<harness>/<account>/
-```
-
-## Mount the directory, never the token file
-
-```toml
-creds = ["$HOME/.claude/", "$HOME/.claude.json"]   # trailing slash = directory
-token = ["$HOME/.claude/.credentials.json"]        # what proves a login
-```
-
-**You cannot `rename()` over a bind-mounted file.** It is a mount point, so the
-kernel returns `EBUSY`:
-
-```
-mv: cannot move '.tmp1' to '.credentials.json': Device or resource busy
-```
-
-Every tool saves a token by writing a temp file and renaming over it. Mounting
-the token *file* therefore means the login succeeds and silently never persists
-— you log in, it says success, and the next launch is logged out. Mounting the
-enclosing **directory** makes that rename an ordinary operation inside it.
-
-That collides with capability mounts living in the same directory, because
-Docker refuses to create a mountpoint inside a bind-mounted host directory
-("is outside of rootfs"). `omh auth` therefore prepares those mountpoints on the
-host first: `.claude/skills`, `.claude/commands`, `.claude/agents`,
-`.claude/settings.json`.
-
-Docker also creates any missing mount parent as **root**, which leaves the agent
-unable to write beside its own config — transcripts fail with `EACCES` and
-atomic writes have nowhere to put their temp file. The harness image therefore
-creates and owns every directory it will mount into, derived from the adapter.
-
-None of that is guessable from documentation. All of it came from running the
-thing and reading the error.
-
-## `token` is what proves a login
-
-A harness fills its config directory just by starting: Claude Code writes
-`statsig/`, `projects/` and `todos/` on boot. Inferring a login from "does this
-directory contain anything" therefore reports success for a session with no
-token at all — which is exactly the bug it replaced.
-
-So the adapter names the file, and `is_captured` is *defined* as
-`unfilled(...).is_empty()`, so the two answers can never drift apart.
-
-Placeholders must be **parseable**, not merely present. `prepare` writes `{}`
-into JSON files, because an empty file is valid TOML and valid YAML but not
-valid JSON, and a harness that parses its config on startup refuses to run:
-
-```
-Claude configuration file at /home/agent/.claude.json is corrupted:
-JSON Parse error: Unexpected EOF
-```
-
-A placeholder is recognised as one, so it never counts as a login.
-
-## A login that cannot finish in a sandbox
-
-Codex's default sign-in opens a browser and waits for the redirect on
-`127.0.0.1:1455` — inside the container, where the host's browser never
-arrives. Two ways round it:
-
-- **Device code.** In `omh auth codex`, choose *Sign in with Device Code*:
-  Codex prints a URL and a one-time code to enter in any browser, so no
-  redirect has to reach the sandbox.
-- **Import.** If you are already logged in on this machine, copy that login:
-
-  ```console
-  $ omh auth codex --name work --import
-  `work` captured for codex
-    copied from /Users/you/.codex/auth.json
-  ```
-
-`--import` copies the adapter's `token` files and nothing else — not the config
-directory around them, which also holds your config, skills and history, and
-omh stages those separately. Every file is read before anything is written;
-each is staged at `0600` and renamed into place only once all are staged, so a
-file omh cannot read, or a write that fails, leaves the account as it was. A
-harness whose login is not a file (omp keeps its credentials in SQLite) is
-refused.
-
-It only finds a login kept in that file. Claude Code on macOS keeps its login
-in the Keychain, and a harness can be pointed at another home by its own
-environment variable (`CODEX_HOME`); in either case `--import` says what it
-looked at and finds nothing. That is also why a launch offers `--import` only
-when there is a login there to copy.
-
-**It is a copy of one login, not a second one.** An API key is a key, and two
-copies of it work side by side. An OAuth login is a refresh chain: when the
-provider replaces the refresh token on each use, whichever copy refreshes
-second is holding a spent one and is logged out. If the host and the sandbox
-both need to stay logged in, give the sandbox its own login with a device
-code. A later login on the host does not reach the account either way.
-
 ## What stops a launch
 
 - **Not being logged in is fine.** The harness prompts, which is what you want
@@ -172,7 +173,78 @@ code. A later login on the host does not reach the account either way.
   that failed to start leaves the previous credentials in place, which would
   otherwise read as a successful re-authentication.
 
-## The invariant this bends
+## How accounts work
+
+### Mount the directory, never the token file
+
+omh mounts the harness's whole credential directory. The token file inside it
+is named separately, as what proves a login:
+
+```toml
+creds = ["$HOME/.claude/", "$HOME/.claude.json"]   # trailing slash = directory
+token = ["$HOME/.claude/.credentials.json"]        # what proves a login
+```
+
+**You cannot `rename()` over a bind-mounted file.** It is a mount point, so the
+kernel returns `EBUSY`:
+
+```
+mv: cannot move '.tmp1' to '.credentials.json': Device or resource busy
+```
+
+Every tool saves a token by writing a temp file and renaming over it. Mounting
+the token *file* therefore means the login succeeds and silently never persists
+— you log in, it says success, and the next launch is logged out. Mounting the
+enclosing **directory** makes that rename an ordinary operation inside it.
+
+<details>
+<summary>What mounting the directory broke, and how omh works round it</summary>
+
+That collides with capability mounts living in the same directory, because
+Docker refuses to create a mountpoint inside a bind-mounted host directory
+("is outside of rootfs"). `omh auth` therefore prepares those mountpoints on the
+host first: `.claude/skills`, `.claude/commands`, `.claude/agents`,
+`.claude/settings.json`.
+
+Docker also creates any missing mount parent as **root**, which leaves the agent
+unable to write beside its own config — transcripts fail with `EACCES` and
+atomic writes have nowhere to put their temp file. The harness image therefore
+creates and owns every directory it will mount into, derived from the adapter.
+
+None of that is guessable from documentation. All of it came from running the
+thing and reading the error.
+
+</details>
+
+### `token` is what proves a login
+
+The adapter names the file that proves a login, and nothing else counts. A
+placeholder omh writes is recognised as one, so it never counts as a login
+either.
+
+<details>
+<summary>Why a full config directory is not a login, and why placeholders must parse</summary>
+
+A harness fills its config directory just by starting: Claude Code writes
+`statsig/`, `projects/` and `todos/` on boot. Inferring a login from "does this
+directory contain anything" therefore reports success for a session with no
+token at all — which is exactly the bug it replaced.
+
+So the adapter names the file, and `is_captured` is *defined* as
+`unfilled(...).is_empty()`, so the two answers can never drift apart.
+
+Placeholders must be **parseable**, not merely present. `prepare` writes `{}`
+into JSON files, because an empty file is valid TOML and valid YAML but not
+valid JSON, and a harness that parses its config on startup refuses to run:
+
+```
+Claude configuration file at /home/agent/.claude.json is corrupted:
+JSON Parse error: Unexpected EOF
+```
+
+</details>
+
+### The invariant this bends
 
 > The writable mounts are a short named set — the worktree, credentials,
 > carried files, the sandbox's own git repository, the harness's transcript
@@ -186,13 +258,15 @@ compromised agent **can** read and exfiltrate its own token.
 Several accounts widens that gap rather than narrowing it. See
 [risks](/concepts/risks/) and [runtime backends](/concepts/architecture/#runtime-backends).
 
-## Verifying
+## Next
 
-`omh doctor` probes the token path by attempting the temp-file-plus-rename that
-every token save performs:
+<div class="cards">
 
-```
-  ✓ token      /home/agent/.claude/.credentials.json (atomic write)
-```
+- [Commands](/reference/commands/)\
+  `omh auth`, `omh set` and every other command, with what each prints.
+- [Configuration](/reference/configuration/)\
+  Where `account` and every other setting lives, and how the two layers resolve.
+- [Troubleshooting](/guides/troubleshooting/)\
+  A login that does not last, and Codex's sign-in messages.
 
-It is non-destructive by construction. See [Troubleshooting](/guides/troubleshooting/).
+</div>
