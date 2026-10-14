@@ -804,7 +804,7 @@ pub(crate) fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Refuse a path that resolves outside the layer it claims to be in.
+/// Refuse a path that resolves outside the store it claims to be in.
 ///
 /// `validate_key` reads a key's spelling; this reads the filesystem. The
 /// local store is bind-mounted writable into the sandbox, so the agent can
@@ -1226,10 +1226,8 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
 
 /// `remember`, against an explicit directory.
 ///
-/// `root` is where the note lands, and it is always the writable layer's
-/// directory — the caller cannot pass the committed one, because no caller is
-/// given the choice. In the sandbox this is a mount point rather than a path
-/// derived from a repo.
+/// `root` is where the note lands: the store's directory. In the sandbox this
+/// is a mount point rather than a path derived from a repo.
 pub fn remember_in(
     root: &Path,
     repo: &Path,
@@ -2396,8 +2394,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// `remember` writes the store and nothing else, at the call site the
     /// command line uses. Asserted by
     /// walking the whole tree rather than by checking one path: that catches
-    /// both a write to the committed layer and a key that escaped through
-    /// `../`, and it survives a refactor that moves the store.
+    /// both a write into the checkout and a key that escaped through `../`,
+    /// and it survives a refactor that moves the store.
     #[test]
     fn remember_writes_nothing_outside_the_local_store() {
         let (dir, paths) = fixture();
@@ -2660,7 +2658,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// because `KeyDisagreesWithPath` compares the leaf alone. The result is
     /// two notes under one key, which `rm` then cannot separate.
     #[test]
-    fn a_key_already_in_the_layer_is_a_conflict_wherever_it_is_stored() {
+    fn a_key_already_in_the_store_is_a_conflict_wherever_it_is_stored() {
         let (_d, paths) = fixture();
         let taken = derived_key(&paths, &observation());
 
@@ -3043,12 +3041,15 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
-    /// `remove` assumed duplicates could only be cross-layer, so two notes
-    /// under one key in one layer produced "`k` is in local and local" — and
-    /// `--layer local` produced it again. There was no argument that reached
-    /// either note, in a store deliberately kept outside the checkout.
+    /// One of two files under one key can be removed by naming it, and only
+    /// that one goes.
+    ///
+    /// `remove` once assumed duplicates could only be cross-layer, so two
+    /// notes under one key in one layer produced "`k` is in local and local"
+    /// — and `--layer local` produced it again. There was no argument that
+    /// reached either note, in a store deliberately kept outside the checkout.
     #[test]
-    fn a_key_duplicated_inside_one_layer_is_still_removable() {
+    fn a_key_duplicated_in_the_store_is_still_removable() {
         let (_d, paths) = fixture();
         let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
@@ -3061,11 +3062,11 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let err = remove(&paths, "dup", None, false).unwrap_err().to_string();
         assert!(
             err.contains("dup.md") && err.contains("ns/dup.md"),
-            "the error must name the files, since the layer cannot separate them: {err}"
+            "the error must name the files, since the key cannot separate them: {err}"
         );
         assert!(
             !err.contains("local and local"),
-            "duplicates in one layer are not a layer question: {err}"
+            "duplicates are not reported as a conflict between layers: {err}"
         );
 
         // And the store must be repairable through omh itself.
@@ -3134,7 +3135,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── listing and the review moment ───────────────────────────────────────
 
-    /// Every line carries its own date and its own layer. Two notes with
+    /// Every line carries its own date. Two notes with
     /// *different* dates, because a single date is satisfied by a constant —
     /// which is how a date guard in this repo passed while checking nothing.
     ///
@@ -3204,8 +3205,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
     }
 
-    // ── resolution across layers ────────────────────────────────────────────
-
     // ── lint ────────────────────────────────────────────────────────────────
 
     /// One note omh cannot parse aborted `lint` before it printed anything,
@@ -3259,7 +3258,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// than of the note being written — hygiene warns — and the reason
     /// `remember` is where the refusal lives.
     #[test]
-    fn two_notes_under_one_key_in_one_layer_are_reported() {
+    fn two_notes_under_one_key_are_reported() {
         let (_d, paths) = fixture();
         let root = paths.memory();
         std::fs::create_dir_all(root.join("ns")).unwrap();
@@ -3706,8 +3705,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         };
         let first = std::fs::read(&path).unwrap();
 
-        // Read it back and write it out again by the same route a rename, a
-        // promotion or a lint pass would.
+        // Read it back and write it out again by the same route a rename or a
+        // lint pass would.
         let note = &load(&paths).unwrap()[0];
         std::fs::write(&path, render(note)).unwrap();
 

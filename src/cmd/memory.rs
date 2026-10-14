@@ -9,6 +9,10 @@ use crate::profile::Paths;
 use crate::{mcp, memory, report};
 use anyhow::Result;
 
+/// The `source` a note written from the command line gets when `--source` is
+/// not given.
+pub(crate) const CLI_SOURCE: &str = "cli";
+
 /// Record an observation. The key is derived, never chosen: an agent that picks
 /// its own cannot be stopped from recording one event twice.
 pub(crate) fn memory_remember(
@@ -24,7 +28,7 @@ pub(crate) fn memory_remember(
         // being told: a session id used to be spliced in here from `-s`, which
         // made a global flag out of one text field. `--source` says it
         // outright, and `memory serve` supplies it for the agent.
-        input.source = "cli".into();
+        input.source = CLI_SOURCE.into();
     }
     ctx.say(&match memory::remember(&paths, &input, if_exists)? {
         memory::Wrote::Created(path) => {

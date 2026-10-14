@@ -166,7 +166,7 @@ pub fn overview(
     }))
 }
 
-/// Write a note into a layer's directory, deriving its filename from its key.
+/// Write a note into the store's directory, deriving its filename from its key.
 ///
 /// Guarded the way `remember` is, because it is the same store: mounted
 /// writable into every session of the repository, so a name in it can be a

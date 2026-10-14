@@ -2372,7 +2372,7 @@ omh memory remember --expected <text> --observed <text> --evidence <text> --answ
 | `--answers` | a question this note answers, as somebody would later ask it. Repeat for several | at least one |
 | `--relates-to <key>` | a note this connects to, by key. Repeat for several | |
 | `--invalidated-by <trigger>` | when the note stops being true — see [`omh memory stale`](#omh-memory-stale) | never |
-| `--source` | who observed it | this session, when there is one |
+| `--source` | who observed it | `cli` |
 | `--if-exists skip\|suffix\|override` | what to do when the derived key is taken | `error` |
 
 ```console
