@@ -609,6 +609,34 @@ mod tests {
         );
     }
 
+    /// A neighbour is cited with its own date, never the date of the note that
+    /// linked to it.
+    ///
+    /// The parse-back above cannot see this: a hit built with the wrong date
+    /// renders faithfully wrong, and the rendered text agrees with it. So each
+    /// hit is compared with the note it names instead.
+    #[test]
+    fn an_expanded_neighbour_carries_its_own_date_not_its_parents() {
+        let notes = store();
+        let found = search(&notes, "credentials", Budget::default());
+        assert!(
+            found.hits.iter().any(|h| h.depth == 1),
+            "the fixture must expand a neighbour: {:?}",
+            found.hits
+        );
+        for hit in &found.hits {
+            let named = notes
+                .iter()
+                .find(|n| n.key == hit.cite.key)
+                .expect("a hit names a note in the store");
+            assert_eq!(
+                hit.cite.recorded, named.recorded,
+                "`{}` is cited with another note's date",
+                hit.cite.key
+            );
+        }
+    }
+
     /// Expansion without a visited set renders a note once per path that
     /// reaches it, and a two-note cycle renders forever.
     #[test]
