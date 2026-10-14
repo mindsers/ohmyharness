@@ -1,45 +1,213 @@
 ---
 title: Decisions
-description: Every load-bearing choice, with its reasoning.
+description: Every load-bearing choice omh has made, with its reasoning.
 ---
 
-**Status: a ledger, not a design.** Every row records a choice already made and the reason it was made. The Status column here is the component's; the *design* for each lives on its own page.
+Every load-bearing choice omh has made, and the reason for it. If you are about
+to change one of these, the reason is what you need to argue with.
 
-Every load-bearing choice, with the reason. If you are about to change one of
-these, the reason is what you need to argue with.
+**Status: a ledger, not a design.** Every entry records a choice already made and the reason it was made. The Status column in [the base set](#the-base-set) is the component's; the *design* for each lives on its own page.
 
-| Decision | Choice | Why |
-|---|---|---|
-| Category | **distribution** | the parts exist; assembly and subtraction are the value |
-| Runtime | **pluggable backend** | Docker unless you say otherwise; `podman` and `sbx` are opt-in through `runtime`, and `sbx` is unmeasured. No vendor lock |
-| Repo exposure | **git worktree, auto-branch** | the agent cannot reach your checkout or `main`; review is `git diff` |
-| Git in the sandbox | **a repository of its own** | your checkout is never mounted, so the agent gets a gitdir holding one commit and none of your history |
-| Getting work back | **`omh sNN commit`, squash or `--keep`** | you choose at commit time whether the agent's own commits and messages land |
-| Code graph | **wire an existing MCP server** | distributions package, they don't reinvent |
-| Language | **Rust** | single binary; `omh` wraps every invocation, so startup is felt |
-| LLM routing | **not ours** | the harness logs in as itself and reaches whatever it is configured to; omh passes no model and proxies nothing |
-| Unit of work | **long-lived session** | keeps the index warm, makes harness switching instant |
-| Session persistence | **`dtach`, not tmux** | omh needs detach/reattach; SSH already provides multiplexing |
-| IDE access | **SSH into the session** | one dependency tree, shared with the agent |
-| Untracked files | **`carry_in` allowlist** | worktrees are pure git; secrets enter only by declaration |
-| Capability floor | **superset, adapters degrade** | omh must never cost you a feature you already had |
-| Content scope | **one personal catalogue** | "where is this skill" had three answers, and a union can add but never subtract |
-| Repo content | **hooks, and nothing else** | a hook binds to a repo's commands; a skill is a way you work |
-| Settings scope | **2 layers in the repo, plus a template** | a repo's behaviour has to be explained by files the repo contains; `~/.omh/default.toml` seeds a new one and decides nothing after that |
-| Selection | **an allowlist, `[use]`** | removing something is deleting its name; no `include`/`exclude` pair to reconcile |
-| Absent selection | **means everything** | upgrading changes nothing, and a new checkout is useful before it is configured |
-| Command scope | **`omh settings` is you, this checkout is the rest** | it was *`config` is you, `repo` is here*, on the argument that the two wanted opposite write defaults, and one `--layer` flag cannot express both |
-| Write default | **the key decides, not the command** | it was *a value never lands in the committed file; a name may*, which held while `repo set` sent every value to the gitignored file. `omh set` serves every key from one command, so the judgement moved into `src/key.rs`: per key, whether a value there can name a credential. Committed is the default now — most settings are facts about the project — and the table is what keeps a secret out of it |
-| Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
-| Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
-| Naming a session | **`sNN` first, one form** | several sandboxes of one repo are reached from one place, so the selector leads and everything after it is unchanged — see [the shape of the CLI](/reference/commands/#the-shape-of-the-cli) |
-| Staying current | **`omh sNN sync`, merged on the host** | no commit of yours may enter the sandbox, so it receives files and conflict markers rather than history — see [`omh sNN sync`](/reference/commands/#omh-snn-sync--trunk-moved-and-the-session-catches-up) |
-| Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
+## At a glance
 
-Each is expanded where it applies: [architecture](/concepts/architecture/) for runtime
-and images, [sessions](/concepts/sessions/) for the session model and persistence,
-[configuration](/reference/configuration/) for the layers, [adapters](/reference/adapters/) for
-the capability floor.
+| Decision | Choice |
+|---|---|
+| [Category](#category-a-distribution) | **a distribution** |
+| [Code graph](#code-graph-wire-an-existing-mcp-server) | **wire an existing MCP server** |
+| [LLM routing](#llm-routing-not-ours) | **not ours** |
+| [Language](#language-rust) | **Rust** |
+| [Runtime](#runtime-a-pluggable-backend) | **a pluggable backend** |
+| [Repo exposure](#repo-exposure-a-git-worktree-auto-branched) | **a git worktree, auto-branched** |
+| [Git in the sandbox](#git-in-the-sandbox-a-repository-of-its-own) | **a repository of its own** |
+| [Untracked files](#untracked-files-a-carry_in-allowlist) | **a `carry_in` allowlist** |
+| [Unit of work](#unit-of-work-a-long-lived-session) | **a long-lived session** |
+| [Session persistence](#session-persistence-dtach-not-tmux) | **`dtach`, not tmux** |
+| [IDE access](#ide-access-ssh-into-the-session) | **SSH into the session** |
+| [Naming a session](#naming-a-session-snn-first-one-form) | **`sNN` first, one form** |
+| [Getting work back](#getting-work-back-omh-snn-commit) | **`omh sNN commit`, squash or `--keep`** |
+| [Staying current](#staying-current-omh-snn-sync-merged-on-the-host) | **`omh sNN sync`, merged on the host** |
+| [Content scope](#content-scope-one-personal-catalogue) | **one personal catalogue** |
+| [Repo content](#repo-content-hooks-and-nothing-else) | **hooks, and nothing else** |
+| [Settings scope](#settings-scope-two-layers-in-the-repo-plus-a-template) | **2 layers in the repo, plus a template** |
+| [Selection](#selection-an-allowlist-use) | **an allowlist, `[use]`** |
+| [Absent selection](#absent-selection-means-everything) | **means everything** |
+| [Command scope](#command-scope-omh-settings-is-you) | **`omh settings` is you, this checkout is the rest** |
+| [Write default](#write-default-the-key-decides) | **the key decides, not the command** |
+| [Capability floor](#capability-floor-a-superset-adapters-degrade) | **superset, adapters degrade** |
+| [Hook vocabulary](#hook-vocabulary-closed-translated-at-staging) | **closed, translated at staging** |
+| [Tool vocabulary](#tool-vocabulary-one-closed-set) | **one closed set, per-adapter map** |
+| [Portability](#portability-store-the-standard-where-one-exists) | **store the standard where one exists** |
+
+Also on this page: [the base set](#the-base-set) as a decision,
+[what was deliberately not decided](#decisions-deliberately-not-made),
+[what the work loop refuses to do](#what-the-work-loop-refuses-to-do),
+[a ratified deviation](#deviations-from-a-written-design-ratified) and
+[three reversals](#reversals-worth-knowing-about).
+
+## What omh is
+
+### Category: a distribution
+
+**omh is a distribution.** The parts exist already; assembly and subtraction are
+the value. → [Why a distribution](/concepts/distribution/)
+
+### Code graph: wire an existing MCP server
+
+**omh wires an existing MCP server rather than writing a graph.** Distributions
+package; they don't reinvent. Its browsable website is scoped to the repo, not
+the session — see [the first reversal](#reversals-worth-knowing-about).
+
+### LLM routing: not ours
+
+**omh does not route models.** The harness logs in as itself and reaches
+whatever it is configured to; omh passes no model and proxies nothing. See also
+[which model you use](#decisions-deliberately-not-made).
+
+### Language: Rust
+
+**omh is written in Rust.** It ships as a single binary, and `omh` wraps every
+invocation, so startup is felt.
+
+## The sandbox
+
+### Runtime: a pluggable backend
+
+**The runtime is a pluggable backend: Docker unless you say otherwise.**
+`podman` and `sbx` are opt-in through `runtime`, and `sbx` is unmeasured. No
+vendor lock. → [Runtime backends](/concepts/architecture/#runtime-backends)
+
+### Repo exposure: a git worktree, auto-branched
+
+**Each session gets a git worktree on a branch of its own.** The agent cannot
+reach your checkout or `main`, and review is `git diff`. →
+[Sessions](/concepts/sessions/)
+
+### Git in the sandbox: a repository of its own
+
+**The sandbox has a repository of its own.** Your checkout is never mounted, so
+the agent gets a gitdir holding one commit and none of your history.
+
+### Untracked files: a `carry_in` allowlist
+
+**Untracked files enter only through `carry_in`.** Worktrees are pure git, so
+secrets enter only by declaration. → [`carry_in`](/reference/configuration/#carry_in)
+
+## Sessions
+
+### Unit of work: a long-lived session
+
+**The unit of work is a long-lived session.** It keeps the index warm and makes
+harness switching instant. → [Sessions](/concepts/sessions/)
+
+### Session persistence: `dtach`, not tmux
+
+**Sessions persist through `dtach`, not tmux.** omh needs detach and reattach,
+and SSH already provides multiplexing. → [Sessions](/concepts/sessions/)
+
+### IDE access: SSH into the session
+
+**Your editor reaches the session over SSH.** One dependency tree, shared with
+the agent. → [Editors](/guides/editors/)
+
+### Naming a session: `sNN` first, one form
+
+**The session selector comes first, in one form.** Several sandboxes of one
+repo are reached from one place, so the selector leads and everything after it
+is unchanged. → [The shape of the CLI](/reference/commands/#the-shape-of-the-cli)
+
+### Getting work back: `omh sNN commit`
+
+**Work comes back through `omh sNN commit`, squashed or with `--keep`.** You
+choose at commit time whether the agent's own commits and messages land. How
+`--keep` lands them departs from its design — see
+[the ratified deviation](#deviations-from-a-written-design-ratified).
+
+### Staying current: `omh sNN sync`, merged on the host
+
+**Trunk reaches a session through `omh sNN sync`, merged on the host.** No
+commit of yours may enter the sandbox, so it receives files and conflict markers
+rather than history. →
+[`omh sNN sync`](/reference/commands/#omh-snn-sync--trunk-moved-and-the-session-catches-up)
+
+## Configuration
+
+### Content scope: one personal catalogue
+
+**Your configuration lives in one personal catalogue.** "Where is this
+skill" had three answers, and a union can add but never subtract. →
+[Configuration](/reference/configuration/)
+
+### Repo content: hooks, and nothing else
+
+**A repository carries hooks and nothing else.** A hook binds to a repo's
+commands; a skill is a way you work.
+
+### Settings scope: two layers in the repo, plus a template
+
+**A repo's settings are two layers in the repo, plus a template.** A repo's
+behaviour has to be explained by files the repo contains. `~/.omh/default.toml`
+seeds a new one and decides nothing after that. →
+[Configuration](/reference/configuration/)
+
+### Selection: an allowlist, `[use]`
+
+**What a repo takes from your catalogue is an allowlist, `[use]`.** Removing
+something is deleting its name, with no `include`/`exclude` pair to reconcile. →
+[`[use]`](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue)
+
+### Absent selection: means everything
+
+**No `[use]` means everything.** Upgrading changes nothing, and a new checkout
+is useful before it is configured.
+
+### Command scope: `omh settings` is you
+
+**`omh settings` is you; this checkout is the rest.** It was *`config` is you,
+`repo` is here*, on the argument that the two wanted opposite write defaults,
+and one `--layer` flag cannot express both. →
+[The command surface](/project/retrospectives/#the-command-surface--done-070-6990)
+
+### Write default: the key decides
+
+**Where a write lands is decided by the key, not the command.** `src/key.rs`
+records, per key, whether a value there can name a credential. Committed is the
+default now — most settings are facts about the project — and that table is
+what keeps a secret out of it.
+
+<details>
+<summary>What the rule was, and why it moved</summary>
+
+It was *a value never lands in the committed file; a name may*, which held while
+`repo set` sent every value to the gitignored file. `omh set` serves every key
+from one command, so the judgement moved into `src/key.rs`. The full story, and
+the second reversal it forced, is under
+[Reversals](#reversals-worth-knowing-about).
+
+</details>
+
+## Harnesses
+
+### Capability floor: a superset, adapters degrade
+
+**The profile is the superset of what any harness can express; an adapter
+degrades by leaving keys out.** omh must never cost you a feature you already
+had. → [Adapters](/reference/adapters/#capabilities-are-optional-keys)
+
+### Hook vocabulary: closed, translated at staging
+
+**Hooks are written in omh's closed vocabulary and translated when they are
+staged.** `event`, `matcher` and the payload are one harness's words, and there
+is no runtime shim. → [Hooks](/reference/adapters/#hooks-three-maps-and-a-template)
+
+### Tool vocabulary: one closed set
+
+**Tool names are one closed set, mapped per adapter.** They are the one thing
+skills, subagents and hooks all leak.
+
+### Portability: store the standard where one exists
+
+**omh stores the standard format where one exists.** Skills and rules already
+travel; only hooks and subagents need omh.
 
 ## The base set
 
@@ -68,9 +236,8 @@ the base set.**
 
 The set lives in a versioned manifest rather than in the binary, and the
 justification is enforced by a test rather than by convention — see
-[the base set](/reference/base-set/).
-
-The base set is also the part of omh with the least evidence behind it. See
+[the base set](/reference/base-set/). It is also the part of omh with the least
+evidence behind it; see
 [the honest weak spot](/concepts/distribution/#the-honest-weak-spot).
 
 ## Decisions deliberately not made
@@ -87,7 +254,7 @@ The base set is also the part of omh with the least evidence behind it. See
 ## What the work loop refuses to do
 
 Reading a session's work, landing it and staying current with trunk are omh's.
-These are not.
+These are not:
 
 - **No omh verb for anything you could run on the host.** No `omh sNN rebase`,
   `cherry-pick`, `stash` or `blame`. The moment you want real git you are on the
@@ -117,26 +284,35 @@ And one that is open rather than refused:
 ## Deviations from a written design, ratified
 
 **A `--keep` selection is a `cherry-pick`, not a generated rebase todo (#56).**
-[The design](https://github.com/mindsers/ohmyharness/blob/afad736a609fd6e3921e09f784c420e05caca115/docs/design/git.md) specified the todo, delivered through `GIT_SEQUENCE_EDITOR`
-pointed at omh's own binary. The implementation used `cherry-pick` instead, and
-the first justification given for that was wrong — it claimed the designed
-mechanism could not be reached by a test, when `tests/cli.rs` runs the real
-binary and `memory::deliver` in this repo already injects `current_exe` for
+[The design](https://github.com/mindsers/ohmyharness/blob/afad736a609fd6e3921e09f784c420e05caca115/docs/design/git.md)
+specified the todo, delivered through `GIT_SEQUENCE_EDITOR` pointed at omh's own
+binary. The two are user-visibly identical, and `cherry-pick` is the smaller
+mechanism, so it was kept — on measurement.
+
+**The one real difference is a raised git floor.** `cherry-pick --empty=` is
+newer than `rebase --empty=`, so a selection fails on an older git where the
+todo would have worked. The exact version is unmeasured — only 2.55 was
+available — and pinning it is part of `omh doctor` learning git.
+
+<details>
+<summary>The justification that failed, and the measurement that replaced it</summary>
+
+The first justification given for `cherry-pick` was wrong: it claimed the
+designed mechanism could not be reached by a test, when `tests/cli.rs` runs the
+real binary and `memory::deliver` in this repo already injects `current_exe` for
 exactly that reason.
 
-Kept anyway, on measurement rather than on the argument that failed. Both
+It was kept anyway, on measurement rather than on the argument that failed. Both
 mechanisms were run against the same history: `--keep 3,1` lands `three` then
 `one` under each, and a selected merge is refused by each — `'pick' does not
 accept merge commits` from the todo, `is a merge but no -m option was given`
 from `cherry-pick` — so omh's own up-front refusal is correct either way and the
-user never sees either message. **The two are user-visibly identical**, and
+user never sees either message.
+
 `cherry-pick` is the smaller mechanism: no editor, no `sh -c` quoting, no second
 entry point into omh, no `hide = true` subcommand for `RESERVED` to carry.
 
-The one real difference is a raised git floor: `cherry-pick --empty=` is newer
-than `rebase --empty=`, so a selection fails on an older git where the todo
-would have worked. The exact version is unmeasured — only 2.55 was available —
-and pinning it is part of `omh doctor` learning git.
+</details>
 
 ## Reversals worth knowing about
 
@@ -165,14 +341,36 @@ teammate cloning a repo got none of the settings it had chosen. One command
 serving every key cannot work that way, so the judgement moved into
 `src/key.rs`, per key, and the committed file became the default.
 
-That reversal forced a second one inside a single release. `omh set` first
-shipped with a rule of its own — the committed file, unless the gitignored one
-already held the key — while `omh use`, `omh unuse` and the feature switch each
-answered differently. Three answers to one question, and every difference was a
-place for a command to report success over something it had not changed:
-`omh unset carry_in` left a map to a credential standing in a committed file
-while saying it had removed it. **The rule is now one function that four
-commands call** — every repo layer that already holds it, else the committed
-file, except a key that can name a credential. Each of the three original
-answers was defensible alone; only asking whether they were answers to the
-*same question* exposed them.
+**The rule is now one function that four commands call** — every repo layer
+that already holds the key, else the committed file, except a key that can name
+a credential.
+
+<details>
+<summary>The second reversal the write default forced, inside one release</summary>
+
+`omh set` first shipped with a rule of its own — the committed file, unless the
+gitignored one already held the key — while `omh use`, `omh unuse` and the
+feature switch each answered differently. Three answers to one question, and
+every difference was a place for a command to report success over something it
+had not changed: `omh unset carry_in` left a map to a credential standing in a
+committed file while saying it had removed it.
+
+Each of the three original answers was defensible alone; only asking whether
+they were answers to the *same question* exposed them.
+
+</details>
+
+## Next
+
+<div class="cards">
+
+- [Architecture](/concepts/architecture/)\
+  Images, runtime backends, and what lives where on disk.
+- [Sessions](/concepts/sessions/)\
+  The session model, and how it persists.
+- [Configuration](/reference/configuration/)\
+  The layers, the catalogue and `[use]`.
+- [Roadmap](/project/roadmap/)\
+  What comes next, and what gates it.
+
+</div>
