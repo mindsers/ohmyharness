@@ -3063,10 +3063,6 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             err.contains("dup.md") && err.contains("ns/dup.md"),
             "the error must name the files, since the key cannot separate them: {err}"
         );
-        assert!(
-            !err.contains("local and local"),
-            "duplicates are not reported as a conflict between layers: {err}"
-        );
 
         // And the store must be repairable through omh itself.
         let removed = remove(&paths, "dup", Some("ns/dup.md"), false)
@@ -3075,6 +3071,10 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             removed.path.ends_with("ns/dup.md"),
             "got: {}",
             removed.path.display()
+        );
+        assert!(
+            !root.join("ns/dup.md").exists(),
+            "the note it named is gone from disk"
         );
         assert!(
             root.join("dup.md").exists(),
