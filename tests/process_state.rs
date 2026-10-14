@@ -26,12 +26,15 @@ fn repo() -> PathBuf {
 
 /// Every `.rs` file under `dir`. Walked rather than listed, so a new module is
 /// covered the moment it exists.
+///
+/// A directory it cannot read is a failure, not an empty one: a scan that read
+/// nothing agrees with anything.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+    for e in entries {
+        let p = e
+            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+            .path();
         if p.is_dir() {
             rust_files(&p, out);
         } else if p.extension().is_some_and(|x| x == "rs") {
@@ -47,14 +50,27 @@ fn nothing_moves_the_process_working_directory() {
     for dir in ["src", "tests"] {
         rust_files(&root.join(dir), &mut files);
     }
+    // By name, because a scan that stopped reading where the call was, or
+    // where the test it broke lives, would still pass.
+    for read in [
+        "build.rs",
+        "src/image.rs",
+        "src/hook.rs",
+        "src/memory/tools.rs",
+        "tests/cli.rs",
+    ] {
+        assert!(
+            files.iter().any(|f| f.ends_with(read) && f.is_file()),
+            "the scan no longer reads {read}"
+        );
+    }
     // This file names the call in order to forbid it.
     let this = root.join(file!());
 
     let mut offenders = Vec::new();
     for file in files.iter().filter(|f| **f != this) {
-        let Ok(text) = fs::read_to_string(file) else {
-            continue;
-        };
+        let text =
+            fs::read_to_string(file).unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
         for (n, line) in text.lines().enumerate() {
             let code = line.trim_start();
             // Prose about the rule is not a breach of it.
