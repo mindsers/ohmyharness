@@ -1,10 +1,12 @@
 name = "omp"
 bin  = "omp"
-# A release binary, not a package manager. oh-my-pi ships one static executable
-# per platform and publishes no npm package, so this is `curl` where the other
-# two adapters are `npm install -g`. Pinned to a tagged release and verified
-# against a per-arch checksum before `chmod +x`: a release binary made
-# executable without a checksum is the supply-chain gap a pin exists to close.
+# A release binary, not a package manager. oh-my-pi ships one executable per
+# platform; its npm package, `@oh-my-pi/pi-coding-agent`, needs Bun, which the
+# harness image does not have (a repo's node stack can add it, in a later
+# layer). So this is `curl` where the other adapters are `npm install -g`.
+# Pinned to a tagged release and verified against a per-arch checksum before
+# `chmod +x`: a release binary made executable without a checksum is the
+# supply-chain gap a pin exists to close.
 #
 # The sums under `[checksums]` are the source of truth `omh doctor` reads; the
 # install repeats the right one per arch and `sha256sum -c` refuses a download
@@ -12,13 +14,13 @@ bin  = "omp"
 # this tag's release, cross-checked by downloading `omp-linux-arm64` and
 # `omp-linux-x64` independently and hashing them rather than trusting the sums
 # file alone — the two agreed.
-version = "18.2.3"
-install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo 37e21b463e16a541d20a94ae422b554ef59fc3e41cc7e275d2759f66041ca5ef ;; *) echo f85bdfb4a763d3399ddd18413f880b26b36da765aa75bd5fcc7d252239c7f17a ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
+version = "18.10.4"
+install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo 58d711d56fa0c95d208c150575dfdb08fe8fc1262e3820d2d900f0a5e750110b ;; *) echo ff59fc1b484c1308a7247ad208305005627b3fac62b440737c2b1835ac32074e ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
 
 # Per-`uname -m` SHA-256 of the release binary — `omp-linux-arm64` and
-# `omp-linux-x64` from `v18.2.3`. Inline, so it stays a top-level key rather
+# `omp-linux-x64` from `v18.10.4`. Inline, so it stays a top-level key rather
 # than swallowing the keys below it into a `[checksums]` section.
-checksums = { x86_64 = "f85bdfb4a763d3399ddd18413f880b26b36da765aa75bd5fcc7d252239c7f17a", aarch64 = "37e21b463e16a541d20a94ae422b554ef59fc3e41cc7e275d2759f66041ca5ef" }
+checksums = { x86_64 = "ff59fc1b484c1308a7247ad208305005627b3fac62b440737c2b1835ac32074e", aarch64 = "58d711d56fa0c95d208c150575dfdb08fe8fc1262e3820d2d900f0a5e750110b" }
 
 # The whole directory, and it has to be: omp keeps credentials in **SQLite**
 # (`auth_credentials`, `auth_credential_blocks` in `agent.db`), and a bind-
@@ -170,10 +172,15 @@ tool-command = "command"
 # itself; the first version of this line read `event.input` directly and
 # threw `event.input?.match is not a function` the first time it actually
 # ran. That string contains one or more `[PATH#TAG]` sections rather than a
-# plain path at all: confirmed against `docs/tools/edit.md` in the pinned
-# v18.2.3 source tree — "One or more `[PATH#TAG]` sections containing
+# plain path at all: confirmed against `docs/tools/edit.md` at v18.2.3 and
+# again at v18.10.4 — "One or more `[PATH#TAG]` sections containing
 # hashline operations", TAG being "four-uppercase-hex". This reads the first
-# section's PATH.
+# section's PATH the way omp's parser does (`parse_header` in
+# `crates/pi-edit/src/modes/hashline/tokenizer.rs` at v18.10.4): up to the
+# *last* `#`, since v18.4.1 lets a file name hold one ("Fixed hashline edits
+# rejecting files whose names contain `#` (such as yadm alternate files)");
+# with balanced brackets, as in `app/[slug]/page.tsx`; and with a tag in
+# either case, which omp upper-cases.
 #
 # The known gap: a single `edit` call can batch sections across *several*
 # files (the same doc: "Same-path sections are merged"; a call can also
@@ -181,13 +188,15 @@ tool-command = "command"
 # the first file a batched edit touches — discipline, not full coverage, the
 # same posture every guard already takes toward a bypass it cannot close.
 [capabilities.hooks.fields-by-tool.edit]
-tool-file = '(event.input?.input?.match(/\[([^\]#]*)#[0-9A-F]{4}\]/) ?? [])[1]'
+tool-file = '(event.input?.input?.match(/\[((?:[^[\]]|\[[^[\]]*\])*)#[0-9A-Fa-f]{4}\]/) ?? [])[1]'
 
 # Advisory text, at the one moment there is a channel for it: a `tool_result`
 # handler returning `content` replaces what the model reads next, so appending
-# to it reaches the model. The renderer is what restricts this to `after-tool`
-# — `tool_call` can only block, and turning a nudge into a wall is the one
-# translation omh refuses to make silently.
+# to it reaches the model. The renderer is what restricts this to `after-tool`.
+# Since v18.3.1 a `tool_call` handler can also return `additionalContext`
+# ("Added passive tool-call context support"); omh does not use it yet, and
+# until it does, a nudge before a call is dropped by name rather than turned
+# into a wall.
 [capabilities.hooks.inject]
 template = 'return { content: [...(event.content ?? []), { type: "text", text: {{text}} }] }'
 

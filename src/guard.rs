@@ -824,22 +824,7 @@ mod rendered {
     /// it existed, both guards were dropped by name here.
     #[test]
     fn every_guard_renders_and_blocks_on_omp() {
-        let adapter = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
-        let binding = adapter.supports(Capability::Hooks).expect("omp has hooks");
-        let sources = vec![PathBuf::from(HOOKS)];
-        let doc = crate::render::document(
-            Capability::Hooks,
-            binding,
-            &sources,
-            &crate::render::RenderContext {
-                own: &crate::base::Own::default(),
-                repo: &crate::settings::RepoPolicy::default(),
-                tools: &adapter.tools,
-                resolves: &Default::default(),
-                log: None,
-            },
-        )
-        .unwrap();
+        let doc = omp_guards();
         for name in ["tdd-guard", "config-guard"] {
             assert!(
                 !doc.dropped.iter().any(|d| d.name == name),
@@ -879,6 +864,78 @@ mod rendered {
             allowed, "null",
             "a dirty test file must not block on omp: {allowed}"
         );
+    }
+
+    /// Every `[PATH#TAG]` header oh-my-pi accepts is guarded, not only the
+    /// plain one. Its parser splits a header at the last `#` (`rsplit_once`
+    /// in `crates/pi-edit/src/modes/hashline/tokenizer.rs` at v18.10.4),
+    /// takes a tag in either case and upper-cases it, and lets a path hold
+    /// brackets. Each header here was one the guard could not read: it saw no
+    /// file, or the wrong one, and the edit went through.
+    ///
+    /// Both ways round, so a wrong path cannot pass by blocking anyway: the
+    /// edit blocks while the test file is untouched, and goes through once it
+    /// has changed.
+    #[test]
+    fn every_header_omp_accepts_is_guarded() {
+        let doc = omp_guards();
+        for (source, test, input) in [
+            // A `#` in the name, accepted since v18.4.1 ("Fixed hashline edits
+            // rejecting files whose names contain `#` (such as yadm alternate
+            // files)"). `#1234` is hex too, and the second section is a file
+            // no guard cares about: the path is the first section's.
+            (
+                "issue#1234.go",
+                "issue#1234_test.go",
+                "[issue#1234.go#A1B2]\nPUT <1:\n+package foo\n[README.md#C3D4]\nPUT <1:\n+hi\n",
+            ),
+            // Brackets, as in a Next.js route. Only an unmatched `]` is
+            // refused.
+            (
+                "[slug].ts",
+                "[slug].test.ts",
+                "[[slug].ts#A1B2]\nPUT <1:\n+export {}\n",
+            ),
+            // A lower-case tag.
+            (
+                "foo.go",
+                "foo_test.go",
+                "[foo.go#a1b2]\nPUT <1:\n+package foo\n",
+            ),
+        ] {
+            let dir = repo_with(source, test);
+            let event = format!(r#"{{ toolName: "edit", input: {{ input: {input:?} }} }}"#);
+            let result = drive_omp(&doc.body, dir.path(), "tool_call", &event);
+            assert!(
+                result.contains(r#""block":true"#),
+                "{source}: an untouched test file must block: {result}"
+            );
+            std::fs::write(dir.path().join(test), "changed").unwrap();
+            let allowed = drive_omp(&doc.body, dir.path(), "tool_call", &event);
+            assert_eq!(
+                allowed, "null",
+                "{source}: a changed test file must not block: {allowed}"
+            );
+        }
+    }
+
+    /// The guards, rendered for omp the way `adapters/omp.toml` binds them.
+    fn omp_guards() -> crate::render::Document {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
+        let binding = adapter.supports(Capability::Hooks).expect("omp has hooks");
+        crate::render::document(
+            Capability::Hooks,
+            binding,
+            &[PathBuf::from(HOOKS)],
+            &crate::render::RenderContext {
+                own: &crate::base::Own::default(),
+                repo: &crate::settings::RepoPolicy::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .unwrap()
     }
 
     /// Every guard rendered for Codex, then run through `sh` the way Codex
