@@ -3,19 +3,45 @@ title: Why a distribution
 description: The thesis, why not an app store, and who else is in this space.
 ---
 
-**Status: an argument, not a system.** This page says what kind of thing omh is and why that shape was chosen. Where it counts what ships, [the base set](/reference/base-set/) is the source of truth — [the roadmap](/project/roadmap/) is what is planned, and [risks](/concepts/risks/) is what is still weak.
+This page explains what kind of thing omh is — a distribution — and why that
+shape was chosen. Read it before judging omh as a framework, or before proposing
+something for its base set.
+
+**In short**
+
+- **omh is a distribution**, not a framework, an abstraction layer or a
+  marketplace: most of what it does, something else already does, and its job
+  is to choose and wire. → [A distribution, not an abstraction layer](#a-distribution-not-an-abstraction-layer)
+- **An app store cannot pick winners; a distribution has to.** omh's product is
+  subtraction, and its metric is decisions removed. → [What omh is not](#what-omh-is-not)
+- **No tool is both curated and harness-neutral.** That is the gap omh is in:
+  your curated setup, anywhere. → [Competitive position](#competitive-position)
+- **The curation half is not earned yet.** Today the verified, defensible half
+  of omh is isolation. → [The honest weak spot](#the-honest-weak-spot)
+- **Being a distribution is a commitment**: a shortlist that is earned, expires,
+  and can be escaped. → [What follows](#what-follows-from-being-a-distribution)
+
+:::note[Status: an argument, not a system]
+This page says what kind of thing omh is and why that shape was chosen. Where it
+counts what ships, [the base set](/reference/base-set/) is the source of truth —
+[the roadmap](/project/roadmap/) is what is planned, and
+[risks](/concepts/risks/) is what is still weak.
+:::
+
+## A distribution, not an abstraction layer
 
 The single most useful thing to understand about omh: it is a **distribution**.
 Not a framework, not an abstraction layer, not a marketplace.
 
-Judged as an abstraction layer it looks thin — most of what it does, something
-else already does. That is the wrong axis. Debian didn't write the kernel.
-Homebrew didn't write the software. oh-my-zsh didn't write zsh, and its genius
-was never the plugin catalog — it was that installing it gave you a good shell
-*immediately*.
+**Judged as an abstraction layer, it looks thin** — most of what it does,
+something else already does. That is the wrong axis. Debian didn't write the
+kernel. Homebrew didn't write the software. oh-my-zsh didn't write zsh, and its
+genius was never the plugin catalog — it was that installing it gave you a good
+shell *immediately*.
 
 **"It already exists" is the precondition for a distribution, not a refutation
-of one.**
+of one.** Every part below is somebody else's work; omh's job is the last
+column.
 
 | Part | Who does it | omh's job |
 |---|---|---|
@@ -30,8 +56,8 @@ of one.**
 Anthropic's marketplace ships 200+ curated plugins into an ecosystem of
 [23,600+ skills and 12,700+ MCP servers](https://claudemarketplaces.com/).
 
-That is an **app store**, and an app store is structurally incapable of being
-opinionated. The moment it picks winners, every excluded publisher becomes a
+**That is an app store, and an app store is structurally incapable of being
+opinionated.** The moment it picks winners, every excluded publisher becomes a
 business problem.
 
 | | App store | Distribution |
@@ -40,14 +66,14 @@ business problem.
 | Success metric | items listed | **decisions removed** |
 | Can it pick winners? | no | yes — that *is* the product |
 
-23,600 skills is not an opinion. It is the **problem statement**. And it grows
+**23,600 skills is not an opinion. It is the problem statement.** And it grows
 every month, which means the case for a distribution strengthens over time
 rather than eroding.
 
 **The product is subtraction.** A dozen MCP servers, not 12,700. The metric is
 decisions-to-productive, and the target is zero.
 
-Corollary: *"we support everything"* is an anti-feature. Mechanisms may be
+**Corollary: *"we support everything"* is an anti-feature.** Mechanisms may be
 broad; the UX must not expose that breadth as choice.
 
 ## Competitive position
@@ -63,24 +89,24 @@ broad; the UX must not expose that breadth as choice.
 
 **No tool is both curated and harness-neutral.** That is the gap.
 
-It also sharpens the pitch. omh is not "a curated setup" — Anthropic will always
-beat us at that on their own harness. omh is **your curated setup, anywhere.**
-Isolation we don't build; curation we inherit and port; provenance so it stays
-debuggable.
+**It also sharpens the pitch.** omh is not "a curated setup" — Anthropic will
+always beat us at that on their own harness. omh is **your curated setup,
+anywhere.** Isolation we don't build; curation we inherit and port; provenance
+so it stays debuggable.
 
-Sobering note: Vibe Kanban's company shut down in April 2026. This category has
-already produced a casualty.
+**A sobering note:** Vibe Kanban's company shut down in April 2026. This
+category has already produced a casualty.
 
 ## The honest weak spot
 
 The em-dash in that table is not a typo. **omh's curation column is currently
-unearned** — the base set is two MCP servers, six hooks and three rules sections, justified by
-argument rather than measurement.
+unearned** — the base set is two MCP servers, six hooks and three rules
+sections, justified by argument rather than measurement.
 
 The name promises curation. The verified, defensible half of the product today
 is isolation.
 
-There is no benchmark coming to fix that, and pretending otherwise would be its
+**No benchmark is coming to fix that**, and pretending otherwise would be its
 own kind of dishonesty — see
 [measure the cost, argue the benefit](/concepts/trust/#measure-the-cost-argue-the-benefit).
 What closes the gap is the ordinary work of a distribution: more entries that
@@ -104,3 +130,17 @@ writing it down.
 - **The opinion must be escapable.** A distribution whose opinion cannot be
   overridden is not trustworthy — hence [`omh eject`](/concepts/trust/), and hence
   runtime backends staying plural even when one is clearly better.
+
+## Next
+
+<div class="cards">
+
+- [Trust](/concepts/trust/)\
+  How the curation stays stated, visible and reversible — and why costs are
+  measured but benefits argued.
+- [The base set](/reference/base-set/)\
+  What omh ships today, each entry with its cost and how to remove it.
+- [Risks](/concepts/risks/)\
+  What is still weak, the curation commitment among it.
+
+</div>
