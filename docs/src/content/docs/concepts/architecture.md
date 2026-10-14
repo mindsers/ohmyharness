@@ -3,10 +3,37 @@ title: Architecture
 description: Images, runtime backends, and the on-disk layout.
 ---
 
-**Status: built, except the second backend.** The on-disk layout, the image build and the runtime trait are all shipping. `sbx` is selectable and **unverified** — `runtime = "sbx"` is a valid setting, and `auto` never picks it, because nobody has measured it — but the spike that resolves file mounts, guest paths and IDE attach has not run, so Docker is the only runtime anyone has confirmed works.
+This page explains how omh is put together — what lives where on disk, how its
+images are built, and how the runtime backend is kept swappable. Read it before
+changing any of those, or to understand why Docker is the only runtime verified
+end to end.
 
-How omh is put together: what lives where on disk, how images are built, and how
-the runtime backend is kept swappable.
+**In short**
+
+- **Everything omh keeps lives in `~/.omh`** — your catalogue, and per-repo,
+  per-session state — while a repo commits only its settings, memory policy and
+  hooks. → [On-disk layout](#on-disk-layout)
+- **Images come in two layers, tagged by recipe digest**: a base every session
+  shares, which already meets `sbx`'s contract, and a thin per-harness layer.
+  → [Images](#images)
+- **The backend sits behind a narrow seam**: a pure `Plan` in, an argv out, and
+  one place where an argv becomes a process. → [Runtime backends](#runtime-backends)
+- **Backends declare what they can do**, and a plan that needs more fails loudly
+  instead of starting an agent that cannot see its own profile.
+  → [Declared capabilities](#declared-capabilities-and-honest-unknowns)
+- **`sbx` is measured, built and opt-in.** It is the fix for the agent holding
+  its own token, but its full launch has not been accepted, so `auto` never
+  picks it. → [The spike](#spike-sbx-0390-measured-2026-09-06)
+
+:::note[Status: built, except the second backend]
+The on-disk layout, the image build and the runtime trait are all shipping.
+`sbx` is selectable and **unverified** — `runtime = "sbx"` is a valid setting,
+and `auto` never picks it, because nobody has measured a full launch on it. The
+spike has run — file mounts and guest paths are measured, and so is the
+published port an IDE would attach through — and the backend was rewritten from
+it. The acceptance, a real `omh doctor --harness claude` under `sbx`, has not,
+so Docker is the only runtime anyone has confirmed works.
+:::
 
 ## On-disk layout
 
@@ -34,7 +61,7 @@ the runtime backend is kept swappable.
 <repo>/AGENTS.md              the project's own rules, tracked
 ```
 
-Two details that are load-bearing rather than incidental:
+Two details are load-bearing rather than incidental:
 
 - **Staging is keyed by session *and* harness.** Without the harness in that
   path, launching a second harness overwrites the config the first one has
@@ -46,8 +73,8 @@ Where things live is in [Configuration](/reference/configuration/#one-catalogue-
 
 ## Images
 
-Two layers: a base every session shares, and a thin per-harness layer that runs
-the adapter's `install` command.
+**Two layers**: a base every session shares, and a thin per-harness layer that
+runs the adapter's `install` command.
 
 ```dockerfile
 # omh/base
@@ -83,21 +110,29 @@ Three properties, each with a test:
 
 ### Tags are recipe digests, never `:latest`
 
-A mutable `:latest` on the base meant `ensure` skipped rebuilding it, so base
-recipe changes had **never** shipped — adding `socat` silently did nothing.
-Harness layers now pin an exact base digest, so a recipe change actually
+**Harness layers pin an exact base digest**, so a recipe change actually
 propagates.
 
-`init` builds these, because init is not finished until `omh new <harness>` works.
-About 30 seconds on first run, cached after.
+<details>
+<summary>What <code>:latest</code> cost: base recipe changes that never shipped</summary>
+
+A mutable `:latest` on the base meant `ensure` skipped rebuilding it, so base
+recipe changes had **never** shipped — adding `socat` silently did nothing.
+
+</details>
+
+**`init` builds these**, because init is not finished until `omh new <harness>`
+works. About 30 seconds on first run, cached after.
 
 ### A plan must be runnable, not merely well-formed
 
-The network a plan names — one per session, named like its container, so two
-sessions of one repo cannot reach each other's services — has to be *created*,
-too. That gap made every real launch die at `network omh-<repo> not found`
-(the per-project network of the time) while every unit test
-passed — the archetypal case for [`omh doctor`](/guides/troubleshooting/).
+**The network a plan names has to be *created*, too** — one per session, named
+like its container, so two sessions of one repo cannot reach each other's
+services.
+
+That gap made every real launch die at `network omh-<repo> not found` (the
+per-project network of the time) while every unit test passed — the archetypal
+case for [`omh doctor`](/guides/troubleshooting/).
 
 ### Verified end to end
 
@@ -114,16 +149,16 @@ tools:  claude=ok dtach=ok git=ok rg=ok node=ok
   version    2.1.222 (Claude Code)
 ```
 
-Every capability class arrives, resolved from the catalogue, in the harness's own
-format. That is the thesis demonstrated rather than argued.
+**Every capability class arrives**, resolved from the catalogue, in the
+harness's own format. That is the thesis demonstrated rather than argued.
 
 ## Runtime backends
 
-Isolation is not ours to build. It is also not one vendor's to own.
+**Isolation is not ours to build. It is also not one vendor's to own.**
 
-The backend sits behind a narrow trait. `Plan` is already a pure description — a
-mount list, env, and argv — so a backend is just a translation of that into one
-process invocation.
+**The backend sits behind a narrow trait.** `Plan` is already a pure
+description — a mount list, env, and argv — so a backend is a translation of
+that into one process invocation.
 
 ```
         Plan  (pure: mounts, env, argv, workdir)
@@ -136,25 +171,33 @@ process invocation.
                credential injection
 ```
 
-Selection is `runtime = "auto" | "docker" | "podman" | "sbx"` in `settings.toml`.
-`auto` selects only `docker`; `podman` (rootless, docker's CLI) and `sbx`
-(Docker Sandboxes, rewritten from the measured spike below) are explicit
-opt-ins, and `omh doctor` says so when one is chosen.
+**Selection is `runtime` in `settings.toml`**, and only one value is chosen for
+you:
+
+| `runtime` | What it is | Chosen by `auto` |
+|---|---|---|
+| `docker` | the shared-kernel backend above | yes — `auto` selects only `docker` |
+| `podman` | rootless, docker's CLI | no — an explicit opt-in |
+| `sbx` | Docker Sandboxes, rewritten from the measured spike below | no — an explicit opt-in |
+
+`omh doctor`'s runtime row names whichever backend is in use. When `auto` finds
+no Docker, its error names the `sbx` opt-in, and `omh doctor` as the way to
+check it first.
 
 ### Why not simply adopt `sbx`
 
-It is better on every security axis — hypervisor isolation instead of a shared
-kernel, and secrets injected at the egress proxy so **a compromised agent never
-holds its own token.** omh currently mounts a credential volume, which means the
-agent *can* read and exfiltrate it. That is a real flaw and `sbx`'s model is the
-fix.
+**It is better on every security axis** — hypervisor isolation instead of a
+shared kernel, and secrets injected at the egress proxy so **a compromised agent
+never holds its own token.** omh currently mounts a credential volume, which
+means the agent *can* read and exfiltrate it. That is a real flaw and `sbx`'s
+model is the fix.
 
-But a distribution whose opinion cannot be escaped is not trustworthy. Backends
-stay plural.
+**But a distribution whose opinion cannot be escaped is not trustworthy.**
+Backends stay plural.
 
 ### Is `sbx` harness-agnostic?
 
-Yes — verified, not assumed. Docker's own docs
+**Yes — verified, not assumed.** Docker's own docs
 [demonstrate building a kit for Amp](https://docs.docker.com/ai/sandboxes/customize/build-an-agent/),
 a third-party agent they do not ship. The four named agents are shipped *kits*,
 not a constraint. A kit is barely more than an omh adapter:
@@ -164,7 +207,7 @@ entrypoint:
   run: [amp, --dangerously-allow-all]
 ```
 
-Base image requirements are four: a non-root `agent` user at UID 1000,
+**Base image requirements are four**: a non-root `agent` user at UID 1000,
 passwordless sudo, `/home/agent/` as home, and HTTP proxy env forwarding. omh's
 `GUEST_HOME` is already `/home/agent`.
 
@@ -178,32 +221,46 @@ From the sbx FAQ:
 > settings, and other files under directories such as `~/.claude` remain on the
 > host."
 
-Docker drew its boundary exactly where omh's product begins. They isolate; they
-deliberately do not carry your setup in. The two **compose**: `sbx` provides the
-microVM, omh gets your profile inside it.
+**Docker drew its boundary exactly where omh's product begins.** They isolate;
+they deliberately do not carry your setup in. The two **compose**: `sbx`
+provides the microVM, omh gets your profile inside it.
 
 ### The seam in the code
 
-`runtime::Runtime` is pure: a `Plan` in, an argv out, and nothing in it ever
-runs a process. `runtime::Backend` is the one place an argv becomes a process.
-`runtime::select` returns a `Backend`, every command that shells out to the
-runtime goes through `Backend::output`, and only the things that genuinely need
-a `Child` take `program()` and spawn their own. There are five, and they are
-named rather than counted, because this paragraph said "two" while the tree held
-seven: an interactive attach and an interactive login, which hand over the
-terminal; a build fed its Dockerfile on stdin; and two graph indexes, which are
-`spawn`ed into the background and never waited for.
+**`runtime::Runtime` is pure**: a `Plan` in, an argv out, and nothing in it ever
+runs a process. **`runtime::Backend` is the one place an argv becomes a
+process.** `runtime::select` returns a `Backend`, and every command that shells
+out to the runtime goes through `Backend::output`.
+
+**Only the things that genuinely need a `Child` take `program()` and spawn their
+own.** There are six, and they are named rather than counted:
+
+- an interactive attach and an interactive login, which hand over the terminal;
+- a build fed its Dockerfile on stdin;
+- two graph indexes, which are `spawn`ed into the background and never waited
+  for;
+- and the memory server's cross-build, a docker-shaped `run` of its own whose
+  output is relayed line by line while it builds.
+
+**A hand-built `Command` that waits for an answer is the shape to look for in
+review**; needing a `Child` is the only thing that justifies one.
+
+<details>
+<summary>Why they are named: this list once said "two" while the tree held seven</summary>
+
+They are named rather than counted because this paragraph said "two" while the
+tree held seven.
 
 The two that did not belong on that list were plain `.output()` calls — the
 graph drop on `omh sNN rm`, and the daemon round-trip behind `omh doctor`'s host
 row — and each was `Backend::real`'s body written out a second time. Writing it
 out is what put them beyond `Backend::scripted`, so neither had a test until
-they came back through the seam. **A hand-built `Command` that waits for an
-answer is the shape to look for in review**; needing a `Child` is the only thing
-that justifies one.
+they came back through the seam.
 
-That split is what makes the launch path testable on a machine with no
-container runtime. `Backend::scripted` answers each argv from a table and logs
+</details>
+
+**That split is what makes the launch path testable on a machine with no
+container runtime.** `Backend::scripted` answers each argv from a table and logs
 what was asked, so `cmd::session`'s launch decisions — join the running
 container, refuse to touch one the daemon will not describe, refuse to restart
 one with a live harness inside, clear a stopped one before `run --name` — each
@@ -212,8 +269,8 @@ or nothing at all.
 
 ### Declared capabilities, and honest unknowns
 
-Backends differ in ways that break a naive plan, so each **declares** what it can
-do rather than failing mysteriously.
+**Backends differ in ways that break a naive plan, so each declares what it can
+do** rather than failing mysteriously.
 
 | Capability | Docker | `sbx` | Consequence if absent |
 |---|---|---|---|
@@ -221,10 +278,11 @@ do rather than failing mysteriously.
 | choose the **guest path** | yes | **no** (measured) — a workspace mounts at its host path | the `/work` convention breaks; stage + symlink from inside |
 | SSH attach for IDE | yes (sshd in image) | **no native SSH**; `exec` is the entry, and a published loopback port reaches a service inside (measured) | an sshd in omh's template on a published port should work; else `exec` ([#109](https://github.com/mindsers/ohmyharness/issues/109)) |
 
-The unknowns are not hand-waved. A `Plan` is validated against the selected
+**The unknowns are not hand-waved.** A `Plan` is validated against the selected
 backend's declared capabilities and fails **loudly** if it needs something the
-backend lacks. Running that validation against `sbx`'s conservative capabilities
-today is instructive — **every single mount omh makes is rejected**:
+backend lacks. Running that validation against `sbx`'s conservative
+capabilities, before staging existed, was instructive — **every single mount omh
+made was rejected**:
 
 ```
 Error: the selected runtime cannot honour this plan:
@@ -234,28 +292,76 @@ Error: the selected runtime cannot honour this plan:
   …
 ```
 
-That is the real blast radius. If `sbx` genuinely forces host-path mounts, the
-staging model needs rework rather than a tweak: staged content would have to be
-written into the workspace and symlinked from inside, not mounted onto chosen
+**That is the real blast radius.** If `sbx` genuinely forces host-path mounts,
+the staging model needs rework rather than a tweak: staged content would have to
+be written into the workspace and symlinked from inside, not mounted onto chosen
 guest paths.
 
 Better to know that from a failing validation than from an agent that starts
 fine and cannot see its own profile.
 
-Resolving it is a one-afternoon spike — build an opencode kit, try a single-file
-mount, try attaching an IDE — and it gates whether `sbx` becomes the default or
-stays opt-in hardening. See [roadmap](/project/roadmap/).
+Resolving it was planned as a one-afternoon spike — build an opencode kit, try a
+single-file mount, try attaching an IDE. **The spike below answered it**: `sbx`
+does force host-path mounts and directory-only workspaces, so staging was
+reworked into stage-and-symlink, and `Plan::validate_for` skips the native-mount
+refusal for a backend that stages. What still gates whether `sbx` becomes the
+default or stays opt-in hardening is the full launch. See
+[roadmap](/project/roadmap/).
 
 ### Spike: `sbx` 0.39.0, measured 2026-09-06
+
+**Built and tested; not yet accepted.** Verified live against sbx 0.39.0: the
+`OMH_LINKS` entrypoint symlinks `/work` and a root-owned path (through the sudo
+fallback) and reads the host content through them; `docker save | sbx template
+load` lists the image and the parser recognises it.
+
+**The remaining acceptance is a full `omh new`/`omh doctor` launch**, which
+rebuilds the base image once (the entrypoint changed). `auto` still never
+selects `sbx` — it stays an explicit opt-in behind the login and account gate.
+
+**Implemented (2026-09-06).** All four mismatches the spike found are now built
+and tested:
+
+1. **Delivery** is `provide`/`provide_to_sbx` in `image`: build with docker,
+   `docker save -o` to a tar, `sbx template load` it, idempotent through
+   `Sbx::template_has` reading `sbx template ls --json`. The measured store row
+   is registry-prefixed (`docker.io/omh/base`), which the parser matches on a
+   path boundary.
+2. **No labels** — the stamp is recorded in `runs/<id>/stamp.json` at create and
+   read back by `stamp_recorded`; `Runtime::carries_labels` is the seam, and the
+   reuse semantics (attach on no drift, restart on drift) are identical to the
+   label path. The fuller option won over recreate-each-launch, so a live sbx
+   agent is not killed on the next `resume`.
+3. **Stage-and-symlink** — every guest path travels in `OMH_LINKS` (`guest host`
+   per line) and the entrypoint symlinks each, `sudo` for a root-owned parent.
+   `sbx_staging` turns mounts into host-path workspaces: a file mount stages its
+   parent directory, a docker named volume (the graph cache) is dropped because
+   sbx home persists across stop/run, and a workspace nested in another is
+   dropped as redundant. `Plan::validate_for` skips the native-mount refusal for
+   a staging backend.
+4. **Running check** and `remove`/`network` are the runtime's own:
+   `running_names` parses the JSON by status, `remove_args` is `rm … --force`,
+   and `ensure_network` is a no-op because sbx isolates in a microVM.
+
+The measurements behind it, in the order they were taken:
+
+<details>
+<summary>Where the spike started: the <code>docker sandbox</code> plugin is gone</summary>
 
 The section above was written against the `docker sandbox` Desktop plugin, which
 is **removed** (`docker sandbox` now prints a migration notice). Docker
 Sandboxes ships as a standalone CLI, `sbx`, installed with
-`brew trust docker/tap && brew install docker/tap/sbx`. This spike measured
-`sbx v0.39.0` on macOS 26 (Apple Silicon). What runs a *sandbox* needs
-`sbx login` (interactive Docker OAuth) and `sbx daemon start`; the CLI surface
-below was read without a login, and the runtime behaviours it raises are marked
-as still needing one.
+`brew trust docker/tap && brew install docker/tap/sbx`.
+
+This spike measured `sbx v0.39.0` on macOS 26 (Apple Silicon). What runs a
+*sandbox* needs `sbx login` (interactive Docker OAuth) and `sbx daemon start`;
+the CLI surface below was read without a login, and the runtime behaviours it
+raises are marked as still needing one.
+
+</details>
+
+<details>
+<summary>Measured from the CLI, without a login — and the model it suggested</summary>
 
 **Measured from the CLI (no login required):**
 
@@ -311,7 +417,10 @@ as still needing one.
 4. The profile — skills, MCP, rules — is staged into the worktree and symlinked
    from inside at startup, because the guest path cannot be chosen.
 
-**Measured with a login, sbx 0.39.0 (2026-09-06):**
+</details>
+
+<details>
+<summary>Measured with a login, sbx 0.39.0 (2026-09-06)</summary>
 
 - **A workspace mounts at its exact host path** — `sbx create shell <dir>` puts
   the files at `<dir>` inside the sandbox, `pwd` and all. The guest path is not
@@ -339,11 +448,17 @@ as still needing one.
   the user the exact next command for, rather than letting sbx's own errors
   surface.
 
-**What remains** is the end-to-end: build omh's base, `sbx template load` it,
-and run `omh doctor --harness claude` with `runtime = "sbx"` — the acceptance
-test. The design is no longer guessed; `Sbx` in `runtime.rs` still needs its
-argv rewritten to `create`/`exec`/`ports` and `Plan::validate` taught the
-stage-and-symlink model, and until that ships `auto` never selects it.
+**What remained at that point** was the end-to-end: build omh's base,
+`sbx template load` it, and run `omh doctor --harness claude` with
+`runtime = "sbx"` — the acceptance test. The design was no longer guessed;
+`Sbx` in `runtime.rs` still needed its argv rewritten to
+`create`/`exec`/`ports` and `Plan::validate` taught the stage-and-symlink model,
+and until that shipped `auto` would never select it.
+
+</details>
+
+<details>
+<summary>Why the rewrite was architectural: four mismatches, each verified with a throwaway image</summary>
 
 **The rewrite is architectural, not an argv swap (measured 2026-09-06).**
 Trying to map omh's Docker-shaped `Sbx` onto the real CLI surfaced four
@@ -382,34 +497,19 @@ delivery), `container`/`Plan::validate` (stage-and-symlink, and reuse without
 labels), and its acceptance is a real launch: `omh doctor --harness claude` with
 `runtime = "sbx"`. The design is fully measured; none of it is guessed.
 
-**Implemented (2026-09-06).** All four mismatches are now built and tested:
+</details>
 
-1. **Delivery** is `provide`/`provide_to_sbx` in `image`: build with docker,
-   `docker save -o` to a tar, `sbx template load` it, idempotent through
-   `Sbx::template_has` reading `sbx template ls --json`. The measured store row
-   is registry-prefixed (`docker.io/omh/base`), which the parser matches on a
-   path boundary.
-2. **No labels** — the stamp is recorded in `runs/<id>/stamp.json` at create and
-   read back by `stamp_recorded`; `Runtime::carries_labels` is the seam, and the
-   reuse semantics (attach on no drift, restart on drift) are identical to the
-   label path. The fuller option won over recreate-each-launch, so a live sbx
-   agent is not killed on the next `resume`.
-3. **Stage-and-symlink** — every guest path travels in `OMH_LINKS` (`guest host`
-   per line) and the entrypoint symlinks each, `sudo` for a root-owned parent.
-   `sbx_staging` turns mounts into host-path workspaces: a file mount stages its
-   parent directory, a docker named volume (the graph cache) is dropped because
-   sbx home persists across stop/run, and a workspace nested in another is
-   dropped as redundant. `Plan::validate_for` skips the native-mount refusal for
-   a staging backend.
-4. **Running check** and `remove`/`network` are the runtime's own:
-   `running_names` parses the JSON by status, `remove_args` is `rm … --force`,
-   and `ensure_network` is a no-op because sbx isolates in a microVM.
+## Next
 
-Verified live against sbx 0.39.0: the `OMH_LINKS` entrypoint symlinks `/work`
-and a root-owned path (through the sudo fallback) and reads the host content
-through them; `docker save | sbx template load` lists the image and the parser
-recognises it. The remaining acceptance is a full `omh new`/`omh doctor` launch,
-which rebuilds the base image once (the entrypoint changed). `auto` still never
-selects `sbx` — it stays an explicit opt-in behind the login and account gate.
+<div class="cards">
 
+- [Sessions](/concepts/sessions/)\
+  What runs in the container, and what the agent inside it can reach.
+- [The `sbx` runtime](/reference/configuration/#the-sbx-runtime-docker-sandboxes)\
+  Setting it up as an opt-in, and what it changes.
+- [Risks](/concepts/risks/#security)\
+  The credential and egress gaps `sbx` would close.
+- [Roadmap](/project/roadmap/#v05--backends)\
+  What decides whether `sbx` becomes the default.
 
+</div>
