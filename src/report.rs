@@ -3579,9 +3579,29 @@ pub struct StaleSession {
     pub image: StaleImage,
 }
 
+/// What a second look at this repo did to its `[provision]` table.
+///
+/// Two variants and no third for "nothing changed": that is `Asked` with
+/// nothing in it. The split that matters is the other one — a sandbox that was
+/// asked and a sandbox that could not be, which a pair of empty lists would
+/// report identically.
+#[derive(Debug, Clone)]
+pub enum Reprovisioned {
+    Asked {
+        added: Vec<String>,
+        removed: Vec<String>,
+        unanswered: Vec<crate::stack::Unanswered>,
+    },
+    /// The question could not be put, and why. The table is as it was.
+    Unasked(String),
+}
+
 /// What `omh upgrade` refreshed, rebuilt, and left running behind.
 #[derive(Debug, Clone, Default)]
 pub struct Upgraded {
+    /// What asking the sandbox again did to `[provision]`. `None` only for a
+    /// report built without looking, which no run of the command produces.
+    pub provision: Option<Reprovisioned>,
     /// One `(harness, outcome)` per installed adapter.
     pub harnesses: Vec<(String, Outcome)>,
     /// The adapters refreshed from the binary this run (a `.yours` was kept for
@@ -3603,7 +3623,7 @@ impl Report for Upgraded {
         if self.dry_run {
             s.push_str(&format!(
                 "{}\n",
-                p.paint(out::DIM, "--dry-run: nothing built")
+                p.paint(out::DIM, "--dry-run: nothing built, nothing written")
             ));
         }
         if !self.refreshed.is_empty() {
@@ -3611,6 +3631,38 @@ impl Report for Upgraded {
                 "refreshed {}\n",
                 p.paint(out::DIM, &self.refreshed.join(", "))
             ));
+        }
+        // What `[provision]` says now. Nothing when the sandbox was asked and
+        // agreed with the table; never nothing when it could not be asked.
+        match &self.provision {
+            Some(Reprovisioned::Asked {
+                added,
+                removed,
+                unanswered,
+            }) => {
+                for key in added {
+                    s.push_str(&format!(
+                        "{} {key} {}\n",
+                        p.paint(out::OK, "+"),
+                        p.paint(out::DIM, "— applies here now")
+                    ));
+                }
+                for key in removed {
+                    s.push_str(&format!(
+                        "{} {key} {}\n",
+                        p.paint(out::WARN, "-"),
+                        p.paint(out::DIM, "— no longer applies here")
+                    ));
+                }
+                for one in unanswered {
+                    s.push_str(&format!("{}\n", p.paint(out::WARN, &one.says())));
+                }
+            }
+            Some(Reprovisioned::Unasked(why)) => s.push_str(&format!(
+                "{}\n",
+                p.paint(out::WARN, &format!("[provision] left as it was — {why}"))
+            )),
+            None => {}
         }
 
         let mut t = Table::new();
@@ -3657,6 +3709,25 @@ impl Report for Upgraded {
                 StaleImage::Unknown(why) => json!({ "id": s.id, "image": null, "unreadable": why }),
             }).collect::<Vec<_>>(),
             "sessions_unchecked": self.sessions_unchecked,
+            "provision": match &self.provision {
+                Some(Reprovisioned::Asked { added, removed, unanswered }) => json!({
+                    "added": added,
+                    "removed": removed,
+                    "unanswered": unanswered.iter().map(|one| json!({
+                        "provide": one.provide,
+                        "exit": one.exit,
+                        "kept": one.kept,
+                    })).collect::<Vec<_>>(),
+                    "unasked": null,
+                }),
+                Some(Reprovisioned::Unasked(why)) => json!({
+                    "added": [],
+                    "removed": [],
+                    "unanswered": [],
+                    "unasked": why,
+                }),
+                None => serde_json::Value::Null,
+            },
             "dry_run": self.dry_run,
         })
     }

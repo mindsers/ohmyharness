@@ -11681,6 +11681,749 @@ fn a_real_upgrade_rebuilds_when_the_image_is_missing() {
     );
 }
 
+// ── upgrade re-reads what this repo needs ───────────────────────────────────
+//
+// `init` asks the sandbox which of a stack's provides apply here and records
+// the answer in a committed table. It is a one-time command, so for a while
+// nothing asked again: a repo that swapped one lockfile for another went on
+// building the image its first day described.
+
+/// How the stand-in below answers when omh asks it a stack's conditions.
+#[derive(Clone, Copy)]
+enum Asked {
+    /// It runs them, in the directory the mount names.
+    Honestly,
+    /// The runtime takes the question and cannot put it.
+    Exits(i32),
+    /// It runs them somewhere the repo is not — a daemon that does not share
+    /// the path it was told to mount, and mounts an empty directory instead.
+    Blind,
+    /// It runs them and loses the first line of the answer on the way back.
+    DropsALine,
+}
+
+impl Sandbox {
+    /// A `docker` that answers a stack's conditions by running them.
+    ///
+    /// omh asks with `run --rm -v <repo>:/work:ro -w /work <tag> sh -c <script>`.
+    /// `fake_docker` exits 0 with nothing on stdout, which omh reads — rightly —
+    /// as a sandbox that did not answer, and records nothing. So this one runs
+    /// the script, in the directory the `-v` names rather than one it assumes.
+    /// Nothing else it is asked to `run` is executed.
+    ///
+    /// `built` is whether every image exists. Without that it keeps a list of
+    /// the tags it was asked to build, and an image is there when it is on the
+    /// list: `image inspect` says so, `images` lists them by adapter, and a
+    /// `run` in a tag nobody built is refused the way docker refuses it. A
+    /// `build` keeps the recipe it was handed — on stdin, where the argv log
+    /// cannot see it — for `recipes_built` to read back, and fails when that
+    /// recipe holds whatever `sb.bin/build-fails-on` names.
+    fn answering_docker(&self, asked: Asked, built: bool) -> PathBuf {
+        let log = self.fake_docker();
+        let nowhere = self.bin.join("nowhere");
+        std::fs::create_dir_all(&nowhere).unwrap();
+        let run = match asked {
+            Asked::Honestly => "cd \"$src\" && exec sh -c \"$a0\"".to_string(),
+            Asked::Exits(code) => format!("echo 'no such image' >&2; exit {code}"),
+            Asked::Blind => format!("cd {} && exec sh -c \"$a0\"", nowhere.display()),
+            Asked::DropsALine => "cd \"$src\" && sh -c \"$a0\" | tail -n +2; exit 0".to_string(),
+        };
+        let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> @LOG@
+built=@BUILT@
+if [ "$built" = 0 ]; then
+  case "$1 $2" in
+    "image inspect") grep -q -x -F -- "$3" @TAGS@ 2>/dev/null; exit $? ;;
+  esac
+  if [ "$1" = build ]; then
+    recipe=$(cat); printf '%s\n' "$recipe" >> @RECIPES@
+    if [ -f @FAILS@ ] && printf '%s' "$recipe" | grep -q -F -- "$(cat @FAILS@)"; then
+      echo 'the install failed' >&2; exit 1
+    fi
+    printf '%s\n' "$3" >> @TAGS@
+    exit 0
+  fi
+  if [ "$1" = images ]; then
+    adapter=''
+    for a in "$@"; do case "$a" in label=omh.adapter=*) adapter=${a#label=omh.adapter=} ;; esac; done
+    grep -- "^omh/$adapter:" @TAGS@ 2>/dev/null
+    exit 0
+  fi
+fi
+if [ "$1" = run ]; then
+  src=''; a0=''; a1=''; a2=''; a3=''
+  for a in "$@"; do
+    case "$a" in *:/work:ro) src=${a%:/work:ro} ;; esac
+    a3=$a2; a2=$a1; a1=$a0; a0=$a
+  done
+  if [ -n "$src" ] && [ "$a1" = -c ]; then
+    if [ "$built" = 0 ] && ! grep -q -x -F -- "$a3" @TAGS@ 2>/dev/null; then
+      echo "Unable to find image '$a3' locally" >&2; exit 125
+    fi
+    @RUN@
+  fi
+fi
+if [ "$1" = inspect ]; then echo true; fi
+if [ "$1" = ps ]; then cat @CONTAINERS@ 2>/dev/null; fi
+exit 0
+"#
+        .replace("@LOG@", &log.display().to_string())
+        .replace("@BUILT@", if built { "1" } else { "0" })
+        .replace("@TAGS@", &self.bin.join("tags").display().to_string())
+        .replace("@RECIPES@", &self.bin.join("recipes").display().to_string())
+        .replace("@FAILS@", &self.bin.join("build-fails-on").display().to_string())
+        .replace("@CONTAINERS@", &self.bin.join("containers").display().to_string())
+        .replace("@RUN@", &run);
+        std::fs::write(self.bin.join("docker"), script).unwrap();
+        log
+    }
+
+    /// A repo omh already set up, holding a stack of its own whose four
+    /// provides each say something different about a second look.
+    ///
+    /// Its own stack rather than `node`, so that the conditions are `test -f`
+    /// and nothing the machine running the suite has to have installed.
+    fn set_up_with_a_stack_that_moved(&self) {
+        self.git_init();
+        self.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+        std::fs::create_dir_all(self.repo.join(".omh/stacks")).unwrap();
+        std::fs::write(self.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+        let provide = |name: &str, when: &str| {
+            format!(
+                "[[provide]]\nname = \"{name}\"\nneeds = [\"{name}\"]\nwhen = \"{when}\"\n\
+                 install = \"echo installs-{name}\"\nbecause = \"a fixture\"\n\n"
+            )
+        };
+        std::fs::write(
+            self.repo.join(".omh/stacks/acme.toml"),
+            format!(
+                "name = \"acme\"\nmarker = \"acme.json\"\n\n{}{}{}{}",
+                provide("was", "test -f was.lock"),
+                provide("now", "test -f now.lock"),
+                provide("declined", "test -f declined.lock"),
+                provide("broken", "exit 3"),
+            ),
+        )
+        .unwrap();
+        // What the first look recorded, and one line a person typed.
+        std::fs::write(
+            self.repo.join(".omh/settings.toml"),
+            "runtime = \"docker\"\n\n[provision]\n\"acme/was\" = true\n\
+             \"acme/declined\" = false\n\"acme/broken\" = true\n",
+        )
+        .unwrap();
+        // And the repo as it is today: `was.lock` has gone, `now.lock` arrived.
+        for file in ["acme.json", "now.lock", "declined.lock"] {
+            std::fs::write(self.repo.join(file), "{}\n").unwrap();
+        }
+    }
+
+    /// The `[provision]` table as the committed file holds it, and nothing of
+    /// a table after it.
+    fn provision_table(&self) -> String {
+        let settings = std::fs::read_to_string(self.repo.join(".omh/settings.toml")).unwrap();
+        settings
+            .split_once("[provision]")
+            .map(|(_, rest)| {
+                rest.lines()
+                    .take_while(|line| !line.starts_with('['))
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| format!("{line}\n"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// **`omh upgrade` asks again.** The table describes what is true now: an
+/// entry whose condition stopped applying goes, one that started applying
+/// arrives, and the image is built from the result.
+///
+/// And the two things a second look must not do. A `false` can only have been
+/// typed, so it is a decision and survives a condition that now applies. A
+/// condition that *could not answer* is not a "no": the entry it would have
+/// removed stays exactly as it was, and is named.
+#[test]
+fn upgrade_re_reads_which_provides_apply_and_rewrites_the_table() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Honestly, true);
+    sb.set_up_with_a_stack_that_moved();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let table = sb.provision_table();
+    assert!(
+        table.contains("\"acme/now\" = true"),
+        "what applies now is recorded: {table}"
+    );
+    assert!(
+        !table.contains("acme/was"),
+        "what stopped applying is gone, not flipped: {table}"
+    );
+    assert!(
+        table.contains("\"acme/declined\" = false"),
+        "a `false` somebody typed outlives a condition that applies: {table}"
+    );
+    assert!(
+        table.contains("\"acme/broken\" = true"),
+        "a condition that could not answer removes nothing: {table}"
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let names = |field: &str| -> Vec<String> {
+        v["provision"][field]
+            .as_array()
+            .unwrap_or_else(|| panic!("a `{field}` array under `provision`: {v:#}"))
+            .iter()
+            .map(|entry| entry.as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    assert_eq!(names("added"), ["acme/now"], "{v:#}");
+    assert_eq!(names("removed"), ["acme/was"], "{v:#}");
+    assert_eq!(
+        v["provision"]["unanswered"],
+        serde_json::json!([{ "provide": "acme/broken", "exit": 3, "kept": true }]),
+        "the one it could not ask about is named, with the code and what became of it: {v:#}"
+    );
+}
+
+/// A dry run says what would change, and changes nothing. The preview is the
+/// real run's own decision — it asks the sandbox, which is a read — with the
+/// write left out.
+#[test]
+fn a_dry_run_upgrade_reports_the_table_it_would_write_and_writes_nothing() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Honestly, true);
+    sb.set_up_with_a_stack_that_moved();
+    let before = std::fs::read_to_string(sb.repo.join(".omh/settings.toml")).unwrap();
+
+    let out = sb.omh(&["--dry-run", "--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/settings.toml")).unwrap(),
+        before,
+        "a dry run leaves the committed file as it found it"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["provision"]["added"],
+        serde_json::json!(["acme/now"]),
+        "and still says what a real run would add: {v:#}"
+    );
+    assert_eq!(v["provision"]["removed"], serde_json::json!(["acme/was"]));
+}
+
+/// **The images are built from the table the second look wrote**, not from the
+/// one it found — which is the whole reason for asking before building.
+///
+/// With nothing built, so that a build happens and its recipe can be read. It
+/// also covers the order: the stand-in refuses a `run` in a tag nobody built,
+/// so the conditions are only answered if `upgrade` built a harness image
+/// first and asked in that.
+#[test]
+fn upgrade_builds_this_repos_image_from_what_applies_now() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Honestly, false);
+    sb.set_up_with_a_stack_that_moved();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let table = sb.provision_table();
+    assert!(
+        table.contains("\"acme/now\" = true") && !table.contains("acme/was"),
+        "asked in the image it had just built, and recorded: {table}"
+    );
+
+    let recipes = sb.recipes_built();
+    for installed in ["installs-now", "installs-broken"] {
+        assert!(
+            recipes.contains(installed),
+            "{installed} is in the table, so it is in the image: {recipes}"
+        );
+    }
+    for left_out in ["installs-was", "installs-declined"] {
+        assert!(
+            !recipes.contains(left_out),
+            "{left_out} is not in the table, so it is not in the image: {recipes}"
+        );
+    }
+}
+
+/// A dry run builds nothing, so with no image it has nowhere to ask — and it
+/// says that, rather than previewing a table it never looked at.
+#[test]
+fn a_dry_run_upgrade_with_no_image_to_ask_in_says_it_did_not_ask() {
+    let sb = sandbox();
+    let log = sb.answering_docker(Asked::Honestly, false);
+    sb.set_up_with_a_stack_that_moved();
+
+    let out = sb.omh(&["--dry-run", "--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["provision"]["unasked"].is_string(),
+        "nothing was asked, and the report says so: {v:#}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.contains("build") && !calls.lines().any(|call| call.starts_with("run ")),
+        "and it neither built an image to ask in nor asked: {calls}"
+    );
+}
+
+/// An upgrade that finds the table already right does not touch the file.
+///
+/// Writing the table replaces it whole, and a comment beside an entry goes
+/// with the entry it sat on — the price of a write, paid when something
+/// changed. Paid on every upgrade, it would strip the one line of prose a
+/// committed `false` usually carries: why somebody typed it.
+#[test]
+fn an_upgrade_that_changes_nothing_leaves_the_settings_file_alone() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Honestly, true);
+    sb.set_up_with_a_stack_that_moved();
+    // The repo as the table already describes it.
+    std::fs::write(sb.repo.join("was.lock"), "{}\n").unwrap();
+    std::fs::remove_file(sb.repo.join("now.lock")).unwrap();
+    let written = "runtime = \"docker\"\n\n[provision]\n\"acme/was\" = true\n\
+                   \"acme/declined\" = false # the base image has it already\n\
+                   \"acme/broken\" = true\n";
+    std::fs::write(sb.repo.join(".omh/settings.toml"), written).unwrap();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (
+            &v["provision"]["added"],
+            &v["provision"]["removed"],
+            &v["provision"]["unasked"]
+        ),
+        (
+            &serde_json::json!([]),
+            &serde_json::json!([]),
+            &serde_json::Value::Null
+        ),
+        "the sandbox was asked and agreed — a question never put reports the \
+         same two empty lists, so the third field is the claim: {v:#}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/settings.toml")).unwrap(),
+        written,
+        "so the file is byte for byte what somebody wrote"
+    );
+}
+
+/// **A dry run asks about the images a real run then asks about.**
+///
+/// The preview is the real run's own decision with the writes left out, and
+/// the decision that matters is which image each harness needs — a tag that
+/// hashes the recipe, which comes out of the table. A dry run that classified
+/// against the table on disk would report `current` for a stack image the
+/// real run goes on to rebuild.
+///
+/// One laptop's own `false` is in play as well, because the table a dry run
+/// has to imagine is the one the layers resolve to, not the committed one
+/// alone.
+#[test]
+fn a_dry_run_upgrade_asks_about_the_images_a_real_run_would() {
+    let sb = sandbox();
+    let log = sb.answering_docker(Asked::Honestly, true);
+    sb.set_up_with_a_stack_that_moved();
+    // `declined.lock` is there, and nobody has declined it in the committed
+    // file this time — this laptop has.
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "runtime = \"docker\"\n\n[provision]\n\"acme/was\" = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "[provision]\n\"acme/declined\" = false\n",
+    )
+    .unwrap();
+
+    let inspected = |args: &[&str]| -> std::collections::BTreeSet<String> {
+        std::fs::remove_file(&log).ok();
+        let out = sb.omh(args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|call| call.strip_prefix("image inspect "))
+            .map(str::to_string)
+            .collect()
+    };
+    let previewed = inspected(&["--dry-run", "upgrade"]);
+    let real = inspected(&["upgrade"]);
+
+    assert!(
+        sb.provision_table().contains("\"acme/now\" = true"),
+        "the real run changed the table, or this compares nothing: {}",
+        sb.provision_table()
+    );
+    assert!(!previewed.is_empty(), "the dry run asked about images");
+    assert_eq!(
+        previewed, real,
+        "the dry run asked about the images the real run then did"
+    );
+}
+
+/// **`init` holds to the same rule, because it is not always a first look.**
+///
+/// The stamp `init` refuses on is per checkout and gitignored, so a teammate
+/// who clones a repo that is already set up runs `init`, not `upgrade` — and
+/// meets the `[provision]` table somebody else committed. A condition that
+/// cannot answer on *their* machine must not take an entry out of the file
+/// they are about to push.
+///
+/// A stand-in `claude` is on the sandbox's PATH: `init` asks the sandbox only
+/// when it has a harness to build an image for, and finds one by looking for
+/// the program.
+#[test]
+fn init_on_a_clone_keeps_an_entry_whose_condition_cannot_answer() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Honestly, true);
+    sb.set_up_with_a_stack_that_moved();
+    // A fresh clone: everything committed is here, the stamp is not.
+    std::fs::remove_file(sb.repo.join(".omh/seeded-by")).unwrap();
+    let claude = sb.bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let out = sb.omh(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let table = sb.provision_table();
+    assert!(
+        table.contains("\"acme/broken\" = true"),
+        "the entry it could not ask about is still there: {table}"
+    );
+    assert!(
+        table.contains("\"acme/now\" = true") && !table.contains("acme/was"),
+        "and the sandbox was asked, or this proves nothing: {table}"
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("acme/broken's condition could not answer (exit 3) — left as it was"),
+        "and `init` says which, and that it kept it: {said}"
+    );
+}
+
+/// **A table that was rewritten is reported, even when what came next failed.**
+///
+/// The table is written before the images are built, because they are built
+/// from it. If a build then fails, the command exits on the error — and a
+/// report that was going to say `+ acme/now` is never printed. The file has
+/// changed, a re-run finds it already right and says nothing, and a committed
+/// file has been edited with no line anywhere saying so.
+#[test]
+fn an_upgrade_that_fails_after_rewriting_the_table_says_what_it_wrote() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Honestly, false);
+    sb.set_up_with_a_stack_that_moved();
+    // The harness image builds, so the sandbox can be asked. The image with
+    // the newly applying provide in it does not.
+    std::fs::write(sb.bin.join("build-fails-on"), "installs-now").unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(
+        !out.status.success(),
+        "the build failed, so the upgrade did"
+    );
+    assert!(
+        sb.provision_table().contains("\"acme/now\" = true"),
+        "the table had been rewritten by then: {}",
+        sb.provision_table()
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("[provision]") && said.contains("acme/now") && said.contains("acme/was"),
+        "so the failure says what was written before it: {said}"
+    );
+}
+
+/// **A repo `upgrade` is going to refuse is refused before it writes.**
+///
+/// Settings that do not resolve — the retired `[toolchain]` table here — stop
+/// the command. That has to happen first: refused after the catalogue was
+/// refreshed, a container run and the committed table rewritten, the refusal
+/// reads as though nothing happened.
+#[test]
+fn upgrade_refuses_settings_it_cannot_resolve_before_it_writes_anything() {
+    let sb = sandbox();
+    let log = sb.answering_docker(Asked::Honestly, true);
+    sb.set_up_with_a_stack_that_moved();
+    let settings = sb.repo.join(".omh/settings.toml");
+    let written = format!(
+        "{}\n[toolchain]\ncargo = \"skip\"\n",
+        std::fs::read_to_string(&settings).unwrap()
+    );
+    std::fs::write(&settings, &written).unwrap();
+    // An edit of yours to a file omh manages, which a refresh would set aside.
+    let adapter = sb.home.join(".omh/adapters/claude.toml");
+    let mine = format!("{}\n# mine\n", std::fs::read_to_string(&adapter).unwrap());
+    std::fs::write(&adapter, &mine).unwrap();
+    std::fs::remove_file(&log).ok();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(!out.status.success(), "the settings do not resolve");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("toolchain"),
+        "and the refusal names why: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        written,
+        "the committed file is as it was"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&adapter).unwrap(),
+        mine,
+        "the catalogue was not refreshed"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !calls.lines().any(|call| call.starts_with("run ")),
+        "and the sandbox was never asked: {calls}"
+    );
+}
+
+/// **A sandbox that cannot see the repo has not said "no".**
+///
+/// A daemon that does not share the path it is told to mount — a remote
+/// `DOCKER_HOST`, a VM that shares some directories and not this one — mounts
+/// an empty directory and runs the conditions there. Every `test -f` exits 1,
+/// which is a well-formed "does not apply", and a second look would then
+/// remove every entry from a committed file.
+///
+/// The stack's marker is known to be in the repo — that is how the stack was
+/// detected — so a sandbox that cannot see the marker cannot see the repo.
+#[test]
+fn a_sandbox_that_cannot_see_the_repo_has_not_said_no() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Blind, true);
+    sb.set_up_with_a_stack_that_moved();
+    let before = sb.provision_table();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.provision_table(), before, "nothing is removed");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["provision"]["unasked"]
+            .as_str()
+            .is_some_and(|why| why.contains("acme.json")),
+        "and the report says what the sandbox could not see: {v:#}"
+    );
+}
+
+/// **A dry run asks about the stacks a real run would have installed.**
+///
+/// A real run refreshes the catalogue from the binary first, so a stack the
+/// new omh ships is one it asks about. A dry run refreshes nothing, and if it
+/// read the stacks on disk it would preview the table an *older* omh would
+/// write. Adapters are read from the binary on a dry run for exactly this.
+///
+/// And it classifies against them. The stack image's tag hashes the recipe, so
+/// a preview that asked with the shipped stacks and built its recipe from the
+/// ones on disk would name an image the real run never looks for.
+#[test]
+fn a_dry_run_upgrade_asks_about_the_stacks_a_real_run_would_install() {
+    let sb = sandbox();
+    let log = sb.answering_docker(Asked::Honestly, true);
+    sb.set_up_with_a_stack_that_moved();
+    // A catalogue one release behind: no `go` stack on disk yet, in a repo
+    // that is a go project.
+    std::fs::remove_file(sb.home.join(".omh/stacks/go.toml")).unwrap();
+    std::fs::write(sb.repo.join("go.mod"), "module example\n").unwrap();
+
+    let run = |args: &[&str]| -> (Vec<String>, std::collections::BTreeSet<String>) {
+        std::fs::remove_file(&log).ok();
+        let out = sb.omh(args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let added = v["provision"]["added"]
+            .as_array()
+            .unwrap_or_else(|| panic!("an `added` array: {v:#}"))
+            .iter()
+            .map(|key| key.as_str().unwrap_or_default().to_string())
+            .collect();
+        let inspected = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|call| call.strip_prefix("image inspect "))
+            .map(str::to_string)
+            .collect();
+        (added, inspected)
+    };
+    let (previewed, previewed_images) = run(&["--dry-run", "--json", "upgrade"]);
+    let (real, real_images) = run(&["--json", "upgrade"]);
+    assert!(
+        real.contains(&"go/toolchain".to_string()),
+        "the real run installed the stack and asked about it: {real:?}"
+    );
+    assert_eq!(previewed, real, "and the dry run had said it would");
+    assert_eq!(
+        previewed_images, real_images,
+        "and asked about the images the real run then did"
+    );
+}
+
+/// **A dry run asks in whatever harness image there is.**
+///
+/// After a release that moves a pin, the tag of every harness image changes,
+/// and none under the new tag exists until a real run builds it. The
+/// conditions do not care which build of a harness they are asked in, so a
+/// dry run that looked only for the new tag would report that it could not
+/// ask, on a machine with a perfectly good image from yesterday.
+#[test]
+fn a_dry_run_upgrade_asks_in_an_image_from_before_the_pins_moved() {
+    let sb = sandbox();
+    let log = sb.answering_docker(Asked::Honestly, false);
+    sb.set_up_with_a_stack_that_moved();
+    // An image of a harness, under a tag this omh would not give it.
+    std::fs::write(sb.bin.join("tags"), "omh/claude:from-before\n").unwrap();
+
+    let out = sb.omh(&["--dry-run", "--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (&v["provision"]["added"], &v["provision"]["unasked"]),
+        (&serde_json::json!(["acme/now"]), &serde_json::Value::Null),
+        "it asked, and says what a real run would add: {v:#}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls
+            .lines()
+            .any(|call| call.starts_with("run ") && call.contains("omh/claude:from-before")),
+        "in the image that was there: {calls}"
+    );
+    assert!(!calls.contains("build"), "and it built nothing: {calls}");
+}
+
+/// **`init` says what became of an entry, not a guess about it.**
+///
+/// When the answer stops short nothing is recorded, so every entry in the
+/// table is left as it was. For a condition that could not answer, `init`
+/// used to add "not applied" without looking at the table — true on a first
+/// look, and false for an entry a teammate committed, which is still there.
+#[test]
+fn init_says_an_entry_is_left_as_it_was_when_the_answer_stops_short() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::DropsALine, true);
+    sb.set_up_with_a_stack_that_moved();
+    std::fs::remove_file(sb.repo.join(".omh/seeded-by")).unwrap();
+    let claude = sb.bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let before = sb.provision_table();
+
+    let out = sb.omh(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        sb.provision_table(),
+        before,
+        "three answers to four questions is not an answer, so nothing is recorded"
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("acme/broken's condition could not answer (exit 3) — left as it was"),
+        "and the entry that is still there is said to be: {said}"
+    );
+}
+
+/// A sandbox that could not be asked has not said "nothing applies".
+///
+/// The table is left exactly as it was — `stack::reconcile` drops every `true`
+/// it is not told about, so recording the silence would empty it — and the
+/// report says the question was never put, rather than saying nothing, which
+/// reads as "nothing changed".
+#[test]
+fn an_upgrade_that_cannot_ask_the_sandbox_leaves_the_table_and_says_so() {
+    let sb = sandbox();
+    sb.answering_docker(Asked::Exits(125), true);
+    sb.set_up_with_a_stack_that_moved();
+    let before = sb.provision_table();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "a question that could not be put does not fail the upgrade: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.provision_table(), before, "nothing is recorded");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["provision"]["unasked"]
+            .as_str()
+            .is_some_and(|why| why.contains("125") && why.contains("no such image")),
+        "and the reason reaches the report, with what the runtime itself said: {v:#}"
+    );
+}
+
 // ── the leftovers row, end to end ───────────────────────────────────────────
 //
 // Both of these drive the real binary because both claims are about what a

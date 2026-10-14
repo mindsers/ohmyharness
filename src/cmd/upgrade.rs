@@ -2,18 +2,21 @@
 //!
 //! `init` sets a repo up once; `upgrade` applies a newly-installed omh to a
 //! machine that already ran it: it refreshes the managed catalogue from this
-//! binary (keeping edits as `.yours`), rebuilds the images whose recipe moved,
-//! reaps the superseded ones, advances the `seeded-by` stamp, and names any
-//! session still running on an old image.
+//! binary (keeping edits as `.yours`), asks the sandbox again which of this
+//! repo's provides apply, rebuilds the images whose recipe moved, reaps the
+//! superseded ones, advances the `seeded-by` stamp, and names any session still
+//! running on an old image.
 
 use crate::adapter::Adapter;
-use crate::cmd::init::{refresh_catalogue, sandbox, SEEDED_BY};
+use crate::cmd::init::{
+    ask_conditions, record_resolution, refresh_catalogue, sandbox_from, SEEDED_BY,
+};
 use crate::image::{self, Root};
 use crate::profile::Paths;
-use crate::report::{self, Outcome, StaleImage, StaleSession};
-use crate::{out, runtime, session};
+use crate::report::{self, Outcome, Reprovisioned, StaleImage, StaleSession};
+use crate::{config, out, runtime, session, stack};
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Entry point. Discovers `Paths` itself — the dispatch hands it only the cwd,
@@ -22,9 +25,10 @@ use std::path::Path;
 /// The counterpart to `omh init`, keyed on the same `seeded-by` stamp: `init`
 /// runs when a repo is *not* set up, `upgrade` when it *is*. It refreshes the
 /// managed catalogue from this binary (a pin that moved is what moves a tag),
-/// rebuilds the base, harness and this repo's stack images whose recipe moved,
-/// and advances the stamp so the drift row goes quiet. A dry run decides all of
-/// that and reports it, but builds, refreshes and stamps nothing.
+/// asks the sandbox again which provides apply, rebuilds the base, harness and
+/// this repo's stack images whose recipe moved, and advances the stamp so the
+/// drift row goes quiet. A dry run decides all of that and reports it, but
+/// builds, refreshes, records and stamps nothing.
 pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     // Symmetric with `init`'s refusal: upgrade updates a repo already set up,
@@ -38,7 +42,12 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         runtime::installed(p)
     })?;
     let ca = image::ca_for(&paths)?;
-    let (_own, repo) = crate::cmd::session::resolved(&paths)?;
+    // Before anything is written. Settings that do not resolve stop this
+    // command, and they are read again below once the table has been looked
+    // at — by which time the catalogue has been refreshed, a container run and
+    // a committed file rewritten. A refusal after all that reads as though
+    // nothing happened.
+    crate::cmd::session::resolved(&paths)?;
 
     // Refresh first — moving the pins is what moves the tags. A dry run reads
     // the catalogue as it stands and writes nothing.
@@ -62,81 +71,150 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
     } else {
         Adapter::load_dir(&paths.adapters())?
     };
-    let mut current: BTreeSet<String> = BTreeSet::new();
-    current.insert(image::base_tag(ca.as_ref().map(Root::pem)));
-    let mut harnesses = Vec::new();
-    for adapter in adapters {
-        let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
-        let pem = sandbox.ca.as_ref().map(Root::pem);
-        let recipe = sandbox.recipe();
-        let tags = vec![
-            image::base_tag(pem),
-            image::tag_for(&adapter, pem),
-            image::stack_tag(&adapter, &recipe, pem),
-        ];
-        let outcome = outcome_for(adapter.version.as_deref(), &tags, &|t| {
-            image::exists(&backend, t)
-        });
-        harnesses.push((adapter.name.to_string(), outcome));
 
-        // These tags are current whatever the outcome — an `Unpinnable`
-        // adapter is left on the image it already had, so a session on it is
-        // *not* stale. This has to happen before the `continue`, or that
-        // session is falsely named "relaunch to move it" with nowhere to move.
-        current.extend(tags);
-        if outcome == Outcome::Unpinnable {
-            continue;
-        }
-        if !dry_run {
-            // Builds base/harness/stack as needed and reaps the superseded.
-            let tag = image::ensure_stack(&backend, &adapter, &recipe, pem, &paths.repo)?;
-            current.insert(tag);
-        }
-    }
-
-    // Sessions still running on an image this upgrade did not just build. If
-    // the runtime will not list what is running, that is not "nothing is
-    // stale" — the check did not run, and the report says so rather than a
-    // false all-clear.
-    // A `worktrees/` omh cannot read is the same shape as a runtime that will
-    // not answer, and this row already has the field for it: not `?`, because
-    // the rest of the upgrade report is still worth printing, and not an empty
-    // list either, which is the false all-clear the comment above refuses.
-    let listed = session::list(&paths.worktrees());
-    let (stale_sessions, sessions_unchecked) = match (image::running_set(&backend), listed) {
-        (_, Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
-        (Err(why), _) => (Vec::new(), Some(why)),
-        (Ok(up), Ok(ids)) => {
-            let mut running = Vec::new();
-            for id in ids {
-                let name = paths.container(&id);
-                if !up.contains(&name) {
-                    continue;
-                }
-                let image = match image::container_stamp(&backend, &name) {
-                    image::Stamp::Read(labels) => labels
-                        .get("omh.image")
-                        .cloned()
-                        .ok_or_else(|| "the sandbox records no image".to_string()),
-                    image::Stamp::Unknown(why) => Err(why),
-                };
-                running.push((id, image));
-            }
-            (sessions_on_old_images(&running, &current), None)
-        }
+    // The stacks, by the same rule and for the same reason: a real run has
+    // just refreshed them onto disk, and a dry run reads what that refresh
+    // would have written.
+    let defs = if dry_run {
+        stack::over(bundled_stacks()?, &paths.stacks(), &paths.repo_stacks())?
+    } else {
+        stack::load_all(&paths.stacks(), &paths.repo_stacks())?
     };
 
-    // Advance the stamp so `omh doctor`'s drift row goes quiet — the same
-    // write `init` does, and, like it, not `write_if_absent`: the stamp has to
-    // move when omh does or it records the first omh that ever ran here.
-    if !dry_run {
-        std::fs::write(
-            paths.repo.join(".omh").join(SEEDED_BY),
-            format!("{}\n", env!("CARGO_PKG_VERSION")),
-        )?;
-    }
+    // Ask again which provides apply, before anything reads the table — the
+    // recipe every image below is classified and built from comes out of it.
+    let (provision, table) = reprovision(
+        &paths,
+        &backend,
+        ca.as_ref(),
+        &adapters,
+        &defs,
+        dry_run,
+        ctx,
+    )?;
+    // What a real run has just written into a committed file, for the one
+    // case where the report below never prints: a build that fails after it.
+    let wrote = match (&provision, dry_run) {
+        (Reprovisioned::Asked { added, removed, .. }, false)
+            if !(added.is_empty() && removed.is_empty()) =>
+        {
+            Some(format!(
+                "`[provision]` in {} had already been rewritten when this failed ({})",
+                config::Layer::Shared.file(&paths).display(),
+                added
+                    .iter()
+                    .map(|key| format!("+ {key}"))
+                    .chain(removed.iter().map(|key| format!("- {key}")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+        _ => None,
+    };
+    let rest = || -> Result<Rebuilt> {
+        let (_own, mut repo) = crate::cmd::session::resolved(&paths)?;
+        if let Some(table) = table {
+            // A dry run wrote nothing, so the resolution on disk is still the old
+            // one. Classify against the table a real run would have written, as
+            // the layers resolve it — the laptop's own file over the committed one
+            // — or the preview reports `current` for a stack image a real run
+            // rebuilds.
+            let mut would_be = table;
+            would_be.extend(config::read_provision(&paths, config::Layer::Local)?);
+            repo.provision = would_be;
+        }
+        let mut current: BTreeSet<String> = BTreeSet::new();
+        current.insert(image::base_tag(ca.as_ref().map(Root::pem)));
+        let mut harnesses = Vec::new();
+        for adapter in &adapters {
+            let sandbox = sandbox_from(&paths, adapter, &repo, ca.clone(), &defs)?;
+            let pem = sandbox.ca.as_ref().map(Root::pem);
+            let recipe = sandbox.recipe();
+            let tags = vec![
+                image::base_tag(pem),
+                image::tag_for(adapter, pem),
+                image::stack_tag(adapter, &recipe, pem),
+            ];
+            let outcome = outcome_for(adapter.version.as_deref(), &tags, &|t| {
+                image::exists(&backend, t)
+            });
+            harnesses.push((adapter.name.to_string(), outcome));
+
+            // These tags are current whatever the outcome — an `Unpinnable`
+            // adapter is left on the image it already had, so a session on it is
+            // *not* stale. This has to happen before the `continue`, or that
+            // session is falsely named "relaunch to move it" with nowhere to move.
+            current.extend(tags);
+            if outcome == Outcome::Unpinnable {
+                continue;
+            }
+            if !dry_run {
+                // Builds base/harness/stack as needed and reaps the superseded.
+                let tag = image::ensure_stack(&backend, adapter, &recipe, pem, &paths.repo)?;
+                current.insert(tag);
+            }
+        }
+
+        // Sessions still running on an image this upgrade did not just build. If
+        // the runtime will not list what is running, that is not "nothing is
+        // stale" — the check did not run, and the report says so rather than a
+        // false all-clear.
+        // A `worktrees/` omh cannot read is the same shape as a runtime that will
+        // not answer, and this row already has the field for it: not `?`, because
+        // the rest of the upgrade report is still worth printing, and not an empty
+        // list either, which is the false all-clear the comment above refuses.
+        let listed = session::list(&paths.worktrees());
+        let (stale_sessions, sessions_unchecked) = match (image::running_set(&backend), listed) {
+            (_, Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
+            (Err(why), _) => (Vec::new(), Some(why)),
+            (Ok(up), Ok(ids)) => {
+                let mut running = Vec::new();
+                for id in ids {
+                    let name = paths.container(&id);
+                    if !up.contains(&name) {
+                        continue;
+                    }
+                    let image = match image::container_stamp(&backend, &name) {
+                        image::Stamp::Read(labels) => labels
+                            .get("omh.image")
+                            .cloned()
+                            .ok_or_else(|| "the sandbox records no image".to_string()),
+                        image::Stamp::Unknown(why) => Err(why),
+                    };
+                    running.push((id, image));
+                }
+                (sessions_on_old_images(&running, &current), None)
+            }
+        };
+
+        // Advance the stamp so `omh doctor`'s drift row goes quiet — the same
+        // write `init` does, and, like it, not `write_if_absent`: the stamp has to
+        // move when omh does or it records the first omh that ever ran here.
+        if !dry_run {
+            std::fs::write(
+                paths.repo.join(".omh").join(SEEDED_BY),
+                format!("{}\n", env!("CARGO_PKG_VERSION")),
+            )?;
+        }
+
+        Ok(Rebuilt {
+            harnesses,
+            stale_sessions,
+            sessions_unchecked,
+        })
+    };
+    let Rebuilt {
+        harnesses,
+        stale_sessions,
+        sessions_unchecked,
+    } = match (rest(), wrote) {
+        (Ok(done), _) => done,
+        (Err(e), Some(wrote)) => return Err(e.context(wrote)),
+        (Err(e), None) => return Err(e),
+    };
 
     ctx.say(&report::Upgraded {
+        provision: Some(provision),
         harnesses,
         refreshed,
         stale_sessions,
@@ -144,6 +222,125 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         dry_run,
     });
     Ok(())
+}
+
+/// What the part of an upgrade after the second look found: the outcome per
+/// harness, and the sessions it left on an old image or could not check.
+struct Rebuilt {
+    harnesses: Vec<(String, Outcome)>,
+    stale_sessions: Vec<StaleSession>,
+    sessions_unchecked: Option<String>,
+}
+
+/// Ask the sandbox again which of this repo's provides apply, and record it.
+///
+/// `init` asks once and writes the answer into the repo's committed
+/// `[provision]`, which every launch then builds from without asking. That is
+/// right for a launch and wrong for ever: a `yarn.lock` swapped for a
+/// `pnpm-lock.yaml` leaves the table describing a repo that no longer exists,
+/// and `init`, being one-time, refuses to look again. This is the look.
+///
+/// The second value is the table a **dry run** would have written, and `None`
+/// otherwise — after a real run the file holds it, and after a question that
+/// could not be put there is no new table at all.
+///
+/// The conditions are asked in a harness image, as `init` asks them, and any
+/// harness's will do, from any build: the ones omh ships read the repo with
+/// the base image's tools, and nothing of the harness. One that is already
+/// built is preferred — under the tag this omh gives it, or failing that under
+/// whatever tag an earlier one did. A real run with none builds the first it
+/// can, which the loop after this would have built anyway; a dry run with none
+/// has nowhere to ask, and says so rather than guessing.
+fn reprovision(
+    paths: &Paths,
+    backend: &runtime::Backend,
+    ca: Option<&Root>,
+    adapters: &[Adapter],
+    defs: &[stack::Definition],
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<(Reprovisioned, Option<BTreeMap<String, bool>>)> {
+    let pem = ca.map(Root::pem);
+    let detected = stack::detected(defs, &paths.repo);
+    let asking = detected.iter().any(|d| !d.provides.is_empty());
+
+    // Nothing to ask is asked of nothing: `ask_conditions` starts no container
+    // for it, so there is no image to find or build first.
+    let tag = if !asking {
+        String::new()
+    } else if let Some(built) = adapters
+        .iter()
+        .map(|a| image::tag_for(a, pem))
+        .find(|tag| image::exists(backend, tag))
+        // Or one from before a pin moved. After a release every tag this omh
+        // computes names an image nothing has built yet, on a machine with a
+        // perfectly good one from yesterday.
+        .or_else(|| adapters.iter().find_map(|a| image::built_for(backend, a)))
+    {
+        built
+    } else if dry_run {
+        return Ok((
+            Reprovisioned::Unasked(
+                "no harness image is built to ask in, and a dry run builds none".into(),
+            ),
+            None,
+        ));
+    } else {
+        let Some(adapter) = adapters.iter().find(|a| a.version.is_some()) else {
+            return Ok((
+                Reprovisioned::Unasked(
+                    "no harness image is built to ask in, and no harness here pins a \
+                     version omh can build one from"
+                        .into(),
+                ),
+                None,
+            ));
+        };
+        ctx.progress(&format!(
+            "building {} to ask what this repo needs…",
+            image::tag_for(adapter, pem)
+        ));
+        image::ensure(backend, adapter, pem)?;
+        image::tag_for(adapter, pem)
+    };
+
+    let asked = ask_conditions(backend, &tag, &paths.repo, &detected);
+    if let Some(why) = asked.why_unasked() {
+        return Ok((Reprovisioned::Unasked(why), None));
+    }
+
+    let shared = config::read_provision(paths, config::Layer::Shared)?;
+    let look = stack::reread(&shared, &asked.verdicts());
+    let would_be = if dry_run {
+        Some(look.table.clone())
+    } else {
+        // Only when it differs. The write goes through a document editor and
+        // keeps what somebody typed around the table, but a command that
+        // touches a committed file on every run is one whose diff people stop
+        // reading.
+        if look.table != shared {
+            record_resolution(paths, &look.standing)?;
+        }
+        None
+    };
+    Ok((
+        Reprovisioned::Asked {
+            added: look.added,
+            removed: look.removed,
+            unanswered: look.unanswered,
+        },
+        would_be,
+    ))
+}
+
+/// The stacks as this binary ships them, read without writing anything — what
+/// a real run's refresh would have put on disk before it asked.
+fn bundled_stacks() -> Result<Vec<stack::Definition>> {
+    crate::bundled::Shipped::Stacks
+        .files()
+        .iter()
+        .map(|f| stack::parse(f.contents, Path::new(f.name)))
+        .collect()
 }
 
 /// The adapters as this binary ships them — the new pins, read without writing

@@ -474,6 +474,26 @@ the content check.
 compose the rules document — so writing into the checkout would overwrite its
 own input. Point `--to` somewhere outside and copy in what you want.
 
+### `the sandbox cannot see …, which is in this repo`
+
+```
+[provision] left as it was — the sandbox could not be asked (exit status: 96): the sandbox cannot see package.json, which is in this repo — the repo is not mounted where its conditions run
+```
+
+omh asks the sandbox which of a stack's provides apply with your repo mounted
+into it, and the first thing it checks there is the file the stack was detected
+by — `package.json` for node, `Cargo.toml` for rust. It was not there, so the
+container was looking at an empty directory: the container runtime cannot read
+this path. A remote `DOCKER_HOST` cannot, and nor can a runtime in a VM that
+shares some of your directories with it and not this one.
+
+Run there, every condition would have answered "does not apply", and a second
+look would have taken every provide out of your committed settings. omh records
+nothing instead. Make the checkout's path visible to the runtime and run
+`omh upgrade` again. `omh init` says the same in its own words — `the sandbox
+could not be asked (exit status: 96) — nothing recorded`, followed by the line
+naming the file.
+
 ### an unknown-issuer error when omh builds an image
 
 **omh now says this for you, from both ends.** A build that dies on an

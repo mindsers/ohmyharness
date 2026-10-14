@@ -184,7 +184,9 @@ stamp: `init` runs when the repo is not set up, `upgrade` when it is.
 
 Applies a newly-installed omh to a repo you already set up. Run it after you
 update omh (a `brew upgrade`, say): the new binary carries fresh harness version
-pins, and this is what makes them take effect.
+pins, and this is what makes them take effect. Run it, too, when the repo
+changes what it needs — a new lockfile, a second ecosystem — because it is the
+command that looks at that again.
 
 ```console
 $ omh upgrade
@@ -201,9 +203,58 @@ session still running on an image it just superseded — a relaunch away from th
 new one — and advances the `seeded-by` stamp, so `omh doctor`'s drift row goes
 quiet.
 
+**It also asks the sandbox again which of this repo's provides apply**, before
+it builds anything. `init` asks that once and records the answer in
+[`[provision]`](/reference/configuration/#provision--what-your-sandbox-is-built-with),
+and no launch asks again — so a repo that has since swapped a `yarn.lock` for a
+`pnpm-lock.yaml` is described by a table that stopped being true. This is what
+corrects it:
+
+```console
+$ omh upgrade
+refreshed claude, codex, omp, opencode
++ node/pnpm — applies here now
+- node/yarn — no longer applies here
+  rebuilt  claude
+  rebuilt  codex
+  rebuilt  omp
+  rebuilt  opencode
+```
+
+The `+` and `-` lines are edits to `[provision]` in your committed settings, so
+they are in `git diff` afterwards and reach your team with the next push. When
+the table is already right there are no such lines, and the file is not touched.
+
+Four things a second look never does:
+
+- **It never touches a `false`.** That can only have been typed, so it is a
+  decision, and it outlives a condition that now applies.
+- **It never reads "could not answer" as "no".** A condition that exits with
+  anything but 0 or 1 changes nothing: the entry stays as it was, and the line
+  names it with the code. A `package.json` caught half-written, in a repo
+  that declares pnpm there, gets `node/pnpm's condition could not answer
+  (exit 5) — left as it was`, and keeps pnpm.
+- **It never records a silence.** If the sandbox could not be asked at all, the
+  table is left exactly as it was and the report says the question was not put.
+- **It never takes an empty directory for your repo.** The conditions first
+  check that they can see the file each stack was detected by, and refuse to
+  answer when they cannot — see
+  [`the sandbox cannot see …`](/guides/troubleshooting/#the-sandbox-cannot-see--which-is-in-this-repo).
+
+The table is written before the images are built, because they are built from
+it. If a build then fails, the error says what had already been written:
+
+```
+omh: `[provision]` in /Users/you/code/your-project/.omh/settings.toml had already been rewritten when this failed (+ node/pnpm, - node/yarn)
+  because failed to build omh/claude:e3e863b9c2cb4291
+```
+
 It rebuilds, so it needs Docker; it needs no login. `--dry-run` decides and
-reports all of it and touches nothing. It runs in a repo already set up; in one
-that is not, it refuses and points at `omh init`.
+reports all of it and touches nothing — it asks the sandbox too, which is a
+read, and prints the `[provision]` lines a real run would write. With no
+harness image built yet it has nowhere to ask, and says that instead. It runs
+in a repo already set up; in one that is not, it refuses and points at
+`omh init`.
 
 ## `omh new <harness> [-- args…]`
 
