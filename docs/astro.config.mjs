@@ -20,6 +20,17 @@ export default defineConfig({
         baseUrl: 'https://github.com/mindsers/ohmyharness/edit/main/docs/',
       },
       lastUpdated: true,
+      // The look: ohmyharness.sh's palette and type. src/styles/omh.css says
+      // what each rule is for, and holds the cards, steps and details a page
+      // can use from plain markdown.
+      customCss: [
+        '@fontsource/ibm-plex-sans/400.css',
+        '@fontsource/ibm-plex-sans/500.css',
+        '@fontsource/ibm-plex-sans/600.css',
+        '@fontsource/ibm-plex-mono/400.css',
+        '@fontsource/ibm-plex-mono/500.css',
+        './src/styles/omh.css',
+      ],
       sidebar: [
         { label: 'Getting started', items: [{ autogenerate: { directory: 'getting-started' } }] },
         { label: 'Guides', items: [{ autogenerate: { directory: 'guides' } }] },

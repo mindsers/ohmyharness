@@ -1,64 +1,42 @@
 ---
 title: Editors
-description: Attaching VS Code, Zed, Cursor or Neovim to a session over SSH.
+description: Open a session in VS Code, Zed, Cursor or Neovim — or any editor that speaks SSH — with omh sNN attach.
 ---
 
-```console
-$ omh s01 attach            # $OMH_EDITOR, then $EDITOR, then print every recipe
-$ omh s01 attach zed
-$ omh s01 attach code
-```
+Open a session in VS Code, Zed, Cursor or Neovim — or any editor that speaks
+SSH — with its language server inside the sandbox, beside the dependencies the
+agent builds against.
 
-## Why this exists
+**You need** a session — [`omh new`](/getting-started/first-session/) starts
+one — and the editor installed on your machine.
 
-The worktree is a plain host directory, so this was never about file access —
-you could open it in anything.
+## Open a session in your editor
 
-It is about **where the language server runs.** Dependencies are installed
-Linux-side inside the sandbox while your host is probably macOS/arm64. A host
-LSP means a second dependency tree that silently diverges from the one the agent
-is actually building against, and the divergence shows up as your editor
-confidently underlining code that compiles fine.
+<div class="steps">
 
-sshd runs in the session; the editor attaches to it. One dependency tree, shared
-with the agent.
+1. Attach the session.
 
-## The integration point is an SSH config include
+   ```console
+   $ omh s01 attach            # $OMH_EDITOR, then $EDITOR, then print every recipe
+   $ omh s01 attach zed
+   $ omh s01 attach code
+   ```
 
-Not an IDE plugin. omh manages one file:
+   omh brings the session's sandbox up if it is not running, writes the SSH
+   alias for it, and opens the editor on `/work`, the session's worktree.
 
-```
-# ~/.ssh/config.d/omh
-Host omh-s01
-  HostName 127.0.0.1
-  Port 49201
-  User agent
-  IdentityFile ~/.omh/keys/ohmyharness/id_ed25519
-  HostKeyAlias omh-s01
-  StrictHostKeyChecking yes
-  UserKnownHostsFile ~/.omh/keys/ohmyharness/known_hosts
-```
+2. Work in it as you would locally.
 
-Everything downstream then works without omh knowing it exists:
+   The files, the terminal and the language server are the sandbox's — the
+   same worktree and dependencies the agent has.
 
-```console
-$ code --remote ssh-remote+omh-ohmyharness-3f9a2c1b-s01 /work
-$ zed ssh://omh-ohmyharness-3f9a2c1b-s01/work
-$ ssh omh-ohmyharness-3f9a2c1b-s01
-```
+</div>
 
-JetBrains Gateway works through the same alias.
-
-The alias is `omh-<repo id>-<session>`, and the repo id is the checkout's
-directory name plus a short digest of where it is —
-`omh info --repo` prints it. The digest is there because two checkouts called
-`api` would otherwise be one host: before 0.8.0 they shared an alias, and
-attaching from either landed you in whichever session existed. It is stable
-for a given checkout, so a bookmark keeps working.
-
-Choosing an include over a plugin is what makes "any editor" true rather than
-aspirational — the editors omh ships descriptions for are a convenience, not the
-boundary of what works.
+If no editor opens, `attach` prints the session's URL, its `ssh` line and a
+recipe for every editor it knows, ready to paste —
+[Editors are data](#editors-are-data) shows that output, and how to add an
+editor. If the editor starts and cannot connect, see
+[Troubleshooting](/guides/troubleshooting/#nvim-did-not-open-the-session--and-neither-does-any-other-editor).
 
 ## Editors are data
 
@@ -75,8 +53,15 @@ args = ["$URL"]
 
 ```toml
 # ~/.omh/editors/code.toml
+name = "code"
+bin  = "code"
 args = ["--remote", "ssh-remote+$ALIAS", "/work"]
 ```
+
+| In `args` | Becomes |
+|---|---|
+| `$ALIAS` | the session's SSH host alias, `omh-<repo id>-<session>` |
+| `$URL` | `ssh://<alias>/work` |
 
 Four shipped: `code`, `cursor`, `nvim`, `zed`.
 
@@ -101,15 +86,77 @@ session s01 is up
 Guessing would launch the wrong thing, which is harder to diagnose than being
 told no.
 
+## The integration point is an SSH config include
+
+Not an IDE plugin. omh manages one file, with a block per session:
+
+```
+# ~/.ssh/config.d/omh
+Host omh-ohmyharness-3f9a2c1b-s01
+  HostName 127.0.0.1
+  Port 49201
+  User agent
+  IdentityFile /Users/you/.omh/keys/ohmyharness-3f9a2c1b/id_ed25519
+  IdentitiesOnly yes
+  HostKeyAlias omh-ohmyharness-3f9a2c1b-s01
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /Users/you/.omh/keys/ohmyharness-3f9a2c1b/known_hosts
+  LogLevel ERROR
+```
+
+Everything downstream then works without omh knowing it exists:
+
+```console
+$ code --remote ssh-remote+omh-ohmyharness-3f9a2c1b-s01 /work
+$ zed ssh://omh-ohmyharness-3f9a2c1b-s01/work
+$ ssh omh-ohmyharness-3f9a2c1b-s01
+```
+
+JetBrains Gateway works through the same alias.
+
+The alias is `omh-<repo id>-<session>`, and the repo id is the checkout's
+directory name plus a short digest of where it is —
+`omh info --repo` prints it. It is stable for a given checkout, so a bookmark
+keeps working.
+
+<details>
+<summary>Why an include rather than a plugin, and why the alias carries a digest</summary>
+
+Choosing an include over a plugin is what makes "any editor" true rather than
+aspirational — the editors omh ships descriptions for are a convenience, not the
+boundary of what works.
+
+The digest is there because two checkouts called `api` would otherwise be one
+host: before 0.8.0 they shared an alias, and attaching from either landed you in
+whichever session existed.
+
+</details>
+
+## Why this exists
+
+The worktree is a plain host directory, so this was never about file access —
+you could open it in anything.
+
+It is about **where the language server runs.** Dependencies are installed
+Linux-side inside the sandbox while your host is probably macOS/arm64. A host
+LSP means a second dependency tree that silently diverges from the one the agent
+is actually building against, and the divergence shows up as your editor
+confidently underlining code that compiles fine.
+
+sshd runs in the session; the editor attaches to it. One dependency tree, shared
+with the agent.
+
 ## Three details that are load-bearing
 
 - **The public key arrives as an environment variable, not a mount.** A
   bind-mounted `authorized_keys` lands with host ownership, and sshd silently
   refuses to read one it does not trust — a failure that presents as a wrong key
   and sends you looking in entirely the wrong place.
-- **Ports are derived, not assigned.** An IDE bookmark points at the alias, which
-  resolves through the port. A port that moved between restarts would break every
-  saved window you have.
+- **Ports are derived, then kept.** omh hashes the repo and session names into a
+  port, steps past one that is already taken, and records the choice so it
+  never moves. An IDE bookmark points at the alias, which resolves through the
+  port. A port that moved between restarts would break every saved window you
+  have.
 - **The `Include` is prepended** to `~/.ssh/config`, never appended. ssh applies
   the first matching block, so an include placed below someone's `Host *` would
   never win. Everything else in that file is left untouched.
@@ -135,3 +182,16 @@ listen on it, and the previous `StrictHostKeyChecking no` trusted whatever did.
 
 `ssh omh-ohmyharness-3f9a2c1b-s01` lands as `agent` (uid 1000) inside the sandbox, with
 the worktree at `/work` and the profile in place.
+
+## Next
+
+<div class="cards">
+
+- [Commands](/reference/commands/)\
+  `omh sNN attach` and the rest of what you can do with a session.
+- [Adapters](/reference/adapters/)\
+  The same data-not-code approach, for the harnesses themselves.
+- [Troubleshooting](/guides/troubleshooting/)\
+  An editor that will not connect, and what else can go wrong.
+
+</div>

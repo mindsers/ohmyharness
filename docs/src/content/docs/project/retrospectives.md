@@ -1,21 +1,32 @@
 ---
 title: Retrospectives
-description: Four bodies of work that shipped outside a milestone, and what each one cost.
+description: Four bodies of work that shipped outside a milestone, what each one changed, and what it cost.
 ---
 
-Four bodies of work that shipped outside a [roadmap](/project/roadmap/)
-milestone, written down when they landed. Each says what was wrong and what
-changed; the later ones also say what it cost to get right, which is the part
-worth reading before proposing the next one.
+What shipped outside a [roadmap](/project/roadmap/) milestone, and what it cost
+to get right — the part worth reading before proposing the next change.
+
+Each retrospective was written when its work landed. Each says what was wrong
+and what changed; the later ones also say what it cost.
+
+## At a glance
+
+| Retrospective | Shipped | What changed | What it cost |
+|---|---|---|---|
+| [The git repairs](#the-git-repairs--done-4652) | 0.6.0, #46–#52 | four measured defects in getting work out of a session, one of which deleted unreviewed commits | not recorded |
+| [The command surface](#the-command-surface--done-070-6990) | 0.7.0, #69–#90 | a command name can no longer collide with a harness name, and scope is visible in the verb | a release with no backward compatibility — and three wrong behaviours a green, reviewed release still had, found only by running the commands |
+| [The silent failures](#the-silent-failures--done-080-9192) | 0.8.0, #91–#92 | two named risks closed, a lint that never ran, `omh eject`, and `main.rs` split up | the fix for 8d reopened 8d one line down, and three guards passed against broken code — found by review, not the suite |
+| [Say it before it bites](#say-it-before-it-bites--done-090-9497) | 0.9.0, #94–#97 | `omh doctor` reports the host, a TLS-inspecting proxy is named, and `rm` reports only what it removed | not recorded |
 
 ## The git repairs — done (#46–#52)
 
-Not a milestone. Four measured defects in the path that gets work out of a
-session, one of which deleted unreviewed commits — [risks](/concepts/risks/) 4b and 8b.
-They landed first, each with its failing test before the fix, because the
+Not a milestone; shipped in 0.6.0. Four measured defects in the path that gets
+work out of a session, one of which deleted unreviewed commits —
+[risks](/concepts/risks/) 4b and 8b. They landed first, each with its failing
+test before the fix, because the
 [work loop](/project/roadmap/#v15--the-work-loop--060) rested on them.
 
-Both cheap hardenings rode along as planned: the sandbox's exclude list is
+**Both cheap hardenings rode along, as planned:** the sandbox's exclude list is
 rewritten on every launch (4c), and its `config` is mounted read-only (2b),
 which mattered once omh started reading that gitdir from the host.
 
@@ -38,7 +49,7 @@ layer that already declares the key, else the key's own classification decides,
 and `--local` or `--save` names a file on purpose. What keeps a credential out
 of git moved from the command's default to `src/key.rs`, per key — fail-safe by
 enumeration rather than by destination, which is a real trade and is recorded
-in [decisions](/project/decisions/).
+in [decisions](/project/decisions/#write-default-the-key-decides).
 
 **`omh init` reported what existed, not what it did.** It opened with the
 machine's harnesses and editors — true before the command ran. That is
@@ -60,7 +71,7 @@ with a harness name and scope is visible in the verb. **Met**, at the cost of
 one release with no backward compatibility: retired spellings are refused by
 name with their replacement, and nothing retired parses.
 
-Worth reading before the next surface change, in two parts.
+**What it cost** is worth reading before the next surface change, in two parts.
 
 **The guards did more of the work than the sweeps did**, and where a guard
 could not see, the sweep shipped falsehoods. A rename applied by spelling
@@ -121,8 +132,8 @@ which is recorded as a debt rather than described as finished.
 **Success criterion:** the two risks the page had named for weeks are closed,
 and nothing omh cannot check reads the same as something it checked. **Met.**
 
-What it cost is the part worth keeping. The fix for 8d **reopened 8d one line
-down** — a `!entry.is_dir()` filter added while closing it, and `is_dir()`
+**What it cost** is the part worth keeping. The fix for 8d **reopened 8d one
+line down** — a `!entry.is_dir()` filter added while closing it, and `is_dir()`
 answers `false` for every error, so a dangling symlink took the accounting
 with it. Three of the guards written alongside these fixes passed against a
 broken implementation, one of them the whole `profile` suite green against a
@@ -156,3 +167,16 @@ exit 0, worktree still there. The disk is asked now, a removal that did not
 finish is a non-zero exit that names what survived, and the report lists only
 the parts omh watched go. `rm` also asks before destroying commits no branch
 has, instead of refusing and telling you to retype the command with `--force`.
+
+## Next
+
+<div class="cards">
+
+- [Roadmap](/project/roadmap/)\
+  The milestones this work happened between.
+- [Risks](/concepts/risks/)\
+  The numbered weaknesses these retrospectives close.
+- [Decisions](/project/decisions/)\
+  The choices behind them, and three that were reversed.
+
+</div>

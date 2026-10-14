@@ -1,0 +1,262 @@
+/* The site's look, on top of Starlight's.
+ *
+ * Same palette and type as ohmyharness.sh, so the docs read as the same
+ * product: slate-blue ground, one warm accent (brass), IBM Plex. Every text
+ * colour below clears 4.5:1 on the background it sits on, in both themes.
+ *
+ * Starlight puts its own styles in a CSS layer, so these win without
+ * `!important`. Dark is Starlight's default theme; light overrides it.
+ */
+
+:root {
+	--sl-font: 'IBM Plex Sans', var(--sl-font-system);
+	--sl-font-mono: 'IBM Plex Mono', var(--sl-font-system-mono);
+
+	--sl-color-accent-low: #3a2c12;
+	--sl-color-accent: #e0a33e;
+	--sl-color-accent-high: #f0cb8a;
+
+	--sl-color-white: #f3f5f9;
+	--sl-color-gray-1: #dfe3ea;
+	--sl-color-gray-2: #b8bfcc;
+	--sl-color-gray-3: #929bab;
+	--sl-color-gray-4: #5b6474;
+	--sl-color-gray-5: #2f3542;
+	--sl-color-gray-6: #1b2029;
+	--sl-color-black: #12151b;
+
+	/* Starlight's blue is only used by `:::note`. Slate, the site's cool
+	   colour, keeps brass the one warm accent. */
+	--sl-color-blue-low: #18262d;
+	--sl-color-blue: #7fb2c6;
+	--sl-color-blue-high: #c4dde7;
+
+	--sl-content-width: 46rem;
+	--omh-card: var(--sl-color-gray-6);
+	--omh-card-border: var(--sl-color-gray-5);
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #fbecd2;
+	--sl-color-accent: #94600e;
+	--sl-color-accent-high: #5e3b07;
+
+	--sl-color-white: #12151b;
+	--sl-color-gray-1: #1d222c;
+	--sl-color-gray-2: #2f3542;
+	--sl-color-gray-3: #4f5868;
+	--sl-color-gray-4: #6b7383;
+	--sl-color-gray-5: #d5d9e0;
+	--sl-color-gray-6: #eceef2;
+	--sl-color-gray-7: #f6f7f9;
+	--sl-color-black: #ffffff;
+
+	--sl-color-blue-low: #e3eef3;
+	--sl-color-blue: #3d7a92;
+	--sl-color-blue-high: #1d4656;
+
+	--omh-card: var(--sl-color-gray-7);
+	--omh-card-border: var(--sl-color-gray-5);
+}
+
+/* The wordmark, as on ohmyharness.sh: a prompt, then the name. */
+.site-title {
+	gap: 0;
+	font-family: var(--sl-font-mono);
+	font-weight: 500;
+	letter-spacing: 0.01em;
+}
+.site-title::before {
+	content: '$';
+	margin-inline-end: 0.5ch;
+	color: var(--sl-color-accent);
+}
+
+/* Reading rhythm: more air between sections than between paragraphs. */
+.sl-markdown-content h2 {
+	margin-top: 2.75rem;
+}
+.sl-markdown-content h3 {
+	margin-top: 2rem;
+}
+
+/* A heading that is a command — every entry of the commands reference — reads
+   as type, not as an inline-code chip blown up to heading size. */
+.sl-markdown-content :is(h2, h3, h4) code {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font-size: 0.92em;
+	font-weight: 600;
+}
+
+/* A page opens with one sentence that says what it is for. */
+.sl-markdown-content > p:first-child {
+	font-size: var(--sl-text-lg);
+	line-height: 1.6;
+	color: var(--sl-color-gray-2);
+}
+
+.sl-markdown-content table {
+	font-size: var(--sl-text-sm);
+}
+
+/* --- Cards ---------------------------------------------------------------
+ * A list of links, each followed by one line, in a <div class="cards">:
+ *
+ *   <div class="cards">
+ *
+ *   - [Install omh](/getting-started/installation/)\
+ *     Homebrew, the install script, or from source.
+ *
+ *   </div>
+ *
+ * Plain markdown links, so tests/docs.rs still checks every one of them. The
+ * whole card is the link's hit area.
+ */
+.sl-markdown-content .cards > ul {
+	list-style: none;
+	padding: 0;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+	gap: 1rem;
+}
+.sl-markdown-content .cards > ul > li {
+	position: relative;
+	margin: 0;
+	padding: 1rem 1.15rem 1.1rem;
+	border: 1px solid var(--omh-card-border);
+	border-radius: 0.6rem;
+	background: var(--omh-card);
+	color: var(--sl-color-gray-3);
+	font-size: var(--sl-text-sm);
+	line-height: 1.55;
+	transition: border-color 0.15s ease;
+}
+.sl-markdown-content .cards > ul > li:hover {
+	border-color: var(--sl-color-accent);
+}
+.sl-markdown-content .cards > ul > li > a:first-child {
+	display: block;
+	margin-bottom: 0.3rem;
+	font-size: var(--sl-text-base);
+	font-weight: 600;
+	color: var(--sl-color-white);
+	text-decoration: none;
+}
+.sl-markdown-content .cards > ul > li > a:first-child::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+}
+.sl-markdown-content .cards > ul > li > a:first-child:focus-visible {
+	outline: none;
+}
+.sl-markdown-content .cards > ul > li:has(> a:first-child:focus-visible) {
+	outline: 2px solid var(--sl-color-accent);
+	outline-offset: 2px;
+}
+.sl-markdown-content .cards > ul > li > br {
+	display: none;
+}
+
+/* --- Steps ---------------------------------------------------------------
+ * An ordered list in a <div class="steps">. Each item opens with a short
+ * sentence that names the step; the rest — commands, output — follows it,
+ * indented three spaces so it stays inside the item.
+ */
+.sl-markdown-content .steps > ol {
+	list-style: none;
+	counter-reset: step;
+	padding-inline-start: 0;
+}
+.sl-markdown-content .steps > ol > li {
+	counter-increment: step;
+	position: relative;
+	margin: 0;
+	padding-inline-start: 2.75rem;
+	padding-bottom: 1.75rem;
+}
+.sl-markdown-content .steps > ol > li::before {
+	content: counter(step);
+	position: absolute;
+	inset-inline-start: 0;
+	top: 0;
+	width: 1.85rem;
+	height: 1.85rem;
+	display: grid;
+	place-items: center;
+	border-radius: 50%;
+	border: 1px solid var(--omh-card-border);
+	background: var(--omh-card);
+	color: var(--sl-color-white);
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+	font-weight: 600;
+}
+.sl-markdown-content .steps > ol > li::after {
+	content: '';
+	position: absolute;
+	inset-inline-start: calc(1.85rem / 2 - 0.5px);
+	top: 2.35rem;
+	bottom: 0.6rem;
+	width: 1px;
+	background: var(--omh-card-border);
+}
+.sl-markdown-content .steps > ol > li:last-child {
+	padding-bottom: 0;
+}
+.sl-markdown-content .steps > ol > li:last-child::after {
+	display: none;
+}
+.sl-markdown-content .steps > ol > li > p:first-child {
+	padding-top: 0.15rem;
+	font-weight: 600;
+	color: var(--sl-color-white);
+}
+
+/* --- Details -------------------------------------------------------------
+ * The *why* behind a step or a rule, out of the way until someone wants it:
+ *
+ *   <details>
+ *   <summary>Why init never asks a question</summary>
+ *
+ *   …markdown…
+ *
+ *   </details>
+ */
+.sl-markdown-content details {
+	border: 1px solid var(--omh-card-border);
+	border-radius: 0.6rem;
+	padding: 0.7rem 1rem;
+	background: var(--omh-card);
+}
+.sl-markdown-content details > summary {
+	cursor: pointer;
+	font-weight: 600;
+	color: var(--sl-color-white);
+}
+.sl-markdown-content details[open] > summary {
+	margin-bottom: 0.75rem;
+}
+.sl-markdown-content details > :not(summary) {
+	font-size: var(--sl-text-sm);
+}
+
+/* --- The front page ------------------------------------------------------
+ * The hero keeps a column for an image even when there is none; without one
+ * the title would wrap into a narrow strip.
+ */
+.hero {
+	grid-template-columns: minmax(0, 1fr);
+}
+.hero h1 {
+	max-width: 22ch;
+	text-wrap: balance;
+}
+.hero .tagline {
+	max-width: 38rem;
+	color: var(--sl-color-gray-2);
+}

@@ -1,34 +1,167 @@
 ---
 title: Your first session
-description: From a repository to a sandboxed agent that already has your rules, skills and MCP servers.
+description: Set a repository up, start Claude Code in a sandbox that already has your rules, skills and MCP servers, and bring its work back as a branch you review.
 sidebar:
   order: 2
 ---
 
-From a repository to a sandboxed agent that already has your rules, skills and
-MCP servers, once omh is [installed](/getting-started/installation/). Roughly
+Set a repository up, start Claude Code in a sandbox that already has your rules,
+skills and MCP servers, and bring its work back as a branch you review. About
 five minutes, most of it the first image build.
 
-## Set up a repo
+**You need** omh [installed](/getting-started/installation/), Docker running, a
+git repository, and access to Claude Code.
+
+<div class="steps">
+
+1. Set the repository up.
+
+   ```console
+   $ cd ~/code/your-project
+   $ omh init
+   ```
+
+   `init` reads your manifests, README and git history, decides, and prints what
+   it decided. It asks nothing. The first run builds the sandbox image, which
+   takes a while; later runs use the cache.
+
+   ```text title="omh init"
+   omh init — decided, asked nothing
+
+     harness    claude  (found on your host)
+     image      omh/claude:b4edd8fd15d4d669 (already built)
+     image      omh/claude:8eae0d5c1511fa89 (this repo's toolchain)
+     stack      rust (from Cargo.toml)
+     hooks      2 selected  (6 more in your catalogue)
+     provision  rust/linker
+     provision  rust/toolchain
+     memory     2 notes written, 0 already there
+     graph      indexing in background → omh-cache-your-project-a8c4d1cd
+   ```
+
+   The report goes on to say where your catalogue and this repo's settings
+   live, which [base set](/reference/base-set/) entries you got, and what to run
+   next. [`omh why <name>`](/reference/commands/#omh-why-thing) explains any
+   entry: what it costs, what was considered instead, how to remove it.
+
+2. Log in to Claude.
+
+   ```console
+   $ omh auth claude --name personal
+   ```
+
+   This runs Claude Code's own login and keeps the result under
+   `~/.omh/creds/claude/personal/`. You do it once per account — for a work and
+   a personal account, see [Accounts](/guides/accounts/).
+
+3. Start a session and give it a task.
+
+   ```console
+   $ omh new claude
+   ```
+
+   Claude Code opens in a container, on a git worktree with a branch of its
+   own, with your configuration where it reads it. Your checkout is not mounted.
+   Ask for something small to start with — fix a failing test, say.
+
+   Close the terminal whenever you like: the agent keeps running, and
+   `omh s01 resume` puts you back.
+
+4. Read what it did.
+
+   From a terminal on your host, in the same repository:
+
+   ```console
+   $ omh s              # every session and its state
+   $ omh s01 diff -p    # the patch
+   ```
+
+   To look around yourself, open the same session in your editor:
+
+   ```console
+   $ omh s01 attach
+   ```
+
+5. Keep the work.
+
+   ```console
+   $ omh s01 commit -m "Fix the parser test"
+   $ omh s01 push fix/parser-test
+   ```
+
+   `commit` runs the repository's own checks in the sandbox first, then lands
+   the work as one commit on the session branch, `omh/s01`. `push` sends that
+   branch to origin under a name a reviewer can read. Your checkout changes only
+   when you merge it.
+
+</div>
+
+## Check that it is wired up
+
+Do not trust the fact that it started:
 
 ```console
-$ cd ~/code/your-project
-$ omh init
+$ omh doctor
 ```
 
+`doctor` launches the real image with the real mounts, checks the paths Claude
+Code actually reads — rules, skills, MCP servers, hooks — and asks Claude Code
+whether the MCP servers loaded. It is the only thing that can prove a setup is
+right; [Troubleshooting](/guides/troubleshooting/#omh-doctor) says what each row
+means.
+
+## What you just used
+
+- **A session** is a container, a git worktree and a branch. The agent works on
+  its side of that line and cannot reach yours. → [Sessions](/concepts/sessions/)
+- **Your configuration** — rules, skills, MCP servers, commands, subagents and
+  hooks — lives once in `~/.omh`, and each repository names what it takes from
+  it. → [Configuration](/reference/configuration/)
+- **The code graph and project memory** were set up by `init` and are there in
+  every session of this repository. → [Code graph](/guides/code-graph/),
+  [Memory](/reference/memory/)
+
+## Behind the scenes
+
+### What it actually did
+
+<details>
+<summary>The seven things <code>omh init</code> does, in order</summary>
+
+```text
+1  repo check                     fail fast, before any work
+2  ensure ~/.omh: the catalogue, bundled adapters, editors, the base set
+3  detect the stack; read the host for a harness *preference*
+4  write ~/.omh/mcp.json and <repo>/.omh: settings, [use], memory, a hook per stack
+5  seed memory by derivation       README, manifests, git log, existing rules
+6  ensure the image                ← the real blocker; nothing runs without it
+7  index the code graph            background, resumable
 ```
-omh init — decided, asked nothing
 
-  harness    claude  (found on your host)
-  image      omh/claude:b4edd8fd15d4d669 (already built)
-  image      omh/claude:8eae0d5c1511fa89 (this repo's toolchain)
-  stack      rust (from Cargo.toml)
-  hooks      2 selected  (4 more in your catalogue)
-  provision  rust/linker
-  provision  rust/toolchain
-  memory     2 notes written, 0 already there
-  graph      indexing in background → omh-cache-your-project-a8c4d1cd
+**The report is the last step.** Every decision is collected and printed once,
+which is why the image and graph lines — made at 6 and 7 — are in it, and why
+`--json` can be one object rather than six.
 
+**`[use]` is written expanded**, every catalogue entry named, because a list you
+curate by deleting lines beats a wildcard you cannot review. What you add to
+your catalogue later is not in it, so the launcher names what is not selected —
+see [Configuration](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue).
+
+**Step 4 never overwrites what you wrote**, and writes no rules file: omh's own
+sections are [base-set entries](/reference/base-set/), composed into every
+session. Your `AGENTS.md` or `CLAUDE.md` is read and composed with them — see
+[Configuration](/reference/configuration/#keeping-the-agents-git-status-clean).
+
+**Step 6 is the slow one** — about 30 seconds the first time, cached afterwards.
+`init` is not finished until `omh new <harness>` works, so it builds the image
+rather than leaving that to your first launch.
+
+**Step 3 reads your host only for a preference.** The harness that runs is the
+one inside the sandbox, a different installation.
+
+The full report, with its last sections:
+
+```text
   catalogue  /Users/you/.omh
   this repo  /Users/you/code/your-project/.omh  (committed)
 
@@ -45,110 +178,21 @@ omh init — decided, asked nothing
     omh sNN attach  open it in your editor
 ```
 
-The base set is [a versioned file](/reference/base-set/), not something buried in
-the binary — `init` seeds from it and `omh why` explains from it, which is why
-they cannot disagree about what you just got.
+</details>
 
-`init` **decides and reports — it never asks.** Every question is hassle omh
-promised to remove, so the bar for asking one is high enough that nothing has
-cleared it yet: see [derive, never interrogate](#derive-never-interrogate).
+### Derive, never interrogate
 
-### What it actually did
+`init` asks no questions, on purpose. Every question is hassle omh exists to
+remove, and most answers are already in the repository: manifests name the
+stack, git log names what you work on, the README names the project. Derived
+facts also stay current as the repo changes, where an answer typed once goes
+stale.
 
-```
-1  repo check                     fail fast, before any work
-2  ensure ~/.omh: the catalogue, bundled adapters, editors, the base set
-3  detect the stack; read the host for a harness *preference*
-4  write ~/.omh/mcp.json and <repo>/.omh: settings, [use], memory, a hook per stack
-5  seed memory by derivation       README, manifests, git log, existing rules
-6  ensure the image                ← the real blocker; nothing runs without it
-7  index the code graph            background, resumable
-```
-
-The report **is** the final step. Every decision above is collected and printed
-once, which is why the image and graph lines — made at 6 and 7 — are in it, and
-why `--json` can be one object rather than six unrelated ones.
-
-`[use]` is written **expanded**, with every catalogue entry named, because a
-list you curate by deleting lines beats a wildcard you cannot review. Anything
-you add to your catalogue afterwards is not in it, so the launcher names what is
-not selected — see [Configuration](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue).
-
-Step 4 **never overwrites what you already wrote**, and writes no rules file at
-all: omh's own sections are [base-set entries](/reference/base-set/), composed
-into every session from the manifest. Your `AGENTS.md` or `CLAUDE.md` is read
-and composed with them — see [Configuration](/reference/configuration/#keeping-the-agents-git-status-clean).
-
-Step 6 is the slow one — about 30 seconds the first time, cached afterwards.
-`init` is not finished until `omh new <harness>` works, so it builds the image
-rather than deferring it to your first launch.
-
-Step 3 reads your host only to learn which harness you *prefer*. The harness
-that runs is the one inside the sandbox, which is a different installation.
-
-## Log in
-
-```console
-$ omh auth claude --name personal
-```
-
-This runs the harness's **own** login flow — the same `/login` you would use
-normally — and captures the result into `~/.omh/creds/claude/personal/`. You do
-this once per harness per account. See [Accounts](/guides/accounts/) for several
-logins, and for why capture is keyed by harness rather than by provider.
-
-## Run
-
-```console
-$ omh new claude
-```
-
-You now have a container holding a git worktree on its own branch, with your
-profile mounted where Claude Code actually reads it. Your checkout is not
-mounted and the agent cannot reach it.
-
-```console
-$ omh s01 diff              # what the agent changed
-$ omh s01 commit -m "..."   # commit it onto the session branch
-$ omh s01 push fix/thing    # push it to origin under a name a reviewer can read
-$ omh s01 attach            # open the same session in your editor
-$ omh graph                 # browse the codebase as a graph
-```
-
-Those run on the host, against the worktree you never have to visit. The agent
-cannot run them itself: the sandbox has a repository of its own but no way to
-reach yours, and it is told so rather than left to discover it.
-
-Closing your terminal does not kill the agent — `omh s01 resume` puts you back
-in the session you left, running the harness it ran. See
-[Sessions](/concepts/sessions/).
-
-## Verify it worked
-
-Do not trust the fact that it started.
-
-```console
-$ omh doctor
-```
-
-`doctor` launches the real image with the real mounts and inspects the paths the
-harness actually reads. It is the only thing in the project that can prove an
-adapter is correct — a passing unit suite cannot, and [Troubleshooting](/guides/troubleshooting/)
-explains why in more detail than you probably want until the first time it
-matters.
-
-## Derive, never interrogate
-
-Every question `init` could ask is hassle omh exists to remove, and most answers
-are already lying around: manifests name the stack, git log names what you work
-on, the README names the project. Derived facts also refresh when the repo
-changes, instead of going stale in a config file nobody revisits.
+<details>
+<summary>When omh would ask, and the four kinds of unknown</summary>
 
 A question earns its place only if it is **not derivable**, **actionable** (omh
 does something different with the answer), and **answerable well right now**.
-"What is your job" fails all three.
-
-Four kinds of unknown, told apart by where and when the answer can be known:
 
 | | Knowable | Example | What omh does |
 |---|---|---|---|
@@ -157,21 +201,29 @@ Four kinds of unknown, told apart by where and when the answer can be known:
 | 3 | nobody has written it down | what command tests this project | asks you once, and records the answer |
 | 4 | only you know | "these hooks are mine, keep them" | `omh import` |
 
-Every question is pushed up a row if it can be. Most things that feel like they
-need asking are in a file the repo already commits.
+Every question is pushed up a row if it can be. The strongest permitted form is
+*derive, then confirm* — state the guess and make it correctable:
 
-The strongest permitted form is *derive, then confirm* — state the hypothesis
-and make it correctable:
-
-```
+```text
 ! 2 stacks detected; hooks were written for all of them.
   drop the ones you do not want: .omh/hooks/
 ```
 
-That is not a questionnaire. init still decided; it just showed its work.
+That is not a questionnaire: `init` still decided, and showed its work.
+
+</details>
 
 ## Next
 
-- [Commands](/reference/commands/) — the full surface
-- [Configuration](/reference/configuration/) — the catalogue, and where your settings go
-- [Why a distribution](/concepts/distribution/) — what omh is actually for
+<div class="cards">
+
+- [Commands](/reference/commands/)\
+  Everything you can do with a session, and what each command prints.
+- [Configuration](/reference/configuration/)\
+  Your catalogue, what a repository takes from it, and where settings go.
+- [Accounts](/guides/accounts/)\
+  Several logins, and keeping work and personal apart.
+- [Editors](/guides/editors/)\
+  Open the same session in VS Code, Zed, Cursor or Neovim.
+
+</div>

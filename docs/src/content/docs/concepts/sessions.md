@@ -3,8 +3,33 @@ title: Sessions
 description: What a session is, the git the agent gets, persistence, and worktrees.
 ---
 
-A session is not a launch. It is a **running container, a git worktree, and a
-branch**, which many harnesses take turns inhabiting.
+This page explains what an omh session is — a container, a git worktree and a
+branch — what the agent inside it can reach, and how a session outlives your
+terminal. Read it before you hand a session real work.
+
+**In short**
+
+- **A session is a container, a worktree and a branch**, not a launch.
+  Harnesses take turns in it, and the code graph stays warm between them.
+  → [A session is not a launch](#a-session-is-not-a-launch)
+- **The agent reaches only the worktree.** Your checkout is never mounted, and
+  review, commit and push all run on the host.
+  → [What the agent can reach](#what-the-agent-can-reach)
+- **The agent has git, in a repository of its own** — no remote, no commit of
+  yours — and its commits become yours only when you ask for them.
+  → [The agent has git](#the-agent-has-git-and-it-is-not-yours)
+- **The sandbox protects your host; the branch protects your repo.** Nothing
+  here contains a determined agent.
+  → [What the sandbox contains](#what-the-sandbox-contains-and-what-it-does-not)
+- **A session survives your terminal, and ends carefully**: omh never restarts
+  one over a running harness, and the branch outlives `rm` whenever it could
+  hold something you have not got. → [Persistence](#persistence),
+  [Lifecycle](#lifecycle)
+
+## A session is not a launch
+
+A session is a **running container, a git worktree, and a branch**, which many
+harnesses take turns inhabiting.
 
 ```
        omh new claude ──┐
@@ -23,68 +48,74 @@ branch**, which many harnesses take turns inhabiting.
  └──────────────────────────────────────────────────────┘
 ```
 
-Making the session the unit of work — rather than the launch — is what keeps the
-index warm. `omh new claude`, then `omh s01 resume opencode` against that same
-session, and everything the graph learned is still there: the graph lives in a volume keyed by
-repo, and the worktree and branch are on the host, so neither belongs to the
-container.
+**Making the session the unit of work — rather than the launch — is what keeps
+the index warm.** `omh new claude`, then `omh s01 resume opencode` against that
+same session, and everything the graph learned is still there: the graph lives
+in a volume keyed by repo, and the worktree and branch are on the host, so
+neither belongs to the container.
 
 **Switching harness is not free, though.** An image is built per harness, so a
-session started by `omh new claude` is running the claude image and does not contain
-`opencode` at all. Asking for the other one restarts the sandbox:
+session started by `omh new claude` is running the claude image and does not
+contain `opencode` at all. Asking for the other one restarts the sandbox:
 
 ```console
 $ omh s01 resume opencode
 omh: restarting the sandbox for omh/s01 — image (omh/claude:b4ed… → omh/opencode:1e1a…), mounts (6 added, 9 removed)
 ```
 
-A few seconds, and nothing is lost. It used to be instant and wrong — omh execed
-`opencode` into the claude image, which does not have it, and the harness's whole
-staged profile stayed unmounted. See
+A few seconds, and nothing is lost. Why it restarts rather than reusing the
+container — and what it did before it knew to — is in
 [what a container is compared against](#what-a-container-is-compared-against).
 
-A session with a harness still running in it is **not** restarted; see the same
-section.
+A session with a harness still running in it is **not** restarted; see
+[the same section](#it-will-not-restart-over-running-work).
 
 ## What the agent can reach
 
-Only the worktree. **Your checkout is never mounted**, so the agent cannot see
+**Only the worktree. Your checkout is never mounted**, so the agent cannot see
 your uncommitted work, cannot touch `main`, and cannot reach anything outside
 the branch it was given.
 
-Review is therefore just git:
+**Review is therefore plain git:**
 
 ```console
 $ omh s01 diff
 $ git log omh/s01
 ```
 
-That git runs on the **host**, and so does the way work leaves a session:
+**That git runs on the host, and so does the way work leaves a session:**
 
 ```console
 $ omh s01 commit -m "Fix the tap guard"
 $ omh s01 push fix/tap-guard
 ```
 
-Not a stylistic choice. A worktree's `.git` is a file holding an absolute path
-to an admin directory in your checkout, and omh mounts only the worktree — so
-that pointer leads nowhere from inside a container, and pushing to your remote
-is not something the sandbox is in a position to do.
+**This is not a stylistic choice.** A worktree's `.git` is a file holding an
+absolute path to an admin directory in your checkout, and omh mounts only the
+worktree — so that pointer leads nowhere from inside a container, and pushing to
+your remote is not something the sandbox is in a position to do.
 
-The branch itself is in your checkout the whole time — worktrees share a ref
-store — so once the work is committed, `git log omh/s01` and `git push` work
-from your own repo without `~/.omh` entering into it.
+**The branch is in your checkout the whole time** — worktrees share a ref store
+— so once the work is committed, `git log omh/s01` and `git push` work from your
+own repo without `~/.omh` entering into it.
 
-What is writable is a short list, and it grew: the worktree, because that is the
-work; credentials, because tokens refresh in place; the sandbox's own repository
-(below); each file `carry_in` hands over, so the agent can edit config it was
-given; the directory the harness writes its transcript to, which is what
-`omh sNN` reads to say what the agent did; and two caches outside `/work` — the
-code graph and the local note store.
+### What the agent can write
 
-**Nothing else is**, and a test asserts the set by name rather than asserting a
-list of mount strings, so adding one is a decision somebody has to make on
-purpose.
+What is writable is a short list, and it grew:
+
+| Writable | Why |
+|---|---|
+| the worktree | that is the work |
+| credentials | tokens refresh in place |
+| the sandbox's own repository | see [below](#the-agent-has-git-and-it-is-not-yours) |
+| each file `carry_in` hands over | so the agent can edit config it was given |
+| the directory the harness writes its transcript to | it is what `omh sNN` reads to say what the agent did |
+| the code graph and the local note store | two caches outside `/work` |
+
+**Nothing else is**, and tests assert the set by name — how many there are and
+which guest path each is, with credentials in a test of their own — rather than
+asserting a list of mount strings, so adding one is a decision somebody has to
+make on purpose.
 
 ### Worktrees live outside the repo
 
@@ -98,6 +129,12 @@ about to take off.
 
 ## The agent has git, and it is not yours
 
+**omh gives the agent a git repository of its own**: it holds what the agent
+does in the session, and none of your history.
+
+<details>
+<summary>Why the agent was given git at all</summary>
+
 Until 2026.08 it had none: the dangling pointer meant every command failed with
 `fatal: not a git repository`, so omh refused the call outright rather than let
 an agent spend turns repairing what could not be repaired. That cost the agent
@@ -105,30 +142,49 @@ an agent spend turns repairing what could not be repaired. That cost the agent
 editor its source control panel, since the editor runs *inside* the container —
 for the editors that have one; `omh s01 attach nvim` never did.
 
-So omh gives it a repository of its own. A gitdir under `~/.omh/shadow/`, seeded
-with a single commit of the tree the session started from — minus everything omh
-put there, so your carried `.env` and omh's own staged documents are not in it
-either — mounted at `/omh/shadow`, and named by a `.git` file mounted over
-`/work/.git`. That last
-mount is the whole trick: it shadows the pointer for the container's view only,
-so your own file is never written and everything on this page still works.
+</details>
 
-**What makes it safe is what is not in it.** It starts at one commit on one
-branch, gains whatever the agent does, and never has a remote or a commit from
-your checkout — an agent reading its own history learns
-nothing about yours, and there is no `main` in there to move. Shared *blobs* are
-unavoidable, since a file whose content matches yours hashes the same; history
-is the thing that must not cross.
+### How the repository is made
+
+**A gitdir under `~/.omh/shadow/`, seeded with a single commit** of the tree the
+session started from — minus everything omh put there, so your carried `.env`
+and omh's own staged documents are not in it either. It is mounted at
+`/omh/shadow`, and named by a `.git` file mounted over `/work/.git`.
+
+**That last mount is the whole trick**: it shadows the pointer for the
+container's view only, so your own file is never written and everything on this
+page still works.
 
 It lives at `~/.omh/shadow/<repo>/<session>.git`, on the branch
 `<session>-scratch` — keyed by the checkout, like every other per-repo path omh
 keeps.
 
-**Do not run `git` in that directory yourself.** The agent commits through it,
-so its hooks are the agent's to write, and `git --git-dir=… checkout` on the
-host runs them as you. `omh s01 log` numbers those commits and `omh s01 diff 4
--p` reads one, through a `git` that omh has told to run none of them. If you do
-want it in your own hands, read a copy:
+### Why it is safe to hand over
+
+**What makes it safe is what is not in it.** It starts at one commit on one
+branch, gains whatever the agent does, and never has a remote or a commit from
+your checkout — an agent reading its own history learns nothing about yours,
+and there is no `main` in there to move.
+
+**Shared *blobs* are unavoidable**, since a file whose content matches yours
+hashes the same; history is the thing that must not cross.
+
+**Push is the one thing still walled**, by git's own `pre-push` hook inside that
+repository. Be clear about what that is: a signpost, not a control. There is no
+remote, so a push fails anyway; the hook is what meets the agent after git's own
+error suggests `git remote add`, and it is bypassable by `--no-verify`. Checked
+against git 2.55.0 rather than assumed, both directions.
+
+### Reading it yourself
+
+:::caution[Do not run `git` in that directory yourself]
+The agent commits through it, so its hooks are the agent's to write, and
+`git --git-dir=… checkout` on the host runs them as you. `omh s01 log` numbers
+those commits and `omh s01 diff 4 -p` reads one, through a `git` that omh has
+told to run none of them.
+:::
+
+If you do want it in your own hands, read a copy:
 
 ```console
 $ git clone --no-local ~/.omh/shadow/myrepo/s01.git /tmp/s01-copy
@@ -138,65 +194,79 @@ $ git -C /tmp/s01-copy log --oneline
 What is proposed next for that repository — the host reading it only through
 a fetch — is [a design page](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md).
 
-**Trunk can still reach it, one direction only.** `omh s01 sync` merges the
-new base into the session *on the host* and writes the resulting files in, so
-the sandbox receives a tree and never a commit of yours — the rule above holds
-through a sync. The agent finds a commit saying `base moved to <sha>` and, if
-anything conflicted, the files sitting there with their markers for it to
-resolve — and, at its next start, one sentence saying so, delivered once and
-then gone. That last part is Claude Code only; opencode and omp cannot speak at
-a session's start, and say so when they launch. It refuses while the sandbox is running, because what the agent
+### Trunk in, commits out
+
+**Trunk can still reach it, one direction only.** `omh s01 sync` merges the new
+base into the session *on the host* and writes the resulting files in, so the
+sandbox receives a tree and never a commit of yours — the rule above holds
+through a sync.
+
+**What the agent finds after a sync** is a commit saying `base moved to <sha>`
+and, if anything conflicted, the files sitting there with their markers for it
+to resolve — and, at its next start, one sentence saying so, delivered once and
+then gone. That last part needs a harness that can speak at a session's start,
+which Claude Code and Codex can; opencode and omp cannot, and say so when they
+launch.
+
+**`sync` refuses while the sandbox is running**, because what the agent
 believes the tree holds is in its conversation and no file on disk reaches
 that.
 
-**Its commits are not yours until you ask for them.** `omh s01 commit` squashes the
-files into one commit of your own and never looks at that repository;
-`omh s01 commit --keep` replants the agent's commits, messages and all — every one
-since the last handover, or the ones you name by their number in `omh s01 log`:
-`--keep 1,3-4`. Whichever you use, `omh s01 rm` takes the repository with the session
-— so checkpoints you did not harvest go with it, and after a `git reset --hard`
-in the sandbox those are the only copies there were.
+**Its commits are not yours until you ask for them.** `omh s01 commit` squashes
+the files into one commit of your own and never looks at that repository;
+`omh s01 commit --keep` replants the agent's commits, messages and all — every
+one since the last handover, or the ones you name by their number in
+`omh s01 log`: `--keep 1,3-4`.
 
-Push is the one thing still walled, by git's own `pre-push` hook inside that
-repository. Be clear about what that is: a signpost, not a control. There is no
-remote, so a push fails anyway; the hook is what meets the agent after git's own
-error suggests `git remote add`, and it is bypassable by `--no-verify`. Checked
-against git 2.55.0 rather than assumed, both directions.
+**Whichever you use, `omh s01 rm` takes the repository with the session** — so
+checkpoints you did not harvest go with it, and after a `git reset --hard` in
+the sandbox those are the only copies there were. It stops first when any are on
+no branch, naming how many: on a terminal it asks, and without one it refuses
+unless you pass `--yes`.
 
-Nothing here contains a determined agent, and nothing ever did — the container
-has `curl` and outbound network. See [Risks](/concepts/risks/). What it does
-contain is an accident: the sandbox drops every Linux capability and takes back
-the eight the entrypoint and sshd need, holds at most 2048 processes, and takes
-the memory and CPU ceiling `sandbox_memory` and `sandbox_cpus` set. `sudo` still
-works inside — that is a decision, recorded in a test — so this is a wall
-against a runaway build, not against an agent that wants out.
+### What the sandbox contains, and what it does not
 
-Worth being precise about what this buys: a sandbox protects your *host*. What
-protects your *repo* is the worktree branch. That is why `omh s01 rm` never
-deletes a branch that has commits — only an empty one, which held nothing to
-review.
+**Nothing here contains a determined agent, and nothing ever did** — the
+container has `curl` and outbound network. See [Risks](/concepts/risks/).
+
+**What it does contain is an accident.** The sandbox drops every Linux
+capability and takes back the nine the entrypoint and sshd need, holds at most
+2048 processes, and takes the memory and CPU ceiling `sandbox_memory` and
+`sandbox_cpus` set. `sudo` still works inside — that is a decision, recorded in
+a test — so this is a wall against a runaway build, not against an agent that
+wants out.
+
+**A sandbox protects your *host*. What protects your *repo* is the worktree
+branch.** That is why `omh s01 rm` never deletes a branch holding work trunk
+does not have — only an empty one, which held nothing to review, or one whose
+work omh can prove already landed (see [Lifecycle](#lifecycle)).
 
 ## What a container is compared against
 
-A launch plan is a pure description — image, mounts, network, environment — and a
-session container is one plan materialized. The network is the session's own,
-named like its container; `omh sNN down` and `rm` remove it with the container. Everything in that list is fixed the
-moment the container starts: no later `exec` adds a mount or changes an image.
+A launch plan is a pure description — image, mounts, network, environment — and
+a session container is one plan materialized. The network is the session's own,
+named like its container; `omh sNN down` and `rm` remove it with the container.
 
-So omh stamps the plan onto the container as labels at launch, and compares
-before reusing one. If they disagree the container is replaced, naming what
+**Everything in that list is fixed the moment the container starts**: no later
+`exec` adds a mount or changes an image.
+
+**So omh stamps the plan onto the container as labels at launch, and compares
+before reusing one.** If they disagree, the container is replaced, naming what
 moved. Two real failures came from never asking:
 
-- `omh s01 resume opencode` on a session started by `omh new claude` execed a binary that image
-  does not contain.
-- changing the account between launches went on quietly using the old one — the
-  exact thing `omh auth` refuses to guess about elsewhere. It was `--account
-  work` then; the account is `omh set account <name>` now, and the mount it
-  resolves to is part of the stamp either way.
+- **A harness the image does not have.** `omh s01 resume opencode` on a session
+  started by `omh new claude` was instant and wrong: it execed a binary that
+  image does not contain, and the harness's whole staged profile stayed
+  unmounted.
+- **An account change nobody noticed.** Changing the account between launches
+  went on quietly using the old one — the exact thing `omh auth` refuses to
+  guess about elsewhere. It was `--account work` then; the account is
+  `omh set account <name>` now, and the mount it resolves to is part of the
+  stamp either way.
 
-The harness's own arguments are deliberately **not** part of the comparison.
-`claude --resume x` is the same session as `claude`, and a stamp that moved would
-rebuild the sandbox on every flag.
+**The harness's own arguments are deliberately not part of the comparison.**
+`claude --resume x` is the same session as `claude`, and a stamp that moved
+would rebuild the sandbox on every flag.
 
 ### It will not restart over running work
 
@@ -210,20 +280,25 @@ Error: session s01 is running opencode and cannot be reused for this launch (ima
   or start a fresh one  omh new claude
 ```
 
-Liveness is read from the `dtach` sockets, which exist only while their harness
-does — a socket *is* a harness name, where the process table needs one parsed
-out of a command line.
+**Liveness is read from the `dtach` sockets**, which exist only while their
+harness does — a socket *is* a harness name, where the process table needs one
+parsed out of a command line.
 
-It also used to be the only signal that worked. PID 1 in the sandbox was `sleep
-infinity`, which reaps nothing, so an exited `dtach` lingered as
+<details>
+<summary>Why not the process table: zombies, and sessions an older omh started</summary>
+
+The sockets also used to be the only signal that worked. PID 1 in the sandbox
+was `sleep infinity`, which reaps nothing, so an exited `dtach` lingered as
 `[dtach] <defunct>` and `pgrep` would have answered "still running" for the life
 of the session. The container runs under a real init now, so those no longer
 accumulate — but a session started by an older omh keeps its zombies until it is
 next restarted.
 
+</details>
+
 ## Persistence
 
-A long-lived container is not a long-lived *session*. Plain `exec` ties the
+**A long-lived container is not a long-lived *session*.** Plain `exec` ties the
 harness's lifetime to your terminal: close the lid and the agent is hung up on
 mid-task while the container keeps running around the corpse.
 
@@ -233,28 +308,32 @@ So every harness is wrapped:
 dtach -A /omh/sock/<session>-<harness>  <harness> [args…]
 ```
 
-Detaching is your terminal closing. Reattaching is `omh sNN resume` — `-A`
-attaches to a live session or creates one, so a second invocation never starts a
-second agent. The socket path is a pure function of session and
-harness; anything variable in it would silently fork a duplicate.
+- **Detaching is your terminal closing.**
+- **Reattaching is `omh sNN resume`.** `-A` attaches to a live session or
+  creates one, so a second invocation never starts a second agent.
+- **The socket path is a pure function of session and harness**; anything
+  variable in it would silently fork a duplicate.
 
-Some harnesses ship their own resume. Relying on that would be exactly the
-per-harness behaviour omh exists to abstract, so persistence is uniform and
-lives in the distribution. Turn it off with `persistence = "none"`.
+**Persistence is omh's, not the harness's.** Some harnesses ship their own
+resume. Relying on that would be exactly the per-harness behaviour omh exists to
+abstract, so persistence is uniform and lives in the distribution. Turn it off
+with `persistence = "none"`.
 
 ### Why not tmux
 
-tmux is a multiplexer **and** a persistence tool, and omh needs only the second
-half — `omh s01 attach` means SSH already gives you as many shells against a session
-as you want.
+**tmux is a multiplexer *and* a persistence tool, and omh needs only the second
+half** — `omh s01 attach` means SSH already gives you as many shells against a
+session as you want.
 
-Adopting tmux would buy one feature we need and one we already have, while
-importing costs that land exactly where this project is most fragile: a prefix
-key competing with harness TUI bindings, nested tmux for anyone already running
-it on the host, and another translation layer over mouse, resize and paste.
+**Adopting tmux would buy one feature we need and one we already have**, while
+importing costs that land exactly where this project is most fragile:
 
-`dtach` does persistence in about a thousand lines with no prefix key, no config
-file, and nothing sitting between you and the harness.
+- a prefix key competing with harness TUI bindings,
+- nested tmux for anyone already running it on the host,
+- and another translation layer over mouse, resize and paste.
+
+**`dtach` does persistence in about a thousand lines**, with no prefix key, no
+config file, and nothing sitting between you and the harness.
 
 **Open question.** Watching several things in one session — agent, dev server,
 shell — is a real want that `dtach` cannot serve. Whether that calls for tmux
@@ -270,40 +349,61 @@ $ omh s01 down            # stop the container, keep worktree and branch
 $ omh s01 rm              # remove the session — the branch survives its work
 ```
 
-The branch survives whenever dropping it could lose something: it goes only
+**The branch survives whenever dropping it could lose something**: it goes only
 when it holds no commits, or when omh can prove trunk already has their content
 under another sha — a squash merge — in which case `rm` names the commit it
 landed as. See [`omh sNN rm`](/reference/commands/#omh-snn-rm--and-what-it-refuses-to-take-with-it).
 
-`omh s` reports state as English for you and as fields for a script: `omh s
---json` gives each session's `running`, `behind` and `work.state` without
-anyone parsing the table — see [what every command
-prints](/reference/commands/#what-every-command-prints).
+**`down` and `rm` differ in what they leave behind, and both leave a branch that
+holds commits trunk does not have.** To actually discard agent work you delete the branch yourself,
+deliberately, with git.
 
-Sessions idle longer than `idle_timeout` are stopped on the next launch — but only when their harness has exited. A session whose agent is still running in the container is left alone however old its marker, because stopping it would take the agent's conversation with it, and a container omh cannot probe is left alone too.
+**`omh s` reports state as English for you and as fields for a script**:
+`omh s --json` gives each session's `running`, `behind` and `work.state` without
+anyone parsing the table — see
+[what every command prints](/reference/commands/#what-every-command-prints).
+
+### Idle sessions
+
+**Sessions idle longer than `idle_timeout` are stopped on the next launch.**
 N sessions means N containers, so this is not a nicety — see
 [risks](/concepts/risks/).
 
-Only the **container** stops; the worktree and branch survive, so
-`omh sNN resume` puts you back exactly where you left off. The clock measures when you
-last *launched into* or *attached to* a session, not the agent's own writes — a
-session left running after you walked away is what this exists to reap, and one
-where an agent is working unattended is one you started recently.
-
-Unset by default: nothing is stopped unless you ask for it. A session that has
-no recorded use — from before this existed, or after clearing `~/.omh/run` — is
-left alone rather than stopped on a guess.
-
-`down` and `rm` differ in what they leave behind, and both leave a branch that
-holds commits. To actually discard agent work you delete the branch yourself,
-deliberately, with git.
+- **Only when their harness has exited.** A session whose agent is still
+  running in the container is left alone however old its marker, because
+  stopping it would take the agent's conversation with it, and a container omh
+  cannot probe is left alone too.
+- **Only the container stops.** The worktree and branch survive, so
+  `omh sNN resume` puts you back exactly where you left off.
+- **The clock measures when you last *launched into* or *attached to* a
+  session**, not the agent's own writes — a session left running after you
+  walked away is what this exists to reap, and one where an agent is working
+  unattended is one you started recently.
+- **Unset by default**: nothing is stopped unless you ask for it. A session that
+  has no recorded use — from before this existed, or after clearing
+  `~/.omh/run` — is left alone rather than stopped on a guess.
 
 ## Several sessions at once
 
 Normal, and the reason sessions are numbered. Each gets its own container,
 worktree and branch.
 
-One thing they **share** is the code graph store, keyed by repo. That is what
+**One thing they share is the code graph store**, keyed by repo. That is what
 keeps the index warm across a harness switch, and it means an agent in one
 session can query another session's graph. Mitigated, not prevented — see
 [Code graph](/guides/code-graph/#what-the-agent-can-still-see).
+
+## Next
+
+<div class="cards">
+
+- [Getting work out of a session](/reference/commands/#getting-work-out-of-a-session)\
+  `commit`, `--keep`, `push` and `sync`, with what each prints.
+- [Risks](/concepts/risks/#security)\
+  What the sandbox does not contain, stated plainly.
+- [Architecture](/concepts/architecture/)\
+  The images, the runtime backends, and where everything lives on disk.
+- [Editors](/guides/editors/)\
+  Attach VS Code, Zed, Cursor or Neovim to a running session.
+
+</div>
