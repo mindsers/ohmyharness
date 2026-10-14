@@ -1,115 +1,105 @@
 ---
 title: omh documentation
-description: The safe way to run a coding agent against your repo — a sandboxed session, your setup already in it, and a branch you can review.
+description: Set up, use and understand omh — the safe way to run a coding agent against your repo, with your setup already inside the sandbox and its work handed back as a branch.
+template: splash
+hero:
+  title: Your agent's environment, already set up.
+  tagline: omh runs Claude Code in a sandbox with your rules, skills, MCP servers, a code graph and shared project knowledge already in place — and hands its work back as a branch you review.
+  actions:
+    - text: Install omh
+      link: /getting-started/installation/
+      icon: right-arrow
+    - text: Your first session
+      link: /getting-started/first-session/
+      variant: minimal
 ---
 
-> oh-my-zsh for agentic coding — the best agentic coding environment without the
-> hassle of understanding, installing, and configuring everything.
-
-**Status: early.** `0.14.1`. This release is about memory another session can
-use, and a sandbox whose git can merge. One note store per repo at
-`~/.omh/memory/<repo>`, shared the moment a note is written and never
-committed — [`omh memory`](/reference/commands/#omh-memory-) — and a base image on
-Debian 13, because Debian 12's git 2.39.5 failed any check that merges.
-0.13.0 ran the harnesses their makers ship now: every pin moved to its current
-release and each adapter was re-read against it; the two claims that broke were
-fixed rather than carried. [`omh auth codex`](/guides/accounts/#a-login-that-cannot-finish-in-a-sandbox)
-finishes — a device code, or `--import` of the login this machine has — Codex
-runs omh's hooks, `omh sNN` reads its rollouts, and an
-[`account`](/guides/accounts/#keyed-by-harness-not-by-provider) can name one
-harness's login with `codex:work`. An unreadable `worktrees/` no longer reads as
-no sessions. [`omh sNN rm`](/reference/commands/#omh-snn-rm--and-what-it-refuses-to-take-with-it)
-that can tell a squash already landed a branch, and harness names that cannot
-be paths, arrived in 0.12.0,
-[which hooks fired](/reference/commands/#omh-snn-shows-which-hooks-fired) and the opt-in
-[guards](/reference/configuration/#guards-and-their-bypass) in 0.11.0,
-[`omh upgrade`](/reference/commands/#omh-upgrade) and the checks `omh sNN commit` runs
-before landing in 0.10.0, the [silent failures](/project/retrospectives/#the-silent-failures--done-080-9192)
-closed in 0.8.0, the [command surface](/project/retrospectives/#the-command-surface--done-070-6990) landed in 0.7.0 and
-the [work loop](/project/roadmap/#v15--the-work-loop--060) in 0.6.0.
-
-`0.14.1` is repairs: no editor could attach to a session, a fresh install's
-[`omh doctor`](/guides/troubleshooting/#omh-doctor) ended red on a memory server it
-had never built, and several session lifecycle paths could lose work or leave a
-worktree unusable. 0.14.0 retired the committed note layer and `omh memory promote` with it, and
-moves the store to `~/.omh/memory/<repo>` — a store under the old path moves
-itself, once, and says so. `omh doctor` gained a `git` row that asks the image
-rather than the host. 0.13.2 let Codex run commands and edit files: its own
-sandbox cannot start inside omh's container, so omh turns it off. 0.13.1 fixed
-two launches 0.13.0 broke: opencode died on start over a
-directory the image left to root, and Codex could not save its own config.
-[`omh doctor`](/guides/troubleshooting/#omh-doctor) asks first whether a harness
-starts at all.
-
-One harness (`claude`) has been driven for real work; `opencode`, `omp` and
-`codex` pass `omh doctor`, which proves their paths and nothing about their
-behaviour. Docker is the only end-to-end-verified runtime; `podman` and `sbx`
-are opt-in. Several pages describe work that is **partly
-built** — each says which parts, at the top. See the [roadmap](/project/roadmap/).
+:::caution[Early project]
+omh is at `0.14.1`. Claude Code on Docker is the path people have done real work
+through; the other harnesses and runtimes pass `omh doctor` but have not been
+driven for real. The [roadmap](/project/roadmap/) says what comes next.
+:::
 
 ## Start here
 
-If you have five minutes and a repo, [install omh](/getting-started/installation/)
-and follow [Your first session](/getting-started/first-session/). It goes from
-nothing to a sandboxed agent with your setup already inside it.
+<div class="cards">
 
-## Using omh
+- [Install omh](/getting-started/installation/)\
+  Homebrew, the install script, or from source. About two minutes.
+- [Your first session](/getting-started/first-session/)\
+  From a repository to a sandboxed agent, and its work back as a branch.
+- [Commands](/reference/commands/)\
+  Every command and flag, and what each one prints.
+- [Troubleshooting](/guides/troubleshooting/)\
+  `omh doctor`, and what to do when something does not start.
 
-| | |
+</div>
+
+## Common tasks
+
+| I want to… | Read |
 |---|---|
-| [Installation](/getting-started/installation/) | Homebrew, the install script, or from source |
-| [Your first session](/getting-started/first-session/) | `omh init`, logging in, and running an agent |
-| [Commands](/reference/commands/) | every command, what it does, what it prints |
-| [Configuration](/reference/configuration/) | the catalogue, settings and their layers, provenance, `carry_in` |
-| [Stacks](/reference/stacks/) | what a stack file holds, and the condition that decides what your sandbox is built with |
-| [Sessions](/concepts/sessions/) | what a session actually is, the git the agent gets, persistence, worktrees |
-| [Accounts](/guides/accounts/) | `omh auth`, several logins per harness |
-| [Editors](/guides/editors/) | attaching VS Code, Zed, Cursor or Neovim over SSH |
-| [Code graph](/guides/code-graph/) | the graph, the four hooks, `omh graph` |
-| [Troubleshooting](/guides/troubleshooting/) | `omh doctor`, and the failures it exists to catch |
+| bring the agent's work back onto my branch | [Getting work out of a session](/reference/commands/#getting-work-out-of-a-session) |
+| use a work and a personal Claude account | [Accounts](/guides/accounts/) |
+| open the session in VS Code, Zed, Cursor or Neovim | [Editors](/guides/editors/) |
+| choose which skills and MCP servers a repo uses | [`[use]`](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue) |
+| give the sandbox a `.env` file git does not track | [`carry_in`](/reference/configuration/#carry_in) |
+| find out why omh installed something | [`omh why`](/reference/commands/#omh-why-thing) |
+| let the agent look up symbols and callers | [Code graph](/guides/code-graph/) |
+| fix an image build that fails on a certificate | [An unknown issuer error](/guides/troubleshooting/#an-unknown-issuer-error-when-omh-builds-an-image) |
 
 ## Understanding omh
 
-These explain *why*, and are worth reading before proposing an architectural
-change — most of them record something that was tried and cost something.
+These pages explain *why* omh works the way it does. Read them before proposing
+an architectural change: most of them record something that was tried, and what
+it cost.
 
-| | |
-|---|---|
-| [Why a distribution](/concepts/distribution/) | the thesis, why not an app store, who else is in this space |
-| [Architecture](/concepts/architecture/) | images, runtime backends, on-disk layout |
-| [Adapters](/reference/adapters/) | harnesses and editors as data, and how to add one |
-| [The base set](/reference/base-set/) | omh's opinion as a versioned data file, and the test that makes an entry earn its place |
-| [Memory](/reference/memory/) | the note store: what a note file holds, how its key is derived, what recall matches |
-| [Trust](/concepts/trust/) | provenance, evidence, and a credible exit |
-| [Risks](/concepts/risks/) | what is weak, stated plainly |
-| [Decisions](/project/decisions/) | every load-bearing choice with its reasoning |
-| [Roadmap](/project/roadmap/) | what ships when, and what gates what |
-| [Retrospectives](/project/retrospectives/) | four bodies of work that shipped outside a milestone, and what each one cost |
+<div class="cards">
 
-### Design pages
+- [Sessions](/concepts/sessions/)\
+  What a session is: a container, a git worktree and a branch.
+- [Architecture](/concepts/architecture/)\
+  Images, runtime backends, and what lives where on disk.
+- [Why a distribution](/concepts/distribution/)\
+  The thesis: curation and defaults, not another catalogue.
+- [Trust](/concepts/trust/)\
+  Provenance, measured costs, and a way out.
+- [Risks](/concepts/risks/)\
+  What is still weak, stated plainly.
+- [Decisions](/project/decisions/)\
+  Every load-bearing choice, with its reasoning.
 
-One more is kept beside the source and read on GitHub: a proposal, which says
-at the top that none of it is built.
+</div>
 
-| | |
-|---|---|
-| [The sandbox's repository becomes a remote](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md) | proposed, not built — the only git the host runs against the sandbox's repository is a fetch, and everything else runs in a repository the host owns |
+[Retrospectives](/project/retrospectives/) cover what past work cost. One proposal
+is kept beside the source rather than here:
+[the sandbox's repository becomes a remote](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md)
+— proposed, not built.
+
+## What's new in 0.14
+
+- **Memory a second session can use.** One note store per repository, at
+  `~/.omh/memory/<repo>`, shared by every session the moment a note is written
+  and never committed. See [`omh memory`](/reference/commands/#omh-memory-).
+- **A sandbox that can merge.** The base image moved to Debian 13, whose git has
+  the `merge-tree --merge-base` that repos with modern checks rely on.
+- **Repairs in 0.14.1.** Editors can attach to a session again, a fresh
+  install's [`omh doctor`](/guides/troubleshooting/#omh-doctor) no longer fails on
+  a memory server it never built, and several session lifecycle paths no longer
+  risk losing work.
+
+Earlier releases are on [GitHub](https://github.com/mindsers/ohmyharness/releases).
 
 ## Contributing
 
-[Contributing](https://github.com/mindsers/ohmyharness/blob/main/.github/CONTRIBUTING.md) — the testing rules, the invariants that must
-keep holding, and the one thing about this codebase that will mislead you if
-nobody tells you first.
+[CONTRIBUTING](https://github.com/mindsers/ohmyharness/blob/main/.github/CONTRIBUTING.md)
+has the testing rules, the invariants that must keep holding, and the one thing
+about this codebase that will mislead you if nobody tells you first.
 
----
-
-### A note on how these pages are written
-
-Claims here are meant to be checkable. Where a number appears it was measured on
-this repo and says so; where something is unverified it is marked unverified.
-
-That is not modesty. Almost every bug this project has shipped lived at the
-boundary between omh and external software, where a confident sentence in a
-document and a green test suite are equally worthless — see
-[Troubleshooting](/guides/troubleshooting/) for why `omh doctor` exists and what it
-can prove that nothing else can.
+:::note[How these pages are written]
+Claims here are meant to be checkable. A number was measured on this repository
+and says so; anything unverified is marked unverified. Almost every bug omh has
+shipped lived where omh meets other software, where a confident sentence and a
+green test suite are equally worthless — which is why
+[`omh doctor`](/guides/troubleshooting/#omh-doctor) exists.
+:::
