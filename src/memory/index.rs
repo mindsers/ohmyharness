@@ -170,10 +170,11 @@ mod tests {
         }
     }
 
-    /// A description derived from one layer tells a repo whose store is mostly
-    /// promoted that it holds two notes, and the agent stops querying.
+    /// The description says how many notes the store holds. One that
+    /// undercounts tells the agent there is little to find, and it stops
+    /// querying.
     #[test]
-    fn the_description_counts_both_layers() {
+    fn the_description_counts_every_note() {
         let notes = vec![note("surprise/a"), note("surprise/b")];
         assert_eq!(Index::of(&notes).total, 2);
         assert!(describe(&Index::of(&notes)).contains('2'));

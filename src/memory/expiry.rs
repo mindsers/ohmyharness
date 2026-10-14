@@ -369,9 +369,9 @@ pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
                 continue;
             }
             // Folded here as well as on the write path. A note that arrived any
-            // other way — hand-authored, edited, promoted from a teammate, or
-            // written before normalisation shipped — still carries the sandbox
-            // prefix, and reported a deletion for a file sitting right there.
+            // other way — hand-authored, edited, or written before
+            // normalisation shipped — still carries the sandbox prefix, and
+            // reported a deletion for a file sitting right there.
             let relative = normalise_path(path, &paths.repo);
             // `Path::join` with an absolute argument *replaces*, so a pin
             // normalisation could not fold into the repo would have `stale`
@@ -581,7 +581,8 @@ mod tests {
 
     /// `validate_key` exists because a path read back off disk becomes a write.
     /// A trigger path is read back off disk and becomes a `metadata` call —
-    /// and notes are promoted, so it arrives from another machine.
+    /// and the store is mounted writable into every session, so an agent can
+    /// write one.
     ///
     /// Only the forms that are wrong at every stage are refused here. An
     /// absolute path cannot be: `/work/…` is what the agent legitimately
@@ -771,9 +772,9 @@ mod tests {
     }
 
     /// The sandbox prefix was folded in on the write path only. Any note that
-    /// did not come through `remember` — hand-authored, edited, promoted from a
-    /// teammate, or written before this shipped — reported a deletion that
-    /// never happened, for a file sitting right there.
+    /// did not come through `remember` — hand-authored, edited, or written
+    /// before this shipped — reported a deletion that never happened, for a
+    /// file sitting right there.
     #[test]
     fn gather_folds_a_sandbox_path_the_way_the_write_path_would() {
         let (_d, paths) = repo_with(&[("tracked.txt", "x\n")]);

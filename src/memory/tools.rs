@@ -387,12 +387,12 @@ mod tests {
 
     /// `remember` writes the store and nothing else, re-asserted at the MCP
     /// call site. The command line's test guards the command line's path;
-    /// this is where a `layer` argument would be added "for
-    /// flexibility", and an unattended writer reaching the committed layer
-    /// pushes wrong facts to teammates through git, where they arrive with
-    /// the authority of a reviewed change.
+    /// this is where an argument naming somewhere else to write would be
+    /// added "for flexibility", and an unattended writer reaching the
+    /// checkout pushes wrong facts to teammates through git, where they
+    /// arrive with the authority of a reviewed change.
     #[test]
-    fn remember_over_mcp_writes_only_to_the_local_layer() {
+    fn remember_over_mcp_writes_only_to_the_store() {
         let mut fx = fixture();
         let (out, failed) = text(fx.server.call("remember", &observation()));
         assert!(!failed, "{out}");

@@ -25,8 +25,8 @@
 //! back. Measured on a ten-note store, `"a"` retrieved all ten and a real
 //! question retrieved nine.
 //!
-//! **Layer is not a tiebreak.** Retrieval never picks a winner; reconciling a
-//! contradiction is the agent's job, done with layers and dates in hand.
+//! **Retrieval never picks a winner.** Reconciling a contradiction is the
+//! agent's job, done with the dates in hand.
 
 use crate::memory::Note;
 #[cfg(test)]
@@ -274,7 +274,7 @@ fn score(doc: &Indexed<'_>, terms: &BTreeSet<String>, df: &BTreeMap<&str, usize>
     (total * 1000.0) as u64
 }
 
-/// How many notes point at each key, from either layer.
+/// How many notes point at each key.
 ///
 /// A tie-break, never a weight. Alphabetical order carries no information about
 /// which of two equally-rare, equally-recent notes answers the question; what
@@ -343,9 +343,7 @@ pub fn search_phrased(notes: &[Note], phrasings: &[String], budget: Budget) -> N
     // observation yet, and a new observation is what this feature is for.
     let inbound = inbound_counts(notes);
 
-    // Recency, then connectedness, then key. Layer is deliberately absent:
-    // sorting the committed layer above the local one would present a
-    // reconciliation the ranking is not entitled to make.
+    // Recency, then connectedness, then key.
     scored.sort_by(|(a_score, a), (b_score, b)| {
         b_score
             .cmp(a_score)
@@ -432,8 +430,9 @@ pub fn render(n: &Neighbourhood) -> String {
 
     // Width comes from the rendered label — tree prefix included — plus a gap
     // that cannot close. Deriving it from the bare key let a long child's key
-    // run straight into its layer (`…-returns-ebusylocal · 2026-08-08`), which
-    // is the provenance guarantee broken in the only text an agent ever reads.
+    // run straight into the column after it — a layer, when notes had one:
+    // `…-returns-ebusylocal · 2026-08-08` — which is the provenance guarantee
+    // broken in the only text an agent ever reads.
     // Counted in characters, not bytes, because the tree glyphs are multi-byte
     // and `{:width$}` pads by character.
     let width = n
@@ -466,7 +465,7 @@ pub fn render(n: &Neighbourhood) -> String {
 ///
 /// Test-only, and load-bearing: this is the half of the provenance guarantee a
 /// `contains` assertion cannot fake. **Strict and total** — any non-empty line
-/// it cannot fully decompose is an error, so a dropped layer becomes a failure
+/// it cannot fully decompose is an error, so a dropped date becomes a failure
 /// rather than a line that quietly does not match.
 #[cfg(test)]
 pub fn parse_rendered(rendered: &str) -> Result<Vec<Cite>> {
@@ -529,14 +528,16 @@ mod tests {
         }
     }
 
-    /// The fixture *is* part of the invariant-1 guard, so each property below
+    /// The fixture *is* part of the provenance guards, so each property below
     /// is deliberate:
     ///
-    /// - **pairwise distinct dates**, so a renderer printing a constant, or
-    ///   today, or the parent's date, cannot pass;
-    /// - **both layers among the roots and among the children**, with a `team`
-    ///   parent whose child is `local`, so an inherited layer cannot pass;
-    /// - **one key present in both layers**, so key-only dedup cannot pass;
+    /// - **pairwise distinct dates**, so a hit cited with a constant, with
+    ///   today, or with its parent's date cannot pass;
+    /// - **a neighbour that is not itself a match**, so `credentials` expands
+    ///   one hop and a neighbour's date is checked apart from its parent's;
+    /// - **two claims about one topic under two keys**, which
+    ///   `retrieval_never_picks_a_winner_between_contradicting_notes` needs
+    ///   both of;
     /// - **one note reachable from two roots**, so a duplicate-emitting
     ///   expansion cannot pass.
     fn store() -> Vec<Note> {
@@ -564,28 +565,27 @@ mod tests {
         ]
     }
 
-    /// **A note is never retrieved without its date and layer.**
+    /// **A note is never retrieved without its date.**
     ///
-    /// Asserted as a bijection, not a containment. `rendered.contains("team")`
-    /// passes while every line carries the same date, while a child inherits
-    /// its parent's layer, and while one of two same-key notes has silently
-    /// vanished. This repo has shipped exactly that shape of guard twice.
+    /// Asserted as a bijection, not a containment. `rendered.contains("2026-")`
+    /// passes while every line carries the same date. This repo has shipped
+    /// exactly that shape of guard twice.
     ///
     /// The rendered text is parsed back **strictly and totally** — any line
-    /// the parser cannot fully decompose into key, layer and date is an error,
-    /// so a dropped field becomes a failure rather than a line that quietly
-    /// does not match. Then the set of what came back must equal the set of
-    /// what the search selected, and the line count must equal it too.
+    /// the parser cannot fully decompose into key and date is an error, so a
+    /// dropped field becomes a failure rather than a line that quietly does
+    /// not match. Then the set of what came back must equal the set of what
+    /// the search selected, and the line count must equal it too.
     ///
-    /// Mutations this must go red against, in order:
-    ///   1. drop the layer from the line format   → a line fails to parse
-    ///   2. (the parent-layer mutation is NOT caught here — a hit built with the
-    ///      wrong layer renders faithfully wrong. That one belongs to
-    ///      `an_expanded_neighbour_carries_its_own_layer_not_its_parents`.)
-    ///   3. print today() instead of `recorded`   → the dates mismatch
-    ///   4. dedup by key, dropping the local twin → the sets differ in size
+    /// Mutations this must go red against:
+    ///   1. drop the date from the line format    → a line fails to parse
+    ///   2. print a constant instead of `recorded` → the dates mismatch
+    ///
+    /// A hit built with its parent's date is **not** caught here — it renders
+    /// faithfully wrong. That one belongs to
+    /// `an_expanded_neighbour_carries_its_own_date_not_its_parents`.
     #[test]
-    fn no_note_is_retrieved_without_its_date_and_layer() {
+    fn no_note_is_retrieved_without_its_date() {
         let notes = store();
         let found = search(&notes, "credentials", Budget::default());
         assert!(!found.hits.is_empty(), "the fixture must match something");
@@ -603,18 +603,15 @@ mod tests {
 
         let got: BTreeSet<Cite> = cites.into_iter().collect();
         let want: BTreeSet<Cite> = found.hits.iter().map(|h| h.cite.clone()).collect();
-        assert_eq!(
-            got, want,
-            "each note carries its own layer and its own date"
-        );
+        assert_eq!(got, want, "each note carries its own date");
     }
 
     /// A neighbour is cited with its own date, never the date of the note that
     /// linked to it.
     ///
-    /// The parse-back above cannot see this: a hit built with the wrong date
-    /// renders faithfully wrong, and the rendered text agrees with it. So each
-    /// hit is compared with the note it names instead.
+    /// `no_note_is_retrieved_without_its_date` cannot see this: a hit built
+    /// with the wrong date renders faithfully wrong, and the rendered text
+    /// agrees with it. So each hit is compared with the note it names instead.
     #[test]
     fn an_expanded_neighbour_carries_its_own_date_not_its_parents() {
         let notes = store();
@@ -654,8 +651,9 @@ mod tests {
     /// longest in the neighbourhood got zero padding, because the column width
     /// was computed from bare key lengths while the label also carries a tree
     /// prefix. The rendered line read `surprise/…-returns-ebusylocal ·
-    /// 2026-08-08` — key and layer fused, which is the provenance guarantee
-    /// broken in the output an agent actually reads.
+    /// 2026-08-08` — key and layer fused, back when a line carried a layer,
+    /// which is the provenance guarantee broken in the output an agent
+    /// actually reads.
     ///
     /// The fixture in `store()` could never catch it: its keys were similar
     /// enough that the padding happened to work. So this one is built the
@@ -676,7 +674,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("provenance must stay separable: {e}\n{rendered}"));
 
         for line in rendered.lines().filter(|l| !l.trim().is_empty()) {
-            assert!(line.contains("  "), "key and layer must not fuse: {line:?}");
+            assert!(line.contains("  "), "key and date must not fuse: {line:?}");
         }
     }
 
@@ -691,7 +689,7 @@ mod tests {
     }
 
     /// Retrieval never picks a winner. Contradicting notes both return,
-    /// and the agent reconciles with layers and dates in hand — which is what
+    /// and the agent reconciles with the dates in hand — which is what
     /// an LLM is good at and an indexer is not.
     #[test]
     fn retrieval_never_picks_a_winner_between_contradicting_notes() {
@@ -718,10 +716,10 @@ mod tests {
     #[test]
     fn order_follows_recency() {
         let key = "deploy";
-        let newer_is_local = vec![note(key, "2026-01-01", &[]), note(key, "2026-09-09", &[])];
-        let newer_is_team = vec![note(key, "2026-09-09", &[]), note(key, "2026-01-01", &[])];
+        let newer_last = vec![note(key, "2026-01-01", &[]), note(key, "2026-09-09", &[])];
+        let newer_first = vec![note(key, "2026-09-09", &[]), note(key, "2026-01-01", &[])];
 
-        for notes in [newer_is_local, newer_is_team] {
+        for notes in [newer_last, newer_first] {
             let found = search(&notes, key, Budget::default());
             assert_eq!(
                 found.hits[0].cite.recorded, "2026-09-09",
