@@ -507,9 +507,8 @@ fn manifests() -> Vec<std::path::PathBuf> {
     out
 }
 
-// `no_test_moves_the_working_directory` sat here. It duplicated
-// `tests/process_state.rs`, which #121 wrote first: that guard also reads
-// `build.rs`, and names the line it finds rather than the file.
+// The working-directory guard is `tests/process_state.rs`, from #121. A second
+// one here would only disagree with it.
 
 /// A scan that stopped early agrees with anything.
 ///
