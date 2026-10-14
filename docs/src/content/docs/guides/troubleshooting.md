@@ -1,9 +1,14 @@
 ---
 title: Troubleshooting
-description: omh doctor, and the failures it exists to catch.
+description: Find the message or behaviour you are seeing and fix it, starting with omh doctor.
 ---
 
+Find what you are seeing and fix it — starting with `omh doctor`, the one check
+that proves a session's setup is right.
+
 ## `omh doctor`
+
+Run it first, in the repository whose sessions misbehave:
 
 ```console
 $ omh doctor
@@ -29,198 +34,226 @@ claude in omh/claude:8eae0d5c1511fa89
   …
 ```
 
-The rows under **host** are gathered before any container work — so on a
-machine that cannot build a sandbox they are still what you get, instead of a
-single error. The last four read what this checkout declares — that its
-settings resolve, that every `[use]` name is in the catalogue, that every file
-in `.omh/hooks` parses, that every `carry_in` path exists — which needs no
-container either. **The first `omh doctor` on a machine cross-builds the memory server**, the
-same Linux binary a launch mounts, and says `first run only` while it does.
-Before that it asked a server it had not put in the container and reported it
-as not answering. A preview — `omh doctor --dry-run` — builds nothing; it
-prints the probe script.
+**Run it** after changing an adapter, after upgrading a harness, and any time a
+session behaves as though your profile is not there. A preview —
+`omh doctor --dry-run` — builds nothing; it prints the probe script.
 
-Under the harness's heading, `starts` comes first: the
-harness printing its own version, in the image a launch uses. `git` is second
-and is about the image rather than the adapter — whether its git can merge,
-which is what a repo's own turn-end check will need. Every row after those two
-is an adapter path, checked inside the sandbox, and they are the reason the
-command exists — but none of them can notice a harness that dies before
-reading any of them, which is how opencode 1.18 failed every launch while every
-path row passed. One
-more host row appears only when this repo has no commit for a session branch to
-fork from.
+### Reading the report
 
-Run it after changing an adapter, after upgrading a harness, and any time a
-session behaves as though your profile is not there.
+- **`host`** rows are gathered before any container work — so on a machine that
+  cannot build a sandbox they are still what you get, instead of a single
+  error. The last four read what this checkout declares — that its settings
+  resolve, that every `[use]` name is in the catalogue, that every file in
+  `.omh/hooks` parses, that every `carry_in` path exists — which needs no
+  container either. One more host row appears only when this repo has no commit
+  for a session branch to fork from.
+- **`starts`** comes first under the harness's heading: the harness printing its
+  own version, in the image a launch uses.
+- **`git`** is second, and is about the image rather than the adapter — whether
+  its git can merge, which is what a repo's own turn-end check will need.
+- **Every row after those two is an adapter path**, checked inside the sandbox.
+  They are the reason the command exists.
 
-## Why it exists
+**The first `omh doctor` on a machine cross-builds the memory server**, the same
+Linux binary a launch mounts, and says `first run only` while it does. How many
+rows you get depends on your setup — [Current status](#current-status) says
+what moves the count.
 
-**Factual correctness is not testable in process.**
+<details>
+<summary>Why <code>starts</code> comes first, and why the first run builds a server</summary>
 
-Adapters assert things about *external software* — that Claude Code reads MCP
-config from `/work/.mcp.json`, that skills live in `~/.claude/skills`. A green
-unit suite proves omh mounts a path faithfully. It cannot prove anything reads
-it, and that software ships weekly.
+No path row can notice a harness that dies before reading any of them — which
+is how opencode 1.18 failed every launch while every path row passed.
 
-Almost every bug this project has shipped lived at that boundary, and **not one
-was catchable by the test suite.** `doctor` is the only cure.
+Before the first run built the memory server, `doctor` asked a server it had
+not put in the container and reported it as not answering.
 
-The `mcp` binding is the cautionary tale. It said `$HOME/.mcp.json` — a path
-Claude Code does not read and never did — and omh rendered a correct document,
-mounted it faithfully, and reported `✓ mcp` for as long as that lasted. Not one
-session ever loaded an MCP server. Checking a document proves the document; only
-the harness can say whether it read it, which is what `mcp-loaded` asks and why
-its check runs the harness's own `mcp list` inside the sandbox.
+</details>
 
-## What it does
+## Find your problem
 
-It launches the real image with the real mounts and inspects the **guest** paths
-the adapter declares. Checking anything host-side would just re-test the staging
-directory omh wrote a moment earlier, which is circular.
+Look for the message or the behaviour, and follow the link. If nothing matches,
+see [Something else](#something-else).
 
-Capabilities the harness cannot express are **skipped, not failed** — they were
-already reported as dropped at launch.
-
-### The credential probe
-
-This is the half no in-process test can reach: whether a token saved at a path
-survives depends on how the runtime binds it, not on anything omh wrote. So the
-probe attempts the temp-file-plus-rename that every token save performs.
-
-It is **non-destructive by construction** — the file case copies the original
-and renames byte-identical content back, so a successful probe changes nothing
-and a failed one touches nothing. A health check that costs you your login would
-be worse than no check.
-
-Run against a file mount, it reports the real defect:
-
-```
-  ✗ token      /home/agent/.claude.json cannot be renamed over —
-               a token saved here will not persist
-```
-
-### A silent probe is never a pass
-
-If a probe produces no output, that means the sandbox never ran it. Calling that
-success would make `doctor` worse than useless, so silence is a failure.
-
-## Current status
-
-Both shipped adapters are verified this way, hooks included on both. The
-"unverified claim" caveat is retired for these two, and any third adapter
-inherits the same bar.
-
-The *number* of checks is not a property of the adapter: it counts the
-capabilities your profile declares, plus a `token` check only when you have
-captured a login for that harness, plus `memory` when the base set's server is
-installed. Two harnesses showing different totals usually means you are logged
-in to one of them.
-
----
+| What you see | What to do |
+|---|---|
+| **Building and starting a session** | |
+| `unable to get local issuer certificate`, `CERTIFICATE_VERIFY_FAILED` or `UNABLE_TO_VERIFY_LEAF_SIGNATURE` while omh builds an image | [Give omh your network's root certificate](#an-unknown-issuer-error-when-omh-builds-an-image) |
+| `up?` in `omh s`, or `omh could not tell whether the sandbox is running` | [Start the container runtime](#up-in-omh-s-or-omh-could-not-tell-whether-the-sandbox-is-running) |
+| `network omh-<repo>-<session> not found` | [A launch plan that could not run](#network-omh-repo-session-not-found) |
+| `create mountpoint for /work/AGENTS.md mount: ... is outside of rootfs` | [Update omh, or launch again](#create-mountpoint-for-workagentsmd-mount--is-outside-of-rootfs) |
+| A flag you meant for the harness went to omh | [Put it after `--`](#a-flag-went-to-omh-when-you-meant-the-harness) |
+| **Reusing a session's sandbox** | |
+| `omh could not tell whether s01's sandbox is still usable` | [Launch again, or take the session down](#omh-could-not-tell-whether-s01s-sandbox-is-still-usable) |
+| `current working directory is outside of container mount namespace root`, or `possible container breakout detected` | [Replace the container](#current-working-directory-is-outside-of-container-mount-namespace-root) |
+| `restarting the sandbox for omh/s01 — …` | [Not an error](#restarting-the-sandbox-for-omhs01--) |
+| `session s01 is running opencode and cannot be reused for this launch` | [Stop it, or work somewhere else](#session-s01-is-running-opencode-and-cannot-be-reused-for-this-launch) |
+| **Logging in** | |
+| You logged in, and the next session is logged out | [Find where the token was written](#i-logged-in-but-the-next-session-is-logged-out) |
+| Codex says "Login using `codex login` and then run this command again" | [Upgrade, then log in with a device code](#codex-says-login-using-codex-login-and-then-run-this-command-again) |
+| **Codex** | |
+| `Failed to set trust for /work … failed to persist config.toml` | [Update omh and upgrade](#codex-says-failed-to-set-trust-for-work--failed-to-persist-configtoml) |
+| `could not find bubblewrap on PATH`, or `bwrap: No permissions to create a new namespace` | [Update omh and upgrade](#codex-says-could-not-find-bubblewrap-on-path-and-commands-fail-with-bwrap-no-permissions-to-create-a-new-namespace) |
+| **Your setup in the session** | |
+| The agent does not see your rules or skills | [Run `omh doctor`, then read the launch line](#the-harness-starts-but-does-not-see-my-rules-or-skills) |
+| One skill is missing, and the launch says `1 catalogue entry is not selected here` | [Select it with `omh use`](#a-skill-i-have-is-not-reaching-the-agent) |
+| `mcp/codegraph is omh's` | [Switch the whole feature instead](#mcpcodegraph-is-omhs) |
+| `list_projects` shows a project you do not recognise | [Expected](#the-graph-shows-a-project-i-do-not-recognise) |
+| **Attaching an editor** | |
+| `nvim did not open the session`, or any other editor | [Recreate the session's container](#nvim-did-not-open-the-session--and-neither-does-any-other-editor) |
+| **Carried files** | |
+| `the carried-file scan could not read these` | [Not an error](#the-carried-file-scan-could-not-read-these) |
+| `Device or resource busy` from `sed -i` or `mv` on a carried file | [Edit it in place](#device-or-resource-busy-editing-a-file-omh-carried-in) |
+| **Getting work out of a session** | |
+| `omh will not move a branch the session is not on` | [Put the worktree back on its branch](#omh-will-not-move-a-branch-the-session-is-not-on) |
+| `… is a repository of its own inside this session's worktree` | [Remove its `.git`, or ignore it](#-is-a-repository-of-its-own-inside-this-sessions-worktree) |
+| `the sandbox's history no longer reaches …` | [Take the files with `commit -m`](#the-sandboxs-history-no-longer-reaches-) |
+| `omh will not rewrite your history to hide a secret` | [Drop the commit, or take the files](#omh-will-not-rewrite-your-history-to-hide-a-secret) |
+| **Disk and cleanup** | |
+| Sessions are piling up | [Stop the ones you are not using](#sessions-are-piling-up) |
+| omh is using more disk than you expected | [Read the inventory, then prune](#omh-is-using-more-disk-than-i-expected) |
+| Removing images did not give the disk back | [Buildkit's cache is separate](#docker-image-rm-is-not-what-filled-my-disk) |
+| `omh: removed omh/claude:… this build replaced` | [Not an error](#omh-removed-omhclaude-this-build-replaced) |
+| `omh sNN rm` says the session "is not a working tree" | [What it meant](#omh-snn-rm-says-the-session-is-not-a-working-tree) |
+| `sNN is partly removed — its worktree is still there` | [Close what holds it, then remove again](#snn-is-partly-removed--its-worktree-is-still-there) |
+| **Your catalogue and settings** | |
+| `no usable base manifest`, or `declares no base-set entries` | [Run `omh init`](#no-usable-base-manifest-or-declares-no-base-set-entries) |
+| `` a hook does nothing without `run` or `inject` ``, or ``unknown field `event` `` | [Write the hook in omh's words](#a-hook-does-nothing-without-run-or-inject) |
+| `` `graph-refresh` is a name omh ships `` | [Rename your hook, or switch the feature off](#graph-refresh-is-a-name-omh-ships) |
+| `your catalogue has no skills called …` | [Check the name, or create the entry](#your-catalogue-has-no-skills-called-) |
+| `a repo names servers from your catalogue, it cannot declare one` | [Move the servers to your catalogue](#a-repo-names-servers-from-your-catalogue-it-cannot-declare-one) |
+| `keys.toml is where key templates used to live` | [Rename it to `memory.toml`](#keystoml-is-where-key-templates-used-to-live) |
+| `omh why` says something is not installed when it is | [Look for a path in the message](#omh-why-says-something-is-not-installed-when-it-is) |
+| `is inside your checkout, and eject will not write there` | [Eject somewhere outside it](#is-inside-your-checkout-and-eject-will-not-write-there) |
+| **Command-line errors** | |
+| `--dry-run is not something this command can answer yet` | [Run the command without it](#--dry-run-is-not-something-this-command-can-answer-yet) |
+| `unexpected argument '-a' found` | [Set the account instead](#unexpected-argument--a-found) |
+| `unexpected argument '--layer' found` | [Drop the flag](#unexpected-argument---layer-found) |
+| **After upgrading from an older omh** | |
+| `moved this checkout's … off` | [Expected, once](#moved-this-checkouts--off---upgrading-to-080) |
+| `omh will not move … — it cannot establish that it is this checkout's` | [Sort the sessions out by hand](#omh-will-not-move---it-cannot-establish-that-it-is-this-checkouts) |
+| `a sandbox from before this version is still running` | [Stop the sandboxes, then retry](#a-sandbox-from-before-this-version-is-still-running) |
+| `… are from before omh keyed them by checkout, and it already has newer ones` | [Keep them or delete them](#-are-from-before-omh-keyed-them-by-checkout-and-it-already-has-newer-ones) |
 
 ## Common failures
 
-### The harness starts but does not see my rules or skills
+### Building and starting a session
 
-Run `omh doctor`. If a path fails there, the adapter is wrong — that is a bug,
-and [Adapters](/reference/adapters/) covers how to fix it.
+#### an unknown-issuer error when omh builds an image
 
-If doctor passes, check whether the capability was dropped at launch:
+The wording depends on which tool reaches the network first — `unable to get
+local issuer certificate` from curl, `CERTIFICATE_VERIFY_FAILED` from python,
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` from node. A build that dies this way ends by
+naming `ca_cert` and the command that sets it. `omh doctor` can warn before
+anything fails — which is how you find out when an image cached from before the
+proxy appeared still builds, and only the sessions fail.
 
-```console
-$ omh new opencode
-omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment),
-     graph-first (no `search` tool),
-     graph-orient (no `session-start` moment),
-     graph-read (no way to inject text before a tool runs)
-```
+**The cause is one thing: your network inspects TLS.** Zscaler, Netskope and
+corporate MITM proxies terminate every HTTPS connection and re-sign it with the
+company's own root. Your machine trusts it because IT installed it; a container
+does not. The graph download and `npm install -g` for the harness both fail, so
+no image gets built.
 
-That is the harness genuinely not supporting the feature, not omh losing it.
+<div class="steps">
 
-### Codex says "Login using `codex login` and then run this command again"
+1. Get the root as a PEM.
 
-That line is Codex 0.5.0's, the pin omh shipped before 0.154.0. Its
-`codex login` signs in through a browser redirect that waits inside the
-sandbox, where your browser never arrives, so `omh auth codex` could not
-finish that way and a launch started logged out. Update omh, run
-`omh upgrade` to move the pin, then either:
+   On macOS it lives in the keychain rather than on disk:
 
-```console
-$ omh auth codex                     # choose "Sign in with Device Code"
-$ omh auth codex --import            # or copy the login this machine has
-```
+   ```console
+   $ security find-certificate -a -c "Zscaler" -p > ~/corp-root.pem
+   ```
 
-With `account` set for the repo, use that name: `omh auth codex --name <it>`.
-See [Accounts](/guides/accounts/#a-login-that-cannot-finish-in-a-sandbox).
+   If the file you have is a DER `.crt` rather than PEM, omh says so and gives
+   you the `openssl` line that converts it. If it carries `Bag Attributes` or
+   `friendlyName:` preamble from a `pkcs12` export, omh refuses it rather than
+   editing your certificate — strip it to the `BEGIN`/`END` block.
 
-### Codex says "Failed to set trust for /work … failed to persist config.toml"
+2. Point omh at it.
 
-omh 0.13.0 mounted its MCP servers over `~/.codex/config.toml`, and Codex
-rewrites that file itself — here to save that it trusts `/work` — by renaming a
-temporary file over it, which a mounted file refuses. Update omh and run
-`omh upgrade`: the servers move to `/etc/codex/managed_config.toml`,
-`~/.codex/config.toml` is the account's own again, and `/etc/codex/config.toml`
-already trusts `/work`, so Codex does not ask.
+   ```console
+   $ omh set --local ca_cert ~/corp-root.pem
+   ```
 
-### Codex says "could not find bubblewrap on PATH", and commands fail with `bwrap: No permissions to create a new namespace`
+   `--local` puts it in `.omh/settings.local.toml`, which is gitignored. **Not
+   `omh settings set`** — that writes the template new repos are seeded from,
+   and a repo that already exists never re-reads it.
 
-Codex runs each command inside its own bubblewrap sandbox, which cannot start
-inside omh's container. omh 0.13.1 and earlier left it on, so every shell
-command and every file edit failed. Update omh and run `omh upgrade`: Codex's
-sandbox is turned off in `/etc/codex/config.toml`, and omh's container is the
-sandbox.
+3. Build the image again.
 
-### I logged in, but the next session is logged out
+   ```console
+   $ omh init
+   ```
 
-The token was written somewhere that does not persist. `omh doctor` names it:
+4. Check that the root reached the sandbox.
 
-```
-  ✗ token      /home/agent/.claude.json cannot be renamed over
-```
+   ```console
+   $ omh doctor
+   ```
 
-Background in [Accounts](/guides/accounts/#mount-the-directory-never-the-token-file).
+   This is the step worth not skipping: it checks the root reached the
+   sandbox's trust store, which is the one thing a successful build does not
+   prove. `update-ca-certificates` exits 0 when it skips a certificate it cannot
+   parse.
 
-### `nvim did not open the session` — and neither does any other editor
+</div>
 
-```console
-$ omh s06 attach
-omh: nvim did not open the session
-session s06 is up
+[`ca_cert`](/reference/configuration/#ca_cert) has the detail, including which
+toolchains need telling separately from the system store.
 
-  ssh://omh-ohmyharness-c8a80c16-s06/work
-  ssh omh-ohmyharness-c8a80c16-s06
-```
+<details>
+<summary>How omh spots it — in the build, and in <code>omh doctor</code> before anything fails</summary>
 
-Every editor `attach` offers is an ssh URL, so this is never really about the
-editor: the container is refusing the connection, and each of the commands
-printed under it fails the same way. `ssh -v` shows it closing right after
-`SSH2_MSG_KEXINIT sent`, and the reason is in a log inside the container:
+**omh says this for you, from both ends.** The build names `ca_cert` itself
+because doctor's *guest-side* checks cannot answer this one — they work by
+launching the image and inspecting it from the inside, and behind an inspecting
+proxy there is no image to launch — so the diagnosis lives in the build itself.
 
-```console
-$ docker exec -u root omh-<repo>-s06 tail -3 /omh/sshd.log
-chroot("/run/sshd"): Operation not permitted [preauth]
-```
+**`omh doctor` says it *before* anything fails.** With no `ca_cert` set, it asks
+whether a container would accept the certificates this network serves, by
+verifying against the roots the platform ships rather than the ones your
+machine trusts — which is the same question a container asks. That catches the
+case the build cannot: the cached image that still builds.
 
-sshd's unprivileged pre-auth process chroots to `/run/sshd`, and omh's
-container dropped `SYS_CHROOT` — a capability its own list described as having
-no caller. `0.14.1` gives it back — it was missing since the runtime seam
-landed, so every omh that could attach at all had this.
+It asks about two of the hosts a build fetches from — `github.com`, where the
+graph binary comes from in the base layer, and `registry.npmjs.org`, where the
+harness does — sampled rather than exhaustive, because a proxy can inspect
+selectively and one host is a coin flip. Either one being re-signed is enough,
+and the warning names which.
 
-**A container created by an older omh keeps the old capability set**, because
-capabilities are fixed when a container is created and not when it starts. Take
-the session down and start it again: `omh s06 down`, then `omh s06 resume
-<harness>`. The worktree and everything in it are untouched.
+It needs an `openssl` that restricts verification to the file it is given.
+Stock macOS ships LibreSSL, which does not, so omh checks that first and says
+it cannot tell rather than reporting a clean network it did not measure.
 
-### `up?` in `omh s`, or `omh could not tell whether the sandbox is running`
+It reports only when the answer is yes. Offline, or anywhere omh cannot tell a
+shipped root from an installed one, it says nothing rather than guessing —
+being told to install a corporate root on a plane is worse than silence.
+
+</details>
+
+#### `up?` in `omh s`, or `omh could not tell whether the sandbox is running`
 
 The container runtime is installed — omh checked before it asked — but it would
-not answer. Almost always the daemon is not running: start Docker Desktop, or
-`systemctl start docker`. `omh s` prints the runtime's own message above the
-table, one line per session, and that message is the part worth reading.
+not answer. Almost always the daemon is not running.
+
+<div class="steps">
+
+1. Read what the runtime said.
+
+   `omh s` prints the runtime's own message above the table, one line per
+   session, and that message is the part worth reading.
+
+2. Start the daemon.
+
+   Start Docker Desktop, or `systemctl start docker`.
+
+</div>
 
 **Nothing acts on the answer while it is unknown**, but what *that* means
-differs by command, because the safe direction does:
+differs by command, because the safe direction does.
+
+<details>
+<summary>What each command does while the runtime cannot be asked, and why</summary>
 
 - `sync`, `graph` and a launch **refuse**, naming what the runtime said.
 - `down` leaves the session alone, reports it as a row rather than omitting it,
@@ -238,94 +271,43 @@ live sandboxes as `stopped` — and `omh sNN sync` believed there was nothing to
 stop, which would have written trunk's files over the work of an agent
 mid-turn.
 
-### `network omh-<repo>-<session> not found`
+</details>
 
-The plan named a per-session network that was never created. A plan must be
-*runnable*, not merely well-formed — this gap made every real launch die while
-every unit test passed, and it is the archetypal case for why `doctor` exists.
+#### `network omh-<repo>-<session> not found`
 
-### `create mountpoint for /work/AGENTS.md mount: ... is outside of rootfs`
+The plan named a per-session network that was never created.
+
+<details>
+<summary>Why this one is the case for <code>omh doctor</code></summary>
+
+A plan must be *runnable*, not merely well-formed — this gap made every real
+launch die while every unit test passed, and it is the archetypal case for why
+`doctor` exists.
+
+</details>
+
+#### `create mountpoint for /work/AGENTS.md mount: ... is outside of rootfs`
 
 Fixed in `v0.2.1`. omh mounts its rules onto `/work/CLAUDE.md` and
 `/work/AGENTS.md` — paths inside the worktree mount — and left creating those
-destinations to the runtime. Docker Desktop will not: `/work` is the host
-worktree, so it resolves the destination back to a host path and refuses to
-create a mountpoint outside the container's rootfs.
+destinations to the runtime, which Docker Desktop will not do.
+
+**Update omh.** On an older version, launching a second time is the workaround.
+
+<details>
+<summary>Why it looked intermittent</summary>
+
+`/work` is the host worktree, so Docker Desktop resolves the destination back to
+a host path and refuses to create a mountpoint outside the container's rootfs.
 
 Docker creates the empty file on the host on its way out, which is why this read
 as intermittent: the first launch of a session died, the second found the
 leftover and worked. omh places those files itself now, before docker sees the
-plan. On an older version, launching a second time is the workaround.
+plan.
 
-### `omh could not tell whether s01's sandbox is still usable`
+</details>
 
-Before reusing a running sandbox, omh runs one command inside it — that command
-answers both *can this be entered* and *what is running in it*. It acts on the
-answer only when docker names the failure, and refuses otherwise.
-
-Two failures it acts on. The worktree the container is bound to was deleted, or
-deleted and recreated, so no `exec` will ever work again (the next section) —
-the container has to go. Or the container is not there at all: removed, or
-exited while omh was looking. Both mean nothing is alive inside to lose, so omh
-replaces the sandbox and the launch carries on.
-
-Anything else — the daemon restarting mid-launch, an image with no shell, a
-fork that failed — is a question omh cannot answer, and the cost of answering
-it wrongly is a `docker rm -f` on a container with an agent working inside. So
-it stops and shows you what the runtime said, along with two ways on:
-
-- run the launch again, which is enough if the runtime has come back;
-- `omh sNN down`, which stops the container without needing to enter it, so the
-  next launch builds a fresh one.
-
-`omh sNN rm` is **not** the way out here, though an earlier version of this page
-said so. It deletes the worktree as well as the container, and when omh cannot
-read the sandbox it will not guess what would be lost: on a terminal it asks
-before going ahead, and with nobody to ask it refuses. Either way the answer
-that gets past it destroys the work you came here to keep.
-
-### `current working directory is outside of container mount namespace root`
-
-Docker's full wording is `OCI runtime exec failed: ... -- possible container
-breakout detected`, which is alarming and misleading: nothing broke out. The
-session container is running with `/work` bound to a worktree directory that no
-longer exists. Recreating the directory does not help — a bind mount follows the
-inode, not the path — so every command into that container fails the same way.
-
-Fixed in `v0.3.1`, from both ends. `omh sNN rm` now takes the container down with
-the worktree, which is what created the mismatch, and a launch that finds a
-container it cannot enter replaces it instead of exec'ing into it:
-
-```console
-omh: restarting the sandbox for omh/s01 — it can no longer reach its worktree
-```
-
-The worktree and branch are on the host, so the restart costs nothing.
-
-On an older version, `docker rm -f omh-<repo>-<session>` and relaunch.
-
-### `restarting the sandbox for omh/s01 — …`
-
-Not an error. The container under that session id was not built from the plan
-you just asked for — a different harness, a different account, a changed mount
-set — and no `exec` can retrofit any of those. The line names what moved. The
-worktree and branch are on the host and the graph is in a volume, so the restart
-costs seconds and loses nothing.
-
-`it predates this check` means the container was started by a version of omh that
-did not stamp its plan, so nothing about it can be verified. It happens once per
-session after upgrading.
-
-### `session s01 is running opencode and cannot be reused for this launch`
-
-The same mismatch, but something is live inside and restarting would kill it. Use
-`omh s01 down` if you want it gone, or `omh new <harness>` to leave it alone
-and work somewhere else.
-
-If you believe nothing is running, look at the sockets: `docker exec
-omh-<repo>-s01 ls /omh/sock`. One per live harness, removed when it exits.
-
-### A flag went to omh when you meant the harness
+#### A flag went to omh when you meant the harness
 
 `omh new claude --dry-run` is a dry run *of omh* — everything before the `--`
 is omh's. Put the flag after the separator to hand it to the harness:
@@ -334,65 +316,831 @@ is omh's. Put the flag after the separator to hand it to the harness:
 $ omh new claude -- --dry-run
 ```
 
+<details>
+<summary>Why omh no longer refuses the other spelling</summary>
+
 This used to be an error rather than a rule. The bare-name form had no
 separator, so omh guessed: it refused its own long flags typed after a harness
 name and left short ones alone, since `-s` is a flag plenty of harnesses use.
 `omh new` does not guess, so there is nothing left to refuse.
 
-### `omh sNN rm` says the session "is not a working tree"
+</details>
+
+### Reusing a session's sandbox
+
+#### `omh could not tell whether s01's sandbox is still usable`
+
+Before reusing a running sandbox, omh runs one command inside it — that command
+answers both *can this be entered* and *what is running in it*. It acts on the
+answer only when docker names the failure, and here docker did not, so omh
+stopped and showed you what the runtime said.
+
+<div class="steps">
+
+1. Run the launch again.
+
+   That is enough if the runtime has come back.
+
+2. If it still stops, take the session down.
+
+   `omh sNN down` stops the container without needing to enter it, so the next
+   launch builds a fresh one.
+
+</div>
+
+:::caution[Not `omh sNN rm`]
+`omh sNN rm` is **not** the way out here, though an earlier version of this page
+said so. It deletes the worktree as well as the container, and when omh cannot
+read the sandbox it will not guess what would be lost: on a terminal it asks
+before going ahead, and with nobody to ask it refuses. Either way the answer
+that gets past it destroys the work you came here to keep.
+:::
+
+<details>
+<summary>Which failures omh repairs on its own, and why it stops on the rest</summary>
+
+Two failures it acts on. The worktree the container is bound to was deleted, or
+deleted and recreated, so no `exec` will ever work again
+([below](#current-working-directory-is-outside-of-container-mount-namespace-root))
+— the container has to go. Or the container is not there at all: removed, or
+exited while omh was looking. Both mean nothing is alive inside to lose, so omh
+replaces the sandbox and the launch carries on.
+
+Anything else — the daemon restarting mid-launch, an image with no shell, a
+fork that failed — is a question omh cannot answer, and the cost of answering
+it wrongly is a `docker rm -f` on a container with an agent working inside. So
+it stops and shows you what the runtime said, along with the two ways on above.
+
+</details>
+
+#### `current working directory is outside of container mount namespace root`
+
+Docker's full wording is `OCI runtime exec failed: ... -- possible container
+breakout detected`, which is alarming and misleading: nothing broke out. The
+session container is running with `/work` bound to a worktree directory that no
+longer exists, so every command into that container fails the same way.
+
+Fixed in `v0.3.1`: a launch that finds a container it cannot enter replaces it
+instead of exec'ing into it, and says so:
+
+```console
+omh: restarting the sandbox for omh/s01 — it can no longer reach its worktree
+```
+
+The worktree and branch are on the host, so the restart costs nothing.
+
+On an older version, replace the container yourself:
+
+<div class="steps">
+
+1. Remove the container.
+
+   `docker rm -f omh-<repo>-<session>`
+
+2. Launch the session again.
+
+</div>
+
+<details>
+<summary>Why recreating the directory does not help, and what <code>v0.3.1</code> changed</summary>
+
+Recreating the directory does not help — a bind mount follows the inode, not the
+path.
+
+`v0.3.1` fixed it from both ends: `omh sNN rm` now takes the container down with
+the worktree, which is what created the mismatch, and a launch replaces the
+container rather than exec'ing into it, as above.
+
+</details>
+
+#### `restarting the sandbox for omh/s01 — …`
+
+**Not an error.** The container under that session id was not built from the
+plan you just asked for — a different harness, a different account, a changed
+mount set — and no `exec` can retrofit any of those. The line names what moved.
+
+Nothing to do: the worktree and branch are on the host and the graph is in a
+volume, so the restart costs seconds and loses nothing.
+
+`it predates this check` means the container was started by a version of omh that
+did not stamp its plan, so nothing about it can be verified. It happens once per
+session after upgrading.
+
+#### `session s01 is running opencode and cannot be reused for this launch`
+
+The same mismatch as [`restarting the sandbox`](#restarting-the-sandbox-for-omhs01--),
+but something is live inside and restarting would kill it. Choose one:
+
+- **To stop it:** `omh s01 down`, if you want it gone.
+- **To leave it alone:** `omh new <harness>`, and work somewhere else.
+
+If you believe nothing is running, look at the sockets: `docker exec
+omh-<repo>-s01 ls /omh/sock`. One per live harness, removed when it exits.
+
+### Logging in
+
+#### I logged in, but the next session is logged out
+
+The token was written somewhere that does not persist. `omh doctor` names it:
+
+```
+  ✗ token      /home/agent/.claude.json cannot be renamed over —
+               a token saved here will not persist
+```
+
+Why a token can fail to persist, and how omh mounts credentials so that it
+does: [Accounts](/guides/accounts/#mount-the-directory-never-the-token-file).
+
+#### Codex says "Login using `codex login` and then run this command again"
+
+That line is Codex 0.5.0's, the pin omh shipped before 0.154.0. Its
+`codex login` signs in through a browser redirect that waits inside the
+sandbox, where your browser never arrives, so `omh auth codex` could not
+finish that way and a launch started logged out.
+
+<div class="steps">
+
+1. [Update omh](/getting-started/installation/#keep-it-up-to-date).
+
+2. Move the pin.
+
+   Run `omh upgrade`.
+
+3. Log in again, one of two ways.
+
+   ```console
+   $ omh auth codex                     # choose "Sign in with Device Code"
+   $ omh auth codex --import            # or copy the login this machine has
+   ```
+
+   With `account` set for the repo, use that name: `omh auth codex --name <it>`.
+
+</div>
+
+See [Accounts](/guides/accounts/#a-login-that-cannot-finish-in-a-sandbox) for
+both ways in.
+
+### Codex
+
+#### Codex says "Failed to set trust for /work … failed to persist config.toml"
+
+omh 0.13.0 mounted its MCP servers over `~/.codex/config.toml`, and Codex
+rewrites that file itself — here to save that it trusts `/work` — by renaming a
+temporary file over it, which a mounted file refuses.
+
+<div class="steps">
+
+1. [Update omh](/getting-started/installation/#keep-it-up-to-date).
+
+2. Run `omh upgrade`.
+
+</div>
+
+The servers move to `/etc/codex/managed_config.toml`, `~/.codex/config.toml` is
+the account's own again, and `/etc/codex/config.toml` already trusts `/work`, so
+Codex does not ask.
+
+#### Codex says "could not find bubblewrap on PATH", and commands fail with `bwrap: No permissions to create a new namespace`
+
+Codex runs each command inside its own bubblewrap sandbox, which cannot start
+inside omh's container. omh 0.13.1 and earlier left it on, so every shell
+command and every file edit failed.
+
+<div class="steps">
+
+1. [Update omh](/getting-started/installation/#keep-it-up-to-date).
+
+2. Run `omh upgrade`.
+
+</div>
+
+Codex's sandbox is then turned off in `/etc/codex/config.toml`, and omh's
+container is the sandbox.
+
+### Your setup in the session
+
+#### The harness starts but does not see my rules or skills
+
+Either the adapter names a path the harness does not read, or the harness cannot
+express that capability and omh dropped it at launch.
+
+<div class="steps">
+
+1. Run `omh doctor`.
+
+   If a path fails there, the adapter is wrong — that is a bug, and
+   [Adapters](/reference/adapters/) covers how to fix it.
+
+2. If doctor passes, check whether the capability was dropped at launch.
+
+   ```console
+   $ omh new opencode
+   omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment),
+        graph-first (no `search` tool),
+        graph-orient (no `session-start` moment),
+        graph-read (no way to inject text before a tool runs)
+   ```
+
+   That is the harness genuinely not supporting the feature, not omh losing it.
+
+</div>
+
+If one entry is missing rather than a whole kind, see
+[A skill I have is not reaching the agent](#a-skill-i-have-is-not-reaching-the-agent).
+
+#### A skill I have is not reaching the agent
+
+Check the launch output. If it names the entry, this repo has a `[use]` list and
+that entry is not in it:
+
+```console
+$ omh new claude
+omh: 1 catalogue entry is not selected here: skills/refactor
+omh:   omh use skills refactor    ·    omh use --all
+```
+
+**Select it** with the line omh printed: `omh use skills refactor` for that
+entry, or `omh use --all` for everything in your catalogue. `omh info --repo`
+shows the same thing without launching.
+
+`omh init` writes `[use]` with every entry named, so anything added to your
+catalogue *afterwards* is off here until you say otherwise. That is the trade an
+explicit list makes, and this line is what stops it being silent.
+
+#### `mcp/codegraph is omh's`
+
+`codegraph` and `memory` are in `~/.omh/mcp.json` because `omh init` seeded them
+there, so they look exactly like servers you added. They are not selectable in
+either direction: a feature is its server, its hooks and its rules section
+together, and keeping half of it is the one combination that manufactures
+confident wrong answers.
+
+**Switch the whole feature instead:**
+
+```toml
+# <repo>/.omh/settings.toml
+[omh]
+codegraph = false
+```
+
+or `omh set codegraph off`. Nothing is uninstalled and the next repo gets
+it back.
+
+#### The graph shows a project I do not recognise
+
+**Expected.** Graphs are shared per repo across sessions, so `list_projects`
+shows all of them — [documented](/guides/code-graph/#what-the-agent-can-still-see).
+Your session's own project name is in `$OMH_GRAPH_PROJECT`.
+
+### Attaching an editor
+
+#### `nvim did not open the session` — and neither does any other editor
+
+```console
+$ omh s06 attach
+omh: nvim did not open the session
+session s06 is up
+
+  ssh://omh-ohmyharness-c8a80c16-s06/work
+  ssh omh-ohmyharness-c8a80c16-s06
+```
+
+Every editor `attach` offers is an ssh URL, so this is never really about the
+editor: the container is refusing the connection, and each of the commands
+printed under it fails the same way. omh's container dropped a capability sshd
+needs, and `v0.14.1` gives it back.
+
+<div class="steps">
+
+1. [Update omh](/getting-started/installation/#keep-it-up-to-date) to `v0.14.1`
+   or later.
+
+2. Take the session down.
+
+   `omh s06 down`. **A container created by an older omh keeps the old
+   capability set**, because capabilities are fixed when a container is created
+   and not when it starts.
+
+3. Start it again.
+
+   `omh s06 resume <harness>`. The worktree and everything in it are untouched.
+
+</div>
+
+<details>
+<summary>How to confirm it, and which capability it was</summary>
+
+`ssh -v` shows the connection closing right after `SSH2_MSG_KEXINIT sent`, and
+the reason is in a log inside the container:
+
+```console
+$ docker exec -u root omh-<repo>-s06 tail -3 /omh/sshd.log
+chroot("/run/sshd"): Operation not permitted [preauth]
+```
+
+sshd's unprivileged pre-auth process chroots to `/run/sshd`, and omh's
+container dropped `SYS_CHROOT` — a capability its own list described as having
+no caller. It was missing since the runtime seam landed, so every omh that
+could attach at all had this.
+
+</details>
+
+### Carried files
+
+#### `the carried-file scan could not read these`
+
+```console
+omh: the carried-file scan could not read these, so it cannot tell you whether
+     their contents reached a commit:
+    certs/deploy.p12 — it is not text, so there are no lines to search for
+    certs/short.env — every line in it is too short or is a comment
+  the path itself is still checked — what is not is a copy under another name
+```
+
+**Not an error, and the harvest still lands.** At launch and at harvest, omh
+searches the agent's commits for lines from the files you
+[carried in](/reference/configuration/#carry_in) — and this says which of those
+files it could not turn into lines. The path check still applies; what it
+cannot see is the same content copied to a different name.
+
+Nothing to do about it in most cases. If a file matters, carrying it in a form
+the scan can read — text, lines of twelve characters or more — is what buys
+the content check.
+
+<details>
+<summary>Why omh says this at all</summary>
+
+It is the difference between *no carried secret reached the branch* and *omh
+could not check*, which used to be the same sentence.
+
+</details>
+
+#### `Device or resource busy` editing a file omh carried in
+
+```console
+$ sed -i s/OLD/NEW/ .env
+sed: cannot rename ./sedXXXXXX: Device or resource busy
+```
+
+`carry_in` files are bind-mounted rather than copied, so `git clean -fdx` in the
+sandbox cannot delete them — a mountpoint cannot be unlinked. The same property
+blocks every write-temp-then-rename edit, which is what `sed -i` and `mv` do.
+
+**Edit the file in place instead.** Appending works (`echo LINE >> .env`), and so
+does anything that writes the file in place. Edits land on omh's staged copy,
+never on the file in your checkout.
+
+A carried **directory** is a plain copy and has none of this — it is removable
+by `git clean -fdx`. omh warns when it carries one, though only when it actually
+copies: relaunch a session whose carried directory has not changed and the
+warning does not repeat.
+
+<details>
+<summary>Why omh mounts a carried file rather than tracking it</summary>
+
+This is a trade, and the obvious way out was measured and rejected. Tracking the
+carried file in the sandbox's repository instead of mounting it would survive
+`git clean` *and* leave `sed -i` working — but a tracked file is in the tree of
+every commit that follows it, and the harvest fetches that repository into
+yours, so the secret would be copied into your real repository by every harvest
+that gets that far. Fetching less does not help: `--depth=1` still carries the
+blob, because it is in the tree of the commit it does fetch.
+
+On a harvest that then *fails*, omh keeps the fetched ref on purpose so nothing
+is lost — which would leave the secret reachable from a live ref until someone
+noticed. A test pins it so nobody fixes the visible half.
+
+</details>
+
+### Getting work out of a session
+
+#### `omh will not move a branch the session is not on`
+
+`omh sNN commit --keep` refuses when the session's worktree has left its branch —
+a `git checkout` to look at something, or an abandoned bisect. Put it back:
+
+```console
+$ git -C ~/.omh/worktrees/<repo>/<session> checkout -q omh/<session>
+```
+
+Keep the `-q`. Without it `checkout` finishes by reporting what is still
+changed, and for a directory the agent turned into a repository of its own that
+report is git run inside it.
+
+<details>
+<summary>Related refusals from the same command</summary>
+
+All of them mean "a harvest here would silently drop work", and all are about
+the sandbox's **own** repository: a detached HEAD, an interrupted rebase or
+merge, and commits no branch there can reach.
+
+The detached and stranded cases each print a `git` command to run **inside the
+sandbox** — one to put it back, one to show you what it found. Not on the host:
+that repository's hooks are the agent's to write. The interrupted case names the
+marker it saw and leaves finishing or aborting to you.
+
+</details>
+
+#### `… is a repository of its own inside this session's worktree`
+
+`omh sNN commit`, `commit --keep` and `sync` refuse while the worktree holds a
+directory with a `.git` of its own — the agent ran `git clone` or `git init`
+inside `/work`, or did so in the empty directory of one of your submodules.
+
+<div class="steps">
+
+1. Inside the sandbox, delete its `.git`, or ignore it.
+
+   Deleting the `.git` leaves the files as ordinary files; adding the path to
+   `.gitignore` leaves it out. For one of your own submodules only the first
+   applies.
+
+2. Run the command again.
+
+</div>
+
+`omh s` and `omh sNN diff` keep working in the meantime. `omh s` lists the
+directory as changed, and neither looks inside it.
+
+<details>
+<summary>Why omh will not commit a nested repository, or ask git about one</summary>
+
+Two reasons, and the second is the one that matters. A commit cannot carry it:
+git records a nested repository as a commit id and none of its files, and that
+id exists nowhere but the sandbox. And git answers *is that repository dirty*
+by running `git status` **inside it**, under its own config — a file the agent
+wrote. So omh neither stages one nor asks about one.
+
+`omh sNN commit` never stages a change to one of your submodule pointers either
+way — the sandbox's repository has no submodules to update, so one that moved in
+there moved to a commit only the agent has.
+
+</details>
+
+#### `the sandbox's history no longer reaches …`
+
+`omh sNN commit --keep` replays from the point it last handed over. An agent that
+`reset --hard`s below that point — or rebases across it — leaves a record the
+sandbox's history no longer contains, and omh cannot tell which commits are new
+from what is left. Replaying from the start of the session would offer the
+branch work it already has.
+
+**The branch is untouched.** Take the files as they stand with
+`omh sNN commit -m`, which does not read the sandbox's repository at all.
+
+#### `omh will not rewrite your history to hide a secret`
+
+`--keep` found something you listed in `carry_in` inside a commit the agent
+made — added with `git add -f`, copied under another name, pasted into source,
+or written into a commit message. omh knows the bytes it carried in, so it can
+tell, and it stops rather than quietly rewriting the agent's work.
+
+The branch is untouched either way. Choose one:
+
+- **Keep the history:** drop that commit in the sandbox and harvest again.
+- **Take the files without the history:** `omh sNN commit -m`.
+
+### Disk and cleanup
+
+#### Sessions are piling up
+
+N sessions is N containers.
+
+<div class="steps">
+
+1. List them.
+
+   ```console
+   $ omh s
+   ```
+
+2. Stop the ones you are not using.
+
+   ```console
+   $ omh s01 down
+   ```
+
+3. Let `idle_timeout` stop unused ones from now on.
+
+   See [Sessions](/concepts/sessions/#lifecycle).
+
+</div>
+
+#### omh is using more disk than I expected
+
+`omh doctor`'s **leftovers** row is the inventory, and `omh prune` is what acts
+on it. Between them they cover everything omh keys by a checkout: cache volumes,
+containers, networks, and the seven per-checkout directories under `~/.omh`
+(`worktrees`, `shadow`, `memory`, `notes`, `run`, `keys`, `scratch`).
+
+<div class="steps">
+
+1. See what would go.
+
+   `omh --dry-run prune` shows what would go without removing anything.
+
+2. Remove it.
+
+   `omh prune`.
+
+3. Decide about what omh could not attribute.
+
+   `omh prune --dangerously-include-unsafe` names every one of them with its
+   reason and asks before removing any.
+
+</div>
+
+Expect the first run on an established machine to report far more **left** than
+removed, and to say `omh could not attribute` about most of it. That is not the
+command failing, and the rest is not stuck.
+
+<details>
+<summary>Why omh cannot attribute older state</summary>
+
+Until 0.10.0 omh keyed a checkout's state by a one-way digest of its path and
+recorded the path nowhere, so for anything created before that there is nothing
+to compare against. omh recovers what it can from evidence it already wrote — a
+worktree's `.git` pointer, an image's build label — and refuses to guess about
+the rest.
+
+</details>
+
+#### `docker image rm` is not what filled my disk
+
+Buildkit's cache is separate and `omh` never touches it. On the machine that
+prompted this feature it was 8.8 GB against 14.86 GB of images.
+
+<div class="steps">
+
+1. See it.
+
+   `docker system df` shows it; `docker buildx du` breaks it down.
+
+2. Reclaim it, if you want to.
+
+   Only `docker builder prune` reclaims it, and it takes every cached layer with
+   it, so omh leaves that decision to you.
+
+</div>
+
+#### `omh: removed omh/claude:… this build replaced`
+
+**Not an error.** A build removes the images it supersedes. omh tags an image
+with a hash of its recipe, so once a recipe changes the previous tag of the same
+kind is dead and nothing will ask for it again. Before this, nothing removed
+them.
+
+Never removed: `:latest`, and any tag a container still references.
+
+**Images built before omh stamped labels are yours to remove.** They carry none,
+so they belong to no class and are never collected — `docker images 'omh/*'`
+will show them.
+
+<details>
+<summary>How omh decides an image is superseded, and why the space freed is small</summary>
+
+"Of the same kind" is the load-bearing part, and it is decided by labels omh
+stamps at build time — `omh.kind`, plus the adapter, plus the checkout for a
+stack layer — not by the image name. `omh/claude` legitimately holds the
+harness layer *and* one toolchain layer per checkout, all of them current, so
+the name alone cannot tell you which are dead.
+
+A superseded tag usually frees far less than its `SIZE` column suggests,
+because it shares almost every layer with the tag that replaced it; the space is
+returned when a whole chain dies.
+
+</details>
+
+#### `omh sNN rm` says the session "is not a working tree"
 
 Worktree registration and the directory on disk disagreed. omh prunes before
 adding and removes the directory outright when git will not, so this should no
 longer reach you.
 
-### omh is using more disk than I expected
-
-`omh doctor`'s **leftovers** row is the inventory, and `omh prune` is what acts
-on it. Between them they cover everything omh keys by a checkout: cache volumes,
-containers, networks, and the six per-checkout directories under `~/.omh`
-(`worktrees`, `shadow`, `notes`, `run`, `keys`, `scratch`).
-
-`omh --dry-run prune` shows what would go without removing anything.
-
-Expect the first run on an established machine to report far more **left** than
-removed, and to say `omh could not attribute` about most of it. That is not the
-command failing. Until 0.10.0 omh keyed a checkout's state by a one-way digest
-of its path and recorded the path nowhere, so for anything created before that
-there is nothing to compare against. omh recovers what it can from evidence it
-already wrote — a worktree's `.git` pointer, an image's build label — and
-refuses to guess about the rest.
-
-The rest is not stuck. `omh prune --dangerously-include-unsafe` names every one
-of them with its reason and asks before removing any.
-
-### `sNN is partly removed — its worktree is still there`
+#### `sNN is partly removed — its worktree is still there`
 
 `rm` asks the disk whether the worktree actually went rather than trusting
 git's exit code, and this is it saying no. The command exits non-zero and lists
 what it did observe going, so nothing is claimed that was not watched.
 
-Something is holding the directory: a shell still `cd`'d into it, an editor or
-a file watcher with it open, a mount that has gone read-only, or a parent whose
-permissions changed. Close whatever it is and run `omh sNN rm` again — the
-parts that already went are gone, and re-running finishes the rest.
+<div class="steps">
+
+1. Close whatever is holding the directory.
+
+   A shell still `cd`'d into it, an editor or a file watcher with it open, a
+   mount that has gone read-only, or a parent whose permissions changed.
+
+2. Run `omh sNN rm` again.
+
+   The parts that already went are gone, and re-running finishes the rest.
+
+</div>
 
 `--yes` does not help here. It answers the question about unreviewed work; it
 does not make the removal try harder, and `git worktree remove --force` was
 passed either way.
 
-### `moved this checkout's … off ` — upgrading to 0.8.0
+### Your catalogue and settings
 
-Expected, once, and nothing is lost.
+#### `no usable base manifest` or `declares no base-set entries`
 
-Before 0.8.0 omh keyed a checkout's state by its **directory name**, so
-`~/work/api` and `~/oss/api` were one repo: they shared worktrees, sandbox
-repositories, the note store, the cache volume and container names, and the
-second one's `omh new` resumed into the first one's session. That is
-[risk 8d](/concepts/risks/), and 0.8.0 closes it by keying on the name *and* a
-digest of where the checkout is.
+omh could not find a readable [base set](/reference/base-set/) in `~/.omh/base`,
+or the newest one names nothing. **Run `omh init`**: it reinstalls it.
 
-The first omh command you run in each checkout after upgrading moves its state
-onto the new key and says so:
+<details>
+<summary>Why this is loud</summary>
+
+This is deliberately loud. It used to be silent: a stray `.toml` in that directory became the base set,
+`init` seeded no MCP servers and reported success anyway, and every session
+came up running hooks that pointed at a server which was not installed.
+
+</details>
+
+#### `` a hook does nothing without `run` or `inject` ``
+
+A file in a `hooks/` directory is not a usable hook: truncated, half-written, or
+written in a harness's words rather than omh's. Related messages from the same
+check: ``unknown field `event` `` (that is Claude Code's vocabulary),
+``a hook either `run`s something or `inject`s text, not both``, and
+``$` in `inject` must name a variable`.
+
+**Rewrite the file in omh's words** — [writing a hook](/reference/configuration/#writing-a-hook)
+has them — or remove it.
+
+<details>
+<summary>Why it is checked when the file is read</summary>
+
+Loud on purpose, and checked when the file is read rather than at runtime. An
+unparseable hook used to be reported as *"modified by you"* with a blank value —
+a false accusation from the one command whose job is telling authorship
+straight — while a launch failed hard on the same file.
+
+</details>
+
+#### `` `graph-refresh` is a name omh ships ``
+
+You have a hook file answering to one of omh's own names. It does not override
+omh's and it does not run, so it is refused rather than left inert. Choose one:
+
+- **To keep your hook:** rename it.
+- **To have omh's version gone:** switch the feature off.
+
+  ```toml
+  # <repo>/.omh/settings.toml
+  [omh]
+  codegraph = false
+  ```
+
+#### `your catalogue has no skills called …`
+
+`omh use` names an entry that has to exist, so a typo is refused rather than
+written and reported at the next launch. Check the name, or create the entry:
+`omh settings edit skills <name>` creates one.
+
+The mirror of it: `omh unuse` refuses a name this repo was not using, instead of
+writing the list back unchanged and reporting success.
+
+#### `a repo names servers from your catalogue, it cannot declare one`
+
+There is an `mcp.json` in `<repo>/.omh/`. That was where servers lived before
+the catalogue, and nothing reads it now.
+
+<div class="steps">
+
+1. Add each server to your catalogue.
+
+   `omh settings mcp add` puts one there.
+
+2. Move any token for this repo alone.
+
+   It goes under `[mcp.<name>.env]` in `.omh/settings.local.toml`.
+
+3. Delete `<repo>/.omh/mcp.json`.
+
+   omh refuses for as long as the file is there.
+
+</div>
+
+#### `keys.toml is where key templates used to live`
+
+**Rename it to `memory.toml`.**
+
+<details>
+<summary>Why omh refuses instead of reading it</summary>
+
+omh refuses rather than falling back, because the fallback is the disaster: the
+shipped defaults would silently re-key every note written from then on, and
+every existing key would stop being derivable from anything.
+
+</details>
+
+#### `omh why` says something is not installed when it is
+
+Check the message for a path. A layer that cannot be **read** — wrong
+permissions, a broken symlink — is now an error naming the file rather than an
+empty layer.
+
+<details>
+<summary>On an older build</summary>
+
+If you hit the old behaviour on an older build, the tell is that `omh init`
+appears to do nothing: it uses `write_if_absent`, sees the file exists, and
+leaves it alone, so the advice and the problem never meet.
+
+</details>
+
+#### `is inside your checkout, and eject will not write there`
+
+`omh eject` renders `AGENTS.md` and `CLAUDE.md`, which are files it *reads* to
+compose the rules document — so writing into the checkout would overwrite its
+own input.
+
+<div class="steps">
+
+1. Point `--to` somewhere outside the checkout.
+
+2. Copy in what you want.
+
+</div>
+
+### Command-line errors
+
+#### `--dry-run is not something this command can answer yet`
+
+`--dry-run` runs everything and withholds the writes, so it only means anything
+on a command that writes. `init`, `auth`, `graph`, `settings edit` and the
+session verbs except `resume` refuse it instead of running, and so do read-only
+commands.
+
+**Run the command without the flag**, or read what it would touch with
+`omh info --repo`.
+
+<details>
+<summary>Why these commands refuse rather than preview</summary>
+
+Each of the writing commands would have to compute what it *would* do — which
+container to stop, which commits to replant, which worktree to delete — and a
+preview that guessed would be worse than none.
+
+Read-only commands refuse it for the opposite reason. `omh info` is its own dry
+run; accepting the flag would promise a preview it never gives.
+
+</details>
+
+#### `unexpected argument '-a' found`
+
+`-a`/`--account` was removed in 0.7.0. The account is one thing with one
+spelling now, and every command that launches or probes reads it:
+
+<div class="steps">
+
+1. Capture it.
+
+   `omh auth <harness> -n <name>`
+
+2. Choose it for this project.
+
+   `omh set account <name>`. It refuses a name no captured login answers to, so
+   a typo is caught where you type it rather than as a failed login inside a
+   sandbox.
+
+</div>
+
+<details>
+<summary>Why <code>-a</code> went</summary>
+
+It overrode the account for one invocation and recorded nothing — so a session
+started with it could not be resumed without repeating it, and forgetting meant
+the account mount no longer matched the container's stamp, which either blocked
+the resume or brought the container back as a different account.
+
+</details>
+
+#### `unexpected argument '--layer' found`
+
+`--layer` was removed in 0.7.0 along with the command that carried it. You no
+longer pick the file — the key does. (`omh memory rm --layer` is gone too, in
+0.14: notes are one store per repo, so a key names one note.)
+
+**Drop the flag.** `omh why <key>` says which file a key goes to, and `--save` or
+`--local` overrides it for one write. See
+[Configuration](/reference/configuration/#two-scopes-two-commands).
+
+<details>
+<summary>How the key decides</summary>
+
+`carry_in` is kept out of git because a value there can name a credential;
+everything else is committed, because it is a fact about the project a teammate
+cloning should get.
+
+</details>
+
+### After upgrading from an older omh
+
+#### `moved this checkout's … off ` — upgrading to 0.8.0
+
+**Expected, once, and nothing is lost.** The first omh command you run in each
+checkout after upgrading moves its state onto the new key and says so:
 
 ```console
 $ omh s
@@ -403,11 +1151,23 @@ omh: moved this checkout's worktrees off `proj` — keyed by checkout now, so tw
 `omh info --repo` shows the key it chose, as `keyed as proj-561662ee`. That is
 also the answer to *which `docker ps` row belongs to this project*.
 
-The cache volume and network are **not** moved — they are derivable, docker
-cannot rename either, and the old pair is left behind. Nothing reports them;
-`docker volume ls | grep omh-cache-` finds them if you want the disk back.
+**To get the disk back:** the cache volume and network are **not** moved — they
+are derivable, docker cannot rename either, and the old pair is left behind.
+Nothing reports them; `docker volume ls | grep omh-cache-` finds them.
 
-### `omh will not move … — it cannot establish that it is this checkout's`
+<details>
+<summary>Why the key changed</summary>
+
+Before 0.8.0 omh keyed a checkout's state by its **directory name**, so
+`~/work/api` and `~/oss/api` were one repo: they shared worktrees, sandbox
+repositories, the note store, the cache volume and container names, and the
+second one's `omh new` resumed into the first one's session. That is
+[risk 8d](/concepts/risks/), and 0.8.0 closes it by keying on the name *and* a
+digest of where the checkout is.
+
+</details>
+
+#### `omh will not move … — it cannot establish that it is this checkout's`
 
 Two checkouts with the same directory name shared one worktrees directory, and
 omh will not decide which of them gets it:
@@ -421,405 +1181,131 @@ omh: omh will not move `~/.omh/worktrees/api` — it cannot establish that it is
 no sessions
 ```
 
+<div class="steps">
+
+1. Find which checkout owns each session.
+
+   Each session's `.git` file names the checkout it belongs to.
+
+2. Find each checkout's new directory name.
+
+   `omh info --repo`, run in that checkout, prints it.
+
+3. Move the sessions you want.
+
+   Into `~/.omh/worktrees/<name>-<digest>/` for the checkout that owns them.
+
+4. Delete the rest.
+
+</div>
+
+The same message appears if a pointer cannot be read at all, naming the file:
+omh treats *cannot look* as a refusal rather than as permission.
+
+<details>
+<summary>Why both checkouts' sessions are in one directory</summary>
+
 This is the normal shape of the collision rather than an exotic one: session
 ids were handed out by scanning that shared directory, so the first checkout
 took `s01` and the second took `s02` — **in the same directory**. Whichever
 checkout omh sampled would have taken the other's sessions with it, including
 work no branch has.
 
-Each session's `.git` file names the checkout it belongs to. Read them, move
-the ones you want into `~/.omh/worktrees/<name>-<digest>/` for the checkout
-that owns them — `omh info --repo` prints that name — and delete the rest.
-The same message appears if a pointer cannot be read at all, naming the file:
-omh treats *cannot look* as a refusal rather than as permission.
+</details>
 
-### `a sandbox from before this version is still running`
+#### `a sandbox from before this version is still running`
 
-The move renames the directory a live container has mounted. `omh s down`
-first, then run any omh command again.
+The move renames the directory a live container has mounted.
 
-### `… are from before omh keyed them by checkout, and it already has newer ones`
+<div class="steps">
+
+1. Stop the sandboxes.
+
+   `omh s down`
+
+2. Run any omh command again.
+
+</div>
+
+#### `… are from before omh keyed them by checkout, and it already has newer ones`
 
 State under the old key that cannot move, because this checkout already has
 state under the new one. Nothing reads it again. omh will not merge two sets
 of sessions together, so it names them and leaves them in `~/.omh` for you to
 keep or delete.
 
-### `the carried-file scan could not read these`
-
-At launch and at harvest, omh searches the agent's commits for lines from the
-files you [carried in](/reference/configuration/#carry_in) — and this says which of
-those files it could not turn into lines:
-
-```console
-omh: the carried-file scan could not read these, so it cannot tell you whether
-     their contents reached a commit:
-    certs/deploy.p12 — it is not text, so there are no lines to search for
-    certs/short.env — every line in it is too short or is a comment
-  the path itself is still checked — what is not is a copy under another name
-```
-
-Not an error, and the harvest still lands. It is the difference between *no
-carried secret reached the branch* and *omh could not check*, which used to be
-the same sentence. The path check still applies; what it cannot see is the
-same content copied to a different name.
-
-Nothing to do about it in most cases. If a file matters, carrying it in a form
-the scan can read — text, lines of twelve characters or more — is what buys
-the content check.
-
-### `is inside your checkout, and eject will not write there`
-
-`omh eject` renders `AGENTS.md` and `CLAUDE.md`, which are files it *reads* to
-compose the rules document — so writing into the checkout would overwrite its
-own input. Point `--to` somewhere outside and copy in what you want.
-
-### an unknown-issuer error when omh builds an image
-
-**omh now says this for you, from both ends.** A build that dies on an
-unverifiable certificate ends by naming `ca_cert` and the command that sets it.
-Doctor's *guest-side* checks cannot answer that one — they work by launching
-the image and inspecting it from the inside, and behind an inspecting proxy
-there is no image to launch — so the diagnosis lives in the build itself.
-
-And `omh doctor` now says it *before* anything fails. With no `ca_cert` set, it
-asks whether a container would accept the certificates this network serves, by
-verifying against the roots the platform ships rather than the ones your
-machine trusts — which is the same question a container asks. That catches the
-case the build cannot: an image cached from before the proxy appeared still
-builds, and only the sessions fail.
-
-It asks about two of the hosts a build fetches from — `github.com`, where the
-graph binary comes from in the base layer, and `registry.npmjs.org`, where the
-harness does — sampled rather than exhaustive, because a proxy can inspect
-selectively and one host is a coin flip. Either one being re-signed is enough,
-and the warning names which.
-
-It needs an `openssl` that restricts verification to the file it is given.
-Stock macOS ships LibreSSL, which does not, so omh checks that first and says
-it cannot tell rather than reporting a clean network it did not measure.
-
-It reports only when the answer is yes. Offline, or anywhere omh cannot tell a
-shipped root from an installed one, it says nothing rather than guessing —
-being told to install a corporate root on a plane is worse than silence.
-
-The wording depends on which tool reaches the network first — `unable to get
-local issuer certificate` from curl, `CERTIFICATE_VERIFY_FAILED` from python,
-`UNABLE_TO_VERIFY_LEAF_SIGNATURE` from node — but the cause is one thing: your
-network inspects TLS. Zscaler, Netskope and corporate MITM proxies terminate
-every HTTPS connection and re-sign it with the company's own root. Your machine
-trusts it because IT installed it; a container does not. The graph download and
-`npm install -g` for the harness both fail, so no image gets built.
-
-Get the root as a PEM — on macOS it lives in the keychain rather than on disk —
-and point omh at it:
-
-```console
-$ security find-certificate -a -c "Zscaler" -p > ~/corp-root.pem
-$ omh set --local ca_cert ~/corp-root.pem
-$ omh init
-$ omh doctor
-```
-
-`--local` puts it in `.omh/settings.local.toml`, which is gitignored. **Not
-`omh settings set`** — that writes the template new repos are seeded from, and
-a repo that already exists never re-reads it.
-
-`omh doctor` is the step worth not skipping: it checks the root reached the
-sandbox's trust store, which is the one thing a successful build does not
-prove. `update-ca-certificates` exits 0 when it skips a certificate it cannot
-parse.
-
-[`ca_cert`](/reference/configuration/#ca_cert) has the detail, including which
-toolchains need telling separately from the system store.
-
-If the file you have is a DER `.crt` rather than PEM, omh says so and gives you
-the `openssl` line that converts it. If it carries `Bag Attributes` or
-`friendlyName:` preamble from a `pkcs12` export, omh refuses it rather than
-editing your certificate — strip it to the `BEGIN`/`END` block.
-
-### `no usable base manifest` or `declares no base-set entries`
-
-omh could not find a readable [base set](/reference/base-set/) in `~/.omh/base`,
-or the newest one names nothing. `omh init` reinstalls it.
-
-This is deliberately loud. It used to be silent: a stray `.toml` in that
-directory became the base set, `init` seeded no MCP servers and reported success
-anyway, and every session came up running hooks that pointed at a server which
-was not installed.
-
-### `` a hook does nothing without `run` or `inject` ``
-
-A file in a `hooks/` directory is not a usable hook: truncated, half-written, or
-written in a harness's words rather than omh's. Related messages from the same
-check: ``unknown field `event` `` (that is Claude Code's vocabulary — see
-[writing a hook](/reference/configuration/#writing-a-hook)), ``a hook either `run`s
-something or `inject`s text, not both``, and ``$` in `inject` must name a
-variable`.
-
-Loud on purpose, and checked when the file is read rather than at runtime. An
-unparseable hook used to be reported as *"modified by you"* with a blank value —
-a false accusation from the one command whose job is telling authorship
-straight — while a launch failed hard on the same file.
-
-### `` `graph-refresh` is a name omh ships ``
-
-You have a hook file answering to one of omh's own names. It does not override
-omh's and it does not run, so it is refused rather than left inert. Rename it —
-or, if what you want is omh's version gone, switch the feature off:
-
-```toml
-# <repo>/.omh/settings.toml
-[omh]
-codegraph = false
-```
-
-### A skill I have is not reaching the agent
-
-Check the launch output. If it names the entry, this repo has a `[use]` list and
-that entry is not in it:
-
-```console
-$ omh new claude
-omh: 1 catalogue entry is not selected here: skills/refactor
-omh:   omh use skills refactor    ·    omh use --all
-```
-
-`omh init` writes `[use]` with every entry named, so anything added to your
-catalogue *afterwards* is off here until you say otherwise. That is the trade an
-explicit list makes, and this line is what stops it being silent. `omh info --repo`
-shows the same thing without launching.
-
-### `mcp/codegraph is omh's`
-
-`codegraph` and `memory` are in `~/.omh/mcp.json` because `omh init` seeded them
-there, so they look exactly like servers you added. They are not selectable in
-either direction: a feature is its server, its hooks and its rules section
-together, and keeping half of it is the one combination that manufactures
-confident wrong answers.
-
-```toml
-# <repo>/.omh/settings.toml
-[omh]
-codegraph = false
-```
-
-or `omh set codegraph off`. Nothing is uninstalled and the next repo gets
-it back.
-
-### `--dry-run is not something this command can answer yet`
-
-`--dry-run` runs everything and withholds the writes, so it only means anything
-on a command that writes. `init`, `auth`, `graph`, `settings edit` and the
-session verbs except `resume` refuse it instead of
-running: each would have to compute what it *would* do — which container to
-stop, which commits to replant, which worktree to delete — and a preview that
-guessed would be worse than none.
-
-Read-only commands refuse it too, for the opposite reason. `omh info` is its own
-dry run; accepting the flag would promise a preview it never gives.
-
-Run the command without the flag, or read what it would touch with
-`omh info --repo`.
-
-### `unexpected argument '-a' found`
-
-`-a`/`--account` was removed in 0.7.0. It overrode the account for one
-invocation and recorded nothing — so a session started with it could not be
-resumed without repeating it, and forgetting meant the account mount no longer
-matched the container's stamp, which either blocked the resume or brought the
-container back as a different account.
-
-The account is one thing with one spelling now: `omh auth <harness> -n <name>`
-captures it, `omh set account <name>` chooses it, and every command that
-launches or probes reads that. `omh set account` refuses a name no captured
-login answers to, so a typo is caught where you type it rather than as a failed
-login inside a sandbox.
-
-### `unexpected argument '--layer' found`
-
-`--layer` was removed in 0.7.0 along with the command that carried it. You no
-longer pick the file — the key does. (`omh memory rm --layer` is gone too, in
-0.14: notes are one store per repo, so a key names one note.) `carry_in` is kept out of git because a
-value there can name a credential; everything else is committed, because it is
-a fact about the project a teammate cloning should get. `omh why <key>` says
-which a key is, and `--save` or `--local` overrides it for one write. See
-[Configuration](/reference/configuration/#two-scopes-two-commands).
-
-### `your catalogue has no skills called …`
-
-`omh use` names an entry that has to exist, so a typo is refused rather than
-written and reported at the next launch. `omh settings edit skills <name>` creates
-one.
-
-The mirror of it: `omh unuse` refuses a name this repo was not using, instead of
-writing the list back unchanged and reporting success.
-
-### `a repo names servers from your catalogue, it cannot declare one`
-
-There is an `mcp.json` in `<repo>/.omh/`. That was where servers lived before
-the catalogue, and nothing reads it now. `omh settings mcp add` puts one in your
-catalogue; a token for this repo alone goes under `[mcp.<name>.env]` in
-`.omh/settings.local.toml`.
-
-### `keys.toml is where key templates used to live`
-
-Rename it to `memory.toml`. omh refuses rather than falling back, because the
-fallback is the disaster: the shipped defaults would silently re-key every note
-written from then on, and every existing key would stop being derivable from
-anything.
-
-### `omh why` says something is not installed when it is
-
-Check the message for a path. A layer that cannot be **read** — wrong
-permissions, a broken symlink — is now an error naming the file rather than an
-empty layer.
-
-If you hit the old behaviour on an older build, the tell is that `omh init`
-appears to do nothing: it uses `write_if_absent`, sees the file exists, and
-leaves it alone, so the advice and the problem never meet.
-
-### `Device or resource busy` editing a file omh carried in
-
-`carry_in` files are bind-mounted rather than copied, so `git clean -fdx` in the
-sandbox cannot delete them — a mountpoint cannot be unlinked. The same property
-blocks every write-temp-then-rename edit, which is what `sed -i` and `mv` do:
-
-```console
-$ sed -i s/OLD/NEW/ .env
-sed: cannot rename ./sedXXXXXX: Device or resource busy
-```
-
-Appending works (`echo LINE >> .env`), and so does anything that writes the file
-in place. Edits land on omh's staged copy, never on the file in your checkout.
-
-This is a trade, and the obvious way out was measured and rejected. Tracking the
-carried file in the sandbox's repository instead of mounting it would survive
-`git clean` *and* leave `sed -i` working — but a tracked file is in the tree of
-every commit that follows it, and the harvest fetches that repository into
-yours, so the secret would be copied into your real repository by every harvest
-that gets that far. Fetching less does not help: `--depth=1` still carries the
-blob, because it is in the tree of the commit it does fetch.
-On a harvest that then *fails*, omh keeps the fetched ref on purpose so nothing
-is lost — which would leave the secret reachable from a live ref until someone
-noticed. A test pins it so nobody fixes the visible half.
-
-A carried **directory** is a plain copy and has none of this — it is removable
-by `git clean -fdx`. omh warns when it carries one, though only when it actually
-copies: relaunch a session whose carried directory has not changed and the
-warning does not repeat.
-
-### `omh will not move a branch the session is not on`
-
-`omh sNN commit --keep` refuses when the session's worktree has left its branch —
-a `git checkout` to look at something, or an abandoned bisect. Put it back:
-
-```console
-$ git -C ~/.omh/worktrees/<repo>/<session> checkout -q omh/<session>
-```
-
-Keep the `-q`. Without it `checkout` finishes by reporting what is still
-changed, and for a directory the agent turned into a repository of its own that
-report is git run inside it.
-
-Related refusals from the same command, all meaning "a harvest here would
-silently drop work", all about the sandbox's **own** repository: a detached
-HEAD, an interrupted rebase or merge, and commits no branch there can reach.
-The detached and stranded cases each print a `git` command to run **inside the
-sandbox** — one to put it back, one to show you what it found. Not on the host:
-that repository's hooks are the agent's to write. The interrupted case names the
-marker it saw and leaves finishing or aborting to you.
-
-### `… is a repository of its own inside this session's worktree`
-
-`omh sNN commit`, `commit --keep` and `sync` refuse while the worktree holds a
-directory with a `.git` of its own — the agent ran `git clone` or `git init`
-inside `/work`, or did so in the empty directory of one of your submodules.
-
-Two reasons, and the second is the one that matters. A commit cannot carry it:
-git records a nested repository as a commit id and none of its files, and that
-id exists nowhere but the sandbox. And git answers *is that repository dirty*
-by running `git status` **inside it**, under its own config — a file the agent
-wrote. So omh neither stages one nor asks about one.
-
-Inside the sandbox, either delete its `.git`, which leaves the files as
-ordinary files, or add the path to `.gitignore` to leave it out. For one of
-your own submodules only the first applies. Then run the command again.
-
-`omh s` and `omh sNN diff` keep working in the meantime. `omh s` lists the
-directory as changed, and neither looks inside it. `omh sNN commit` never
-stages a change to one of your submodule pointers either way — the sandbox's
-repository has no submodules to update, so one that moved in there moved to a
-commit only the agent has.
-
-### `the sandbox's history no longer reaches …`
-
-`omh sNN commit --keep` replays from the point it last handed over. An agent that
-`reset --hard`s below that point — or rebases across it — leaves a record the
-sandbox's history no longer contains, and omh cannot tell which commits are new
-from what is left. Replaying from the start of the session would offer the
-branch work it already has.
-
-The branch is untouched. Take the files as they stand with `omh sNN commit -m`,
-which does not read the sandbox's repository at all.
-
-### `omh will not rewrite your history to hide a secret`
-
-`--keep` found something you listed in `carry_in` inside a commit the agent
-made — added with `git add -f`, copied under another name, pasted into source,
-or written into a commit message. omh knows the bytes it carried in, so it can
-tell, and it stops rather than quietly rewriting the agent's work.
-
-Drop that commit in the sandbox and harvest again, or take the files without the
-history with `omh sNN commit -m`. The branch is untouched either way.
-
-### Sessions are piling up
-
-```console
-$ omh s
-$ omh s01 down
-```
-
-N sessions is N containers. `idle_timeout` stops unused ones; see
-[Sessions](/concepts/sessions/#lifecycle).
-
-### `omh: removed omh/claude:… this build replaced`
-
-A build removes the images it supersedes. omh tags an image with a hash of its
-recipe, so once a recipe changes the previous tag of the same kind is dead and
-nothing will ask for it again. Before this, nothing removed them.
-
-"Of the same kind" is the load-bearing part, and it is decided by labels omh
-stamps at build time — `omh.kind`, plus the adapter, plus the checkout for a
-stack layer — not by the image name. `omh/claude` legitimately holds the
-harness layer *and* one toolchain layer per checkout, all of them current, so
-the name alone cannot tell you which are dead.
-
-Never removed: `:latest`, and any tag a container still references.
-
-Two limits worth knowing. Images built before omh stamped labels carry none, so
-they belong to no class and are never collected — `docker images 'omh/*'` will
-show them and they are yours to remove. And a superseded tag usually frees far
-less than its `SIZE` column suggests, because it shares almost every layer with
-the tag that replaced it; the space is returned when a whole chain dies.
-
-### `docker image rm` is not what filled my disk
-
-Buildkit's cache is separate and `omh` never touches it. `docker system df`
-shows it; `docker buildx du` breaks it down. On the machine that prompted this
-feature it was 8.8 GB against 14.86 GB of images. Only `docker builder prune`
-reclaims it, and it takes every cached layer with it, so omh leaves that
-decision to you.
-
-### The graph shows a project I do not recognise
-
-Graphs are shared per repo across sessions, so `list_projects` shows all of
-them. Expected, and [documented](/guides/code-graph/#what-the-agent-can-still-see) —
-your session's own project name is in `$OMH_GRAPH_PROJECT`.
-
 ### Something else
 
 The things most likely to be wrong are the things omh asserts about other
 people's software. If you are debugging one of those, start with `omh doctor`,
-then read the relevant page in [design](/reference/adapters/) — several of them
-record a failure that looked exactly like the one you are probably having.
+then read the relevant reference page, starting with
+[Adapters](/reference/adapters/) — several of them record a failure that looked
+exactly like the one you are probably having.
+
+## How `omh doctor` works
+
+### Why it exists
+
+**Factual correctness is not testable in process.**
+
+Adapters assert things about *external software* — that Claude Code reads MCP
+config from `/work/.mcp.json`, that skills live in `~/.claude/skills`. A green
+unit suite proves omh mounts a path faithfully. It cannot prove anything reads
+it, and that software ships weekly.
+
+Almost every bug this project has shipped lived at that boundary, and **not one
+was catchable by the test suite.** `doctor` is the only cure.
+
+<details>
+<summary>The <code>mcp</code> binding that no session ever loaded</summary>
+
+The `mcp` binding is the cautionary tale. It said `$HOME/.mcp.json` — a path
+Claude Code does not read and never did — and omh rendered a correct document,
+mounted it faithfully, and reported `✓ mcp` for as long as that lasted. Not one
+session ever loaded an MCP server. Checking a document proves the document; only
+the harness can say whether it read it, which is what `mcp-loaded` asks and why
+its check runs the harness's own `mcp list` inside the sandbox.
+
+</details>
+
+### What it does
+
+It launches the real image with the real mounts and inspects the **guest** paths
+the adapter declares. Checking anything host-side would just re-test the staging
+directory omh wrote a moment earlier, which is circular.
+
+Capabilities the harness cannot express are **skipped, not failed** — they were
+already reported as dropped at launch.
+
+#### The credential probe
+
+This is the half no in-process test can reach: whether a token saved at a path
+survives depends on how the runtime binds it, not on anything omh wrote. So the
+probe attempts the temp-file-plus-rename that every token save performs.
+
+It is **non-destructive by construction** — the file case copies the original
+and renames byte-identical content back, so a successful probe changes nothing
+and a failed one touches nothing. A health check that costs you your login would
+be worse than no check.
+
+Run against a file mount, it reports the real defect — the `✗ token` line under
+[I logged in, but the next session is logged out](#i-logged-in-but-the-next-session-is-logged-out).
+
+#### A silent probe is never a pass
+
+If a probe produces no output, that means the sandbox never ran it. Calling that
+success would make `doctor` worse than useless, so silence is a failure.
+
+### Current status
+
+All four shipped adapters — `claude`, `codex`, `opencode` and `omp` — are
+verified this way, hooks included on each. The "unverified claim" caveat is
+retired for them, and any further adapter inherits the same bar. Verified here
+means the paths are right: only `claude` has been driven for real work — see
+[Adapters](/reference/adapters/#the-bar-for-shipping-one).
+
+The *number* of checks is not a property of the adapter: it counts the
+capabilities your profile declares, plus a `token` check only when you have
+captured a login for that harness, plus `memory` when the base set's server is
+installed. Two harnesses showing different totals usually means you are logged
+in to one of them.
