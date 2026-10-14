@@ -755,7 +755,7 @@ pub(crate) enum MemoryCmd {
     },
     /// Notes the world has moved on from. A join, never a judgement.
     Stale,
-    /// Schema and hygiene violations, across both layers.
+    /// Schema and hygiene violations, across the store.
     Lint,
     /// Remove one note. Never a neighbour; reports what linked to it.
     Rm {

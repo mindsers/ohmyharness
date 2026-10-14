@@ -153,7 +153,7 @@ pub(crate) fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> 
     Ok(())
 }
 
-/// The store, by layer, with what points at each note.
+/// The store, with what points at each note.
 pub(crate) fn memory_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     ctx.say(&report::Notes {

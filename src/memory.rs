@@ -449,7 +449,6 @@ pub enum Rule {
     KeyDisagreesWithPath,
     DuplicateKey,
     DanglingLink,
-    /// A committed note links somewhere a fresh clone cannot follow.
     /// `invalidated_by` names an expiry omh cannot evaluate, so the note
     /// advertises a freshness guarantee nothing will ever check.
     UnevaluatableTrigger,
