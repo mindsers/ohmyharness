@@ -1385,7 +1385,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     let expected: std::collections::BTreeMap<String, usize> = [
         ("README.md", 57), // + the omh upgrade command in the list
         ("docs/src/content/docs/concepts/sessions.md", 11),
-        ("docs/src/content/docs/concepts/trust.md", 2),
+        ("docs/src/content/docs/concepts/trust.md", 3), // + `omh use` in the commands table
         // Getting started was one page until it became two, and all fifteen
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
@@ -1394,7 +1394,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("docs/src/content/docs/guides/editors.md", 4),
         ("docs/src/content/docs/guides/troubleshooting.md", 13),
         ("docs/src/content/docs/project/decisions.md", 1),
-        ("docs/src/content/docs/reference/adapters.md", 1),
+        ("docs/src/content/docs/reference/adapters.md", 2), // + `omh doctor --harness` in adding a harness
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
         // then `omh s` and `omh s01 rm` in the landed-branch block
         ("docs/src/content/docs/reference/commands.md", 145),

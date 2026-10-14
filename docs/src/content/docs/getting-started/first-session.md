@@ -76,7 +76,11 @@ git repository, and access to Claude Code.
    $ omh s01 diff -p    # the patch
    ```
 
-   To look around yourself, `omh s01 attach` opens the session in your editor.
+   To look around yourself, open the same session in your editor:
+
+   ```console
+   $ omh s01 attach
+   ```
 
 5. Keep the work.
 
