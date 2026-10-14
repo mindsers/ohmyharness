@@ -10,7 +10,7 @@ use crate::{mcp, memory, report};
 use anyhow::Result;
 
 /// The `source` a note written from the command line gets when `--source` is
-/// not given.
+/// absent or blank.
 pub(crate) const CLI_SOURCE: &str = "cli";
 
 /// Record an observation. The key is derived, never chosen: an agent that picks

@@ -5901,6 +5901,56 @@ fn a_session_scopes_a_session_verb_and_nothing_else() {
     );
 }
 
+/// The default `--source` names in its help is the source a note gets
+/// without it.
+///
+/// The help said "Defaults to this session when there is one" long after
+/// the handler had started writing `cli`. Read from the binary on both
+/// sides, so the help and the handler cannot drift apart again, whichever
+/// one changes.
+#[test]
+fn remember_without_source_writes_the_default_its_help_names() {
+    let sb = sandbox();
+    sb.git_init();
+
+    let help = sb.omh(&["memory", "remember", "--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    let named = help
+        .split("--source")
+        .nth(1)
+        .and_then(|after| after.split("Defaults to `").nth(1))
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("--source's help names no default:\n{help}"));
+
+    let out = sb.omh(&[
+        "memory",
+        "remember",
+        "--expected",
+        "a",
+        "--observed",
+        "b",
+        "--evidence",
+        "c",
+        "--answers",
+        "d",
+    ]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let path = said
+        .trim()
+        .strip_prefix("recorded ")
+        .unwrap_or_else(|| panic!("`remember` names the file it wrote: {said}"));
+    let note = std::fs::read_to_string(path.trim()).unwrap();
+    assert!(
+        note.lines().any(|l| l == format!("source: {named}")),
+        "the help says `{named}`, and the note says otherwise:\n{note}"
+    );
+}
+
 /// A name nothing answers to is refused, whichever command you typed.
 ///
 /// `omh settings mcp rm nope` exited **0** and said *"nope is not in your

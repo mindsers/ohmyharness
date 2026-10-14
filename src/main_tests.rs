@@ -6427,33 +6427,6 @@ fn the_global_flags_describe_what_every_command_does_with_them() {
     }
 }
 
-/// `omh memory remember --source` names the default the handler writes.
-///
-/// It said "Defaults to this session when there is one" after the handler
-/// stopped splicing in a session id from `--session`, so the help promised a
-/// provenance omh no longer wrote.
-#[test]
-fn remember_source_help_names_the_default_it_writes() {
-    use clap::CommandFactory;
-    let cmd = Cli::command();
-    let help = cmd
-        .find_subcommand("memory")
-        .and_then(|c| c.find_subcommand("remember"))
-        .and_then(|c| c.get_arguments().find(|a| a.get_id().as_str() == "source"))
-        .and_then(|a| a.get_help())
-        .map(|h| h.to_string())
-        .expect("`omh memory remember --source` has help");
-    let default = format!("`{}`", crate::cmd::memory::CLI_SOURCE);
-    assert!(
-        help.contains(&default),
-        "--source's help names {default}, the source a blank one becomes: {help}"
-    );
-    assert!(
-        !help.contains("this session"),
-        "--source's help promises a session id omh no longer writes: {help}"
-    );
-}
-
 /// One spelling for "read this instead": `--from`. One for "write here":
 /// `--to`.
 ///
