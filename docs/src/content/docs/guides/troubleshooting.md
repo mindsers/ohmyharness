@@ -80,7 +80,7 @@ see [Something else](#something-else).
 | **Building and starting a session** | |
 | `the sandbox cannot see package.json, which is in this repo` from `omh init` or `omh upgrade` | [Let the container runtime see your checkout](#the-sandbox-cannot-see--which-is-in-this-repo) |
 | `unable to get local issuer certificate`, `CERTIFICATE_VERIFY_FAILED` or `UNABLE_TO_VERIFY_LEAF_SIGNATURE` while omh builds an image | [Give omh your network's root certificate](#an-unknown-issuer-error-when-omh-builds-an-image) |
-| `up?` in `omh s`, or `omh could not tell whether the sandbox is running` | [Start the container runtime](#up-in-omh-s-or-omh-could-not-tell-whether-the-sandbox-is-running) |
+| `up?` in `omh s`, or `could not tell whether s01's sandbox is running` | [Start the container runtime](#up-in-omh-s-or-could-not-tell-whether-s01s-sandbox-is-running) |
 | `network omh-<repo>-<session> not found` | [A launch plan that could not run](#network-omh-repo-session-not-found) |
 | `create mountpoint for /work/AGENTS.md mount: ... is outside of rootfs` | [Update omh, or launch again](#create-mountpoint-for-workagentsmd-mount--is-outside-of-rootfs) |
 | A flag you meant for the harness went to omh | [Put it after `--`](#a-flag-went-to-omh-when-you-meant-the-harness) |
@@ -119,7 +119,7 @@ see [Something else](#something-else).
 | `sNN is partly removed — its worktree is still there` | [Close what holds it, then remove again](#snn-is-partly-removed--its-worktree-is-still-there) |
 | **Your catalogue and settings** | |
 | `no usable base manifest`, or `declares no base-set entries` | [Run `omh init`](#no-usable-base-manifest-or-declares-no-base-set-entries) |
-| `` a hook does nothing without `run` or `inject` ``, or ``unknown field `event` `` | [Write the hook in omh's words](#a-hook-does-nothing-without-run-or-inject) |
+| `` a hook does nothing without `run`, `inject` or `refuse` ``, or ``unknown field `event` `` | [Write the hook in omh's words](#a-hook-does-nothing-without-run-inject-or-refuse) |
 | `` `graph-refresh` is a name omh ships `` | [Rename your hook, or switch the feature off](#graph-refresh-is-a-name-omh-ships) |
 | `your catalogue has no skills called …` | [Check the name, or create the entry](#your-catalogue-has-no-skills-called-) |
 | `a repo names servers from your catalogue, it cannot declare one` | [Move the servers to your catalogue](#a-repo-names-servers-from-your-catalogue-it-cannot-declare-one) |
@@ -266,7 +266,7 @@ being told to install a corporate root on a plane is worse than silence.
 
 </details>
 
-#### `up?` in `omh s`, or `omh could not tell whether the sandbox is running`
+#### `up?` in `omh s`, or `could not tell whether s01's sandbox is running`
 
 The container runtime is installed — omh checked before it asked — but it would
 not answer. Almost always the daemon is not running.
@@ -991,13 +991,14 @@ came up running hooks that pointed at a server which was not installed.
 
 </details>
 
-#### `` a hook does nothing without `run` or `inject` ``
+#### `` a hook does nothing without `run`, `inject` or `refuse` ``
 
 A file in a `hooks/` directory is not a usable hook: truncated, half-written, or
 written in a harness's words rather than omh's. Related messages from the same
 check: ``unknown field `event` `` (that is Claude Code's vocabulary),
-``a hook either `run`s something or `inject`s text, not both``, and
-``$` in `inject` must name a variable`.
+``a hook does one thing — `run` a command, `inject` advisory text, or `refuse` the call``,
+`` `$(` in `inject` runs a command from inside a sentence ``, and
+`` `$5` is not a variable name ``.
 
 **Rewrite the file in omh's words** — [writing a hook](/reference/configuration/#writing-a-hook)
 has them — or remove it.
