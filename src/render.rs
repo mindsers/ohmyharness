@@ -818,11 +818,13 @@ const OMP_TURN_END: &str = "turn_end";
 /// The same distinction opencode's `Slot` draws, drawn on different evidence:
 /// there it is which handler a moment lives on, here it is simply which of the
 /// four `pi.on` events it is. A moment with no call has no `event.toolName` to
-/// narrow on and no `event.input` to read a field off, and — for `tool_call` —
-/// a call in scope is still not an advisory channel.
+/// narrow on and no `event.input` to read a field off. `tool_call` has a call
+/// in scope, and omh does not advise through it: oh-my-pi has let it return
+/// `additionalContext` since v18.3.1, and nothing here renders that yet.
 #[derive(Clone, Copy, PartialEq)]
 enum Moment {
-    /// `tool_call`: can block a call, cannot advise, has the arguments.
+    /// `tool_call`: can block a call, has the arguments; omh does not advise
+    /// here.
     Before,
     /// `tool_result`: can rewrite what the model reads next, cannot block.
     After,
@@ -921,9 +923,10 @@ fn omp_plugin(
                 continue;
             }
         }
-        // Advisory text has no channel before the call on this harness either:
-        // `tool_call` returns a block or it returns nothing. Checked before the
-        // binding is asked, because the binding *can* advise — just not here.
+        // Advisory text is not rendered before the call on this harness:
+        // oh-my-pi's `tool_call` can return `additionalContext` since v18.3.1,
+        // and omh does not use it yet. Checked before the binding is asked,
+        // because the binding *can* advise — just not here.
         if matches!(hook.action, hook::Action::Inject { .. }) && moment == Moment::Before {
             dropped.push(give_up("way to inject text before a tool runs"));
             continue;
@@ -1426,9 +1429,14 @@ fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> R
         hide_full_access_warning: bool,
     }
     #[derive(Serialize)]
+    struct Features {
+        daemon_auto_start: bool,
+    }
+    #[derive(Serialize)]
     struct Doc<'a> {
         sandbox_mode: &'static str,
         notice: Notice,
+        features: Features,
         projects: BTreeMap<&'static str, Trust>,
         hooks: BTreeMap<&'a str, Vec<Group<'a>>>,
     }
@@ -1446,10 +1454,16 @@ fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> R
     // to create a new namespace`; `danger-full-access` here ran both, and
     // Codex stops warning that bubblewrap is missing. The notice that mode
     // raises is answered with it.
+    // No daemon: since 0.157.0 the interactive app starts a shared app-server
+    // out of a copy of itself in `~/.codex` — the account's directory, on the
+    // host — that follows the latest release rather than omh's pin.
     let mut doc = Doc {
         sandbox_mode: "danger-full-access",
         notice: Notice {
             hide_full_access_warning: true,
+        },
+        features: Features {
+            daemon_auto_start: false,
         },
         projects: BTreeMap::from([(
             crate::container_workdir(),
@@ -1874,6 +1888,32 @@ mod tests {
             table["notice"]["hide_full_access_warning"].as_bool(),
             Some(true)
         );
+    }
+
+    /// Codex starts no daemon of its own. Since 0.157.0 its interactive app
+    /// starts a shared app-server by default. Measured in the 0.162.1 image:
+    /// 25 seconds of `codex` with no login copied 390 MB of its package into
+    /// `~/.codex/packages` — the account's directory, on the host — and left
+    /// two `app-server` processes running out of that copy. Its source marks
+    /// the copy as following the latest release, and an updater runs Codex's
+    /// install script every hour, so it would not stay the version omh pins.
+    #[test]
+    fn codex_starts_no_daemon_of_its_own() {
+        for doc in [
+            codex_document(&[]),
+            codex_document(&[("tests", r#"{"on":"turn-end","run":"cargo test"}"#)]),
+        ] {
+            let table: toml::Table = doc.body.parse().unwrap();
+            assert_eq!(
+                table
+                    .get("features")
+                    .and_then(|f| f.get("daemon_auto_start"))
+                    .and_then(toml::Value::as_bool),
+                Some(false),
+                "{}",
+                doc.body
+            );
+        }
     }
 
     /// And an injection keeps its stdout, which *is* its protocol.
@@ -2920,9 +2960,10 @@ mod tests {
 
     /// A nudge is never promoted to a wall.
     ///
-    /// `tool_call` can block or say nothing, so advisory text has no channel
-    /// there — the one translation omh refuses to make silently. Dropped **by
-    /// name**, saying what it asked for.
+    /// omh renders no advisory text at `tool_call` (oh-my-pi has accepted
+    /// `additionalContext` there since v18.3.1; omh does not use it yet), and
+    /// a block is the one translation omh refuses to make silently. Dropped
+    /// **by name**, saying what it asked for.
     ///
     /// The mirror case, a `refuse` at `after-tool`, is not tested here because
     /// it cannot reach a renderer: omh refuses that pairing when the hook is
