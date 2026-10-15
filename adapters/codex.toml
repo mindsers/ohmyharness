@@ -154,12 +154,12 @@ after-tool    = "PostToolUse"
 [capabilities.hooks.fields]
 tool-command = ".tool_input.command"
 
-# `edit`'s file, read out of the patch: its first `*** Update File:`,
-# `*** Add File:` or `*** Delete File:` header. The same posture as omp's
-# `[PATH#TAG]` override — a patch touching several files shows a guard only
-# the first.
+# `edit`'s file, read out of the patch: where a `*** Move to:` sends it, which
+# is the file written, else its first `*** Update File:`, `*** Add File:` or
+# `*** Delete File:` header. The same posture as omp's `[PATH#TAG]` override —
+# a patch touching several files shows a guard only the first.
 [capabilities.hooks.fields-by-tool.edit]
-tool-file = '.tool_input.command | (capture("\\*\\*\\* (Update|Add|Delete) File: (?<p>[^\\n]+)") | .p)'
+tool-file = '.tool_input.command | ((capture("\\*\\*\\* Move to: (?<p>[^\\n]+)") | .p) // (capture("\\*\\*\\* (Update|Add|Delete) File: (?<p>[^\\n]+)") | .p))'
 
 # Measured reaching the model as a developer message at `SessionStart`,
 # `PreToolUse` and `PostToolUse`. **Not at `Stop`**, which rejects the key as

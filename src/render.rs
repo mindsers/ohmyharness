@@ -1323,18 +1323,32 @@ const t = (hook, raw, word, env) => {
   return r.out
 }
 
-// The file a call touches, as the one absolute path the harness will resolve
-// it to, so a guard matching `/work/.omh/*` cannot be walked past by spelling
-// the same file another way: relative, `..`, `./`, a doubled slash. omp cleans
-// a path before resolving it — a stray leading `:` or `@`, a `file://` URL, a
-// `~` (`expandPath` in its `tools/path-utils.ts`) — and is the one harness that
-// calls MCP tools by path, `xd://mcp__<server>_<tool>`, which is a URI and
-// left alone.
+// The file a call touches, as the one absolute path the harness will write, so
+// a guard matching `/work/.omh/*` cannot be walked past by spelling the same
+// file another way: relative, `..`, `./`, a doubled slash.
+//
+// omp is followed step for step (`write.ts` and `tools/path-utils.ts` at
+// v18.10.4): a `[PATH]` or `[PATH#TAG]` hashline header is unwrapped; a URL its
+// router handles is not a file here — `xd://mcp__<server>_<tool>` is how it
+// calls an MCP tool, and its `local:` writes stay in its own session
+// directory — and anything else goes through `expandPath`: a stray leading `:`
+// or `@`, a `file:` URL, and `~`, which is joined to the home directory
+// whatever follows it. A scheme the router does not handle, `a://`, is a path.
+const OMP_SCHEMES = new Set(["agent", "artifact", "attachment", "cfg", "conflict", "history", "issue", "local", "mcp", "memory", "omp", "pr", "proc", "rule", "security", "skill", "ssh", "vault", "xd"])
 const omh_file = (f, omp) => {
   if (!f) return ""
   if (omp) {
+    const t = f.trimEnd()
+    if (t.length > 2 && t[0] === "[" && t[t.length - 1] === "]") {
+      const inner = t.slice(1, -1)
+      const tag = /#[0-9A-Fa-f]{4}$/.exec(inner)
+      const part = tag ? inner.slice(0, tag.index) : inner
+      if (part.length > 0 && (tag || !/#/.test(part))) f = part
+    }
+    const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(f)
+    if (scheme && OMP_SCHEMES.has(scheme[1].toLowerCase())) return f
     if (/^:(?=[/~]|\.\.?\/)/.test(f)) f = f.slice(1)
-    if (/^@(?=[/~]|[A-Za-z][A-Za-z0-9+.-]*:\/\/)/.test(f)) f = f.slice(1)
+    if (/^@(?=[/~])/.test(f)) f = f.slice(1)
     if (/^file:\/\//i.test(f)) {
       try {
         f = fileURLToPath(f)
@@ -1342,8 +1356,9 @@ const omh_file = (f, omp) => {
         // Not a URL omp could open either; resolved as a path below.
       }
     }
-    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(f)) return f
-    if (f === "~" || f.startsWith("~/")) f = homedir() + f.slice(1)
+    if (f === "~") f = homedir()
+    else if (f.startsWith("~/")) f = homedir() + f.slice(1)
+    else if (f.startsWith("~")) f = posix.join(homedir(), f.slice(1))
   }
   return posix.resolve(process.cwd(), f)
 }
@@ -3939,11 +3954,41 @@ try {{
                 }
             }
         }
+        // A newline inside the path is part of it, not a second record.
+        let said = sh(
+            &serde_json::json!({ "tool_input": { "file_path": "/work/a\n/../.omh/hooks/x.json" } })
+                .to_string(),
+        );
+        if !said.contains("saw /work/.omh/hooks/x.json") {
+            wrong.push(format!("claude, a newline: {said}"));
+        }
+        // omp's `write` unwraps a hashline header first, and resolves a scheme
+        // its router does not handle — `a:` — as a path, from the workspace.
+        for f in ["[.omh/hooks/x.json]", "a://../.omh/hooks/x.json"] {
+            let said = drive_omp(
+                &omp_doc,
+                "tool_call",
+                &format!(r#"{{ toolName: "write", input: {{ path: {f:?}, content: "x" }} }}"#),
+            );
+            if !said.contains(&format!("saw {here}/.omh/hooks/x.json")) {
+                wrong.push(format!("omp {f}: {said}"));
+            }
+        }
+        // `~` followed by anything is joined to the home directory, as omp's
+        // `expandTilde` does; here, two levels up from it is `/`.
+        let home = std::env::var("HOME").unwrap();
+        let up = format!(
+            "~{}/work/.omh/hooks/x.json",
+            "/..".repeat(home.matches('/').count())
+        );
+        let up = up.replacen("~/", "~", 1);
         // omp's own clean-up, before it resolves a path.
         for f in [
             ":/work/.omh/hooks/x.json",
             "@/work/.omh/hooks/x.json",
             "file:///work/.omh/hooks/x.json",
+            "[/work/.omh/hooks/x.json#0000]",
+            up.as_str(),
         ] {
             let said = drive_omp(
                 &omp_doc,
@@ -3959,6 +4004,59 @@ try {{
             "{} spellings seen as something else:\n{}",
             wrong.len(),
             wrong.join("\n")
+        );
+    }
+
+    /// A Codex patch that moves a file is a write to where it moves to. The
+    /// guard read only the `*** Update File:` header, so a move into `.omh/`
+    /// was seen as an edit of the file it moved from.
+    #[test]
+    fn a_codex_move_is_seen_where_it_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/saw.json",
+            r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#,
+        );
+        let adapter = codex();
+        let doc = document(
+            Capability::Hooks,
+            adapter.supports(Capability::Hooks).unwrap(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .unwrap();
+        let (_, command) = &codex_commands(&doc.body, "PreToolUse")[0];
+        let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n*** Move to: .omh/hooks/x.json\n@@\n-a\n+b\n*** End Patch\n";
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                serde_json::json!({ "tool_input": { "command": patch } })
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let said = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned();
+        let here = std::env::current_dir().unwrap();
+        assert!(
+            said.contains(&format!("saw {}/.omh/hooks/x.json", here.display())),
+            "{said}"
         );
     }
 
