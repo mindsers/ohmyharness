@@ -2143,7 +2143,32 @@ mod tests {
         );
         assert!(df.contains("usermod -o -u 1001 agent"), "{df}");
         assert!(df.contains("groupmod -o -g 100 agent"), "{df}");
-        assert!(df.contains("chown -R 1001:100"), "{df}");
+        // Every directory a recipe hands the agent, it hands the moved agent.
+        let chowned = |df: &str, owner: &str| -> Vec<String> {
+            df.lines()
+                .filter_map(|l| l.split(&format!("chown -R {owner} ")).nth(1))
+                .flat_map(|dirs| dirs.split_whitespace().take_while(|d| *d != "\\"))
+                .map(str::to_string)
+                .collect()
+        };
+        let moved = chowned(&df, "1001:100");
+        let mut given = chowned(&base_dockerfile(None), "agent:agent");
+        for name in ["claude", "codex", "omp", "opencode"] {
+            let a = Adapter::find(adapters(), name).unwrap();
+            given.extend(chowned(&harness_dockerfile(&a, None), "agent:agent"));
+        }
+        assert!(
+            given.len() > 3,
+            "the recipes' chowns were not found: {given:?}"
+        );
+        for dir in &given {
+            assert!(
+                moved
+                    .iter()
+                    .any(|m| dir == m || dir.starts_with(&format!("{m}/"))),
+                "{dir} is the agent's in the image, and the owner layer leaves it to uid 1000: {moved:?}"
+            );
+        }
         assert!(df.trim_end().ends_with("WORKDIR /work"), "{df}");
         assert!(df.contains("\nUSER agent\n"), "{df}");
         assert!(
@@ -2765,6 +2790,51 @@ mod tests {
             harness.stamp(),
             "nor is it the base it was built FROM"
         );
+    }
+
+    /// No class's listing finds another class's image. Docker matches a
+    /// `--filter label=…` per label and ANDs them, so a class whose labels are
+    /// a subset of another's lists that one too, and reaps it: an owner layer
+    /// still labelled `harness` was the harness's to remove, and one that
+    /// did not say what it was built over was every stack layer's.
+    #[test]
+    fn no_class_lists_another_classes_image() {
+        let adapter = claude();
+        let (here, there) = (Path::new("/checkouts/api"), Path::new("/checkouts/web"));
+        let (harness, mine, theirs) = (
+            Kind::Harness(&adapter),
+            Kind::Stack(&adapter, here),
+            Kind::Stack(&adapter, there),
+        );
+        let mut classes = vec![
+            Kind::Base.stamp(),
+            harness.stamp(),
+            mine.stamp(),
+            theirs.stamp(),
+        ];
+        for base in [&harness, &mine, &theirs] {
+            for uid in [1001, 1002] {
+                classes.push(
+                    Kind::Owner {
+                        base,
+                        uid,
+                        gid: uid,
+                    }
+                    .stamp(),
+                );
+            }
+        }
+        for (i, filter) in classes.iter().enumerate() {
+            for (j, image) in classes.iter().enumerate() {
+                let lists = filter.iter().all(|label| image.contains(label));
+                assert_eq!(
+                    lists,
+                    i == j,
+                    "the class {filter:?} {} the image {image:?}",
+                    if lists { "lists" } else { "does not list" }
+                );
+            }
+        }
     }
 
     /// An owner layer's tag names its own recipe, like every other tag: an
