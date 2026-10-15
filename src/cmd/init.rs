@@ -860,7 +860,13 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // by uid 1000 is one it cannot write — the graph then never grew past
         // this index, on GitHub's Linux runners.
         let harness_image = image::tag_for(&adapter, ca.as_ref().map(image::Root::pem));
-        let started = image::for_host(&backend, &harness_image, true).and_then(|tag| {
+        let started = image::for_host(
+            &backend,
+            &harness_image,
+            &image::Kind::Harness(&adapter),
+            true,
+        )
+        .and_then(|tag| {
             let args =
                 base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_name());
             Command::new(backend.program())
@@ -1595,6 +1601,21 @@ pub(crate) struct Sandbox {
 }
 
 impl Sandbox {
+    /// The class of [`tag`](Self::tag), for an image built over it: a stack's
+    /// when this repo installs something, the harness's own otherwise —
+    /// `image::stack_tag` returns the harness's tag then.
+    pub(crate) fn kind<'a>(
+        &self,
+        adapter: &'a Adapter,
+        repo: &'a std::path::Path,
+    ) -> image::Kind<'a> {
+        if self.installs.is_empty() {
+            image::Kind::Harness(adapter)
+        } else {
+            image::Kind::Stack(adapter, repo)
+        }
+    }
+
     pub(crate) fn recipe(&self) -> Vec<&str> {
         self.installs.iter().map(String::as_str).collect()
     }

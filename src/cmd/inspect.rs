@@ -538,7 +538,12 @@ pub(crate) fn doctor_cmd(
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
             repo,
-            image: crate::image::for_host(&backend, &sandbox.tag, true)?,
+            image: crate::image::for_host(
+                &backend,
+                &sandbox.tag,
+                &sandbox.kind(&adapter, &paths.repo),
+                true,
+            )?,
             resolves: sandbox.resolves.clone(),
         };
         if let Some(account_dir) = &account {

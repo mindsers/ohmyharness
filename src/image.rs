@@ -781,10 +781,15 @@ pub enum Kind<'a> {
     Base,
     /// One recipe per adapter per omh version.
     Harness(&'a Adapter),
-    /// An image with the agent moved to the host user's uid, on top of the one
-    /// a launch would run — see [`for_host`]. One per repository and host
-    /// user; a newer one replaces the older.
-    Owner(&'a str),
+    /// An image with the agent moved to the host user's uid and gid, on top of
+    /// the one a launch would run — see [`for_host`]. Its class is its base's
+    /// class and the user: one per base kind (and checkout, for a stack) and
+    /// host user, a newer one replacing the older.
+    Owner {
+        base: &'a Kind<'a>,
+        uid: u32,
+        gid: u32,
+    },
     /// One per *checkout*, because the recipe is that repo's toolchain. This is
     /// the case a repository cannot express.
     ///
@@ -810,11 +815,17 @@ impl Kind<'_> {
                 s.push(("omh.repo".into(), repo.to_string_lossy().into_owned()));
             }
             // An image inherits its base's labels; this one overrides the kind,
-            // so reaping the base's class never counts it, and names the
-            // repository it was built over.
-            Kind::Owner(base) => {
-                let repository = base.rsplit_once(':').map_or(*base, |(r, _)| r);
-                s.push(("omh.owner.of".into(), repository.to_string()));
+            // so reaping the base's class never counts it, and keeps the rest of
+            // the base's class — adapter, checkout — with the user added. Keyed
+            // on the base's repository instead, `omh/claude` was one class for
+            // the harness's layer and every checkout's stack layer, and each
+            // build reaped the others.
+            Kind::Owner { base, uid, gid } => {
+                s = base.stamp();
+                s[0] = ("omh.kind".to_string(), self.name().to_string());
+                s.push(("omh.owner.of".into(), base.name().to_string()));
+                s.push(("omh.owner.uid".into(), uid.to_string()));
+                s.push(("omh.owner.gid".into(), gid.to_string()));
             }
         }
         s
@@ -825,7 +836,7 @@ impl Kind<'_> {
             Kind::Base => "base",
             Kind::Harness(_) => "harness",
             Kind::Stack(..) => "stack",
-            Kind::Owner(_) => "owner",
+            Kind::Owner { .. } => "owner",
         }
     }
 
@@ -970,16 +981,29 @@ pub(crate) fn owner_dockerfile(base: &str, uid: u32, gid: u32) -> String {
     )
 }
 
-/// The name of [`owner_dockerfile`]'s image: the base's, and the owner.
+/// The name of [`owner_dockerfile`]'s image: the base's, the owner, and a
+/// digest of the layer's own recipe, so a layer that changes in a new omh is
+/// built afresh rather than found under its old name.
 pub(crate) fn owned_tag(base: &str, uid: u32, gid: u32) -> String {
-    format!("{base}-u{uid}g{gid}")
+    let recipe = tag_digest(&owner_dockerfile(base, uid, gid));
+    format!("{base}-u{uid}g{gid}-{}", &recipe[..8])
+}
+
+/// `tags` and, where the agent must own what the host mounts, the owner layer
+/// over each: what a session on this host can be running.
+pub(crate) fn with_owned(tags: &[String], owner: Option<(u32, u32)>) -> Vec<String> {
+    let mut out = tags.to_vec();
+    if let Some((uid, gid)) = owner {
+        out.extend(tags.iter().map(|t| owned_tag(t, uid, gid)));
+    }
+    out
 }
 
 /// The image a launch runs on this host: `tag`, or — where the agent must own
 /// what the host mounts, see [`agent_owner`] — `tag` with the agent moved to
 /// the host user, built once and kept beside it. With `build` false, the name
 /// it would have and nothing more, for a dry run.
-pub fn for_host(backend: &Backend, tag: &str, build: bool) -> Result<String> {
+pub fn for_host(backend: &Backend, tag: &str, base: &Kind, build: bool) -> Result<String> {
     let Some((uid, gid)) = host_owner(backend) else {
         return Ok(tag.to_string());
     };
@@ -989,7 +1013,7 @@ pub fn for_host(backend: &Backend, tag: &str, build: bool) -> Result<String> {
             backend,
             &owned,
             &owner_dockerfile(tag, uid, gid),
-            &Kind::Owner(tag),
+            &Kind::Owner { base, uid, gid },
             None,
         )?;
     }
@@ -2092,9 +2116,8 @@ mod tests {
         assert!(df.contains("chown -R 1001:100"), "{df}");
         assert!(df.trim_end().ends_with("WORKDIR /work"), "{df}");
         assert!(df.contains("\nUSER agent\n"), "{df}");
-        assert_eq!(
-            owned_tag("omh/claude:abc123", 1001, 100),
-            "omh/claude:abc123-u1001g100"
+        assert!(
+            owned_tag("omh/claude:abc123", 1001, 100).starts_with("omh/claude:abc123-u1001g100-")
         );
     }
 
@@ -2649,6 +2672,78 @@ mod tests {
             Kind::Base.stamp(),
             "the harness layer is not the base it was built FROM"
         );
+    }
+
+    /// An owner layer is its own class: one per base class and host user. Keyed
+    /// on the base's repository instead, `omh/claude` held the harness's layer
+    /// and every checkout's stack layer, and each build reaped the others —
+    /// `omh init`'s index image and a launch's, two checkouts' stacks, two
+    /// users on one daemon, rebuilding one another on every launch.
+    #[test]
+    fn an_owner_layer_is_its_own_class_per_base_and_user() {
+        let adapter = claude();
+        let here = Path::new("/checkouts/api");
+        let there = Path::new("/checkouts/web");
+        let harness = Kind::Harness(&adapter);
+        let mine = Kind::Stack(&adapter, here);
+        let theirs = Kind::Stack(&adapter, there);
+        let owner = |base: &Kind, uid| {
+            Kind::Owner {
+                base,
+                uid,
+                gid: uid,
+            }
+            .stamp()
+        };
+
+        assert_ne!(
+            owner(&harness, 1001),
+            owner(&mine, 1001),
+            "the harness's layer is not a stack's"
+        );
+        assert_ne!(
+            owner(&mine, 1001),
+            owner(&theirs, 1001),
+            "another checkout's is not this one's"
+        );
+        assert_ne!(
+            owner(&mine, 1001),
+            owner(&mine, 1002),
+            "another user's is not this one's"
+        );
+        assert_ne!(
+            owner(&harness, 1001),
+            harness.stamp(),
+            "nor is it the base it was built FROM"
+        );
+    }
+
+    /// An owner layer's tag names its own recipe, like every other tag: an
+    /// `owner_dockerfile` that changes in a new omh reaches the image, rather
+    /// than finding the old one under the old name and keeping it.
+    #[test]
+    fn an_owner_layers_tag_names_its_recipe() {
+        let base = "omh/claude:abc123";
+        let tag = owned_tag(base, 1001, 100);
+        assert!(tag.starts_with("omh/claude:abc123-u1001g100"), "{tag}");
+        assert!(
+            tag.contains(&tag_digest(&owner_dockerfile(base, 1001, 100))[..8]),
+            "{tag}"
+        );
+    }
+
+    /// The images `omh upgrade` counts as current include the owner layers a
+    /// session on this host runs, or every such session reads as stale and
+    /// stays stale, since a relaunch lands on the same tag.
+    #[test]
+    fn an_owner_layer_is_current_where_its_base_is() {
+        let tags = vec!["omh/base:b".to_string(), "omh/claude:h".to_string()];
+        assert_eq!(with_owned(&tags, None), tags, "no owner, no layer");
+        let both = with_owned(&tags, Some((1001, 100)));
+        for t in &tags {
+            assert!(both.contains(t), "{both:?}");
+            assert!(both.contains(&owned_tag(t, 1001, 100)), "{both:?}");
+        }
     }
 
     /// The class has to reach docker, or it is a comment. Every value is free

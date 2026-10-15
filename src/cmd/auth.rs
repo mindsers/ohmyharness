@@ -157,8 +157,15 @@ fn login_in_sandbox(
             // `base` is `None`: a login is not work on the project. Building a
             // toolchain to type a password would spend minutes on a container
             // that is thrown away, and the credential paths a login writes are
-            // the same in both images.
-            image: image::tag_for(adapter, ca.as_ref().map(image::Root::pem)),
+            // the same in both images. Over it, where the agent must own what
+            // the host mounts, the owner layer: a login writes the account's
+            // directory, which uid 1000 cannot write on such a host.
+            image: image::for_host(
+                &backend,
+                &image::tag_for(adapter, ca.as_ref().map(image::Root::pem)),
+                &image::Kind::Harness(adapter),
+                true,
+            )?,
             // So nothing has been measured about it here, and nothing is
             // suppressed. That is the safe direction — a login session running
             // one hook too many costs nothing, and this container exists for
