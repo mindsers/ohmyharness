@@ -437,7 +437,7 @@ pub(crate) fn attach(
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
             repo,
-            image: sandbox.tag.clone(),
+            image: crate::image::for_host(&backend, &sandbox.tag, true)?,
             resolves: sandbox.resolves.clone(),
         },
         &sandbox,
@@ -2143,7 +2143,9 @@ pub(crate) fn run(
         base: Some(base.clone()),
         omh: own,
         repo,
-        image: sandbox.tag.clone(),
+        // Where the agent must own what the host mounts, the image with the
+        // agent moved to the host user — named on a dry run, built otherwise.
+        image: crate::image::for_host(&backend, &sandbox.tag, staging.is_apply())?,
         resolves: sandbox.resolves.clone(),
     };
 

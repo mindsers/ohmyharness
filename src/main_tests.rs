@@ -1968,7 +1968,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // writing a template nothing re-reads. `omh doctor` goes to
         // somebody who set one that did not work; it carries no `--local`
         // and is the shorter claim.
-        ("src/image.rs", 3),
+        //
+        // The fourth is `docker info`, which `host_owner` asks a rootful Linux
+        // Docker before it moves the agent to the host user's uid.
+        ("src/image.rs", 4),
         // The ninth is the `--json` refusal, beside the two for `--dry-run`
         // and a session prefix nothing consumes.
         ("src/main.rs", 9),

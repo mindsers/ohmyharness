@@ -781,6 +781,10 @@ pub enum Kind<'a> {
     Base,
     /// One recipe per adapter per omh version.
     Harness(&'a Adapter),
+    /// An image with the agent moved to the host user's uid, on top of the one
+    /// a launch would run — see [`for_host`]. One per repository and host
+    /// user; a newer one replaces the older.
+    Owner(&'a str),
     /// One per *checkout*, because the recipe is that repo's toolchain. This is
     /// the case a repository cannot express.
     ///
@@ -805,6 +809,13 @@ impl Kind<'_> {
                 s.push(("omh.adapter".into(), a.name.to_string()));
                 s.push(("omh.repo".into(), repo.to_string_lossy().into_owned()));
             }
+            // An image inherits its base's labels; this one overrides the kind,
+            // so reaping the base's class never counts it, and names the
+            // repository it was built over.
+            Kind::Owner(base) => {
+                let repository = base.rsplit_once(':').map_or(*base, |(r, _)| r);
+                s.push(("omh.owner.of".into(), repository.to_string()));
+            }
         }
         s
     }
@@ -814,6 +825,7 @@ impl Kind<'_> {
             Kind::Base => "base",
             Kind::Harness(_) => "harness",
             Kind::Stack(..) => "stack",
+            Kind::Owner(_) => "owner",
         }
     }
 
@@ -894,6 +906,94 @@ pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<
         &format!("building {t}"),
     )?;
     Ok(())
+}
+
+/// Who the agent must be for this backend to write what the host mounts:
+/// `None` wherever the image's own uid, 1000, already does.
+///
+/// A Linux bind mount keeps the host's ownership, so on rootful Docker Engine
+/// a host user other than 1000 left the agent unable to write the worktree.
+/// Podman maps the host user onto the agent itself (`--userns=keep-id`).
+/// Docker Desktop shares files through a VM that does not keep host
+/// ownership. Rootless Docker maps the host user to the container's root, which
+/// no uid in the image can match. Root writes everything already. `info` is
+/// `docker info`'s operating system and security options; empty when the
+/// daemon would not say, and then nothing is changed.
+pub(crate) fn agent_owner(
+    backend: &str,
+    linux: bool,
+    uid: u32,
+    gid: u32,
+    info: &str,
+) -> Option<(u32, u32)> {
+    let rootful_engine =
+        !info.is_empty() && !info.contains("Docker Desktop") && !info.contains("rootless");
+    (backend == "docker" && linux && uid != 0 && uid != crate::runtime::AGENT_UID && rootful_engine)
+        .then_some((uid, gid))
+}
+
+/// [`agent_owner`] for this host: its user, its platform, and its daemon.
+/// `docker info` is asked only where the answer could matter — Linux Docker,
+/// a user other than 1000 and root — so no other launch pays for it.
+pub(crate) fn host_owner(backend: &Backend) -> Option<(u32, u32)> {
+    let linux = cfg!(target_os = "linux");
+    #[cfg(unix)]
+    // SAFETY: getuid and getgid take no arguments and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    #[cfg(not(unix))]
+    let (uid, gid) = (crate::runtime::AGENT_UID, crate::runtime::AGENT_UID);
+    let asked = linux && backend.name() == "docker" && uid != 0 && uid != crate::runtime::AGENT_UID;
+    let info = if asked {
+        backend
+            .output(&[
+                "info",
+                "--format",
+                "{{.OperatingSystem}} {{json .SecurityOptions}}",
+            ])
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    agent_owner(backend.name(), linux, uid, gid, &info)
+}
+
+/// The layer that moves the agent to `uid`:`gid` on top of `base`.
+/// Non-unique ids are allowed — a primary group of 100, `users`, is common —
+/// and the directories the image gave the agent are re-owned with it.
+pub(crate) fn owner_dockerfile(base: &str, uid: u32, gid: u32) -> String {
+    let work = crate::container_workdir();
+    format!(
+        "FROM {base}\nUSER root\nRUN usermod -o -u {uid} agent \\\n && groupmod -o -g {gid} agent \\\n && chown -R {uid}:{gid} {GUEST_HOME} /omh {work}\nUSER agent\nWORKDIR {work}\n"
+    )
+}
+
+/// The name of [`owner_dockerfile`]'s image: the base's, and the owner.
+pub(crate) fn owned_tag(base: &str, uid: u32, gid: u32) -> String {
+    format!("{base}-u{uid}g{gid}")
+}
+
+/// The image a launch runs on this host: `tag`, or — where the agent must own
+/// what the host mounts, see [`agent_owner`] — `tag` with the agent moved to
+/// the host user, built once and kept beside it. With `build` false, the name
+/// it would have and nothing more, for a dry run.
+pub fn for_host(backend: &Backend, tag: &str, build: bool) -> Result<String> {
+    let Some((uid, gid)) = host_owner(backend) else {
+        return Ok(tag.to_string());
+    };
+    let owned = owned_tag(tag, uid, gid);
+    if build && !exists(backend, &owned) {
+        self::build(
+            backend,
+            &owned,
+            &owner_dockerfile(tag, uid, gid),
+            &Kind::Owner(tag),
+            None,
+        )?;
+    }
+    Ok(owned)
 }
 
 /// Make `tag` available to `backend`, building it if it is not there yet.
@@ -1932,6 +2032,72 @@ mod tests {
     ///
     /// Every row below is a transcript measured 2026-08-24 against docker
     /// 29.7.2 through `/bin/sh`, except the one marked as a shape.
+    /// The agent owns what the host mounts, on rootful Docker Engine too.
+    ///
+    /// The image's agent is uid 1000, and a Linux bind mount keeps the host's
+    /// ownership: on a host whose user is anyone else, the agent could not
+    /// write the worktree at all — measured on GitHub's runners (uid 1001),
+    /// where every edit `tests/e2e` made failed with `Permission denied`
+    /// (nightly run 38722576842). Podman already maps the host user onto the
+    /// agent (`--userns=keep-id`); Docker Desktop shares files through a VM
+    /// that does not keep host ownership; rootless Docker maps the host user
+    /// to the container's root, which a uid in the image cannot fix. So only
+    /// rootful Docker Engine, on Linux, as a user other than 1000 and root.
+    #[test]
+    fn the_agent_takes_the_host_users_uid_only_where_it_must() {
+        let engine = "Ubuntu 24.04 LTS [\"name=apparmor\",\"name=seccomp,profile=builtin\"]";
+        let desktop = "Docker Desktop [\"name=seccomp,profile=builtin\"]";
+        let rootless = "Ubuntu 24.04 LTS [\"name=seccomp,profile=builtin\",\"name=rootless\"]";
+        assert_eq!(
+            agent_owner("docker", true, 1001, 1001, engine),
+            Some((1001, 1001))
+        );
+        assert_eq!(
+            agent_owner("docker", true, 1001, 100, engine),
+            Some((1001, 100))
+        );
+        for (backend, linux, uid, info, why) in [
+            ("docker", true, 1000, engine, "the image's own uid"),
+            ("docker", true, 0, engine, "root writes anything already"),
+            ("docker", false, 1001, engine, "not Linux"),
+            ("docker", true, 1001, desktop, "Docker Desktop"),
+            ("docker", true, 1001, rootless, "rootless Docker"),
+            (
+                "docker",
+                true,
+                1001,
+                "",
+                "a daemon that would not say what it is",
+            ),
+            ("podman", true, 1001, engine, "podman maps the user itself"),
+            ("sbx", true, 1001, engine, "sbx"),
+        ] {
+            assert_eq!(agent_owner(backend, linux, uid, uid, info), None, "{why}");
+        }
+    }
+
+    /// The layer that moves the agent: its uid and gid, non-unique allowed (a
+    /// primary group of 100, `users`, is common), and the directories the image
+    /// gave it re-owned. The image it starts from, and nothing else, decides
+    /// its name, so each host user and each recipe gets its own.
+    #[test]
+    fn the_owner_layer_moves_the_agent_to_the_host_user() {
+        let df = owner_dockerfile("omh/claude:abc123", 1001, 100);
+        assert!(
+            df.starts_with("FROM omh/claude:abc123\nUSER root\n"),
+            "{df}"
+        );
+        assert!(df.contains("usermod -o -u 1001 agent"), "{df}");
+        assert!(df.contains("groupmod -o -g 100 agent"), "{df}");
+        assert!(df.contains("chown -R 1001:100"), "{df}");
+        assert!(df.trim_end().ends_with("WORKDIR /work"), "{df}");
+        assert!(df.contains("\nUSER agent\n"), "{df}");
+        assert_eq!(
+            owned_tag("omh/claude:abc123", 1001, 100),
+            "omh/claude:abc123-u1001g100"
+        );
+    }
+
     /// Git in the sandbox takes the worktree as its own, whoever the
     /// filesystem says owns it.
     ///
