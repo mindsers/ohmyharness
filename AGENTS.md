@@ -51,6 +51,29 @@ stale ones with `docker network ls | grep omh-` before blaming your change.
 
 ## Honesty about coverage
 
-Adapter paths assert facts about *external software*. A passing suite proves omh
-mounts a path faithfully, never that a harness reads it. Do not cite green tests
-as evidence an adapter is correct — that needs `omh doctor`.
+Adapter paths assert facts about *external software*. A passing unit suite
+proves omh mounts a path faithfully, never that a harness reads it. Do not cite
+it as evidence an adapter is correct — that needs the harness itself: `omh
+doctor` asks it, and `tests/e2e` drives it.
+
+## The end-to-end suite
+
+`tests/e2e` runs each harness, at the version `adapters/` pins and in the image
+omh builds for it, through real turns in a session `omh new` started. The model
+is a fake (`tests/e2e/fake-model.mjs`) that plays a script of tool calls and
+logs every request, so a scenario asserts on what the model was actually sent.
+A scenario passes only if the feature worked or omh named it dropped.
+
+```console
+$ cargo test --features e2e --test e2e                 # all four harnesses
+$ cargo test --features e2e --test e2e -- --exact omp  # one
+```
+
+It needs Docker, and builds the images it lacks. It is behind a feature so the
+default build and `--include-ignored` leave it out; the nightly workflow runs it
+once per harness. A failure prints the last two messages the model was sent.
+
+It is stronger than `omh doctor` where doctor only checks a file is there:
+moving omp's MCP config to a path omp never reads passes doctor and fails both
+MCP scenarios. When an adapter claim changes, show a scenario red against the
+old claim.
