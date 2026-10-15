@@ -62,7 +62,9 @@ doctor` asks it, and `tests/e2e` drives it.
 omh builds for it, through real turns in a session `omh new` started. The model
 is a fake (`tests/e2e/fake-model.mjs`) that plays a script of tool calls and
 logs every request, so a scenario asserts on what the model was actually sent.
-A scenario passes only if the feature worked or omh named it dropped.
+A scenario passes only if the feature worked where the driver says it works,
+or omh named it dropped where the driver says it drops it: a hook dropped
+unexpectedly fails as surely as one that did nothing.
 
 ```console
 $ cargo test --features e2e --test e2e                 # all four harnesses

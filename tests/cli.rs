@@ -8181,8 +8181,9 @@ fn a_session_named_first_is_never_silently_dropped() {
 
 /// `omh doctor --json` is one document, whatever doctor could not measure.
 ///
-/// When doctor cannot tell whether the network re-signs TLS — no `openssl`
-/// it can trust, as on every Linux host — it said so with `say`, which is
+/// When doctor cannot tell whether the network re-signs TLS — on every Linux
+/// host, where it cannot tell a shipped root from an installed one, and
+/// wherever its `openssl` fails — it said so with `say`, which is
 /// the command's answer: under `--json`, a notice object printed ahead of the
 /// report, and two documents on stdout that no JSON parser reads as one.
 /// Found by `tests/e2e` on a Linux runner, where `omh doctor --json` would

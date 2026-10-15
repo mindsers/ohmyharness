@@ -854,9 +854,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
-        // The image a session will run, not the harness's own: the volume
-        // this first index creates takes its owner from the image, and where
-        // a session's agent is the host user (`image::for_host`) a volume made
+        // The harness's image as this host runs it, not as built: the volume
+        // this first index creates takes its owner from the image's agent, and
+        // where a session's agent is the host user (`image::for_host`) a volume made
         // by uid 1000 is one it cannot write — the graph then never grew past
         // this index, on GitHub's Linux runners.
         let harness_image = image::tag_for(&adapter, ca.as_ref().map(image::Root::pem));

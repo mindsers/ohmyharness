@@ -925,9 +925,11 @@ pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<
 /// A Linux bind mount keeps the host's ownership, so on rootful Docker Engine
 /// a host user other than 1000 left the agent unable to write the worktree.
 /// Podman maps the host user onto the agent itself (`--userns=keep-id`).
-/// Docker Desktop shares files through a VM that does not keep host
-/// ownership. Rootless Docker maps the host user to the container's root, which
-/// no uid in the image can match. Root writes everything already. `info` is
+/// Docker Desktop for macOS shares files through a VM that does not keep host
+/// ownership; Docker Desktop for Linux is taken to do the same, unmeasured.
+/// Rootless Docker maps the host user to the container's root, which only an
+/// agent run as root would match, and omh does not run it so. Root writes
+/// everything already. `info` is
 /// `docker info`'s operating system and security options.
 pub(crate) fn agent_owner(
     backend: &str,
@@ -2059,9 +2061,10 @@ mod tests {
     /// write the worktree at all — measured on GitHub's runners (uid 1001),
     /// where every edit `tests/e2e` made failed with `Permission denied`
     /// (nightly run 38722576842). Podman already maps the host user onto the
-    /// agent (`--userns=keep-id`); Docker Desktop shares files through a VM
-    /// that does not keep host ownership; rootless Docker maps the host user
-    /// to the container's root, which a uid in the image cannot fix. So only
+    /// agent (`--userns=keep-id`); Docker Desktop for macOS shares files
+    /// through a VM that does not keep host ownership (for Linux, unmeasured);
+    /// rootless Docker maps the host user to the container's root, which only
+    /// an agent run as root would match. So only
     /// rootful Docker Engine, on Linux, as a user other than 1000 and root.
     #[test]
     fn the_agent_takes_the_host_users_uid_only_where_it_must() {
@@ -2132,8 +2135,8 @@ mod tests {
 
     /// The layer that moves the agent: its uid and gid, non-unique allowed (a
     /// primary group of 100, `users`, is common), and the directories the image
-    /// gave it re-owned. The image it starts from, and nothing else, decides
-    /// its name, so each host user and each recipe gets its own.
+    /// gave it re-owned. Its name is its base's, the user's, and a digest of
+    /// its own recipe, so each host user and each recipe gets its own.
     #[test]
     fn the_owner_layer_moves_the_agent_to_the_host_user() {
         let df = owner_dockerfile("omh/claude:abc123", 1001, 100);
