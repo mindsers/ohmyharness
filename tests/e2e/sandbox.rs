@@ -117,6 +117,17 @@ impl Session {
         }
     }
 
+    /// `omh s01 resume`, and the new container provided for.
+    pub fn resume(&self) {
+        let resumed = self.omh(&["s01", "resume"]);
+        assert!(
+            self.running(),
+            "resume did not bring the session back: {}",
+            text(&resumed)
+        );
+        self.provide();
+    }
+
     /// Whether the session's container is running. One that is not there is
     /// not running; a daemon that cannot be asked fails the test, rather than
     /// answer "stopped" to the scenario checking that `down` stopped it.
@@ -271,10 +282,26 @@ impl Session {
             "the fake model's log could not be read: {}",
             text(&log)
         );
-        let requests = String::from_utf8_lossy(&log.stdout)
+        let requests: Vec<serde_json::Value> = String::from_utf8_lossy(&log.stdout)
             .lines()
             .map(|l| serde_json::from_str(l).expect("the fake writes JSON lines"))
             .collect();
+        // Each line is one of the four things the fake writes. A key renamed
+        // in `fake-model.mjs` would otherwise leave `unreadable` and
+        // `elsewhere` counting nothing, and the checks on them passing.
+        for r in &requests {
+            let kinds = [
+                r["method"] == "CONNECT",
+                r["proxied"] == true,
+                r["bad_json"] == true,
+                r.get("plan").is_some() && r.get("body").is_some(),
+            ];
+            assert_eq!(
+                kinds.iter().filter(|k| **k).count(),
+                1,
+                "the fake logged a line this suite does not read: {r}"
+            );
+        }
         let calls = script.iter().filter(|s| s.get("text").is_none()).count();
         Turn {
             out,

@@ -751,13 +751,7 @@ fn lifecycle_sync(s: &Session) {
         s.read("from-main.txt").is_some(),
         "sync did not bring from-main.txt into the worktree"
     );
-    let resumed = s.omh(&["s01", "resume"]);
-    assert!(
-        s.running(),
-        "resume did not bring the session back: {}",
-        crate::sandbox::text(&resumed)
-    );
-    s.provide();
+    s.resume();
     let turn = s.turn("Say hello.", &[]);
     ran(&turn);
     let told = Turn::seen(turn.asks()[0]).contains("main moved 1 commit under you");
@@ -770,13 +764,7 @@ fn lifecycle_sync(s: &Session) {
 fn lifecycle_down_resume(s: &Session) {
     ok(&s.omh(&["s01", "down"]), "omh s01 down");
     assert!(!s.running(), "the session is still running after down");
-    let resumed = s.omh(&["s01", "resume"]);
-    assert!(
-        s.running(),
-        "resume did not bring the session back: {}",
-        crate::sandbox::text(&resumed)
-    );
-    s.provide();
+    s.resume();
     let turn = s.turn("Read it.", &[(s.harness.read)("lifecycle.txt")]);
     ran(&turn);
 }

@@ -25,7 +25,9 @@ pub struct Driver {
     pub shell: fn(command: &str) -> Value,
     /// Read a file, by its path in the worktree.
     pub read: fn(file: &str) -> Value,
-    /// Replace `old` with `new` in a file that exists.
+    /// Change a file that exists: `old` replaced with `new`, or — where the
+    /// harness wants a hash of the file this cannot know, omp — `new`
+    /// inserted at its head.
     pub edit: fn(file: &str, old: &str, new: &str) -> Value,
     /// Create a file, or overwrite one whole.
     pub write: fn(file: &str, contents: &str) -> Value,
