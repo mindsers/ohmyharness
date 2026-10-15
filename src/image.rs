@@ -493,6 +493,7 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     // prepares and the directory the launcher mounts into cannot drift.
     let notes = crate::memory::GUEST_MEMORY;
     let hostkeys = crate::ssh::GUEST_HOST_KEYS;
+    let workdir = crate::container_workdir();
     #[allow(non_snake_case)]
     let AGENT_UID = crate::runtime::AGENT_UID;
     let ca_layer = ca_layer(ca);
@@ -525,6 +526,12 @@ RUN __GRAPH_INSTALL__
 # be owned by the agent, or docker creates it as root.
 RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {notes} {GRAPH_CACHE} \
  && chown -R agent:agent /work /omh {GUEST_HOME}/.cache
+
+# The worktree is the agent's, whoever the filesystem reports as owning it: on
+# Docker Desktop for macOS, root, once a harness has written there, and git
+# refuses a repository it judges another user's. In the system config, so every
+# process here sees it, an editor's SSH session included.
+RUN git config --system --add safe.directory {workdir}
 
 # Session entrypoint: install the key, start sshd, then stay alive so the
 # container outlives the command that created it. The key arrives as an env var
@@ -1925,6 +1932,31 @@ mod tests {
     ///
     /// Every row below is a transcript measured 2026-08-24 against docker
     /// 29.7.2 through `/bin/sh`, except the one marked as a shape.
+    /// Git in the sandbox takes the worktree as its own, whoever the
+    /// filesystem says owns it.
+    ///
+    /// Measured on Docker Desktop for macOS: once a harness had written a file
+    /// in `/work`, `/work` and `/omh/shadow` were reported as owned by root
+    /// rather than the agent, and every git command there stopped with
+    /// `detected dubious ownership`. `tdd-guard` asks git whether the test
+    /// changed, could not, and let every edit through for the rest of the
+    /// session. Found by `tests/e2e`, which drives a real harness through a
+    /// real edit. In the image's system config, so it reaches every process —
+    /// the harness, its hooks, an editor's SSH session — and nothing that
+    /// scrubs the environment can take it away.
+    #[test]
+    fn git_in_the_sandbox_trusts_the_worktree() {
+        let want = format!(
+            "git config --system --add safe.directory {}",
+            crate::container_workdir()
+        );
+        assert!(
+            base_dockerfile(None).contains(&want),
+            "{}",
+            base_dockerfile(None)
+        );
+    }
+
     #[test]
     fn a_probe_that_failed_some_other_way_does_not_read_as_a_broken_worktree() {
         let namespace = "OCI runtime exec failed: exec failed: unable to start container \

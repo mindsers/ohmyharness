@@ -867,36 +867,32 @@ pub fn interpolating(text: &str) -> String {
     out
 }
 
-/// `$OMH_TOOL_FILE` made absolute, in the shell renderers.
+/// `$OMH_TOOL_FILE` as one absolute path, in the shell renderers.
 ///
 /// A harness hands a hook the path its model wrote, and a model writes
 /// relative paths where its harness does: Codex's patches name files from the
-/// working directory, and omp's `read` prints them from the workspace. A guard
-/// matching `/work/.omh/*` never matched those, and one asking git about a
-/// relative path from that path's own directory resolved it twice. Resolved
-/// here against the directory the hook runs in, which is the harness's own —
-/// `/work` in a session — so a hook never has to.
+/// working directory. A guard matching `/work/.omh/*` never matched those, and
+/// one asking git about a relative path from that path's own directory
+/// resolved it twice. Resolved here against the directory the hook runs in —
+/// the harness's own, `/work` in a session — with `.`, `..` and doubled
+/// slashes collapsed, so `pkg/../.omh/x` cannot pass for something else. In
+/// `awk`, because `realpath -m` is GNU's and the suite runs these on macOS.
 pub(crate) fn absolute_file_sh() -> String {
-    "OMH_TOOL_FILE=${OMH_TOOL_FILE#./}; case \"$OMH_TOOL_FILE\" in ''|/*) ;; *) OMH_TOOL_FILE=\"$PWD/$OMH_TOOL_FILE\" ;; esac; ".into()
+    concat!(
+        "[ -n \"$OMH_TOOL_FILE\" ] && OMH_TOOL_FILE=$(printf '%s' \"$OMH_TOOL_FILE\" | awk -v pwd=\"$PWD\" '",
+        "{ p = $0; if (substr(p, 1, 1) != \"/\") p = pwd \"/\" p; n = split(p, a, \"/\"); k = 0; ",
+        "for (i = 1; i <= n; i++) { if (a[i] == \"\" || a[i] == \".\") continue; ",
+        "if (a[i] == \"..\") { if (k > 0) k--; continue } s[++k] = a[i] } ",
+        "o = \"\"; for (i = 1; i <= k; i++) o = o \"/\" s[i]; print (o == \"\" ? \"/\" : o) }'); "
+    )
+    .into()
 }
 
-/// The same, in the plugin renderers' JavaScript, for an `env` object that
-/// already holds `OMH_TOOL_FILE`, resolved against the harness's process.
-///
-/// `uris` is for omp alone, which calls an MCP tool by writing to
-/// `xd://mcp__<server>_<tool>`: there a path that *starts* with a scheme is a
-/// URI and left alone. Nowhere else — and not on omp for a `://` further in.
-/// `.omh/x://y` is a relative path to every harness, a directory `x:` under
-/// `.omh`, and exempting it let a write walk past `config-guard`.
-pub(crate) fn absolute_file_js(indent: &str, uris: bool) -> String {
-    let uri = if uris {
-        " && !/^[A-Za-z][A-Za-z0-9+.-]*:\\/\\//.test(env.OMH_TOOL_FILE)"
-    } else {
-        ""
-    };
-    format!(
-        "{indent}if (env.OMH_TOOL_FILE && !env.OMH_TOOL_FILE.startsWith(\"/\"){uri}) env.OMH_TOOL_FILE = process.cwd() + \"/\" + env.OMH_TOOL_FILE.replace(/^\\.\\//, \"\")\n"
-    )
+/// The same in the plugin renderers' JavaScript, through the bridge's
+/// `omh_file`, for an `env` object that already holds `OMH_TOOL_FILE`. `omp`
+/// adds omp's own clean-up of a path before it resolves one.
+pub(crate) fn absolute_file_js(indent: &str, omp: bool) -> String {
+    format!("{indent}env.OMH_TOOL_FILE = omh_file(env.OMH_TOOL_FILE, {omp})\n")
 }
 
 #[cfg(test)]
