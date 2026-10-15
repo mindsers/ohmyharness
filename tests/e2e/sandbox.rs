@@ -88,23 +88,19 @@ impl Session {
         session.git(&["commit", "-q", "-m", "omh"]);
 
         // Refused at the last step, for want of a terminal — everything before
-        // it is what the test is here for.
+        // it is what the test is here for. Docker words that refusal its own
+        // way per platform ("the input device is not a TTY" on Linux, "stdin
+        // is not a terminal" on Docker Desktop), so the check is the state it
+        // leaves: omh failed, and the session's container is up.
         let new = session.omh(&["new", harness.name]);
+        session.launched = text(&new);
+        session.container = format!("omh-{}-s01", session.id);
         assert!(
-            !new.status.success() && text(&new).contains("not a terminal"),
+            !new.status.success() && session.running(),
             "omh new {} was expected to start the container and stop at the \
              terminal: {}",
             harness.name,
-            text(&new)
-        );
-        session.launched = text(&new);
-        session.container = format!("omh-{}-s01", session.id);
-        let running = docker(&["inspect", "-f", "{{.State.Running}}", &session.container]);
-        assert_eq!(
-            String::from_utf8_lossy(&running.stdout).trim(),
-            "true",
-            "the session container is not running: {}",
-            text(&running)
+            session.launched
         );
         session.provide();
         session
