@@ -100,10 +100,22 @@ impl Session {
             "the session container is not running: {}",
             text(&running)
         );
-        for (file, contents) in harness.files {
-            session.write(file, contents);
-        }
+        session.provide();
         session
+    }
+
+    /// The files the harness's driver needs in the container — omp's model
+    /// provider — written again whenever the container is new.
+    pub fn provide(&self) {
+        for (file, contents) in self.harness.files {
+            self.write(file, contents);
+        }
+    }
+
+    /// Whether the session's container is running.
+    pub fn running(&self) -> bool {
+        let out = docker(&["inspect", "-f", "{{.State.Running}}", &self.container]);
+        String::from_utf8_lossy(&out.stdout).trim() == "true"
     }
 
     /// Run omh, in the repo, as this sandbox's user.

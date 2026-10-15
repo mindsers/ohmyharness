@@ -90,6 +90,32 @@ const SCENARIOS: &[Scenario] = &[
         name: "the model is the only thing the harness reaches, but for what is named",
         run: nothing_else,
     },
+    // The session's life, in order and last: each leaves what the next needs,
+    // and the last removes the session.
+    Scenario {
+        name: "the turn's work shows in omh s01 diff",
+        run: lifecycle_diff,
+    },
+    Scenario {
+        name: "the agent's own commit shows in omh s01 log",
+        run: lifecycle_log,
+    },
+    Scenario {
+        name: "omh s01 commit lands the work on the session's branch",
+        run: lifecycle_commit,
+    },
+    Scenario {
+        name: "omh s01 sync brings the base in, and the next turn is told",
+        run: lifecycle_sync,
+    },
+    Scenario {
+        name: "omh s01 down stops the session, and resume brings it back",
+        run: lifecycle_down_resume,
+    },
+    Scenario {
+        name: "omh s01 rm removes the session and keeps its branch",
+        run: lifecycle_rm,
+    },
 ];
 
 /// The repo every session starts from: one source and test pair per guard
@@ -576,4 +602,113 @@ fn doctor(s: &Session) {
         "omh doctor failed on {}: {failed:#?}",
         s.harness.name
     );
+}
+
+fn ok(out: &std::process::Output, what: &str) -> String {
+    assert!(
+        out.status.success(),
+        "{what}: {}",
+        crate::sandbox::text(out)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn lifecycle_diff(s: &Session) {
+    let turn = s.turn(
+        "Write it.",
+        &[(s.harness.write)("lifecycle.txt", "from the agent\n")],
+    );
+    ran(&turn);
+    let diff = ok(&s.omh(&["s01", "diff", "--json"]), "omh s01 diff");
+    assert!(
+        diff.contains("lifecycle.txt"),
+        "omh s01 diff does not name lifecycle.txt: {diff}"
+    );
+}
+
+fn lifecycle_log(s: &Session) {
+    let turn = s.turn(
+        "Commit it.",
+        &[(s.harness.shell)(
+            "git add lifecycle.txt && git commit -q -m 'e2e: the agent commits'",
+        )],
+    );
+    ran(&turn);
+    let log = ok(&s.omh(&["s01", "log", "--json"]), "omh s01 log");
+    assert!(
+        log.contains("e2e: the agent commits"),
+        "omh s01 log does not list the agent's commit: {log}\n{}",
+        turn.printed()
+    );
+}
+
+fn lifecycle_commit(s: &Session) {
+    let turn = s.turn("Write it.", &[(s.harness.write)("landed.txt", "landed\n")]);
+    ran(&turn);
+    ok(
+        &s.omh(&["s01", "commit", "-m", "e2e: landed", "--json"]),
+        "omh s01 commit",
+    );
+    let shown = s.git(&["show", "omh/s01:landed.txt"]);
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("landed"),
+        "landed.txt is not on omh/s01"
+    );
+}
+
+/// A commit lands on `main` while the session runs. `sync` refuses a running
+/// session — it would move files under an agent that believes otherwise — so
+/// `--down` stops it first; the commit is then in the worktree, and `git-note`
+/// hands the next session start the note the sync left.
+fn lifecycle_sync(s: &Session) {
+    s.git(&["switch", "-q", "main"]);
+    std::fs::write(s.repo.join("from-main.txt"), "from main\n").unwrap();
+    s.git(&["add", "from-main.txt"]);
+    s.git(&["commit", "-q", "-m", "e2e: main moves"]);
+    ok(
+        &s.omh(&["s01", "sync", "--down", "--json"]),
+        "omh s01 sync --down",
+    );
+    assert!(
+        s.read("from-main.txt").is_some(),
+        "sync did not bring from-main.txt into the worktree"
+    );
+    let resumed = s.omh(&["s01", "resume"]);
+    assert!(
+        s.running(),
+        "resume did not bring the session back: {}",
+        crate::sandbox::text(&resumed)
+    );
+    s.provide();
+    let turn = s.turn("Say hello.", &[]);
+    ran(&turn);
+    let told = Turn::seen(turn.asks()[0]).contains("main moved 1 commit under you");
+    worked_or_named(s, "git-note", told);
+}
+
+/// `down` removes the container — it runs with `--rm` — and `resume` starts a
+/// new one, which stops at the terminal like `omh new` does. The worktree
+/// carries over; what the driver wrote into the old container does not.
+fn lifecycle_down_resume(s: &Session) {
+    ok(&s.omh(&["s01", "down"]), "omh s01 down");
+    assert!(!s.running(), "the session is still running after down");
+    let resumed = s.omh(&["s01", "resume"]);
+    assert!(
+        s.running(),
+        "resume did not bring the session back: {}",
+        crate::sandbox::text(&resumed)
+    );
+    s.provide();
+    let turn = s.turn("Read it.", &[(s.harness.read)("lifecycle.txt")]);
+    ran(&turn);
+}
+
+fn lifecycle_rm(s: &Session) {
+    ok(&s.omh(&["s01", "rm", "--yes", "--json"]), "omh s01 rm");
+    assert!(!s.running(), "the container is still running after rm");
+    assert!(
+        !s.worktree().exists(),
+        "the worktree is still there after rm"
+    );
+    s.git(&["rev-parse", "--verify", "-q", "omh/s01"]);
 }

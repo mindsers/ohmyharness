@@ -1005,7 +1005,7 @@ fn omp_one_hook(
                 field.var()
             ));
             if *field == hook::Field::ToolFile {
-                b.push_str(&hook::absolute_file_js("    "));
+                b.push_str(&hook::absolute_file_js("    ", true));
             }
         }
     }
@@ -1138,7 +1138,7 @@ fn one_hook(
                 field.var()
             ));
             if *field == hook::Field::ToolFile {
-                b.push_str(&hook::absolute_file_js("      "));
+                b.push_str(&hook::absolute_file_js("      ", false));
             }
         }
     }
@@ -3728,10 +3728,10 @@ try {{
 
         let claude = render(&claude_hooks());
         let settings: serde_json::Value = serde_json::from_str(&claude).unwrap();
-        let command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        let claude_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        let said = sh(command, r#"{"tool_input":{"file_path":"pkg/x.go"}}"#);
+        let said = sh(claude_command, r#"{"tool_input":{"file_path":"pkg/x.go"}}"#);
         assert!(said.contains(want), "claude: {said}");
 
         let codex = render(&codex());
@@ -3769,6 +3769,35 @@ try {{
             said.contains("saw xd://mcp__codegraph_list_projects"),
             "omp, a URI: {said}"
         );
+
+        // But only a scheme at the start is a URI. `.omh/x://y` is a relative
+        // path on every harness — a directory `x:` under `.omh` — and left
+        // relative, it walked past `config-guard`'s `/work/.omh/*`.
+        let tricky = format!("saw {}/.omh/x://y", here.display());
+        let said = sh(
+            claude_command,
+            r#"{"tool_input":{"file_path":".omh/x://y"}}"#,
+        );
+        assert!(
+            said.contains(&tricky),
+            "claude, `://` inside a path: {said}"
+        );
+        let said = drive(
+            &render(opencode()),
+            "tool.execute.before",
+            r#"{ tool: "write" }"#,
+            r#"{ args: { filePath: ".omh/x://y" } }"#,
+        );
+        assert!(
+            said.contains(&tricky),
+            "opencode, `://` inside a path: {said}"
+        );
+        let said = drive_omp(
+            &render(omp()),
+            "tool_call",
+            r#"{ toolName: "write", input: { path: ".omh/x://y", content: "x" } }"#,
+        );
+        assert!(said.contains(&tricky), "omp, `://` inside a path: {said}");
     }
 
     /// A guard on edits sees a whole-file write, on every harness: a write
