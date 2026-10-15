@@ -146,7 +146,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
             // session is falsely named "relaunch to move it" with nowhere to move.
             // And the owner layer over each, where a session on this host runs
             // one: without them every such session read as stale, for good.
-            current.extend(image::with_owned(&tags, image::host_owner(&backend)));
+            current.extend(image::with_owned(&tags, image::host_owner(&backend)?));
             if outcome == Outcome::Unpinnable {
                 continue;
             }

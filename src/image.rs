@@ -9,7 +9,7 @@
 use crate::adapter::Adapter;
 use crate::base::GRAPH_CACHE;
 use crate::runtime::Backend;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 /// The base tag carries a digest of its own recipe, for the same reason the
@@ -928,8 +928,7 @@ pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<
 /// Docker Desktop shares files through a VM that does not keep host
 /// ownership. Rootless Docker maps the host user to the container's root, which
 /// no uid in the image can match. Root writes everything already. `info` is
-/// `docker info`'s operating system and security options; empty when the
-/// daemon would not say, and then nothing is changed.
+/// `docker info`'s operating system and security options.
 pub(crate) fn agent_owner(
     backend: &str,
     linux: bool,
@@ -944,31 +943,47 @@ pub(crate) fn agent_owner(
 }
 
 /// [`agent_owner`] for this host: its user, its platform, and its daemon.
-/// `docker info` is asked only where the answer could matter — Linux Docker,
-/// a user other than 1000 and root — so no other launch pays for it.
-pub(crate) fn host_owner(backend: &Backend) -> Option<(u32, u32)> {
-    let linux = cfg!(target_os = "linux");
+pub(crate) fn host_owner(backend: &Backend) -> Result<Option<(u32, u32)>> {
     #[cfg(unix)]
     // SAFETY: getuid and getgid take no arguments and cannot fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     #[cfg(not(unix))]
     let (uid, gid) = (crate::runtime::AGENT_UID, crate::runtime::AGENT_UID);
-    let asked = linux && backend.name() == "docker" && uid != 0 && uid != crate::runtime::AGENT_UID;
+    let info = || -> Result<String> {
+        let out = backend.output(&[
+            "info",
+            "--format",
+            "{{.OperatingSystem}} {{json .SecurityOptions}}",
+        ])?;
+        anyhow::ensure!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    owner_of(backend.name(), cfg!(target_os = "linux"), uid, gid, info)
+}
+
+/// [`agent_owner`], with `docker info` asked only where the answer could
+/// matter — Linux Docker, a user other than 1000 and root — so no other launch
+/// pays for it. A daemon that will not answer stops the launch: read as
+/// "nothing to change", it left the agent at 1000 on a host that needed it
+/// moved, and the first edit failed with nothing to say why.
+fn owner_of(
+    backend: &str,
+    linux: bool,
+    uid: u32,
+    gid: u32,
+    info: impl FnOnce() -> Result<String>,
+) -> Result<Option<(u32, u32)>> {
+    let asked = linux && backend == "docker" && uid != 0 && uid != crate::runtime::AGENT_UID;
     let info = if asked {
-        backend
-            .output(&[
-                "info",
-                "--format",
-                "{{.OperatingSystem}} {{json .SecurityOptions}}",
-            ])
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
+        info().context("`docker info` would not say whether the agent must be the host user")?
     } else {
         String::new()
     };
-    agent_owner(backend.name(), linux, uid, gid, &info)
+    Ok(agent_owner(backend, linux, uid, gid, &info))
 }
 
 /// The layer that moves the agent to `uid`:`gid` on top of `base`.
@@ -1004,7 +1019,7 @@ pub(crate) fn with_owned(tags: &[String], owner: Option<(u32, u32)>) -> Vec<Stri
 /// the host user, built once and kept beside it. With `build` false, the name
 /// it would have and nothing more, for a dry run.
 pub fn for_host(backend: &Backend, tag: &str, base: &Kind, build: bool) -> Result<String> {
-    let Some((uid, gid)) = host_owner(backend) else {
+    let Some((uid, gid)) = host_owner(backend)? else {
         return Ok(tag.to_string());
     };
     let owned = owned_tag(tag, uid, gid);
@@ -2097,6 +2112,40 @@ mod tests {
             ("sbx", true, 1001, engine, "sbx"),
         ] {
             assert_eq!(agent_owner(backend, linux, uid, uid, info), None, "{why}");
+        }
+    }
+
+    /// A daemon that would not say what it is fails the launch, by name.
+    ///
+    /// Read as "nothing to change", it left the agent at uid 1000 on a host
+    /// that needed it moved, and the first edit failed with `Permission
+    /// denied` and nothing to say why. Asked only where the answer matters:
+    /// Linux Docker, as a user other than 1000 and root.
+    #[test]
+    fn a_daemon_that_will_not_say_what_it_is_stops_the_launch() {
+        let engine = "Ubuntu 24.04 LTS [\"name=seccomp,profile=builtin\"]";
+        let refused = || -> Result<String> { anyhow::bail!("Cannot connect to the Docker daemon") };
+        let err = owner_of("docker", true, 1001, 1001, refused).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Cannot connect to the Docker daemon"),
+            "{err:#}"
+        );
+        assert!(format!("{err:#}").contains("docker info"), "{err:#}");
+
+        assert_eq!(
+            owner_of("docker", true, 1001, 1001, || Ok(engine.into())).unwrap(),
+            Some((1001, 1001))
+        );
+        // Not asked at all where the answer could not matter.
+        for (backend, linux, uid) in [
+            ("docker", true, 1000),
+            ("docker", true, 0),
+            ("docker", false, 1001),
+            ("podman", true, 1001),
+        ] {
+            let never =
+                || -> Result<String> { panic!("asked docker info for {backend} {linux} {uid}") };
+            assert_eq!(owner_of(backend, linux, uid, uid, never).unwrap(), None);
         }
     }
 
