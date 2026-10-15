@@ -8179,24 +8179,6 @@ fn a_session_named_first_is_never_silently_dropped() {
     );
 }
 
-/// `omh doctor` honours the account you name, or says why it cannot.
-///
-/// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
-/// says so under *honesty about coverage* — and credentials are the half no
-/// in-process test can reach. So a `doctor` that skips the credential checks is
-/// the one failure that leaves nothing behind it.
-///
-/// It skipped them for anyone with more than one account. `doctor_cmd` passed a
-/// hardcoded `None` where `omh new` passes the user's `-a`, and then wrapped the
-/// resolver in `.unwrap_or(None)` — turning a function whose own doc comment
-/// reads *"Ambiguity is an error, never a guess"* into a guess of *no account*.
-/// Two accounts captured, and `omh -a work doctor` printed *"no account, so
-/// credentials go unchecked"*, byte-identical to naming none.
-///
-/// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
-/// flag `doctor` was discarding, and was swallowed before it could print.
-/// **The host's answers survive the thing that stopped the sandbox.**
-///
 /// `omh doctor --json` is one document, whatever doctor could not measure.
 ///
 /// When doctor cannot tell whether the network re-signs TLS — no `openssl`
@@ -8234,8 +8216,42 @@ fn doctor_json_is_one_document() {
         documents.len(),
         String::from_utf8_lossy(&out.stdout)
     );
+    // And the one document still says the check did not run: a consumer of
+    // the JSON must not read "could not tell" as "measured and fine".
+    let said_so = documents[0]["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|c| {
+            c["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("could not check whether this network re-signs TLS"))
+        });
+    assert!(
+        said_so,
+        "the report does not say the TLS check could not run: {}",
+        documents[0]
+    );
 }
 
+/// `omh doctor` honours the account you name, or says why it cannot.
+///
+/// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
+/// says so under *honesty about coverage* — and credentials are the half no
+/// in-process test can reach. So a `doctor` that skips the credential checks is
+/// the one failure that leaves nothing behind it.
+///
+/// It skipped them for anyone with more than one account. `doctor_cmd` passed a
+/// hardcoded `None` where `omh new` passes the user's `-a`, and then wrapped the
+/// resolver in `.unwrap_or(None)` — turning a function whose own doc comment
+/// reads *"Ambiguity is an error, never a guess"* into a guess of *no account*.
+/// Two accounts captured, and `omh -a work doctor` printed *"no account, so
+/// credentials go unchecked"*, byte-identical to naming none.
+///
+/// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
+/// flag `doctor` was discarding, and was swallowed before it could print.
+/// **The host's answers survive the thing that stopped the sandbox.**
+///
 /// This is the whole feature, and nothing reached it: `doctor_cmd` needs a
 /// container, so every existing doctor test hands it `fake_docker`. Deleting
 /// the no-runtime early return left the suite green — the command reverted to
