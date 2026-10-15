@@ -339,8 +339,11 @@ pub(crate) fn doctor_cmd(
     // Everything past here can fail, and every one of those failures used to
     // take the host's answers with it. Run it, then decide what to say.
     let host_rows = host.0.clone();
+    // A host row found inside the run below, kept here too so a run that fails
+    // after finding it still reports it.
+    let mut found: Option<doctor::Outcome> = None;
     let ran = (|| -> Result<()> {
-        let host = doctor::HostRows(host_rows);
+        let mut host = doctor::HostRows(host_rows);
         let adapter = Adapter::find(&paths.adapters(), &name)?;
 
         // Credentials are the half no in-process test can reach: whether a token
@@ -389,14 +392,21 @@ pub(crate) fn doctor_cmd(
             // reachable: no `openssl`, no network, an `openssl` that ignores
             // `-CAfile`. A check that quietly did not run is the shape doctor
             // exists to eliminate, not to add.
+            //
+            // A row of the report, not `say`: `say` is the command's answer,
+            // and under `--json` it put a second document ahead of doctor's on
+            // stdout. As a row it is in the one document, and passing — omh
+            // could not tell, which is not a failure of the host — with the
+            // reason in its detail, where "fine" would have none at all.
+            // `doctor_json_is_one_document`.
             if let doctor::Inspection::Unknown(why) = &verdict {
-                ctx.say(
-                    &report::Action::new(
-                        "tls-inspection-unknown",
-                        format!("could not check whether this network re-signs TLS: {why}"),
-                    )
-                    .data(serde_json::json!({ "reason": why })),
-                );
+                let row = doctor::Outcome {
+                    name: "tls inspection".into(),
+                    ok: true,
+                    detail: format!("could not check whether this network re-signs TLS: {why}"),
+                };
+                found = Some(row.clone());
+                host.0.push(row);
             }
             if verdict == doctor::Inspection::Private {
                 // Named, because a proxy that re-signs one host and not another is
@@ -537,7 +547,12 @@ pub(crate) fn doctor_cmd(
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
             repo,
-            image: sandbox.tag.clone(),
+            image: crate::image::for_host(
+                &backend,
+                &sandbox.tag,
+                &sandbox.kind(&adapter, &paths.repo),
+                true,
+            )?,
             resolves: sandbox.resolves.clone(),
         };
         if let Some(account_dir) = &account {
@@ -632,7 +647,9 @@ pub(crate) fn doctor_cmd(
             // build that dies on an unknown issuer, a probe that produced
             // nothing, an adapter that cannot be found — each of these used to
             // print one line about itself and nothing about the machine.
-            say_host(ctx, host.0);
+            let mut rows = host.0;
+            rows.extend(found);
+            say_host(ctx, rows);
             Err(e)
         }
     }

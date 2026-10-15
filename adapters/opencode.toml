@@ -61,7 +61,7 @@ import = "$HOME/.config/opencode/agents"
 # by name rather than silently matching half of what it asked for. A map is a
 # claim about another program, and half a claim is worse than none.
 [tools]
-edit  = "edit"
+edit  = "edit|write"
 read  = "read"
 shell = "bash"
 

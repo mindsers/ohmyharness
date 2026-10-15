@@ -745,6 +745,9 @@ pub fn render(
                 "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
                 field.var()
             ));
+            if *field == Field::ToolFile {
+                command.push_str(&absolute_file_sh());
+            }
         }
     }
 
@@ -862,6 +865,40 @@ pub fn interpolating(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// `$OMH_TOOL_FILE` as one absolute path, in the shell renderers.
+///
+/// A harness hands a hook the path its model wrote, and a model writes
+/// relative paths where its harness does: Codex's patches name files from the
+/// working directory. A guard matching `/work/.omh/*` never matched those, and
+/// one asking git about a relative path from that path's own directory
+/// resolved it twice. Resolved here against the directory the hook runs in —
+/// the harness's own, `/work` in a session — with `.`, `..` and doubled
+/// slashes collapsed, so `pkg/../.omh/x` cannot pass for something else. In
+/// `awk`, because `realpath -m` is GNU's and the suite runs these on macOS.
+pub(crate) fn absolute_file_sh() -> String {
+    // Read through `ENVIRON`, not stdin: as a record, a path holding a newline
+    // was two, and the second was all a guard saw. And kept as the harness
+    // gave it, said, if `awk` cannot run — never emptied, which every guard
+    // reads as "no file" and allows.
+    concat!(
+        "[ -n \"$OMH_TOOL_FILE\" ] && { omh_f=$(OMH_TOOL_FILE=\"$OMH_TOOL_FILE\" OMH_PWD=\"$PWD\" awk 'BEGIN { ",
+        "p = ENVIRON[\"OMH_TOOL_FILE\"]; if (substr(p, 1, 1) != \"/\") p = ENVIRON[\"OMH_PWD\"] \"/\" p; ",
+        "n = split(p, a, \"/\"); k = 0; ",
+        "for (i = 1; i <= n; i++) { if (a[i] == \"\" || a[i] == \".\") continue; ",
+        "if (a[i] == \"..\") { if (k > 0) k--; continue } s[++k] = a[i] } ",
+        "o = \"\"; for (i = 1; i <= k; i++) o = o \"/\" s[i]; printf \"%s\", (o == \"\" ? \"/\" : o) }') ",
+        "&& [ -n \"$omh_f\" ] && OMH_TOOL_FILE=$omh_f || echo \"omh: could not resolve $OMH_TOOL_FILE; the hook sees it as given\" >&2; }; "
+    )
+    .into()
+}
+
+/// The same in the plugin renderers' JavaScript, through the bridge's
+/// `omh_file`, for an `env` object that already holds `OMH_TOOL_FILE`. `omp`
+/// adds omp's own clean-up of a path before it resolves one.
+pub(crate) fn absolute_file_js(indent: &str, omp: bool) -> String {
+    format!("{indent}env.OMH_TOOL_FILE = omh_file(env.OMH_TOOL_FILE, {omp})\n")
 }
 
 #[cfg(test)]

@@ -40,6 +40,17 @@ libc = "0.2"
 
 [dev-dependencies]
 
+# The end-to-end suite: every harness, in its image, against a fake model.
+# Behind a feature so a default build never compiles it — it needs Docker and
+# the four images, and `--include-ignored` would otherwise run it on every push.
+[features]
+e2e = []
+
 [[bin]]
 name = "omh"
 path = "src/main.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+required-features = ["e2e"]

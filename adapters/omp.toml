@@ -58,7 +58,7 @@ ready = "accountId"
 # rather than silently matching half of what it asked for. The same reasoning,
 # and the same omission, as the opencode adapter.
 [tools]
-edit  = "edit"
+edit  = "edit|write"
 read  = "read"
 shell = "bash"
 
@@ -159,7 +159,9 @@ after-tool    = "tool_result"
 # field to `event.toolName`, which the renderer would emit as
 # `event.input?.toolName` and bind to the empty string.
 #
-# `tool-file` is `path`, which is `read`'s parameter. It is **not** `edit`'s.
+# `tool-file` is `path`: `read`'s and `write`'s parameter, and `edit`'s too in
+# its replace and patch modes. Hashline, the default, carries the path inside
+# `input` instead, which the `fields-by-tool.edit` entry below reads first.
 [capabilities.hooks.fields]
 tool-file    = "path"
 tool-command = "command"
@@ -188,7 +190,7 @@ tool-command = "command"
 # the first file a batched edit touches — discipline, not full coverage, the
 # same posture every guard already takes toward a bypass it cannot close.
 [capabilities.hooks.fields-by-tool.edit]
-tool-file = '(event.input?.input?.match(/\[((?:[^[\]]|\[[^[\]]*\])*)#[0-9A-Fa-f]{4}\]/) ?? [])[1]'
+tool-file = '(event.input?.input?.match(/\[((?:[^[\]]|\[[^[\]]*\])*)#[0-9A-Fa-f]{4}\]/) ?? [])[1] ?? event.input?.path'
 
 # Advisory text, at the one moment there is a channel for it: a `tool_result`
 # handler returning `content` replaces what the model reads next, so appending

@@ -33,3 +33,24 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: run every test, including the ones that need Docker
         run: cargo test --locked -- --include-ignored
+
+  # Every harness omh supports, at the version adapters/ pins and in the image
+  # omh builds for it, driven through real turns against a fake model:
+  # tests/e2e. Behind the `e2e` feature, so the sweep above and every push
+  # leave it out. One job per harness: a failure names its harness, and each
+  # session's network comes from its own runner's address pool.
+  e2e:
+    name: every feature (${{ matrix.harness }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [claude, codex, omp, opencode]
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v7
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: run every scenario against ${{ matrix.harness }}
+        run: cargo test --locked --features e2e --test e2e -- --exact ${{ matrix.harness }}

@@ -854,24 +854,35 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
-        let args = base::index_args(
-            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
-            &paths.cache_volume(),
-            &paths.repo,
-            &paths.repo_name(),
-        );
-        match Command::new(backend.program())
-            .args(&args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+        // The harness's image as this host runs it, not as built: the volume
+        // this first index creates takes its owner from the image's agent, and
+        // where a session's agent is the host user (`image::for_host`) a volume made
+        // by uid 1000 is one it cannot write — the graph then never grew past
+        // this index, on GitHub's Linux runners.
+        let harness_image = image::tag_for(&adapter, ca.as_ref().map(image::Root::pem));
+        let started = image::for_host(
+            &backend,
+            &harness_image,
+            &image::Kind::Harness(&adapter),
+            true,
+        )
+        .and_then(|tag| {
+            let args =
+                base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_name());
+            Command::new(backend.program())
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(anyhow::Error::from)
+        });
+        match started {
             // Backgrounded: init returns now and the first launch waits only if
             // this has not finished.
             Ok(_) => {
                 summary.graph = Some(format!("indexing in background → {}", paths.cache_volume()))
             }
-            Err(e) => summary.graph = Some(format!("could not start indexing: {e}")),
+            Err(e) => summary.graph = Some(format!("could not start indexing: {e:#}")),
         }
     }
 
@@ -1590,6 +1601,21 @@ pub(crate) struct Sandbox {
 }
 
 impl Sandbox {
+    /// The class of [`tag`](Self::tag), for an image built over it: a stack's
+    /// when this repo installs something, the harness's own otherwise —
+    /// `image::stack_tag` returns the harness's tag then.
+    pub(crate) fn kind<'a>(
+        &self,
+        adapter: &'a Adapter,
+        repo: &'a std::path::Path,
+    ) -> image::Kind<'a> {
+        if self.installs.is_empty() {
+            image::Kind::Harness(adapter)
+        } else {
+            image::Kind::Stack(adapter, repo)
+        }
+    }
+
     pub(crate) fn recipe(&self) -> Vec<&str> {
         self.installs.iter().map(String::as_str).collect()
     }

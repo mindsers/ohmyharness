@@ -9,7 +9,7 @@
 use crate::adapter::Adapter;
 use crate::base::GRAPH_CACHE;
 use crate::runtime::Backend;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::Path;
 
 /// The base tag carries a digest of its own recipe, for the same reason the
@@ -493,6 +493,7 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     // prepares and the directory the launcher mounts into cannot drift.
     let notes = crate::memory::GUEST_MEMORY;
     let hostkeys = crate::ssh::GUEST_HOST_KEYS;
+    let workdir = crate::container_workdir();
     #[allow(non_snake_case)]
     let AGENT_UID = crate::runtime::AGENT_UID;
     let ca_layer = ca_layer(ca);
@@ -525,6 +526,12 @@ RUN __GRAPH_INSTALL__
 # be owned by the agent, or docker creates it as root.
 RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {notes} {GRAPH_CACHE} \
  && chown -R agent:agent /work /omh {GUEST_HOME}/.cache
+
+# The worktree is the agent's, whoever the filesystem reports as owning it: on
+# Docker Desktop for macOS, root, once a harness has written there, and git
+# refuses a repository it judges another user's. In the system config, so every
+# process here sees it, an editor's SSH session included.
+RUN git config --system --add safe.directory {workdir}
 
 # Session entrypoint: install the key, start sshd, then stay alive so the
 # container outlives the command that created it. The key arrives as an env var
@@ -774,6 +781,15 @@ pub enum Kind<'a> {
     Base,
     /// One recipe per adapter per omh version.
     Harness(&'a Adapter),
+    /// An image with the agent moved to the host user's uid and gid, on top of
+    /// the one a launch would run — see [`for_host`]. Its class is its base's
+    /// class and the user: one per base kind (and checkout, for a stack) and
+    /// host user, a newer one replacing the older.
+    Owner {
+        base: &'a Kind<'a>,
+        uid: u32,
+        gid: u32,
+    },
     /// One per *checkout*, because the recipe is that repo's toolchain. This is
     /// the case a repository cannot express.
     ///
@@ -798,6 +814,19 @@ impl Kind<'_> {
                 s.push(("omh.adapter".into(), a.name.to_string()));
                 s.push(("omh.repo".into(), repo.to_string_lossy().into_owned()));
             }
+            // An image inherits its base's labels; this one overrides the kind,
+            // so reaping the base's class never counts it, and keeps the rest of
+            // the base's class — adapter, checkout — with the user added. Keyed
+            // on the base's repository instead, `omh/claude` was one class for
+            // the harness's layer and every checkout's stack layer, and each
+            // build reaped the others.
+            Kind::Owner { base, uid, gid } => {
+                s = base.stamp();
+                s[0] = ("omh.kind".to_string(), self.name().to_string());
+                s.push(("omh.owner.of".into(), base.name().to_string()));
+                s.push(("omh.owner.uid".into(), uid.to_string()));
+                s.push(("omh.owner.gid".into(), gid.to_string()));
+            }
         }
         s
     }
@@ -807,6 +836,7 @@ impl Kind<'_> {
             Kind::Base => "base",
             Kind::Harness(_) => "harness",
             Kind::Stack(..) => "stack",
+            Kind::Owner { .. } => "owner",
         }
     }
 
@@ -887,6 +917,124 @@ pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<
         &format!("building {t}"),
     )?;
     Ok(())
+}
+
+/// Who the agent must be for this backend to write what the host mounts:
+/// `None` wherever the image's own uid, 1000, already does.
+///
+/// A Linux bind mount keeps the host's ownership, so on rootful Docker Engine
+/// a host user other than 1000 left the agent unable to write the worktree.
+/// Podman maps the host user onto the agent itself (`--userns=keep-id`).
+/// Docker Desktop for macOS shares files through a VM that does not keep host
+/// ownership; Docker Desktop for Linux is taken to do the same, unmeasured.
+/// Rootless Docker maps the host user to the container's root, which only an
+/// agent run as root would match, and omh does not run it so. Root writes
+/// everything already. `info` is
+/// `docker info`'s operating system and security options.
+pub(crate) fn agent_owner(
+    backend: &str,
+    linux: bool,
+    uid: u32,
+    gid: u32,
+    info: &str,
+) -> Option<(u32, u32)> {
+    let rootful_engine =
+        !info.is_empty() && !info.contains("Docker Desktop") && !info.contains("rootless");
+    (backend == "docker" && linux && uid != 0 && uid != crate::runtime::AGENT_UID && rootful_engine)
+        .then_some((uid, gid))
+}
+
+/// [`agent_owner`] for this host: its user, its platform, and its daemon.
+pub(crate) fn host_owner(backend: &Backend) -> Result<Option<(u32, u32)>> {
+    #[cfg(unix)]
+    // SAFETY: getuid and getgid take no arguments and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    #[cfg(not(unix))]
+    let (uid, gid) = (crate::runtime::AGENT_UID, crate::runtime::AGENT_UID);
+    let info = || -> Result<String> {
+        let out = backend.output(&[
+            "info",
+            "--format",
+            "{{.OperatingSystem}} {{json .SecurityOptions}}",
+        ])?;
+        anyhow::ensure!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    owner_of(backend.name(), cfg!(target_os = "linux"), uid, gid, info)
+}
+
+/// [`agent_owner`], with `docker info` asked only where the answer could
+/// matter — Linux Docker, a user other than 1000 and root — so no other launch
+/// pays for it. A daemon that will not answer stops the launch: read as
+/// "nothing to change", it left the agent at 1000 on a host that needed it
+/// moved, and the first edit failed with nothing to say why.
+fn owner_of(
+    backend: &str,
+    linux: bool,
+    uid: u32,
+    gid: u32,
+    info: impl FnOnce() -> Result<String>,
+) -> Result<Option<(u32, u32)>> {
+    let asked = linux && backend == "docker" && uid != 0 && uid != crate::runtime::AGENT_UID;
+    let info = if asked {
+        info().context("`docker info` would not say whether the agent must be the host user")?
+    } else {
+        String::new()
+    };
+    Ok(agent_owner(backend, linux, uid, gid, &info))
+}
+
+/// The layer that moves the agent to `uid`:`gid` on top of `base`.
+/// Non-unique ids are allowed — a primary group of 100, `users`, is common —
+/// and the directories the image gave the agent are re-owned with it.
+pub(crate) fn owner_dockerfile(base: &str, uid: u32, gid: u32) -> String {
+    let work = crate::container_workdir();
+    format!(
+        "FROM {base}\nUSER root\nRUN usermod -o -u {uid} agent \\\n && groupmod -o -g {gid} agent \\\n && chown -R {uid}:{gid} {GUEST_HOME} /omh {work}\nUSER agent\nWORKDIR {work}\n"
+    )
+}
+
+/// The name of [`owner_dockerfile`]'s image: the base's, the owner, and a
+/// digest of the layer's own recipe, so a layer that changes in a new omh is
+/// built afresh rather than found under its old name.
+pub(crate) fn owned_tag(base: &str, uid: u32, gid: u32) -> String {
+    let recipe = tag_digest(&owner_dockerfile(base, uid, gid));
+    format!("{base}-u{uid}g{gid}-{}", &recipe[..8])
+}
+
+/// `tags` and, where the agent must own what the host mounts, the owner layer
+/// over each: what a session on this host can be running.
+pub(crate) fn with_owned(tags: &[String], owner: Option<(u32, u32)>) -> Vec<String> {
+    let mut out = tags.to_vec();
+    if let Some((uid, gid)) = owner {
+        out.extend(tags.iter().map(|t| owned_tag(t, uid, gid)));
+    }
+    out
+}
+
+/// The image a launch runs on this host: `tag`, or — where the agent must own
+/// what the host mounts, see [`agent_owner`] — `tag` with the agent moved to
+/// the host user, built once and kept beside it. With `build` false, the name
+/// it would have and nothing more, for a dry run.
+pub fn for_host(backend: &Backend, tag: &str, base: &Kind, build: bool) -> Result<String> {
+    let Some((uid, gid)) = host_owner(backend)? else {
+        return Ok(tag.to_string());
+    };
+    let owned = owned_tag(tag, uid, gid);
+    if build && !exists(backend, &owned) {
+        self::build(
+            backend,
+            &owned,
+            &owner_dockerfile(tag, uid, gid),
+            &Kind::Owner { base, uid, gid },
+            None,
+        )?;
+    }
+    Ok(owned)
 }
 
 /// Make `tag` available to `backend`, building it if it is not there yet.
@@ -1906,6 +2054,156 @@ mod tests {
         })
     }
 
+    /// The agent owns what the host mounts, on rootful Docker Engine too.
+    ///
+    /// The image's agent is uid 1000, and a Linux bind mount keeps the host's
+    /// ownership: on a host whose user is anyone else, the agent could not
+    /// write the worktree at all — measured on GitHub's runners (uid 1001),
+    /// where every edit `tests/e2e` made failed with `Permission denied`
+    /// (nightly run 38722576842). Podman already maps the host user onto the
+    /// agent (`--userns=keep-id`); Docker Desktop for macOS shares files
+    /// through a VM that does not keep host ownership (for Linux, unmeasured);
+    /// rootless Docker maps the host user to the container's root, which only
+    /// an agent run as root would match. So only
+    /// rootful Docker Engine, on Linux, as a user other than 1000 and root.
+    #[test]
+    fn the_agent_takes_the_host_users_uid_only_where_it_must() {
+        let engine = "Ubuntu 24.04 LTS [\"name=apparmor\",\"name=seccomp,profile=builtin\"]";
+        let desktop = "Docker Desktop [\"name=seccomp,profile=builtin\"]";
+        let rootless = "Ubuntu 24.04 LTS [\"name=seccomp,profile=builtin\",\"name=rootless\"]";
+        assert_eq!(
+            agent_owner("docker", true, 1001, 1001, engine),
+            Some((1001, 1001))
+        );
+        assert_eq!(
+            agent_owner("docker", true, 1001, 100, engine),
+            Some((1001, 100))
+        );
+        for (backend, linux, uid, info, why) in [
+            ("docker", true, 1000, engine, "the image's own uid"),
+            ("docker", true, 0, engine, "root writes anything already"),
+            ("docker", false, 1001, engine, "not Linux"),
+            ("docker", true, 1001, desktop, "Docker Desktop"),
+            ("docker", true, 1001, rootless, "rootless Docker"),
+            (
+                "docker",
+                true,
+                1001,
+                "",
+                "a daemon that would not say what it is",
+            ),
+            ("podman", true, 1001, engine, "podman maps the user itself"),
+            ("sbx", true, 1001, engine, "sbx"),
+        ] {
+            assert_eq!(agent_owner(backend, linux, uid, uid, info), None, "{why}");
+        }
+    }
+
+    /// A daemon that would not say what it is fails the launch, by name.
+    ///
+    /// Read as "nothing to change", it left the agent at uid 1000 on a host
+    /// that needed it moved, and the first edit failed with `Permission
+    /// denied` and nothing to say why. Asked only where the answer matters:
+    /// Linux Docker, as a user other than 1000 and root.
+    #[test]
+    fn a_daemon_that_will_not_say_what_it_is_stops_the_launch() {
+        let engine = "Ubuntu 24.04 LTS [\"name=seccomp,profile=builtin\"]";
+        let refused = || -> Result<String> { anyhow::bail!("Cannot connect to the Docker daemon") };
+        let err = owner_of("docker", true, 1001, 1001, refused).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Cannot connect to the Docker daemon"),
+            "{err:#}"
+        );
+        assert!(format!("{err:#}").contains("docker info"), "{err:#}");
+
+        assert_eq!(
+            owner_of("docker", true, 1001, 1001, || Ok(engine.into())).unwrap(),
+            Some((1001, 1001))
+        );
+        // Not asked at all where the answer could not matter.
+        for (backend, linux, uid) in [
+            ("docker", true, 1000),
+            ("docker", true, 0),
+            ("docker", false, 1001),
+            ("podman", true, 1001),
+        ] {
+            let never =
+                || -> Result<String> { panic!("asked docker info for {backend} {linux} {uid}") };
+            assert_eq!(owner_of(backend, linux, uid, uid, never).unwrap(), None);
+        }
+    }
+
+    /// The layer that moves the agent: its uid and gid, non-unique allowed (a
+    /// primary group of 100, `users`, is common), and the directories the image
+    /// gave it re-owned. Its name is its base's, the user's, and a digest of
+    /// its own recipe, so each host user and each recipe gets its own.
+    #[test]
+    fn the_owner_layer_moves_the_agent_to_the_host_user() {
+        let df = owner_dockerfile("omh/claude:abc123", 1001, 100);
+        assert!(
+            df.starts_with("FROM omh/claude:abc123\nUSER root\n"),
+            "{df}"
+        );
+        assert!(df.contains("usermod -o -u 1001 agent"), "{df}");
+        assert!(df.contains("groupmod -o -g 100 agent"), "{df}");
+        // Every directory a recipe hands the agent, it hands the moved agent.
+        let chowned = |df: &str, owner: &str| -> Vec<String> {
+            df.lines()
+                .filter_map(|l| l.split(&format!("chown -R {owner} ")).nth(1))
+                .flat_map(|dirs| dirs.split_whitespace().take_while(|d| *d != "\\"))
+                .map(str::to_string)
+                .collect()
+        };
+        let moved = chowned(&df, "1001:100");
+        let mut given = chowned(&base_dockerfile(None), "agent:agent");
+        for name in ["claude", "codex", "omp", "opencode"] {
+            let a = Adapter::find(adapters(), name).unwrap();
+            given.extend(chowned(&harness_dockerfile(&a, None), "agent:agent"));
+        }
+        assert!(
+            given.len() > 3,
+            "the recipes' chowns were not found: {given:?}"
+        );
+        for dir in &given {
+            assert!(
+                moved
+                    .iter()
+                    .any(|m| dir == m || dir.starts_with(&format!("{m}/"))),
+                "{dir} is the agent's in the image, and the owner layer leaves it to uid 1000: {moved:?}"
+            );
+        }
+        assert!(df.trim_end().ends_with("WORKDIR /work"), "{df}");
+        assert!(df.contains("\nUSER agent\n"), "{df}");
+        assert!(
+            owned_tag("omh/claude:abc123", 1001, 100).starts_with("omh/claude:abc123-u1001g100-")
+        );
+    }
+
+    /// Git in the sandbox takes the worktree as its own, whoever the
+    /// filesystem says owns it.
+    ///
+    /// Measured on Docker Desktop for macOS: once a harness had written a file
+    /// in `/work`, `/work` and `/omh/shadow` were reported as owned by root
+    /// rather than the agent, and every git command there stopped with
+    /// `detected dubious ownership`. `tdd-guard` asks git whether the test
+    /// changed, could not, and let every edit through for the rest of the
+    /// session. Found by `tests/e2e`, which drives a real harness through a
+    /// real edit. In the image's system config, so it reaches every process —
+    /// the harness, its hooks, an editor's SSH session — and nothing that
+    /// scrubs the environment can take it away.
+    #[test]
+    fn git_in_the_sandbox_trusts_the_worktree() {
+        let want = format!(
+            "git config --system --add safe.directory {}",
+            crate::container_workdir()
+        );
+        assert!(
+            base_dockerfile(None).contains(&want),
+            "{}",
+            base_dockerfile(None)
+        );
+    }
+
     /// A probe that failed some other way is never read as *this container
     /// cannot reach its worktree* — and the two failures that mean *nothing is
     /// alive in there* are not read as refusals.
@@ -2451,6 +2749,123 @@ mod tests {
             Kind::Base.stamp(),
             "the harness layer is not the base it was built FROM"
         );
+    }
+
+    /// An owner layer is its own class: one per base class and host user. Keyed
+    /// on the base's repository instead, `omh/claude` held the harness's layer
+    /// and every checkout's stack layer, and each build reaped the others —
+    /// `omh init`'s index image and a launch's, two checkouts' stacks, two
+    /// users on one daemon, rebuilding one another on every launch.
+    #[test]
+    fn an_owner_layer_is_its_own_class_per_base_and_user() {
+        let adapter = claude();
+        let here = Path::new("/checkouts/api");
+        let there = Path::new("/checkouts/web");
+        let harness = Kind::Harness(&adapter);
+        let mine = Kind::Stack(&adapter, here);
+        let theirs = Kind::Stack(&adapter, there);
+        let owner = |base: &Kind, uid| {
+            Kind::Owner {
+                base,
+                uid,
+                gid: uid,
+            }
+            .stamp()
+        };
+
+        assert_ne!(
+            owner(&harness, 1001),
+            owner(&mine, 1001),
+            "the harness's layer is not a stack's"
+        );
+        assert_ne!(
+            owner(&mine, 1001),
+            owner(&theirs, 1001),
+            "another checkout's is not this one's"
+        );
+        assert_ne!(
+            owner(&mine, 1001),
+            owner(&mine, 1002),
+            "another user's is not this one's"
+        );
+        assert_ne!(
+            owner(&harness, 1001),
+            harness.stamp(),
+            "nor is it the base it was built FROM"
+        );
+    }
+
+    /// No class's listing finds another class's image. Docker matches a
+    /// `--filter label=…` per label and ANDs them, so a class whose labels are
+    /// a subset of another's lists that one too, and reaps it: an owner layer
+    /// still labelled `harness` was the harness's to remove, and one that
+    /// did not say what it was built over was every stack layer's.
+    #[test]
+    fn no_class_lists_another_classes_image() {
+        let adapter = claude();
+        let (here, there) = (Path::new("/checkouts/api"), Path::new("/checkouts/web"));
+        let (harness, mine, theirs) = (
+            Kind::Harness(&adapter),
+            Kind::Stack(&adapter, here),
+            Kind::Stack(&adapter, there),
+        );
+        let mut classes = vec![
+            Kind::Base.stamp(),
+            harness.stamp(),
+            mine.stamp(),
+            theirs.stamp(),
+        ];
+        for base in [&harness, &mine, &theirs] {
+            for uid in [1001, 1002] {
+                classes.push(
+                    Kind::Owner {
+                        base,
+                        uid,
+                        gid: uid,
+                    }
+                    .stamp(),
+                );
+            }
+        }
+        for (i, filter) in classes.iter().enumerate() {
+            for (j, image) in classes.iter().enumerate() {
+                let lists = filter.iter().all(|label| image.contains(label));
+                assert_eq!(
+                    lists,
+                    i == j,
+                    "the class {filter:?} {} the image {image:?}",
+                    if lists { "lists" } else { "does not list" }
+                );
+            }
+        }
+    }
+
+    /// An owner layer's tag names its own recipe, like every other tag: an
+    /// `owner_dockerfile` that changes in a new omh reaches the image, rather
+    /// than finding the old one under the old name and keeping it.
+    #[test]
+    fn an_owner_layers_tag_names_its_recipe() {
+        let base = "omh/claude:abc123";
+        let tag = owned_tag(base, 1001, 100);
+        assert!(tag.starts_with("omh/claude:abc123-u1001g100"), "{tag}");
+        assert!(
+            tag.contains(&tag_digest(&owner_dockerfile(base, 1001, 100))[..8]),
+            "{tag}"
+        );
+    }
+
+    /// The images `omh upgrade` counts as current include the owner layers a
+    /// session on this host runs, or every such session reads as stale and
+    /// stays stale, since a relaunch lands on the same tag.
+    #[test]
+    fn an_owner_layer_is_current_where_its_base_is() {
+        let tags = vec!["omh/base:b".to_string(), "omh/claude:h".to_string()];
+        assert_eq!(with_owned(&tags, None), tags, "no owner, no layer");
+        let both = with_owned(&tags, Some((1001, 100)));
+        for t in &tags {
+            assert!(both.contains(t), "{both:?}");
+            assert!(both.contains(&owned_tag(t, 1001, 100)), "{both:?}");
+        }
     }
 
     /// The class has to reach docker, or it is a comment. Every value is free

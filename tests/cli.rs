@@ -8179,6 +8179,62 @@ fn a_session_named_first_is_never_silently_dropped() {
     );
 }
 
+/// `omh doctor --json` is one document, whatever doctor could not measure.
+///
+/// When doctor cannot tell whether the network re-signs TLS — on every Linux
+/// host, where it cannot tell a shipped root from an installed one, and
+/// wherever its `openssl` fails — it said so with `say`, which is
+/// the command's answer: under `--json`, a notice object printed ahead of the
+/// report, and two documents on stdout that no JSON parser reads as one.
+/// Found by `tests/e2e` on a Linux runner, where `omh doctor --json` would
+/// not parse. An `openssl` that fails stands in for one doctor cannot trust.
+#[test]
+fn doctor_json_is_one_document() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    let openssl = sb.bin.join("openssl");
+    std::fs::write(&openssl, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(
+        &openssl,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let out = sb.omh(&["doctor", "--json"]);
+    let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&out.stdout)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| {
+            panic!(
+                "stdout is not JSON: {e}\n{}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        });
+    assert_eq!(
+        documents.len(),
+        1,
+        "omh doctor --json printed {} documents:\n{}",
+        documents.len(),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // And the one document still says the check did not run: a consumer of
+    // the JSON must not read "could not tell" as "measured and fine".
+    let said_so = documents[0]["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|c| {
+            c["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("could not check whether this network re-signs TLS"))
+        });
+    assert!(
+        said_so,
+        "the report does not say the TLS check could not run: {}",
+        documents[0]
+    );
+}
+
 /// `omh doctor` honours the account you name, or says why it cannot.
 ///
 /// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md

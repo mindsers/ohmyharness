@@ -864,6 +864,19 @@ mod rendered {
             allowed, "null",
             "a dirty test file must not block on omp: {allowed}"
         );
+
+        // And config-guard, registered on the same moment before tdd-guard: a
+        // driver that kept only the last handler for an event never ran it.
+        let config = drive_omp(
+            &doc.body,
+            dir.path(),
+            "tool_call",
+            r#"{ toolName: "write", input: { path: "/work/.omh/settings.toml", content: "x" } }"#,
+        );
+        assert!(
+            config.contains(r#""block":true"#),
+            "config-guard must block on omp too: {config}"
+        );
     }
 
     /// Every `[PATH#TAG]` header oh-my-pi accepts is guarded, not only the
@@ -1046,11 +1059,19 @@ mod rendered {
             format!(
                 r#"import register from "file://{}"
 const handlers = {{}}
-const pi = {{ on: (event, handler) => {{ handlers[event] = handler }} }}
+const pi = {{ on: (event, handler) => {{ (handlers[event] ??= []).push(handler) }} }}
 register(pi)
-const event = {event}
+let event = {event}
 try {{
-  const result = await handlers[{event_name:?}]?.(event, {{}})
+  // Every handler, in order, as omp runs them: the first block ends the
+  // call, and a result's content is what the next handler sees.
+  let result = null
+  for (const handler of handlers[{event_name:?}] ?? []) {{
+    const r = await handler(event, {{}})
+    if (r?.block) {{ result = r; break }}
+    if (r?.content) event = {{ ...event, content: r.content }}
+    if (r != null) result = r
+  }}
   console.log(JSON.stringify(result ?? null))
 }} catch (e) {{ console.log("THREW: " + e.message) }}
 "#,

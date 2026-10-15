@@ -144,7 +144,9 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
             // adapter is left on the image it already had, so a session on it is
             // *not* stale. This has to happen before the `continue`, or that
             // session is falsely named "relaunch to move it" with nowhere to move.
-            current.extend(tags);
+            // And the owner layer over each, where a session on this host runs
+            // one: without them every such session read as stale, for good.
+            current.extend(image::with_owned(&tags, image::host_owner(&backend)?));
             if outcome == Outcome::Unpinnable {
                 continue;
             }

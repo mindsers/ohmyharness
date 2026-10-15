@@ -1953,7 +1953,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // One of them was written `omh s rm <id>`, which does not parse,
         // and the scan caught it.
         ("src/doctor.rs", 7), // + `omh info --repo` in the `use` row's detail
-        // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
+        // Four. One is the `# `omh set --local ca_cert`` line `ca_layer`
         // writes into the generated Dockerfile, telling whoever reads the
         // recipe where the certificate came from. **Not** either of
         // `ca_for`'s refusals: neither contains a command line, so neither
@@ -1968,7 +1968,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // writing a template nothing re-reads. `omh doctor` goes to
         // somebody who set one that did not work; it carries no `--local`
         // and is the shorter claim.
-        ("src/image.rs", 3),
+        //
+        // The fourth is `docker info`, which `host_owner` asks a rootful Linux
+        // Docker before it moves the agent to the host user's uid.
+        ("src/image.rs", 4),
         // The ninth is the `--json` refusal, beside the two for `--dry-run`
         // and a session prefix nothing consumes.
         ("src/main.rs", 9),
