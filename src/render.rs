@@ -976,8 +976,8 @@ fn omp_one_hook(
         let names = wired
             .tools
             .iter()
-            // A vocabulary entry can name several tools, `edit|write`: a
-            // regex to Claude Code's matcher, a list here.
+            // A vocabulary entry can name several tools, `edit|write`, which
+            // Claude Code and Codex read as their own matcher; a list here.
             .flat_map(|t| t.split('|'))
             .map(|t| format!("{t:?}"))
             .collect::<Vec<_>>()
@@ -1118,8 +1118,8 @@ fn one_hook(
         let names = wired
             .tools
             .iter()
-            // A vocabulary entry can name several tools, `edit|write`: a
-            // regex to Claude Code's matcher, a list here.
+            // A vocabulary entry can name several tools, `edit|write`, which
+            // Claude Code and Codex read as their own matcher; a list here.
             .flat_map(|t| t.split('|'))
             .map(|t| format!("{t:?}"))
             .collect::<Vec<_>>()

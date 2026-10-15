@@ -14,8 +14,8 @@
 //! calls.
 //!
 //! Behind the `e2e` feature, so it builds only when asked for: it needs Docker,
-//! the four images, and minutes. The nightly workflow runs it with
-//! `cargo test --features e2e --test e2e`.
+//! the four images, and minutes. Run it with `cargo test --features e2e --test
+//! e2e`; the nightly workflow runs it once per harness, `-- --exact <name>`.
 
 mod driver;
 mod sandbox;

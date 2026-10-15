@@ -159,7 +159,9 @@ after-tool    = "tool_result"
 # field to `event.toolName`, which the renderer would emit as
 # `event.input?.toolName` and bind to the empty string.
 #
-# `tool-file` is `path`, which is `read`'s parameter. It is **not** `edit`'s.
+# `tool-file` is `path`: `read`'s and `write`'s parameter, and `edit`'s too in
+# its replace and patch modes. Hashline, the default, carries the path inside
+# `input` instead, which the `fields-by-tool.edit` entry below reads first.
 [capabilities.hooks.fields]
 tool-file    = "path"
 tool-command = "command"

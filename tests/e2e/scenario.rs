@@ -23,6 +23,10 @@ const SCENARIOS: &[Scenario] = &[
         run: rules,
     },
     Scenario {
+        name: "omh drops exactly the hooks this harness cannot express",
+        run: drops,
+    },
+    Scenario {
         name: "tdd-guard refuses an edit whose test is untouched",
         run: tdd_refuses,
     },
@@ -87,7 +91,7 @@ const SCENARIOS: &[Scenario] = &[
         run: doctor,
     },
     Scenario {
-        name: "the model is the only thing the harness reaches, but for what is named",
+        name: "through its proxy, the harness reaches the model and what is named",
         run: nothing_else,
     },
     // The session's life, in order and last: each leaves what the next needs,
@@ -199,7 +203,8 @@ fn message(e: &Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "a panic with no message".into())
 }
 
-/// A turn that ran, and asked the model at least once.
+/// A turn that ran, asked the model, and played the whole script: a turn that
+/// stopped early would pass every check that something did *not* happen.
 fn ran(turn: &Turn) {
     assert!(
         turn.out.status.success(),
@@ -210,6 +215,17 @@ fn ran(turn: &Turn) {
         !turn.asks().is_empty(),
         "the harness never asked the model for a next step: {} requests, {}",
         turn.requests.len(),
+        turn.printed()
+    );
+    assert_eq!(
+        turn.unreadable(),
+        0,
+        "the fake model could not parse a request: {}",
+        turn.printed()
+    );
+    assert!(
+        turn.played(),
+        "the turn ended before the script did: {}",
         turn.printed()
     );
 }
@@ -234,12 +250,16 @@ fn rules(s: &Session) {
     ran(&turn);
     let seen = Turn::seen(turn.asks()[0]);
     let rules = s.rendered("rules.md");
-    let missing: Vec<&str> = rules
+    let checked: Vec<&str> = rules
         .lines()
         .map(str::trim)
         .filter(|l| l.len() >= 20 && !(l.starts_with("<!--") && l.ends_with("-->")))
-        .filter(|l| !seen.contains(l))
         .collect();
+    assert!(
+        !checked.is_empty(),
+        "omh composed no rules to look for:\n{rules}"
+    );
+    let missing: Vec<&str> = checked.into_iter().filter(|l| !seen.contains(l)).collect();
     assert!(
         missing.is_empty(),
         "{} of omh's rules lines never reached the model:\n{}",
@@ -258,6 +278,7 @@ fn edit_script(h: &Driver, file: &str, old: &str, new: &str) -> Vec<Value> {
 
 fn refuses(s: &Session, file: &str, old: &str) {
     let before = s.read(file);
+    assert!(before.is_some(), "the seed has no {file} to guard");
     let turn = s.turn(
         "Edit the file.",
         &edit_script(s.harness, file, old, "// edited"),
@@ -287,13 +308,11 @@ fn allows(s: &Session, file: &str, test: &str, old: &str) {
         "tdd-guard refused {file} although {test} had changed: {}",
         turn.printed()
     );
-    if s.harness.edits_land {
-        assert!(
-            s.read(file).is_some_and(|c| c.contains("// edited")),
-            "{file} did not change: {}",
-            turn.printed()
-        );
-    }
+    assert!(
+        s.read(file).is_some_and(|c| c.contains("// edited")),
+        "{file} did not change: {}",
+        turn.printed()
+    );
 }
 
 fn tdd_refuses(s: &Session) {
@@ -362,24 +381,55 @@ fn config_refuses(s: &Session) {
     );
 }
 
-/// A hook either did what it is for, or omh said it could not: the launch
-/// line names every hook it dropped, and why.
+/// A hook did what it is for, or — when the driver expects this harness to
+/// have no way to express it — omh named it dropped. Both ways strict: a hook
+/// that stopped working fails, and so does one omh newly drops.
 fn worked_or_named(s: &Session, hook: &str, worked: bool) {
-    assert!(
-        worked || s.dropped(hook),
-        "{hook} neither worked nor was named dropped on {}. omh new said:\n{}",
+    if s.harness.drops.contains(&hook) {
+        assert!(
+            s.dropped(hook),
+            "{hook} was expected dropped on {} and was not. omh new said:\n{}",
+            s.harness.name,
+            s.launched
+        );
+    } else {
+        assert!(
+            worked && !s.dropped(hook),
+            "{hook} did not work on {} (dropped: {}). omh new said:\n{}",
+            s.harness.name,
+            s.dropped(hook),
+            s.launched
+        );
+    }
+}
+
+/// omh drops exactly the hooks the driver expects for this harness, and no
+/// others.
+fn drops(s: &Session) {
+    let want: std::collections::BTreeSet<String> =
+        s.harness.drops.iter().map(|h| h.to_string()).collect();
+    assert_eq!(
+        s.dropped_all(),
+        want,
+        "omh dropped a different set on {}. omh new said:\n{}",
         s.harness.name,
         s.launched
     );
 }
 
-/// The lines in a file in the container, which a `run` hook appends to.
+/// The lines in a file in the container, which a `run` hook appends to. A
+/// file not there yet is none; a container that could not be asked fails.
 fn lines(s: &Session, file: &str) -> usize {
     let out = s.sh(&format!("cat {file} 2>/dev/null | wc -l"));
+    assert!(
+        out.status.success(),
+        "counting {file}: {}",
+        crate::sandbox::text(&out)
+    );
     String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse()
-        .unwrap_or(0)
+        .unwrap_or_else(|_| panic!("counting {file}: {}", crate::sandbox::text(&out)))
 }
 
 fn graph_orient(s: &Session) {
@@ -402,9 +452,10 @@ fn graph_read(s: &Session) {
     worked_or_named(s, "graph-read", told);
 }
 
-/// No harness omh supports has one tool for searching: Claude Code searches
-/// through its shell, and the others have `grep` and `glob` apart. A hook
-/// narrowed to `search` would match nothing, so it is dropped by name.
+/// No harness omh supports has one tool for searching: Claude Code and Codex
+/// search through their shell, and omp and opencode have `grep` and `glob`
+/// apart. A hook narrowed to `search` would match nothing, so it is dropped by
+/// name.
 fn graph_first(s: &Session) {
     assert!(
         s.dropped("graph-first"),
@@ -435,7 +486,12 @@ fn graph_refresh(s: &Session) {
 /// How many times omh's ledger records `hook` as fired. Parsed, not grepped:
 /// the shell and plugin renderers write the same two keys in either order.
 fn fired(s: &Session, hook: &str) -> usize {
-    let out = s.sh("cat /omh/shadow/omh-events.jsonl 2>/dev/null");
+    let out = s.sh("cat /omh/shadow/omh-events.jsonl 2>/dev/null; true");
+    assert!(
+        out.status.success(),
+        "reading the ledger: {}",
+        crate::sandbox::text(&out)
+    );
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -455,7 +511,7 @@ fn every_event(s: &Session) {
     let first = Turn::seen(turn.asks()[0]);
     let anywhere = |text: &str| turn.requests.iter().any(|r| Turn::seen(r).contains(text));
 
-    let mut silent = Vec::new();
+    let mut wrong = Vec::new();
     for (hook, worked) in [
         ("e2e-start-run", ran_during(0)),
         ("e2e-start-inject", first.contains("E2E-START-INJECT")),
@@ -466,13 +522,17 @@ fn every_event(s: &Session) {
         ("e2e-end-run", ran_during(3)),
         ("e2e-end-inject", anywhere("E2E-END-INJECT")),
     ] {
-        if !worked && !s.dropped(hook) {
-            silent.push(hook);
+        let expected_dropped = s.harness.drops.contains(&hook);
+        if expected_dropped != s.dropped(hook) || (!expected_dropped && !worked) {
+            wrong.push(format!(
+                "{hook}: worked {worked}, dropped {}, expected dropped {expected_dropped}",
+                s.dropped(hook)
+            ));
         }
     }
     assert!(
-        silent.is_empty(),
-        "these hooks neither worked nor were named dropped on {}: {silent:?}\nomh new said:\n{}\n{}",
+        wrong.is_empty(),
+        "hooks that did not do what {} should: {wrong:#?}\nomh new said:\n{}\n{}",
         s.harness.name,
         s.launched,
         turn.printed()

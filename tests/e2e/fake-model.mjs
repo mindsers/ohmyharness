@@ -117,8 +117,8 @@ function chat(res, body, plan) {
   res.writeHead(200, { "content-type": "text/event-stream" });
   const delta = plan.tool ? { role: "assistant", tool_calls: [{ index: 0, ...call }] } : { role: "assistant", content: plan.text };
   sse(res, null, { ...base, choices: [{ index: 0, delta, finish_reason: null }] });
-  // Without a finish reason opencode asks again, and again: 1,395 requests in
-  // a minute, measured.
+  // Without a finish reason opencode asks again, and again: about 1,400
+  // requests in a minute, measured.
   sse(res, null, { ...base, choices: [{ index: 0, delta: {}, finish_reason: finish }], usage });
   sse(res, null, "[DONE]");
   res.end();
@@ -130,11 +130,22 @@ const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk) => (raw += chunk));
   req.on("end", () => {
+    // A request in absolute form is one sent through the fake as a proxy:
+    // plain HTTP for somewhere else. Logged with the CONNECTs, and refused.
+    if (/^https?:\/\//.test(req.url)) {
+      record({ method: req.method, url: req.url, proxied: true });
+      res.writeHead(403);
+      return res.end();
+    }
     let body = {};
     try {
       body = raw ? JSON.parse(raw) : {};
     } catch {
-      // Not JSON; logged as an empty body, and answered as a miss below.
+      // Logged raw and refused, never answered as an ordinary turn: a request
+      // the fake could not read must not look like one it played.
+      record({ method: req.method, url: req.url, bad_json: true, raw });
+      res.writeHead(400, { "content-type": "application/json" });
+      return res.end('{"error":{"type":"invalid_request_error","message":"the fake model could not parse this request"}}');
     }
     const proto = req.method === "POST" ? protocol(req.url) : null;
     const plan = proto ? reply(body) : null;

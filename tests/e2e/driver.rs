@@ -29,14 +29,15 @@ pub struct Driver {
     pub edit: fn(file: &str, old: &str, new: &str) -> Value,
     /// Create a file, or overwrite one whole.
     pub write: fn(file: &str, contents: &str) -> Value,
-    /// Whether an `edit` the guards let through is applied. Not on omp, whose
-    /// edits carry a snapshot hash only a real `read` hands out.
-    pub edits_land: bool,
     /// Call `tool` on the MCP server omh registered as `server` — every
     /// harness has its own way, and some take two steps.
     pub mcp: fn(server: &str, tool: &str, args: Value) -> Vec<Value>,
     /// Hosts the harness reaches on its own, beside the model, and why.
     pub elsewhere: &'static [&'static str],
+    /// Every hook omh drops for this harness, of the base set's and the
+    /// suite's own: exactly these, so a capability lost or newly dropped
+    /// fails rather than passing as "named".
+    pub drops: &'static [&'static str],
 }
 
 /// omh's code graph server checks GitHub for a newer release whenever it
@@ -92,7 +93,7 @@ pub const CLAUDE: Driver = Driver {
     },
     mcp: |server, tool_name, args| vec![tool(&format!("mcp__{server}__{tool_name}"), args)],
     elsewhere: &[GRAPH_UPDATE_CHECK],
-    edits_land: true,
+    drops: &["graph-first"],
 };
 
 /// Codex takes a provider on the command line — the session layer, above
@@ -144,8 +145,11 @@ pub const CODEX: Driver = Driver {
             "*** Begin Patch\n*** Add File: {file}\n{body}*** End Patch\n"
         ) } })
     },
-    // Codex holds every MCP tool behind `tool_search`: a call by name is an
-    // `unsupported call` until a search has loaded the server's namespace.
+    // Codex offers its MCP tools only through `tool_search`, which answers with
+    // each server's namespace — `mcp__codegraph` holding `list_projects` — and
+    // a call names both. Spelled flat, `mcp__codegraph__list_projects`, it is
+    // an `unsupported call`. Searching first is what a model would do, since
+    // the search is how it learns the namespace.
     mcp: |server, tool_name, args| {
         vec![
             json!({ "item": { "type": "tool_search_call", "execution": "client", "arguments": { "query": format!("{server} {tool_name}"), "limit": 8 } } }),
@@ -153,14 +157,13 @@ pub const CODEX: Driver = Driver {
         ]
     },
     elsewhere: &[GRAPH_UPDATE_CHECK],
-    edits_land: true,
+    drops: &["graph-first", "graph-read", "e2e-end-inject"],
 };
 
-/// omp's provider is a file. `openai-completions`, not `anthropic-messages`,
-/// which renames every tool with a leading `_`. The providers it would
-/// otherwise ask for model lists are switched off; catalog.stencil.so has no
-/// switch, and its failure is swallowed. Not `--no-extensions`: omh's hooks
-/// are an extension.
+/// omp's provider is a file, speaking `openai-completions`, which was measured
+/// completing a turn as is. The providers it would otherwise ask for model
+/// lists are switched off. Not `--no-extensions`: omh's hooks are an
+/// extension.
 pub const OMP: Driver = Driver {
     name: "omp",
     env: &[("PI_AUTO_QA", "0")],
@@ -183,9 +186,8 @@ pub const OMP: Driver = Driver {
     shell: |command| tool("bash", json!({ "command": command, "i": "e2e" })),
     read: |file| tool("read", json!({ "path": file, "i": "e2e" })),
     // Hashline, omp's default edit mode for a model it does not know. The tag
-    // is the file's snapshot hash, which only a `read` hands out; a guard
-    // decides before omp checks it, and anything past the guard is refused
-    // by omp for the tag rather than applied.
+    // is a snapshot hash this edit cannot know; omp still applies an insert at
+    // the head of the file (`PUT <1:`) under a stale one, with a warning.
     edit: |file, _old, new| {
         tool("edit", json!({ "input": format!("[{file}#0000]\nPUT <1:\n+{new}\n"), "i": "e2e" }))
     },
@@ -195,8 +197,11 @@ pub const OMP: Driver = Driver {
     mcp: |server, tool_name, args| {
         vec![tool("write", json!({ "path": format!("xd://mcp__{server}_{tool_name}"), "content": args.to_string(), "i": "e2e" }))]
     },
-    elsewhere: &[GRAPH_UPDATE_CHECK],
-    edits_land: false,
+    // And omp's model catalogue, which it fetches with no switch to stop it
+    // and retries five minutes after a failure: there in some turns and not
+    // in others.
+    elsewhere: &[GRAPH_UPDATE_CHECK, "catalog.stencil.so:443"],
+    drops: &["e2e-before-inject", "e2e-end-inject", "e2e-start-inject", "git-note", "graph-first", "graph-orient", "graph-read"],
 };
 
 /// opencode's provider comes in through `OPENCODE_CONFIG_CONTENT`, which it
@@ -246,5 +251,14 @@ pub const OPENCODE: Driver = Driver {
     // And the npm registry: opencode installs `@opencode-ai/plugin` beside the
     // plugins it loads, with no switch to stop it.
     elsewhere: &[GRAPH_UPDATE_CHECK, "registry.npmjs.org:443"],
-    edits_land: true,
+    drops: &[
+        "e2e-before-inject",
+        "e2e-end-inject",
+        "e2e-start-inject",
+        "e2e-start-run",
+        "git-note",
+        "graph-first",
+        "graph-orient",
+        "graph-read",
+    ],
 };

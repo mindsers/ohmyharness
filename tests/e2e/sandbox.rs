@@ -207,7 +207,8 @@ impl Session {
     pub fn turn(&self, prompt: &str, script: &[serde_json::Value]) -> Turn {
         // A directory per turn, so nothing the last fake logged can be taken
         // for this turn's. One port for all of them — omp's provider is a file
-        // written once per session — and it is clear of the ports omp probes
+        // naming it, written whenever the container is new — and it is clear
+        // of the ports omp probes
         // for local providers (11434, 8080, 1234).
         let k = self.fakes.get() + 1;
         self.fakes.set(k);
@@ -255,6 +256,11 @@ impl Session {
             text(&stopped)
         );
         let log = self.exec(&[], &["cat".into(), format!("{dir}/requests.jsonl")]);
+        assert!(
+            log.status.success(),
+            "the fake model's log could not be read: {}",
+            text(&log)
+        );
         let requests = String::from_utf8_lossy(&log.stdout)
             .lines()
             .map(|l| serde_json::from_str(l).expect("the fake writes JSON lines"))
@@ -269,6 +275,26 @@ impl Session {
             .lines()
             .filter(|l| l.contains("dropped hooks:"))
             .any(|l| l.contains(&format!("{hook} (")))
+    }
+
+    /// Every hook `omh new` named as dropped.
+    pub fn dropped_all(&self) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for line in self
+            .launched
+            .lines()
+            .filter(|l| l.contains("dropped hooks:"))
+        {
+            let list = line.split("dropped hooks:").nth(1).unwrap_or("");
+            // `name (why), name (why)`: a name is what comes before ` (` at
+            // the start of the list or after `), `.
+            for part in list.split("), ") {
+                if let Some((name, _)) = part.trim().split_once(" (") {
+                    out.insert(name.trim().to_string());
+                }
+            }
+        }
+        out
     }
 
     /// Run a shell command in the container, as the agent, and say whether
@@ -321,14 +347,22 @@ impl Drop for Session {
                 .map(str::to_string)
                 .collect()
         };
+        // Said, never asserted: a panic in `drop` while a scenario's panic
+        // unwinds aborts the run, and a leak is worth a line, not that.
+        let remove = |what: &str, args: &[&str]| {
+            let out = docker(args);
+            if !out.status.success() {
+                eprintln!("e2e: could not remove {what}: {}", text(&out));
+            }
+        };
         for c in named(&["ps", "-a", "--format", "{{.Names}}"]) {
-            docker(&["rm", "-f", &c]);
+            remove(&c, &["rm", "-f", &c]);
         }
         for n in named(&["network", "ls", "--format", "{{.Name}}"]) {
-            docker(&["network", "rm", &n]);
+            remove(&n, &["network", "rm", &n]);
         }
         for v in named(&["volume", "ls", "--format", "{{.Name}}"]) {
-            docker(&["volume", "rm", &v]);
+            remove(&v, &["volume", "rm", &v]);
         }
     }
 }
@@ -406,11 +440,27 @@ impl Turn {
         out
     }
 
+    /// Whether the fake played its whole script: some request was answered
+    /// with the end of it. A turn that stopped early has not.
+    pub fn played(&self) -> bool {
+        self.requests
+            .iter()
+            .any(|r| r["plan"]["text"] == "FAKE_DONE")
+    }
+
+    /// Requests the fake could not parse, which it refused rather than played.
+    pub fn unreadable(&self) -> usize {
+        self.requests
+            .iter()
+            .filter(|r| r["bad_json"] == true)
+            .count()
+    }
+
     /// Hosts the harness tried to reach other than the model.
     pub fn elsewhere(&self) -> Vec<String> {
         self.requests
             .iter()
-            .filter(|r| r["method"] == "CONNECT")
+            .filter(|r| r["method"] == "CONNECT" || r["proxied"] == true)
             .filter_map(|r| r["url"].as_str().map(str::to_string))
             .collect()
     }
