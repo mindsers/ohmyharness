@@ -1356,9 +1356,9 @@ const omh_file = (f, omp) => {
         // Not a URL omp could open either; resolved as a path below.
       }
     }
-    if (f === "~") f = homedir()
-    else if (f.startsWith("~/")) f = homedir() + f.slice(1)
-    else if (f.startsWith("~")) f = posix.join(homedir(), f.slice(1))
+    // omp's `expandTilde` has three cases — `~`, `~/x`, `~x` — and a join
+    // gives each the same answer.
+    if (f.startsWith("~")) f = posix.join(homedir(), f.slice(1))
   }
   return posix.resolve(process.cwd(), f)
 }
@@ -3964,7 +3964,21 @@ try {{
         }
         // omp's `write` unwraps a hashline header first, and resolves a scheme
         // its router does not handle — `a:` — as a path, from the workspace.
-        for f in ["[.omh/hooks/x.json]", "a://../.omh/hooks/x.json"] {
+        // A stray `:` goes before a relative path too.
+        let parent = format!(
+            ":../{}/.omh/hooks/x.json",
+            std::path::Path::new(&here)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+        for f in [
+            "[.omh/hooks/x.json]",
+            "a://../.omh/hooks/x.json",
+            ":./.omh/hooks/x.json",
+            parent.as_str(),
+        ] {
             let said = drive_omp(
                 &omp_doc,
                 "tool_call",
@@ -3981,7 +3995,8 @@ try {{
             "~{}/work/.omh/hooks/x.json",
             "/..".repeat(home.matches('/').count())
         );
-        let up = up.replacen("~/", "~", 1);
+        let joined = up.replacen("~/", "~", 1);
+        let (colon, at) = (format!(":{up}"), format!("@{up}"));
         // omp's own clean-up, before it resolves a path.
         for f in [
             ":/work/.omh/hooks/x.json",
@@ -3989,6 +4004,9 @@ try {{
             "file:///work/.omh/hooks/x.json",
             "[/work/.omh/hooks/x.json#0000]",
             up.as_str(),
+            joined.as_str(),
+            colon.as_str(),
+            at.as_str(),
         ] {
             let said = drive_omp(
                 &omp_doc,
