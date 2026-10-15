@@ -854,24 +854,29 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
-        let args = base::index_args(
-            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
-            &paths.cache_volume(),
-            &paths.repo,
-            &paths.repo_name(),
-        );
-        match Command::new(backend.program())
-            .args(&args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
+        // The image a session will run, not the harness's own: the volume
+        // this first index creates takes its owner from the image, and where
+        // a session's agent is the host user (`image::for_host`) a volume made
+        // by uid 1000 is one it cannot write — the graph then never grew past
+        // this index, on GitHub's Linux runners.
+        let harness_image = image::tag_for(&adapter, ca.as_ref().map(image::Root::pem));
+        let started = image::for_host(&backend, &harness_image, true).and_then(|tag| {
+            let args =
+                base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_name());
+            Command::new(backend.program())
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(anyhow::Error::from)
+        });
+        match started {
             // Backgrounded: init returns now and the first launch waits only if
             // this has not finished.
             Ok(_) => {
                 summary.graph = Some(format!("indexing in background → {}", paths.cache_volume()))
             }
-            Err(e) => summary.graph = Some(format!("could not start indexing: {e}")),
+            Err(e) => summary.graph = Some(format!("could not start indexing: {e:#}")),
         }
     }
 

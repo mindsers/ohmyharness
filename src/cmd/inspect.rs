@@ -389,14 +389,15 @@ pub(crate) fn doctor_cmd(
             // reachable: no `openssl`, no network, an `openssl` that ignores
             // `-CAfile`. A check that quietly did not run is the shape doctor
             // exists to eliminate, not to add.
+            //
+            // A warning on stderr, like the `Private` branch below, and not
+            // `say`: `say` is the command's answer, and under `--json` it put a
+            // second document ahead of doctor's report on stdout —
+            // `doctor_json_is_one_document`.
             if let doctor::Inspection::Unknown(why) = &verdict {
-                ctx.say(
-                    &report::Action::new(
-                        "tls-inspection-unknown",
-                        format!("could not check whether this network re-signs TLS: {why}"),
-                    )
-                    .data(serde_json::json!({ "reason": why })),
-                );
+                ctx.warn(&format!(
+                    "could not check whether this network re-signs TLS: {why}"
+                ));
             }
             if verdict == doctor::Inspection::Private {
                 // Named, because a proxy that re-signs one host and not another is

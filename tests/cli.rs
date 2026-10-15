@@ -8197,6 +8197,45 @@ fn a_session_named_first_is_never_silently_dropped() {
 /// flag `doctor` was discarding, and was swallowed before it could print.
 /// **The host's answers survive the thing that stopped the sandbox.**
 ///
+/// `omh doctor --json` is one document, whatever doctor could not measure.
+///
+/// When doctor cannot tell whether the network re-signs TLS — no `openssl`
+/// it can trust, as on every Linux host — it said so with `say`, which is
+/// the command's answer: under `--json`, a notice object printed ahead of the
+/// report, and two documents on stdout that no JSON parser reads as one.
+/// Found by `tests/e2e` on a Linux runner, where `omh doctor --json` would
+/// not parse. An `openssl` that fails stands in for one doctor cannot trust.
+#[test]
+fn doctor_json_is_one_document() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    let openssl = sb.bin.join("openssl");
+    std::fs::write(&openssl, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(
+        &openssl,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let out = sb.omh(&["doctor", "--json"]);
+    let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&out.stdout)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| {
+            panic!(
+                "stdout is not JSON: {e}\n{}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        });
+    assert_eq!(
+        documents.len(),
+        1,
+        "omh doctor --json printed {} documents:\n{}",
+        documents.len(),
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// This is the whole feature, and nothing reached it: `doctor_cmd` needs a
 /// container, so every existing doctor test hands it `fake_docker`. Deleting
 /// the no-runtime early return left the suite green — the command reverted to
