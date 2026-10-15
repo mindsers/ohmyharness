@@ -36,6 +36,12 @@ impl Session {
     /// selected by `omh use` and committed, and a session of `harness` started
     /// in it by `omh new`.
     pub fn start(harness: &'static Driver, seed: &[(&str, &str)], hooks: &[&str]) -> Session {
+        // One start at a time. `omh init` builds the image a launch needs and
+        // removes the ones it supersedes, and four of them at once after a
+        // recipe changed removed each other's images: `No such image` on
+        // whichever came last. The turns, after, run side by side.
+        static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = STARTING.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let repo = dir.path().join("repo");
