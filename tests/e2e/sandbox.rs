@@ -26,6 +26,8 @@ pub struct Session {
     pub id: String,
     pub container: String,
     pub harness: &'static Driver,
+    /// What `omh new` said: the launch line names every hook it dropped.
+    pub launched: String,
     fakes: std::cell::Cell<u16>,
 }
 
@@ -46,6 +48,7 @@ impl Session {
             id: String::new(),
             container: String::new(),
             harness,
+            launched: String::new(),
             fakes: std::cell::Cell::new(0),
         };
         session.git(&["init", "-q", "-b", "main"]);
@@ -88,6 +91,7 @@ impl Session {
             harness.name,
             text(&new)
         );
+        session.launched = text(&new);
         session.container = format!("omh-{}-s01", session.id);
         let running = docker(&["inspect", "-f", "{{.State.Running}}", &session.container]);
         assert_eq!(
@@ -244,6 +248,21 @@ impl Session {
             .map(|l| serde_json::from_str(l).expect("the fake writes JSON lines"))
             .collect();
         Turn { out, requests }
+    }
+
+    /// Whether `omh new` named `hook` as dropped for this harness: the
+    /// launch line reads `— dropped hooks: graph-first (no `search` tool), …`.
+    pub fn dropped(&self, hook: &str) -> bool {
+        self.launched
+            .lines()
+            .filter(|l| l.contains("dropped hooks:"))
+            .any(|l| l.contains(&format!("{hook} (")))
+    }
+
+    /// Run a shell command in the container, as the agent, and say whether
+    /// it succeeded.
+    pub fn sh(&self, command: &str) -> Output {
+        self.exec(&[], &["sh".into(), "-c".into(), command.into()])
     }
 
     /// A file in the worktree, as the agent left it.

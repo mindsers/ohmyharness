@@ -34,8 +34,6 @@ pub struct Driver {
     pub edits_land: bool,
 }
 
-pub const ALL: [&Driver; 4] = [&CLAUDE, &CODEX, &OMP, &OPENCODE];
-
 fn tool(name: &str, args: Value) -> Value {
     json!({ "tool": { "name": name, "args": args } })
 }
