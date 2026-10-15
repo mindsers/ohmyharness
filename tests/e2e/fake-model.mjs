@@ -14,6 +14,7 @@
 //
 //   { "tool":   { "name": "Bash", "args": { "command": "ls" } } }
 //   { "custom": { "name": "apply_patch", "input": "*** Begin Patch\n…" } }
+//   { "item":   { "type": "tool_search_call", … } }  (Responses only, as is)
 //   { "text":   "anything" }
 //
 // Every request is a line in `$FAKE_DIR/requests.jsonl`, body and all: that
@@ -88,7 +89,9 @@ function anthropic(res, body, plan) {
 
 function responses(res, body, plan) {
   const id = `resp_fake${n}`;
-  const item = plan.custom
+  const item = plan.item
+    ? { id: `item_fake${n}`, call_id: `call_fake${n}`, status: "completed", ...plan.item }
+    : plan.custom
     ? { type: "custom_tool_call", id: `ctc_fake${n}`, call_id: `call_fake${n}`, name: plan.custom.name, input: plan.custom.input, status: "completed" }
     : plan.tool
       ? { type: "function_call", id: `fc_fake${n}`, call_id: `call_fake${n}`, name: plan.tool.name, arguments: JSON.stringify(plan.tool.args), status: "completed" }

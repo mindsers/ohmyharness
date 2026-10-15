@@ -3757,6 +3757,18 @@ try {{
             r#"{ args: { filePath: "pkg/x.go" } }"#,
         );
         assert!(said.contains(want), "opencode: {said}");
+
+        // Not a path at all: omp calls an MCP tool by writing its arguments to
+        // `xd://mcp__<server>_<tool>`, and a URI is left as the model wrote it.
+        let said = drive_omp(
+            &render(omp()),
+            "tool_call",
+            r#"{ toolName: "write", input: { path: "xd://mcp__codegraph_list_projects", content: "{}" } }"#,
+        );
+        assert!(
+            said.contains("saw xd://mcp__codegraph_list_projects"),
+            "omp, a URI: {said}"
+        );
     }
 
     /// A guard on edits sees a whole-file write, on every harness: a write

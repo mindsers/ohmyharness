@@ -875,16 +875,17 @@ pub fn interpolating(text: &str) -> String {
 /// matching `/work/.omh/*` never matched those, and one asking git about a
 /// relative path from that path's own directory resolved it twice. Resolved
 /// here against the directory the hook runs in, which is the harness's own —
-/// `/work` in a session — so a hook never has to.
+/// `/work` in a session — so a hook never has to. A URI is not a path and is
+/// left alone: omp calls an MCP tool by writing to `xd://mcp__<server>_<tool>`.
 pub(crate) fn absolute_file_sh() -> String {
-    "OMH_TOOL_FILE=${OMH_TOOL_FILE#./}; case \"$OMH_TOOL_FILE\" in ''|/*) ;; *) OMH_TOOL_FILE=\"$PWD/$OMH_TOOL_FILE\" ;; esac; ".into()
+    "OMH_TOOL_FILE=${OMH_TOOL_FILE#./}; case \"$OMH_TOOL_FILE\" in ''|/*|*://*) ;; *) OMH_TOOL_FILE=\"$PWD/$OMH_TOOL_FILE\" ;; esac; ".into()
 }
 
 /// The same, in the plugin renderers' JavaScript, for an `env` object that
 /// already holds `OMH_TOOL_FILE`, resolved against the harness's process.
 pub(crate) fn absolute_file_js(indent: &str) -> String {
     format!(
-        "{indent}if (env.OMH_TOOL_FILE && !env.OMH_TOOL_FILE.startsWith(\"/\")) env.OMH_TOOL_FILE = process.cwd() + \"/\" + env.OMH_TOOL_FILE.replace(/^\\.\\//, \"\")\n"
+        "{indent}if (env.OMH_TOOL_FILE && !env.OMH_TOOL_FILE.startsWith(\"/\") && !env.OMH_TOOL_FILE.includes(\"://\")) env.OMH_TOOL_FILE = process.cwd() + \"/\" + env.OMH_TOOL_FILE.replace(/^\\.\\//, \"\")\n"
     )
 }
 

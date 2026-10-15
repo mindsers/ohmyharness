@@ -32,7 +32,18 @@ pub struct Driver {
     /// Whether an `edit` the guards let through is applied. Not on omp, whose
     /// edits carry a snapshot hash only a real `read` hands out.
     pub edits_land: bool,
+    /// Call `tool` on the MCP server omh registered as `server` — every
+    /// harness has its own way, and some take two steps.
+    pub mcp: fn(server: &str, tool: &str, args: Value) -> Vec<Value>,
+    /// Hosts the harness reaches on its own, beside the model, and why.
+    pub elsewhere: &'static [&'static str],
 }
+
+/// omh's code graph server checks GitHub for a newer release whenever it
+/// starts (`curl … api.github.com/repos/DeusData/codebase-memory-mcp/releases/latest`
+/// in its binary), and it has no switch to stop it. Every harness that starts
+/// it reaches GitHub from the sandbox.
+const GRAPH_UPDATE_CHECK: &str = "api.github.com:443";
 
 fn tool(name: &str, args: Value) -> Value {
     json!({ "tool": { "name": name, "args": args } })
@@ -79,6 +90,8 @@ pub const CLAUDE: Driver = Driver {
             json!({ "file_path": abs(file), "content": contents }),
         )
     },
+    mcp: |server, tool_name, args| vec![tool(&format!("mcp__{server}__{tool_name}"), args)],
+    elsewhere: &[GRAPH_UPDATE_CHECK],
     edits_land: true,
 };
 
@@ -131,6 +144,15 @@ pub const CODEX: Driver = Driver {
             "*** Begin Patch\n*** Add File: {file}\n{body}*** End Patch\n"
         ) } })
     },
+    // Codex holds every MCP tool behind `tool_search`: a call by name is an
+    // `unsupported call` until a search has loaded the server's namespace.
+    mcp: |server, tool_name, args| {
+        vec![
+            json!({ "item": { "type": "tool_search_call", "execution": "client", "arguments": { "query": format!("{server} {tool_name}"), "limit": 8 } } }),
+            json!({ "item": { "type": "function_call", "namespace": format!("mcp__{server}"), "name": tool_name, "arguments": args.to_string() } }),
+        ]
+    },
+    elsewhere: &[GRAPH_UPDATE_CHECK],
     edits_land: true,
 };
 
@@ -168,6 +190,12 @@ pub const OMP: Driver = Driver {
         tool("edit", json!({ "input": format!("[{file}#0000]\nPUT <1:\n+{new}\n"), "i": "e2e" }))
     },
     write: |file, contents| tool("write", json!({ "path": file, "content": contents, "i": "e2e" })),
+    // omp lists MCP tools as paths: the model writes the call's arguments to
+    // `xd://mcp__<server>_<tool>`.
+    mcp: |server, tool_name, args| {
+        vec![tool("write", json!({ "path": format!("xd://mcp__{server}_{tool_name}"), "content": args.to_string(), "i": "e2e" }))]
+    },
+    elsewhere: &[GRAPH_UPDATE_CHECK],
     edits_land: false,
 };
 
@@ -214,5 +242,9 @@ pub const OPENCODE: Driver = Driver {
             json!({ "filePath": abs(file), "content": contents }),
         )
     },
+    mcp: |server, tool_name, args| vec![tool(&format!("{server}_{tool_name}"), args)],
+    // And the npm registry: opencode installs `@opencode-ai/plugin` beside the
+    // plugins it loads, with no switch to stop it.
+    elsewhere: &[GRAPH_UPDATE_CHECK, "registry.npmjs.org:443"],
     edits_land: true,
 };

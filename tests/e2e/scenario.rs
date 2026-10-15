@@ -70,6 +70,26 @@ const SCENARIOS: &[Scenario] = &[
         name: "a hook runs, or injects, at every event",
         run: every_event,
     },
+    Scenario {
+        name: "the memory server keeps what the model remembers, for the next turn",
+        run: memory_round_trip,
+    },
+    Scenario {
+        name: "the code graph server answers the model",
+        run: code_graph_answers,
+    },
+    Scenario {
+        name: "omh reads the turn back from the harness's transcript, or says it cannot",
+        run: transcript,
+    },
+    Scenario {
+        name: "omh doctor passes in the session's repo",
+        run: doctor,
+    },
+    Scenario {
+        name: "the model is the only thing the harness reaches, but for what is named",
+        run: nothing_else,
+    },
 ];
 
 /// The repo every session starts from: one source and test pair per guard
@@ -430,5 +450,130 @@ fn every_event(s: &Session) {
         s.harness.name,
         s.launched,
         turn.printed()
+    );
+}
+
+/// Everything a harness tried to reach other than the model, during a turn,
+/// beyond the hosts its driver names and says why.
+///
+/// Through the proxy only: a process that ignores `HTTPS_PROXY`, or is
+/// started without it, goes out directly and is not seen here.
+fn nothing_else(s: &Session) {
+    let turn = s.turn("Run it.", &[(s.harness.shell)("true")]);
+    ran(&turn);
+    let unnamed: Vec<String> = turn
+        .elsewhere()
+        .into_iter()
+        .filter(|h| !s.harness.elsewhere.contains(&h.as_str()))
+        .collect();
+    assert!(
+        unnamed.is_empty(),
+        "{} reached: {unnamed:?}",
+        s.harness.name
+    );
+}
+
+/// A note written through the memory server in one turn is found by a
+/// search in the next. Two turns, so the second's conversation holds the
+/// note only if the server handed it back.
+fn memory_round_trip(s: &Session) {
+    let mark = format!("E2E-NOTE-{}", s.harness.name.to_uppercase());
+    let note = serde_json::json!({
+        "expected": "the e2e suite expected nothing in particular",
+        "observed": mark,
+        "evidence": "image:current",
+        "answers": ["what did the e2e suite record"],
+    });
+    let wrote = s.turn("Remember it.", &(s.harness.mcp)("memory", "remember", note));
+    ran(&wrote);
+    let recalled = s.turn(
+        "Recall it.",
+        &(s.harness.mcp)(
+            "memory",
+            "recall",
+            serde_json::json!({ "question": "what did the e2e suite record" }),
+        ),
+    );
+    ran(&recalled);
+    // A recall lists notes by key, and the server derives a note's key from
+    // what was observed, lower-cased: `surprise/e2e-note-claude`.
+    let results = recalled.results();
+    assert!(
+        results
+            .iter()
+            .any(|r| r.to_lowercase().contains(&mark.to_lowercase())),
+        "the recall did not return {mark}. What the calls returned:\n{results:?}\n{}",
+        recalled.printed()
+    );
+}
+
+/// The code graph server lists the session's project: the server started,
+/// answered, and reads the index omh keeps for this worktree.
+fn code_graph_answers(s: &Session) {
+    let project = format!("{}-s01", s.id);
+    let turn = s.turn(
+        "List the projects.",
+        &(s.harness.mcp)("codegraph", "list_projects", serde_json::json!({})),
+    );
+    ran(&turn);
+    let results = turn.results();
+    assert!(
+        results.iter().any(|r| r.contains(&project)),
+        "list_projects did not name {project}. What the calls returned:\n{results:?}\n{}",
+        turn.printed()
+    );
+}
+
+/// After a turn with one shell call, `omh s01` reads that call back from the
+/// harness's transcript — or says, as itself, that this harness keeps none
+/// omh can read. Never an empty history that looks like nothing happened.
+fn transcript(s: &Session) {
+    let activity = |s: &Session| -> Value {
+        let out = s.omh(&["s01", "--json"]);
+        serde_json::from_slice::<Value>(&out.stdout)
+            .map(|v| v["focus"]["activity"].clone())
+            .unwrap_or_else(|_| panic!("omh s01 --json: {}", crate::sandbox::text(&out)))
+    };
+    let shells = |a: &Value| -> u64 {
+        a["tools"]
+            .as_object()
+            .map(|t| t.values().filter_map(Value::as_u64).sum())
+            .unwrap_or(0)
+    };
+    let before = activity(s);
+    let turn = s.turn("Run it.", &[(s.harness.shell)("echo transcript")]);
+    ran(&turn);
+    let after = activity(s);
+    match after["state"].as_str() {
+        Some("read") => assert!(
+            shells(&after) > shells(&before),
+            "the transcript was read and holds no new call: before {before}, after {after}"
+        ),
+        Some("not-recorded") => assert!(
+            after["why"]
+                .as_str()
+                .is_some_and(|w| w.contains("does not record transcripts")),
+            "not recorded, and not said why: {after}"
+        ),
+        _ => panic!("omh read no transcript and said nothing about why: {after}"),
+    }
+}
+
+/// `omh doctor` for this harness, in the repo the session runs on: the same
+/// probes a person runs, against the same catalogue and image.
+fn doctor(s: &Session) {
+    let out = s.omh(&["doctor", "--harness", s.harness.name, "--json"]);
+    let report: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("omh doctor --json: {}", crate::sandbox::text(&out)));
+    let failed: Vec<&Value> = report["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["ok"] != true)
+        .collect();
+    assert!(
+        report["ok"] == true && failed.is_empty(),
+        "omh doctor failed on {}: {failed:#?}",
+        s.harness.name
     );
 }

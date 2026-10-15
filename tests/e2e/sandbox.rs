@@ -355,6 +355,45 @@ impl Turn {
         out
     }
 
+    /// The text of every tool result in the last request: what the model was
+    /// told its calls returned, in each protocol's own shape.
+    pub fn results(&self) -> Vec<String> {
+        let Some(last) = self.asks().last().copied() else {
+            return Vec::new();
+        };
+        let body = &last["body"];
+        let history = body["messages"].as_array().or(body["input"].as_array());
+        let mut out = Vec::new();
+        for m in history.into_iter().flatten() {
+            let piece = match (m["type"].as_str(), m["role"].as_str()) {
+                // Responses: a call's output is an item of its own.
+                (Some(t), _) if t.ends_with("_call_output") || t == "tool_search_output" => {
+                    Some(m.clone())
+                }
+                // Chat Completions: a message from the `tool` role.
+                (_, Some("tool")) => Some(m["content"].clone()),
+                // Anthropic: `tool_result` blocks inside a user message.
+                (_, Some("user")) => Some(serde_json::Value::Array(
+                    m["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|c| c["type"] == "tool_result")
+                        .cloned()
+                        .collect(),
+                )),
+                _ => None,
+            };
+            if let Some(p) = piece {
+                let text = Turn::seen(&serde_json::json!({ "body": p }));
+                if !text.trim().is_empty() {
+                    out.push(text);
+                }
+            }
+        }
+        out
+    }
+
     /// Hosts the harness tried to reach other than the model.
     pub fn elsewhere(&self) -> Vec<String> {
         self.requests
