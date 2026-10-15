@@ -2052,25 +2052,6 @@ mod tests {
         })
     }
 
-    /// A probe that failed some other way is never read as *this container
-    /// cannot reach its worktree* — and the two failures that mean *nothing is
-    /// alive in there* are not read as refusals.
-    ///
-    /// The first is the worst outcome in the program: `reuse` turns *not
-    /// enterable* into `Restart`, and `session_up` acts on a `Restart` with
-    /// `docker rm -f` — on a container confirmed running earlier in the same
-    /// function. Every non-namespace exec failure destroyed an agent mid-turn,
-    /// and under `--json` said nothing, because the only notice was
-    /// `ctx.progress`.
-    ///
-    /// The second is milder and was introduced by fixing the first: folding
-    /// *the container is gone* into the refusal turned the ordinary race — a
-    /// sandbox whose process exits between *is it running* and *can it be
-    /// entered* — from something that healed itself into a command the user
-    /// had to run twice.
-    ///
-    /// Every row below is a transcript measured 2026-08-24 against docker
-    /// 29.7.2 through `/bin/sh`, except the one marked as a shape.
     /// The agent owns what the host mounts, on rootful Docker Engine too.
     ///
     /// The image's agent is uid 1000, and a Linux bind mount keeps the host's
@@ -2195,6 +2176,25 @@ mod tests {
         );
     }
 
+    /// A probe that failed some other way is never read as *this container
+    /// cannot reach its worktree* — and the two failures that mean *nothing is
+    /// alive in there* are not read as refusals.
+    ///
+    /// The first is the worst outcome in the program: `reuse` turns *not
+    /// enterable* into `Restart`, and `session_up` acts on a `Restart` with
+    /// `docker rm -f` — on a container confirmed running earlier in the same
+    /// function. Every non-namespace exec failure destroyed an agent mid-turn,
+    /// and under `--json` said nothing, because the only notice was
+    /// `ctx.progress`.
+    ///
+    /// The second is milder and was introduced by fixing the first: folding
+    /// *the container is gone* into the refusal turned the ordinary race — a
+    /// sandbox whose process exits between *is it running* and *can it be
+    /// entered* — from something that healed itself into a command the user
+    /// had to run twice.
+    ///
+    /// Every row below is a transcript measured 2026-08-24 against docker
+    /// 29.7.2 through `/bin/sh`, except the one marked as a shape.
     #[test]
     fn a_probe_that_failed_some_other_way_does_not_read_as_a_broken_worktree() {
         let namespace = "OCI runtime exec failed: exec failed: unable to start container \
