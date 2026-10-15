@@ -782,6 +782,18 @@ pub fn plan(
                     crate::memory::expiry::Recipe::Unknowable(_) => String::new(),
                 },
             ),
+            // The worktree is the agent's, whoever the filesystem reports as
+            // owning it — on Docker Desktop for macOS, root, once a harness
+            // has written there, and git then refuses the repository as
+            // `dubious ownership`. Configuration from the environment is
+            // protected configuration, which is the only kind git takes
+            // `safe.directory` from; see `git_in_the_sandbox_trusts_the_worktree`.
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "safe.directory".into()),
+            (
+                "GIT_CONFIG_VALUE_0".into(),
+                crate::container_workdir().into(),
+            ),
         ],
         // A real session gets its own network; a scratch verb shares the
         // per-repo one, which nothing has to remember to remove.
@@ -3432,11 +3444,19 @@ mod tests {
     /// variable set and not nameable is a refusal nobody can act on, and a
     /// variable nameable and not set expands to nothing in the middle of a
     /// sentence, which is the failure the check exists for.
+    ///
+    /// Except git's own configuration, which is the sandbox's and no hook's to
+    /// name: `git_in_the_sandbox_trusts_the_worktree` holds that.
     #[test]
     fn the_sandbox_sets_what_a_hook_may_name() {
         let fx = fixture();
         let plan = plan_for(&fx, "claude");
-        let set: Vec<&str> = plan.env.iter().map(|(k, _)| k.as_str()).collect();
+        let set: Vec<&str> = plan
+            .env
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| !k.starts_with("GIT_CONFIG_"))
+            .collect();
 
         for var in crate::hook::SANDBOX_VARS {
             assert!(
@@ -3917,6 +3937,38 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("/work/"), "got: {err:#}");
+    }
+
+    /// Git in the sandbox takes the worktree as its own, whoever the
+    /// filesystem says owns it.
+    ///
+    /// Measured on Docker Desktop for macOS: once a harness had written a file
+    /// in `/work`, `/work` and `/omh/shadow` were reported as owned by root
+    /// rather than the agent, and every git command there stopped with
+    /// `detected dubious ownership`. `tdd-guard` asks git whether the test
+    /// changed, could not, and let every edit through for the rest of the
+    /// session. Found by `tests/e2e`, which drives a real harness through a
+    /// real edit. As configuration in the environment, not in the image: the
+    /// path is the plan's, and it reaches every process in the container —
+    /// the harness, its hooks, the agent's own shell.
+    #[test]
+    fn git_in_the_sandbox_trusts_the_worktree() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let env: BTreeMap<&str, &str> = p
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let n: usize = env
+            .get("GIT_CONFIG_COUNT")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no GIT_CONFIG_COUNT in {env:?}"));
+        let safe: Vec<&str> = (0..n)
+            .filter(|i| env.get(format!("GIT_CONFIG_KEY_{i}").as_str()) == Some(&"safe.directory"))
+            .filter_map(|i| env.get(format!("GIT_CONFIG_VALUE_{i}").as_str()).copied())
+            .collect();
+        assert_eq!(safe, [p.workdir.as_str()], "{env:?}");
     }
 
     #[test]

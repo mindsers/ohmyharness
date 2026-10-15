@@ -850,7 +850,9 @@ mod tests {
         let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
         assert_eq!(omp.tools[&crate::hook::Tool::Shell], "bash");
         assert_eq!(omp.tools[&crate::hook::Tool::Read], "read");
-        assert_eq!(omp.tools[&crate::hook::Tool::Edit], "edit");
+        // `write` rewrites a file whole, so a guard on edits that a write walks
+        // past guards nothing — `a_guard_on_edits_sees_a_write`.
+        assert_eq!(omp.tools[&crate::hook::Tool::Edit], "edit|write");
         assert!(
             !omp.tools.contains_key(&crate::hook::Tool::Search),
             "omp has grep and glob as separate tools; half a claim is worse than none"

@@ -745,6 +745,9 @@ pub fn render(
                 "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
                 field.var()
             ));
+            if *field == Field::ToolFile {
+                command.push_str(&absolute_file_sh());
+            }
         }
     }
 
@@ -862,6 +865,27 @@ pub fn interpolating(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// `$OMH_TOOL_FILE` made absolute, in the shell renderers.
+///
+/// A harness hands a hook the path its model wrote, and a model writes
+/// relative paths where its harness does: Codex's patches name files from the
+/// working directory, and omp's `read` prints them from the workspace. A guard
+/// matching `/work/.omh/*` never matched those, and one asking git about a
+/// relative path from that path's own directory resolved it twice. Resolved
+/// here against the directory the hook runs in, which is the harness's own —
+/// `/work` in a session — so a hook never has to.
+pub(crate) fn absolute_file_sh() -> String {
+    "OMH_TOOL_FILE=${OMH_TOOL_FILE#./}; case \"$OMH_TOOL_FILE\" in ''|/*) ;; *) OMH_TOOL_FILE=\"$PWD/$OMH_TOOL_FILE\" ;; esac; ".into()
+}
+
+/// The same, in the plugin renderers' JavaScript, for an `env` object that
+/// already holds `OMH_TOOL_FILE`, resolved against the harness's process.
+pub(crate) fn absolute_file_js(indent: &str) -> String {
+    format!(
+        "{indent}if (env.OMH_TOOL_FILE && !env.OMH_TOOL_FILE.startsWith(\"/\")) env.OMH_TOOL_FILE = process.cwd() + \"/\" + env.OMH_TOOL_FILE.replace(/^\\.\\//, \"\")\n"
+    )
 }
 
 #[cfg(test)]

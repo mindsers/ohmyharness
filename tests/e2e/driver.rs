@@ -29,6 +29,9 @@ pub struct Driver {
     pub edit: fn(file: &str, old: &str, new: &str) -> Value,
     /// Create a file, or overwrite one whole.
     pub write: fn(file: &str, contents: &str) -> Value,
+    /// Whether an `edit` the guards let through is applied. Not on omp, whose
+    /// edits carry a snapshot hash only a real `read` hands out.
+    pub edits_land: bool,
 }
 
 pub const ALL: [&Driver; 4] = [&CLAUDE, &CODEX, &OMP, &OPENCODE];
@@ -78,6 +81,7 @@ pub const CLAUDE: Driver = Driver {
             json!({ "file_path": abs(file), "content": contents }),
         )
     },
+    edits_land: true,
 };
 
 /// Codex takes a provider on the command line — the session layer, above
@@ -129,6 +133,7 @@ pub const CODEX: Driver = Driver {
             "*** Begin Patch\n*** Add File: {file}\n{body}*** End Patch\n"
         ) } })
     },
+    edits_land: true,
 };
 
 /// omp's provider is a file. `openai-completions`, not `anthropic-messages`,
@@ -165,6 +170,7 @@ pub const OMP: Driver = Driver {
         tool("edit", json!({ "input": format!("[{file}#0000]\nPUT <1:\n+{new}\n"), "i": "e2e" }))
     },
     write: |file, contents| tool("write", json!({ "path": file, "content": contents, "i": "e2e" })),
+    edits_land: false,
 };
 
 /// opencode's provider comes in through `OPENCODE_CONFIG_CONTENT`, which it
@@ -210,4 +216,5 @@ pub const OPENCODE: Driver = Driver {
             json!({ "filePath": abs(file), "content": contents }),
         )
     },
+    edits_land: true,
 };

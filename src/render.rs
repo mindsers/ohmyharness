@@ -976,6 +976,9 @@ fn omp_one_hook(
         let names = wired
             .tools
             .iter()
+            // A vocabulary entry can name several tools, `edit|write`: a
+            // regex to Claude Code's matcher, a list here.
+            .flat_map(|t| t.split('|'))
             .map(|t| format!("{t:?}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1001,6 +1004,9 @@ fn omp_one_hook(
                 "    env[{:?}] = String({expr} ?? \"\")\n",
                 field.var()
             ));
+            if *field == hook::Field::ToolFile {
+                b.push_str(&hook::absolute_file_js("    "));
+            }
         }
     }
     if let hook::Action::Inject {
@@ -1104,6 +1110,9 @@ fn one_hook(
         let names = wired
             .tools
             .iter()
+            // A vocabulary entry can name several tools, `edit|write`: a
+            // regex to Claude Code's matcher, a list here.
+            .flat_map(|t| t.split('|'))
             .map(|t| format!("{t:?}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1128,6 +1137,9 @@ fn one_hook(
                 "      env[{:?}] = String({expr} ?? \"\")\n",
                 field.var()
             ));
+            if *field == hook::Field::ToolFile {
+                b.push_str(&hook::absolute_file_js("      "));
+            }
         }
     }
     if let hook::Action::Inject {
@@ -3626,11 +3638,19 @@ try {{
             format!(
                 r#"import register from "file://{}"
 const handlers = {{}}
-const pi = {{ on: (event, handler) => {{ handlers[event] = handler }} }}
+const pi = {{ on: (event, handler) => {{ (handlers[event] ??= []).push(handler) }} }}
 register(pi)
-const event = {event}
+let event = {event}
 try {{
-  const result = await handlers[{event_name:?}]?.(event, {{}})
+  // Every handler, in order, as omp runs them: the first block ends the
+  // call, and a result's content is what the next handler sees.
+  let result = null
+  for (const handler of handlers[{event_name:?}] ?? []) {{
+    const r = await handler(event, {{}})
+    if (r?.block) {{ result = r; break }}
+    if (r?.content) event = {{ ...event, content: r.content }}
+    if (r != null) result = r
+  }}
   console.log(JSON.stringify(result ?? null))
 }} catch (e) {{ console.log("THREW: " + e.message) }}
 "#,
@@ -3648,6 +3668,139 @@ try {{
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A hook reads the file a call touches as an absolute path, on every
+    /// harness, however the model spelled it.
+    ///
+    /// Codex's patches name files relative to the working directory, and
+    /// omp's `read` prints paths relative to the workspace for its model to
+    /// copy. Passed through as written, `config-guard`'s `/work/.omh/*` never
+    /// matched them, and `tdd-guard` resolved a subdirectory's test path
+    /// twice (`git -C pkg status -- pkg/x_test.go`) and refused every edit
+    /// below the root. Found by `tests/e2e`, driving both harnesses through
+    /// real edits. Resolved against the directory the harness runs in.
+    #[test]
+    #[ignore]
+    fn a_hook_sees_every_file_as_an_absolute_path() {
+        let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#;
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/saw.json", hook);
+        let render = |a: &crate::adapter::Adapter| {
+            document(
+                Capability::Hooks,
+                a.supports(Capability::Hooks).unwrap(),
+                &[dir.path().join("h")],
+                &RenderContext {
+                    own: &Default::default(),
+                    repo: &Default::default(),
+                    tools: &a.tools,
+                    resolves: &Default::default(),
+                    log: None,
+                },
+            )
+            .unwrap()
+            .body
+        };
+        // The node drivers run where the suite runs, so that is the directory
+        // a relative path resolves against here; `/work` in a session.
+        let here = std::env::current_dir().unwrap();
+        let sh = |command: &str, payload: &str| -> String {
+            use std::io::Write;
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(&here)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+        };
+        let want = format!("saw {}/pkg/x.go", here.display());
+        let want = want.as_str();
+
+        let claude = render(&claude_hooks());
+        let settings: serde_json::Value = serde_json::from_str(&claude).unwrap();
+        let command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let said = sh(command, r#"{"tool_input":{"file_path":"pkg/x.go"}}"#);
+        assert!(said.contains(want), "claude: {said}");
+
+        let codex = render(&codex());
+        let (_, command) = &codex_commands(&codex, "PreToolUse")[0];
+        let patch = "*** Begin Patch\n*** Update File: pkg/x.go\n@@\n-a\n+b\n*** End Patch\n";
+        let said = sh(
+            command,
+            &serde_json::json!({ "tool_input": { "command": patch } }).to_string(),
+        );
+        assert!(said.contains(want), "codex: {said}");
+
+        let said = drive_omp(
+            &render(omp()),
+            "tool_call",
+            r#"{ toolName: "edit", input: { input: "[pkg/x.go#A1B2]\nPUT <1:\n+x\n" } }"#,
+        );
+        assert!(said.contains(want), "omp: {said}");
+
+        let said = drive(
+            &render(opencode()),
+            "tool.execute.before",
+            r#"{ tool: "edit" }"#,
+            r#"{ args: { filePath: "pkg/x.go" } }"#,
+        );
+        assert!(said.contains(want), "opencode: {said}");
+    }
+
+    /// A guard on edits sees a whole-file write, on every harness: a write
+    /// is an edit of the whole file, and a guard a write walks past guards
+    /// nothing. Claude Code's `Write` and Codex's `*** Add File` always were;
+    /// omp's and opencode's `write` were not mapped, so both guards let any
+    /// file be rewritten whole. Found by `tests/e2e`.
+    #[test]
+    #[ignore]
+    fn a_guard_on_edits_sees_a_write() {
+        let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#;
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/saw.json", hook);
+        let render = |a: &crate::adapter::Adapter| {
+            document(
+                Capability::Hooks,
+                a.supports(Capability::Hooks).unwrap(),
+                &[dir.path().join("h")],
+                &RenderContext {
+                    own: &Default::default(),
+                    repo: &Default::default(),
+                    tools: &a.tools,
+                    resolves: &Default::default(),
+                    log: None,
+                },
+            )
+            .unwrap()
+            .body
+        };
+
+        let said = drive_omp(
+            &render(omp()),
+            "tool_call",
+            r#"{ toolName: "write", input: { path: "/work/x.go", content: "x" } }"#,
+        );
+        assert!(said.contains("saw /work/x.go"), "omp: {said}");
+
+        let said = drive(
+            &render(opencode()),
+            "tool.execute.before",
+            r#"{ tool: "write" }"#,
+            r#"{ args: { filePath: "/work/x.go", content: "x" } }"#,
+        );
+        assert!(said.contains("saw /work/x.go"), "opencode: {said}");
     }
 
     /// `log_call` is one function shared by opencode's and omp's renderers,

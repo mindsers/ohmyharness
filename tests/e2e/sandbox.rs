@@ -30,9 +30,10 @@ pub struct Session {
 }
 
 impl Session {
-    /// A repo with one commit, set up by `omh init`, and a session of
-    /// `harness` started in it by `omh new`.
-    pub fn start(harness: &'static Driver) -> Session {
+    /// A repo holding `seed`, set up by `omh init`, with each of `hooks`
+    /// selected by `omh use` and committed, and a session of `harness` started
+    /// in it by `omh new`.
+    pub fn start(harness: &'static Driver, seed: &[(&str, &str)], hooks: &[&str]) -> Session {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let repo = dir.path().join("repo");
@@ -53,12 +54,29 @@ impl Session {
             "# a repo for omh's e2e suite\n",
         )
         .unwrap();
+        for (file, contents) in seed {
+            let path = session.repo.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
         session.git(&["add", "-A"]);
         session.git(&["commit", "-q", "-m", "init"]);
 
         let init = session.omh(&["init"]);
         assert!(init.status.success(), "omh init: {}", text(&init));
         session.id = repo_id(&session.omh(&["info", "--repo", "--json"]));
+        for hook in hooks {
+            let used = session.omh(&["use", "hooks", hook]);
+            assert!(
+                used.status.success(),
+                "omh use hooks {hook}: {}",
+                text(&used)
+            );
+        }
+        // What `init` and `use` wrote is the project's, and a session's
+        // worktree starts from what is committed.
+        session.git(&["add", "-A"]);
+        session.git(&["commit", "-q", "-m", "omh"]);
 
         // Refused at the last step, for want of a terminal — everything before
         // it is what the test is here for.
@@ -108,9 +126,14 @@ impl Session {
         out
     }
 
-    /// Write a file in the container, as the agent. `~` is the agent's home.
+    /// Write a file in the container, as the agent. `~` is the agent's home,
+    /// and a relative path is in the worktree.
     pub fn write(&self, file: &str, contents: &str) {
-        let file = file.replace('~', "/home/agent");
+        let file = match file {
+            f if f.starts_with('~') => f.replacen('~', "/home/agent", 1),
+            f if f.starts_with('/') => f.to_string(),
+            f => format!("/work/{f}"),
+        };
         let parent = Path::new(&file).parent().unwrap().display().to_string();
         let out = self.exec_stdin(
             &[
@@ -322,8 +345,25 @@ impl Turn {
             .collect()
     }
 
+    /// What the harness printed, and the last two messages the model was sent:
+    /// the last call and its result, which is what a failure needs to show.
     pub fn printed(&self) -> String {
-        text(&self.out)
+        let last = self
+            .asks()
+            .last()
+            .map(|r| {
+                let body = &r["body"];
+                let history = body["messages"].as_array().or(body["input"].as_array());
+                let tail: Vec<&serde_json::Value> = history
+                    .map(|h| h.iter().rev().take(2).rev().collect())
+                    .unwrap_or_default();
+                serde_json::to_string_pretty(&tail).unwrap()
+            })
+            .unwrap_or_default();
+        format!(
+            "{}\n--- the last two messages the model was sent\n{last}",
+            text(&self.out)
+        )
     }
 }
 
