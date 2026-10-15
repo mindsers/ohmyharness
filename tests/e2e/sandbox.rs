@@ -28,6 +28,9 @@ pub struct Session {
     pub harness: &'static Driver,
     /// What `omh new` said: the launch line names every hook it dropped.
     pub launched: String,
+    /// Turns so far, naming each turn's fake. A `Cell`, so a scenario's
+    /// `&Session` can count; which leaves `Session` not `Sync`, and right
+    /// so — its scenarios run one after another, on one thread.
     fakes: std::cell::Cell<u16>,
 }
 
@@ -110,14 +113,19 @@ impl Session {
     /// provider — written again whenever the container is new.
     pub fn provide(&self) {
         for (file, contents) in self.harness.files {
-            self.write(file, contents);
+            self.write(file, &contents.replace("{url}", &fake_url()));
         }
     }
 
-    /// Whether the session's container is running.
+    /// Whether the session's container is running. One that is not there is
+    /// not running; a daemon that cannot be asked fails the test, rather than
+    /// answer "stopped" to the scenario checking that `down` stopped it.
     pub fn running(&self) -> bool {
-        let out = docker(&["inspect", "-f", "{{.State.Running}}", &self.container]);
-        String::from_utf8_lossy(&out.stdout).trim() == "true"
+        let out = docker(&["ps", "-a", "--format", "{{.Names}} {{.State}}"]);
+        assert!(out.status.success(), "listing containers: {}", text(&out));
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.trim() == format!("{} running", self.container))
     }
 
     /// Run omh, in the repo, as this sandbox's user.
@@ -233,7 +241,7 @@ impl Session {
             text(&up)
         );
 
-        let url = format!("http://127.0.0.1:{FAKE_PORT}");
+        let url = fake_url();
         let mut env: Vec<(String, String)> =
             ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
                 .iter()
@@ -267,7 +275,12 @@ impl Session {
             .lines()
             .map(|l| serde_json::from_str(l).expect("the fake writes JSON lines"))
             .collect();
-        Turn { out, requests }
+        let calls = script.iter().filter(|s| s.get("text").is_none()).count();
+        Turn {
+            out,
+            requests,
+            calls,
+        }
     }
 
     /// Whether `omh new` named `hook` as dropped for this harness: the
@@ -342,6 +355,9 @@ impl Drop for Session {
             |name: &str| name.starts_with(&format!("omh-{}", self.id)) || name.contains(&self.id);
         let named = |listing: &[&str]| -> Vec<String> {
             let out = docker(listing);
+            if !out.status.success() {
+                eprintln!("e2e: could not list what to remove: {}", text(&out));
+            }
             String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .map(str::trim)
@@ -373,6 +389,8 @@ impl Drop for Session {
 pub struct Turn {
     pub out: Output,
     pub requests: Vec<serde_json::Value>,
+    /// The script's calls: every step but plain text.
+    pub calls: usize,
 }
 
 impl Turn {
@@ -403,9 +421,9 @@ impl Turn {
         out
     }
 
-    /// The text of every tool result in the last request: what the model was
-    /// told its calls returned, in each protocol's own shape.
-    pub fn results(&self) -> Vec<String> {
+    /// Every tool result in the last request, one item each: what the model
+    /// was told its calls returned, in each protocol's own shape.
+    fn outputs(&self) -> Vec<serde_json::Value> {
         let Some(last) = self.asks().last().copied() else {
             return Vec::new();
         };
@@ -413,41 +431,46 @@ impl Turn {
         let history = body["messages"].as_array().or(body["input"].as_array());
         let mut out = Vec::new();
         for m in history.into_iter().flatten() {
-            let piece = match (m["type"].as_str(), m["role"].as_str()) {
+            match (m["type"].as_str(), m["role"].as_str()) {
                 // Responses: a call's output is an item of its own.
                 (Some(t), _) if t.ends_with("_call_output") || t == "tool_search_output" => {
-                    Some(m.clone())
+                    out.push(m.clone())
                 }
                 // Chat Completions: a message from the `tool` role.
-                (_, Some("tool")) => Some(m["content"].clone()),
+                (_, Some("tool")) => out.push(m["content"].clone()),
                 // Anthropic: `tool_result` blocks inside a user message.
-                (_, Some("user")) => Some(serde_json::Value::Array(
+                (_, Some("user")) => out.extend(
                     m["content"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .filter(|c| c["type"] == "tool_result")
-                        .cloned()
-                        .collect(),
-                )),
-                _ => None,
-            };
-            if let Some(p) = piece {
-                let text = Turn::seen(&serde_json::json!({ "body": p }));
-                if !text.trim().is_empty() {
-                    out.push(text);
-                }
+                        .cloned(),
+                ),
+                _ => {}
             }
         }
         out
     }
 
-    /// Whether the fake played its whole script: some request was answered
-    /// with the end of it. A turn that stopped early has not.
+    /// The text of every tool result in the last request.
+    pub fn results(&self) -> Vec<String> {
+        self.outputs()
+            .into_iter()
+            .map(|p| Turn::seen(&serde_json::json!({ "body": p })))
+            .filter(|text| !text.trim().is_empty())
+            .collect()
+    }
+
+    /// Whether the turn played its whole script: the fake reached the end of
+    /// it, and the model was told what every call returned. Reaching the end
+    /// alone is not enough — a harness that ended the turn on a call it did
+    /// not make, and asked again for a hook of its own, was answered "done".
     pub fn played(&self) -> bool {
         self.requests
             .iter()
             .any(|r| r["plan"]["text"] == "FAKE_DONE")
+            && self.outputs().len() >= self.calls
     }
 
     /// Requests the fake could not parse, which it refused rather than played.
@@ -487,6 +510,11 @@ impl Turn {
             text(&self.out)
         )
     }
+}
+
+/// Where a turn's fake model listens, in the container.
+pub fn fake_url() -> String {
+    format!("http://127.0.0.1:{FAKE_PORT}")
 }
 
 pub fn docker(args: &[&str]) -> Output {

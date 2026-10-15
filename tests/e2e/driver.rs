@@ -18,7 +18,7 @@ pub struct Driver {
     /// Set for the turn. `{url}` is the fake model.
     pub env: &'static [(&'static str, &'static str)],
     /// Written in the container once the session is up. `~` is the agent's
-    /// home.
+    /// home, and `{url}` the fake model.
     pub files: &'static [(&'static str, &'static str)],
     /// One turn, without a terminal, against the model at the given URL.
     pub turn: fn(prompt: &str, url: &str) -> Vec<String>,
@@ -175,7 +175,7 @@ pub const OMP: Driver = Driver {
     files: &[
         (
             "~/.omp/agent/models.yml",
-            "providers:\n  fake:\n    baseUrl: http://127.0.0.1:8787/v1\n    auth: none\n    api: openai-completions\n    models:\n      - id: fake-model\n        reasoning: false\n        contextWindow: 1000000\n",
+            "providers:\n  fake:\n    baseUrl: {url}/v1\n    auth: none\n    api: openai-completions\n    models:\n      - id: fake-model\n        reasoning: false\n        contextWindow: 1000000\n",
         ),
         (
             "~/.omp/agent/config.yml",

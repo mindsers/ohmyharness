@@ -17,6 +17,9 @@ struct Scenario {
     run: fn(&Session),
 }
 
+/// Run in this order, in one session. Each scenario before the session's
+/// life works on files of its own, so those could run in any order; the
+/// life cannot, and comes last.
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "rules reach the model",
@@ -418,9 +421,12 @@ fn drops(s: &Session) {
 }
 
 /// The lines in a file in the container, which a `run` hook appends to. A
-/// file not there yet is none; a container that could not be asked fails.
+/// file not there yet is none; one there and unreadable, or a container
+/// that could not be asked, fails.
 fn lines(s: &Session, file: &str) -> usize {
-    let out = s.sh(&format!("cat {file} 2>/dev/null | wc -l"));
+    let out = s.sh(&format!(
+        "if [ -e {file} ]; then wc -l < {file}; else echo 0; fi"
+    ));
     assert!(
         out.status.success(),
         "counting {file}: {}",
@@ -486,7 +492,8 @@ fn graph_refresh(s: &Session) {
 /// How many times omh's ledger records `hook` as fired. Parsed, not grepped:
 /// the shell and plugin renderers write the same two keys in either order.
 fn fired(s: &Session, hook: &str) -> usize {
-    let out = s.sh("cat /omh/shadow/omh-events.jsonl 2>/dev/null; true");
+    // Not there yet is no firings; there and unreadable fails.
+    let out = s.sh("f=/omh/shadow/omh-events.jsonl; if [ -e $f ]; then cat $f; fi");
     assert!(
         out.status.success(),
         "reading the ledger: {}",
