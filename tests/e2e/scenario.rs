@@ -630,6 +630,17 @@ fn transcript(s: &Session) {
     let turn = s.turn("Run it.", &[(s.harness.shell)("echo transcript")]);
     ran(&turn);
     let after = activity(s);
+    let want = if s.harness.transcripts {
+        "read"
+    } else {
+        "not-recorded"
+    };
+    assert_eq!(
+        after["state"].as_str(),
+        Some(want),
+        "omh s01 should report {want} on {}: {after}",
+        s.harness.name
+    );
     match after["state"].as_str() {
         Some("read") => assert!(
             shells(&after) > shells(&before),

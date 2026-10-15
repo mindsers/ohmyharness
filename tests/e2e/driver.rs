@@ -34,6 +34,9 @@ pub struct Driver {
     pub mcp: fn(server: &str, tool: &str, args: Value) -> Vec<Value>,
     /// Hosts the harness reaches on its own, beside the model, and why.
     pub elsewhere: &'static [&'static str],
+    /// Whether omh reads this harness's transcript (`transcripts` in its
+    /// adapter): `omh s01` reports the turn, or says it cannot.
+    pub transcripts: bool,
     /// Every hook omh drops for this harness, of the base set's and the
     /// suite's own: exactly these, so a capability lost or newly dropped
     /// fails rather than passing as "named".
@@ -93,6 +96,7 @@ pub const CLAUDE: Driver = Driver {
     },
     mcp: |server, tool_name, args| vec![tool(&format!("mcp__{server}__{tool_name}"), args)],
     elsewhere: &[GRAPH_UPDATE_CHECK],
+    transcripts: true,
     drops: &["graph-first"],
 };
 
@@ -157,6 +161,7 @@ pub const CODEX: Driver = Driver {
         ]
     },
     elsewhere: &[GRAPH_UPDATE_CHECK],
+    transcripts: true,
     drops: &["graph-first", "graph-read", "e2e-end-inject"],
 };
 
@@ -201,6 +206,7 @@ pub const OMP: Driver = Driver {
     // and retries five minutes after a failure: there in some turns and not
     // in others.
     elsewhere: &[GRAPH_UPDATE_CHECK, "catalog.stencil.so:443"],
+    transcripts: false,
     drops: &["e2e-before-inject", "e2e-end-inject", "e2e-start-inject", "git-note", "graph-first", "graph-orient", "graph-read"],
 };
 
@@ -251,6 +257,7 @@ pub const OPENCODE: Driver = Driver {
     // And the npm registry: opencode installs `@opencode-ai/plugin` beside the
     // plugins it loads, with no switch to stop it.
     elsewhere: &[GRAPH_UPDATE_CHECK, "registry.npmjs.org:443"],
+    transcripts: false,
     drops: &[
         "e2e-before-inject",
         "e2e-end-inject",

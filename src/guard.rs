@@ -864,6 +864,19 @@ mod rendered {
             allowed, "null",
             "a dirty test file must not block on omp: {allowed}"
         );
+
+        // And config-guard, registered on the same moment before tdd-guard: a
+        // driver that kept only the last handler for an event never ran it.
+        let config = drive_omp(
+            &doc.body,
+            dir.path(),
+            "tool_call",
+            r#"{ toolName: "write", input: { path: "/work/.omh/settings.toml", content: "x" } }"#,
+        );
+        assert!(
+            config.contains(r#""block":true"#),
+            "config-guard must block on omp too: {config}"
+        );
     }
 
     /// Every `[PATH#TAG]` header oh-my-pi accepts is guarded, not only the

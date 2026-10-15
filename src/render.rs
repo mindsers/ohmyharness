@@ -3717,7 +3717,6 @@ try {{
     /// below the root. Found by `tests/e2e`, driving both harnesses through
     /// real edits. Resolved against the directory the harness runs in.
     #[test]
-    #[ignore]
     fn a_hook_sees_every_file_as_an_absolute_path() {
         let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#;
         let dir = tempfile::tempdir().unwrap();
@@ -3851,7 +3850,6 @@ try {{
     /// `file:` URL naming `/work/.omh/x` is not taken for a URI omp would not
     /// open.
     #[test]
-    #[ignore]
     fn a_hook_sees_one_spelling_of_every_path() {
         let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#;
         let dir = tempfile::tempdir().unwrap();
@@ -3970,7 +3968,6 @@ try {{
     /// omp's and opencode's `write` were not mapped, so both guards let any
     /// file be rewritten whole. Found by `tests/e2e`.
     #[test]
-    #[ignore]
     fn a_guard_on_edits_sees_a_write() {
         let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#;
         let dir = tempfile::tempdir().unwrap();
