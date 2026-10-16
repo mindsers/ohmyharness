@@ -76,11 +76,322 @@ pub(crate) fn classify(root: &Path) -> Vec<Source> {
 
 /// This crate's production files, each with its test text blanked.
 pub(crate) fn production() -> Vec<(PathBuf, String)> {
-    classify(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+    production_in(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+}
+
+fn production_in(root: &Path) -> Vec<(PathBuf, String)> {
+    classify(root)
         .into_iter()
         .filter(|s| s.role == Role::Production)
         .map(|s| (s.path, production_of(&s.body)))
         .collect()
+}
+
+/// Module → module it uses → where the first such use is, as a file and a
+/// 1-based line. A module is a top-level one: `src/x.rs` and everything
+/// under `src/x/`. Items defined in the crate root are the module `main`.
+pub(crate) type Graph = BTreeMap<String, BTreeMap<String, (PathBuf, usize)>>;
+
+/// The `use` graph between the top-level modules of the tree at `root`,
+/// read from production code only: test text, comments and literals are
+/// blanked first, so a path named in prose is not a dependency.
+///
+/// An edge is `crate::x`, a member of a grouped `use crate::{x, y::{…}}`,
+/// `super::x` where the `super`s climb to the crate root, or — in the crate
+/// root itself — a bare `x::` or `self::x`. A `crate::` name that is not a module is an
+/// item of the crate root.
+pub(crate) fn module_graph(root: &Path) -> Graph {
+    let files: Vec<(PathBuf, String)> = production_in(root);
+    let place = |path: &Path| -> (String, usize) {
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        let parts: Vec<String> = rel
+            .iter()
+            .map(|p| p.to_string_lossy().trim_end_matches(".rs").to_string())
+            .collect();
+        let depth = parts.len() - usize::from(parts.last().is_some_and(|l| l == "mod"));
+        let module = if rel == Path::new("main.rs") {
+            "main".to_string()
+        } else {
+            parts[0].clone()
+        };
+        let depth = if module == "main" { 0 } else { depth };
+        (module, depth)
+    };
+    let modules: std::collections::BTreeSet<String> =
+        files.iter().map(|(p, _)| place(p).0).collect();
+    let mut graph = Graph::new();
+    for (path, body) in &files {
+        let (from, depth) = place(path);
+        let code = code_of(body);
+        for (n, line) in code.lines().enumerate() {
+            for target in uses_on(line, depth, &modules, &code, n) {
+                let target = if modules.contains(&target) {
+                    target
+                } else {
+                    "main".to_string()
+                };
+                if target != from {
+                    graph
+                        .entry(from.clone())
+                        .or_default()
+                        .entry(target)
+                        .or_insert_with(|| (path.clone(), n + 1));
+                }
+            }
+        }
+    }
+    graph
+}
+
+/// The first segment of every path on line `n` that leaves this module for
+/// another. A grouped `use` may open here and close lines later, so the whole
+/// text is passed and the group is read from where it opens.
+fn uses_on(
+    line: &str,
+    depth: usize,
+    modules: &std::collections::BTreeSet<String>,
+    code: &str,
+    n: usize,
+) -> Vec<String> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !ident(chars[i]) || (i > 0 && ident(chars[i - 1])) {
+            i += 1;
+            continue;
+        }
+        // A path: segments joined by `::`, spaces allowed around them.
+        let mut segments: Vec<String> = Vec::new();
+        let mut j = i;
+        let mut group_at: Option<usize> = None;
+        loop {
+            let start = j;
+            while j < chars.len() && ident(chars[j]) {
+                j += 1;
+            }
+            segments.push(chars[start..j].iter().collect());
+            let rest: String = chars[j..].iter().collect();
+            let trimmed = rest.trim_start();
+            let Some(after) = trimmed.strip_prefix("::") else {
+                break;
+            };
+            let after_ws = after.trim_start();
+            j = chars.len() - after_ws.chars().count();
+            if after_ws.starts_with('{') {
+                group_at = Some(j);
+                break;
+            }
+            if !after_ws.starts_with(|c: char| ident(c)) {
+                break;
+            }
+        }
+        let next = j.max(i + 1);
+        let supers = segments.iter().take_while(|s| *s == "super").count();
+        // How many segments lead to the crate root, if this path goes there.
+        let to_root = match segments[0].as_str() {
+            "crate" => Some(1),
+            "super" if depth > 0 && supers == depth => Some(supers),
+            "self" if depth == 0 => Some(1),
+            // A path, not the bare name: `mod x;` declares, it does not use.
+            first
+                if depth == 0
+                    && modules.contains(first)
+                    && first != "main"
+                    && (segments.len() > 1 || group_at.is_some()) =>
+            {
+                Some(0)
+            }
+            _ => None,
+        };
+        if let Some(lead) = to_root {
+            if let Some(name) = segments.get(lead) {
+                out.push(name.clone());
+            } else if let Some(at) = group_at {
+                out.extend(group_members(code, n, at));
+            }
+        }
+        i = next;
+    }
+    out
+}
+
+/// The first segment of each member of the `{ … }` group opening at column
+/// `col` of line `n`, read to its closing brace however many lines that is.
+fn group_members(code: &str, n: usize, col: usize) -> Vec<String> {
+    let text: String = code
+        .lines()
+        .skip(n)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .skip(col + 1)
+        .collect();
+    let mut out = Vec::new();
+    let mut depth = 0;
+    let mut expecting = true;
+    for (k, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 0 => break,
+            '}' => depth -= 1,
+            ',' if depth == 0 => expecting = true,
+            c if expecting && depth == 0 && (c.is_alphanumeric() || c == '_') => {
+                let name: String = text[k..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if name != "self" {
+                    out.push(name);
+                }
+                expecting = false;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `body` with comments and literals blanked to spaces, newlines kept, so a
+/// path that only appears in prose or in a string is not read as code and a
+/// line number stays the line in the file.
+///
+/// Comments are `//` to the end of the line and `/* */`, which nest. Literals
+/// are strings with their escapes, raw strings with any number of `#`, byte
+/// strings, and char literals — told apart from a lifetime by what follows
+/// the quote: an escape, or one character and a closing quote.
+pub(crate) fn code_of(body: &str) -> String {
+    let c: Vec<char> = body.chars().collect();
+    let mut out: Vec<char> = c.clone();
+    let blank = |out: &mut Vec<char>, from: usize, to: usize| {
+        for slot in &mut out[from..to.min(c.len())] {
+            if *slot != '\n' {
+                *slot = ' ';
+            }
+        }
+    };
+    let ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut i = 0;
+    while i < c.len() {
+        let at = |k: usize| c.get(k).copied();
+        if c[i] == '/' && at(i + 1) == Some('/') {
+            let end = (i..c.len()).find(|&k| c[k] == '\n').unwrap_or(c.len());
+            blank(&mut out, i, end);
+            i = end;
+        } else if c[i] == '/' && at(i + 1) == Some('*') {
+            let (mut k, mut depth) = (i + 2, 1);
+            while k < c.len() && depth > 0 {
+                if c[k] == '/' && at(k + 1) == Some('*') {
+                    depth += 1;
+                    k += 2;
+                } else if c[k] == '*' && at(k + 1) == Some('/') {
+                    depth -= 1;
+                    k += 2;
+                } else {
+                    k += 1;
+                }
+            }
+            blank(&mut out, i, k);
+            i = k;
+        } else if (c[i] == 'r' || (c[i] == 'b' && at(i + 1) == Some('r')))
+            && (i == 0 || !ident(c[i - 1]))
+            && {
+                let k = i + if c[i] == 'b' { 2 } else { 1 };
+                let hashes = (k..c.len()).take_while(|&h| c[h] == '#').count();
+                at(k + hashes) == Some('"')
+            }
+        {
+            let k = i + if c[i] == 'b' { 2 } else { 1 };
+            let hashes = (k..c.len()).take_while(|&h| c[h] == '#').count();
+            let open = k + hashes + 1;
+            let close: Vec<char> = std::iter::once('"')
+                .chain(std::iter::repeat_n('#', hashes))
+                .collect();
+            let end = (open..c.len())
+                .find(|&e| c[e..].starts_with(&close))
+                .map_or(c.len(), |e| e + close.len());
+            blank(&mut out, i, end);
+            i = end;
+        } else if c[i] == '"' {
+            let mut k = i + 1;
+            while k < c.len() && c[k] != '"' {
+                k += if c[k] == '\\' { 2 } else { 1 };
+            }
+            blank(&mut out, i, k + 1);
+            i = k + 1;
+        } else if c[i] == '\'' && at(i + 1) == Some('\\') {
+            let end = (i + 3..c.len()).find(|&e| c[e] == '\'').unwrap_or(c.len());
+            blank(&mut out, i, end + 1);
+            i = end + 1;
+        } else if c[i] == '\'' && at(i + 2) == Some('\'') {
+            blank(&mut out, i, i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The strongly connected components of more than one module, each sorted,
+/// in sorted order. Tarjan's algorithm.
+pub(crate) fn cycles(graph: &Graph) -> Vec<Vec<String>> {
+    struct Walk<'g> {
+        graph: &'g Graph,
+        index: BTreeMap<&'g str, usize>,
+        low: BTreeMap<&'g str, usize>,
+        stack: Vec<&'g str>,
+        found: Vec<Vec<String>>,
+    }
+    impl<'g> Walk<'g> {
+        fn visit(&mut self, v: &'g str) {
+            let n = self.index.len();
+            self.index.insert(v, n);
+            self.low.insert(v, n);
+            self.stack.push(v);
+            for w in self.graph.get(v).into_iter().flat_map(|t| t.keys()) {
+                let w = w.as_str();
+                if !self.index.contains_key(w) {
+                    self.visit(w);
+                    let lw = self.low[w];
+                    let lv = self.low.get_mut(v).unwrap();
+                    *lv = (*lv).min(lw);
+                } else if self.stack.contains(&w) {
+                    let iw = self.index[w];
+                    let lv = self.low.get_mut(v).unwrap();
+                    *lv = (*lv).min(iw);
+                }
+            }
+            if self.low[v] == self.index[v] {
+                let mut component = Vec::new();
+                while let Some(w) = self.stack.pop() {
+                    component.push(w.to_string());
+                    if w == v {
+                        break;
+                    }
+                }
+                if component.len() > 1 {
+                    component.sort();
+                    self.found.push(component);
+                }
+            }
+        }
+    }
+    let mut walk = Walk {
+        graph,
+        index: BTreeMap::new(),
+        low: BTreeMap::new(),
+        stack: Vec::new(),
+        found: Vec::new(),
+    };
+    for v in graph.keys() {
+        if !walk.index.contains_key(v.as_str()) {
+            walk.visit(v);
+        }
+    }
+    walk.found.sort();
+    walk.found
 }
 
 /// Every `mod name;` in the tree, resolved to the file it opens, with whether
@@ -386,6 +697,200 @@ impl Ctx {
 }
 ";
         assert_eq!(production_of(body), body);
+    }
+
+    fn edge_set(graph: &Graph) -> Vec<(String, String)> {
+        graph
+            .iter()
+            .flat_map(|(from, to)| to.keys().map(move |t| (from.clone(), t.clone())))
+            .collect()
+    }
+
+    /// Every shape a module edge hides in, and every shape that only looks
+    /// like one: a path in a doc comment, a nested block comment, a string, a
+    /// raw string holding a quote, a byte string, a test-only item. A char
+    /// literal holding `"` must not open a string, a lifetime must not open a
+    /// char literal, and a `//` inside a string must not open a comment —
+    /// each of those, mishandled, swallows the edge on the line after it.
+    #[test]
+    fn the_module_graph_reads_edges_from_code_and_nothing_else() {
+        let dir = tree(&[
+            (
+                "main.rs",
+                "mod a;\nmod b;\nmod c;\nmod d;\nmod e;\nmod f;\nmod g;\nmod h;\n\
+                 use a::Thing;\n\
+                 pub(crate) fn helper() {}\n\
+                 fn main() { b::go(); std::process::exit(0); }\n",
+            ),
+            (
+                "a.rs",
+                "use crate::{\n    b::{One, Two},\n    c,\n};\n\
+                 pub struct Thing;\n\
+                 pub fn quote() -> char { '\"' }\n\
+                 pub fn id<'x>(s: &'x str) -> &'x str { crate::d::id(s) }\n",
+            ),
+            (
+                "b.rs",
+                "//! Names `crate::e` in a doc comment.\n\
+                 /* a block /* nested, naming crate::e */ still crate::e */\n\
+                 pub fn go() {\n\
+                 \x20   let s = \"crate::e \\\" crate::e\";\n\
+                 \x20   let r = r#\"one \" crate::e\"#;\n\
+                 \x20   let y = b\"crate::e\";\n\
+                 \x20   let _ = (s, r, y);\n\
+                 }\n\
+                 pub use crate::f::Exported;\n",
+            ),
+            (
+                "c.rs",
+                "pub fn x() { crate::helper() }\n\
+                 #[cfg(test)]\nmod tests {\n    use crate::g;\n}\n",
+            ),
+            ("d.rs", "pub fn id(s: &str) -> &str { super::e::y(s) }\n"),
+            (
+                "e.rs",
+                "mod inner;\npub struct Own;\npub fn y(s: &str) -> &str { s }\n",
+            ),
+            ("e/inner.rs", "use super::Own;\nuse super::super::g;\n"),
+            (
+                "f.rs",
+                "pub struct Exported;\n\
+                 pub fn line() -> String { format!(\"  // {}\\n\", crate::h::NAME) }\n",
+            ),
+            ("g.rs", "pub fn g() {}\n"),
+            ("h.rs", "pub const NAME: &str = \"h\";\n"),
+        ]);
+        let graph = module_graph(dir.path());
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            edge_set(&graph),
+            vec![
+                pair("a", "b"),
+                pair("a", "c"),
+                pair("a", "d"),
+                pair("b", "f"),
+                pair("c", "main"),
+                pair("d", "e"),
+                pair("e", "g"),
+                pair("f", "h"),
+                pair("main", "a"),
+                pair("main", "b"),
+            ],
+            "{graph:#?}"
+        );
+        let (path, line) = &graph["a"]["d"];
+        assert_eq!(
+            (path.strip_prefix(dir.path()).unwrap(), *line),
+            (Path::new("a.rs"), 7),
+            "an edge names where it was found, by the line in the file"
+        );
+    }
+
+    /// A cycle is a strongly connected component of more than one module, and
+    /// each is reported once, sorted, whatever order the edges arrive in.
+    #[test]
+    fn cycles_are_the_components_of_more_than_one_module() {
+        let mut graph = Graph::new();
+        for (from, to) in [
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "a"),
+            ("c", "d"),
+            ("d", "e"),
+            ("e", "d"),
+            ("f", "a"),
+        ] {
+            graph
+                .entry(from.to_string())
+                .or_default()
+                .insert(to.to_string(), (PathBuf::new(), 0));
+        }
+        assert_eq!(
+            cycles(&graph),
+            vec![vec!["a", "b", "c"], vec!["d", "e"]],
+            "f reaches the cycle but is not in it"
+        );
+    }
+
+    /// The modules that use each other, as they stand. A ratchet: a new cycle
+    /// fails, and so does breaking one without striking it here — the list is
+    /// exact, so it only ever shrinks on purpose. When it is empty, the graph
+    /// is a hierarchy and this asserts it stays one.
+    #[test]
+    fn the_modules_form_no_cycle_beyond_the_known_ones() {
+        const KNOWN_CYCLES: &[&[&str]] = &[
+            &["adapter", "hook"],
+            &[
+                "ask",
+                "auth",
+                "base",
+                "cli",
+                "cmd",
+                "config",
+                "container",
+                "derive",
+                "detect",
+                "doctor",
+                "facts",
+                "idle",
+                "image",
+                "key",
+                "main",
+                "memory",
+                "notice",
+                "profile",
+                "render",
+                "report",
+                "rules",
+                "runtime",
+                "session",
+                "settings",
+                "shadow",
+                "ssh",
+                "stack",
+                "why",
+            ],
+        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let graph = module_graph(&root);
+
+        // Liveness: a blanker that ate code would find no cycles and pass.
+        let edges = graph.values().map(BTreeMap::len).sum::<usize>();
+        assert!(edges > 150, "only {edges} edges read: {graph:#?}");
+        for (from, to) in [("main", "cli"), ("cmd", "session"), ("doctor", "image")] {
+            assert!(
+                graph.get(from).is_some_and(|t| t.contains_key(to)),
+                "{from} → {to} is in the code and was not read"
+            );
+        }
+
+        let found = cycles(&graph);
+        let known: Vec<Vec<String>> = KNOWN_CYCLES
+            .iter()
+            .map(|c| c.iter().map(|m| m.to_string()).collect())
+            .collect();
+        let rel = |p: &Path| p.strip_prefix(&root).unwrap_or(p).display().to_string();
+        let explain = |cycle: &[String]| -> String {
+            let mut out = String::new();
+            for from in cycle {
+                for (to, (path, line)) in &graph[from] {
+                    if cycle.contains(to) {
+                        out.push_str(&format!("\n    {from} → {to}  ({}:{line})", rel(path)));
+                    }
+                }
+            }
+            out
+        };
+        let report: String = found
+            .iter()
+            .map(|c| format!("\n  {c:?}{}", explain(c)))
+            .collect();
+        assert_eq!(
+            found, known,
+            "the cycles between modules changed. A new one is a dependency to \
+             invert; a broken one is progress — strike it from KNOWN_CYCLES.\
+             \nNow:{report}"
+        );
     }
 
     /// The real tree, held to the rule. Two halves: nothing under `src/` is

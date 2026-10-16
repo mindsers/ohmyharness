@@ -4358,18 +4358,13 @@ mod tests {
     /// One definition, and no file quietly reintroducing its own.
     #[test]
     fn the_guest_home_is_defined_once() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut declarations = Vec::new();
-        for entry in std::fs::read_dir(&src).unwrap().flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                let body = std::fs::read_to_string(&path).unwrap();
-                for line in body.lines() {
-                    let l = line.trim();
-                    let is_const = l.starts_with("const ") || l.starts_with("pub const ");
-                    if is_const && l.contains("= \"/home/agent\"") {
-                        declarations.push(format!("{}: {l}", path.display()));
-                    }
+        for (path, body) in crate::testsrc::production() {
+            for line in body.lines() {
+                let l = line.trim();
+                let is_const = l.starts_with("const ") || l.starts_with("pub const ");
+                if is_const && l.contains("= \"/home/agent\"") {
+                    declarations.push(format!("{}: {l}", path.display()));
                 }
             }
         }
