@@ -104,7 +104,7 @@ pub(crate) fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let using = using_here(&paths, &manifest)?;
 
     ctx.say(&report::Repo {
-        repo_id: paths.repo_name(),
+        repo_id: paths.repo_id(),
         dir: paths.repo.join(".omh").display().to_string(),
         settings,
         features,

@@ -25,8 +25,7 @@ pub struct Caps {
 
 pub trait Runtime: std::fmt::Debug {
     /// Backend identity, for error messages that name which runtime refused a
-    /// plan. Implemented by both backends and unused until `sbx` is selectable.
-    #[allow(dead_code)]
+    /// plan.
     fn name(&self) -> &'static str;
     /// Executable to invoke.
     fn program(&self) -> &'static str;

@@ -467,10 +467,6 @@ impl Paths {
         format!("omh-{}-{session}", self.repo_id())
     }
 
-    pub fn repo_name(&self) -> String {
-        self.repo_id()
-    }
-
     /// What every piece of per-repo state is keyed by.
     ///
     /// The checkout's basename, and a digest of where it actually is. It was
@@ -488,7 +484,7 @@ impl Paths {
     ///
     /// Canonicalised, so a checkout reached through a symlink is the same repo
     /// as the checkout itself rather than a second one with its own sessions.
-    fn repo_id(&self) -> String {
+    pub fn repo_id(&self) -> String {
         id_for(&self.repo)
     }
 }
@@ -1049,22 +1045,6 @@ impl Profile {
         out.dedup();
         Ok(out)
     }
-
-    /// Capabilities the profile actually carries.
-    ///
-    /// Not currently called outside tests: the launcher reports dropped
-    /// capabilities from the adapter side instead. Kept because it is the
-    /// profile-side half of that answer and `omh eject` will need it.
-    #[allow(dead_code)]
-    pub fn declared(&self) -> Result<Vec<Capability>> {
-        let mut out = Vec::new();
-        for cap in Capability::ALL {
-            if !self.sources(cap)?.is_empty() {
-                out.push(cap);
-            }
-        }
-        Ok(out)
-    }
 }
 
 /// The catalogue name of one directory entry.
@@ -1465,20 +1445,6 @@ mod tests {
                 .unwrap(),
             vec!["review-diff"],
             "a dotfile is not a skill, and naming it would poison the settings file"
-        );
-    }
-
-    #[test]
-    fn declared_reports_only_present_capabilities() {
-        let f = fixture(&[
-            ("catalogue", "rules/tdd.md", "r"),
-            ("catalogue", "mcp.json", "{}"),
-            ("catalogue", "skills/x/SKILL.md", "s"),
-        ]);
-        let declared = Profile::resolve(&f.paths).declared().unwrap();
-        assert_eq!(
-            declared,
-            vec![Capability::Rules, Capability::Skills, Capability::Mcp]
         );
     }
 

@@ -119,13 +119,12 @@ fn main() -> std::process::ExitCode {
 ///
 /// Cheap enough to run unconditionally — one `exists()` on a path already
 /// computed — and on stderr, so a redirected pipeline still shows it.
-fn say_if_the_template_was_renamed(cwd: &std::path::Path, ctx: &out::Ctx) {
+fn say_if_the_template_was_renamed(ctx: &out::Ctx) {
     let Ok(root) = Paths::home() else { return };
     let old = root.join("settings.toml");
     if !old.exists() {
         return;
     }
-    let _ = cwd;
     let now = root.join(config::TEMPLATE);
     // `mv` only when there is nothing to overwrite. Advising it unconditionally
     // destroyed a populated `default.toml` — omh printing the command that
@@ -293,7 +292,7 @@ fn say_where_the_store_went(cwd: &std::path::Path, ctx: &out::Ctx) {
 
 fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    say_if_the_template_was_renamed(&cwd, ctx);
+    say_if_the_template_was_renamed(ctx);
 
     // Before anything reads it. A scope omh cannot honour is refused where it
     // was named, rather than at whatever depth the handler would have ignored
