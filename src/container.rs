@@ -766,7 +766,7 @@ pub fn plan(
             // refresh; an env var keeps the hook file shared across sessions.
             (
                 crate::base::PROJECT_ENV.into(),
-                crate::base::project_name(&paths.repo_name(), &session.id),
+                crate::base::project_name(&paths.repo_id(), &session.id),
             ),
             // The digest `image:current` pins, resolved here because here is
             // the only side that can. The recipe depends on the PEM `ca_cert`

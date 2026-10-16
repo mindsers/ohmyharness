@@ -88,7 +88,7 @@ pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
         &paths.repo,
     );
     if let Some(note) =
-        memory::ingest::overview(&paths.repo_name(), &seeds, &stubs, &templates, &today)?
+        memory::ingest::overview(&paths.repo_id(), &seeds, &stubs, &templates, &today)?
     {
         if memory::ingest::write(&dir, &note, memory::IfExists::Skip)? {
             written += 1;
@@ -867,8 +867,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             true,
         )
         .and_then(|tag| {
-            let args =
-                base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_name());
+            let args = base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_id());
             Command::new(backend.program())
                 .args(&args)
                 .stdout(std::process::Stdio::null())

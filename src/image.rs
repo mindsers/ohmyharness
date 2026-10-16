@@ -793,10 +793,8 @@ pub enum Kind<'a> {
     /// One per *checkout*, because the recipe is that repo's toolchain. This is
     /// the case a repository cannot express.
     ///
-    /// `repo` is the checkout's full path and not `Paths::repo_name`, which is
-    /// a directory basename: two checkouts both called `api` would otherwise
-    /// share a class and reap each other, which is the same bug one level
-    /// quieter. A host path in image metadata is already the house style —
+    /// `repo` is the checkout's full path, so two checkouts both called `api`
+    /// never share a class and reap each other. A host path in image metadata is already the house style —
     /// `Plan::labels` puts whole mount paths in `omh.mounts`.
     Stack(&'a Adapter, &'a Path),
 }

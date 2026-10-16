@@ -269,7 +269,7 @@ pub(crate) fn session_up(
     // Chosen once and recorded, probing for a free one only the first time.
     let port = ssh::assigned_port(
         &paths.runs(),
-        &paths.repo_name(),
+        &paths.repo_id(),
         &session.id,
         &ssh::port_in_use,
     )?;
@@ -285,7 +285,7 @@ pub(crate) fn session_up(
     // The session's worktree is not the checkout indexed at init — it holds
     // whatever the agent has since written. Index it now; the Stop hook keeps
     // it current from here.
-    let project = base::project_name(&paths.repo_name(), &session.id);
+    let project = base::project_name(&paths.repo_id(), &session.id);
     let _ = Command::new(backend.program())
         .args(backend.exec_args(
             &name,
@@ -452,7 +452,7 @@ pub(crate) fn attach(
     // The integration point is a managed SSH config include, not an IDE plugin —
     // that is what keeps every editor working without omh knowing about any.
     let home = dirs::home_dir().context("no home directory")?;
-    let alias = ssh::host_alias(&paths.repo_name(), &session.id);
+    let alias = ssh::host_alias(&paths.repo_id(), &session.id);
     ssh::ensure_key(&paths.keys())?;
     // The sandbox's host key, pinned under every session's alias. One key per
     // repo, so the known_hosts omh writes is the same key on every line — what
@@ -468,7 +468,7 @@ pub(crate) fn attach(
     let sessions = session::list(&paths.worktrees())?;
     let pinned: Vec<String> = sessions
         .iter()
-        .map(|s| ssh::known_hosts_line(&ssh::host_alias(&paths.repo_name(), s), &host_pub))
+        .map(|s| ssh::known_hosts_line(&ssh::host_alias(&paths.repo_id(), s), &host_pub))
         .collect();
     ssh::write_known_hosts(&known_hosts, &pinned)?;
     let blocks = ssh::config_blocks(&paths.root)?;
@@ -1262,7 +1262,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
             .iter()
             .find(|s| s.id == id)
             .filter(|s| matches!(s.running, Some(image::Running::Yes)))
-            .map(|s| format!("ssh {}", ssh::host_alias(&paths.repo_name(), &s.id)))
+            .map(|s| format!("ssh {}", ssh::host_alias(&paths.repo_id(), &s.id)))
     });
     ctx.say(&report::Sessions {
         sessions,
@@ -2459,7 +2459,7 @@ pub(crate) fn rm(
                 unreached.push("its graph entry".to_string());
             }
             if matches!(up, image::Running::Yes) {
-                let project = base::project_name(&paths.repo_name(), id);
+                let project = base::project_name(&paths.repo_id(), id);
                 match drop_graph_entry(&backend, &name, &project) {
                     Ok(()) => went.push("its graph entry".to_string()),
                     // The report is built from what happened, not from the list

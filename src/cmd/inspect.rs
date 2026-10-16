@@ -31,7 +31,7 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
     let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     })?;
-    let container = base::ui_container(&paths.repo_name());
+    let container = base::ui_container(&paths.repo_id());
 
     if stop {
         if !crate::cmd::harvest::must_know(

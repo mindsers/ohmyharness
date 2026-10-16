@@ -200,13 +200,25 @@ surprise/mounting-a-credential-file-returns-ebusy  2026-08-07
   for in.
 
 <details>
-<summary>What was measured, and where the measurements live</summary>
+<summary>What was measured</summary>
 
-Ranking `Answers` above the rest of the note was tried and cost ten points of
-first-place precision on a forty-note store.
+Measured 2026-08-09 on a store of 40 notes built from this repository's
+history, with 40 questions:
 
-How those were measured, and on what, is beside the script that measures them:
-[`scripts/bench-recall.md`](https://github.com/mindsers/ohmyharness/blob/main/scripts/bench-recall.md).
+| | first place | top 3 | top 8 | notes returned |
+|---|---|---|---|---|
+| `recall` | 47.5% | 65.0% | 90.0% | 8 |
+| iwe's lexical (BM25) ranker | 55.0% | 75.0% | 95.0% | 25.9 |
+| `recall`, notes with questions declared | 55.0% | 67.5% | 87.5% | 8 |
+
+The two engines are statistically indistinguishable (McNemar p = 0.51), and
+iwe buys its top-8 by returning 26 notes where `recall` returns 8. Declared
+questions fixed three first places and broke none, but forty questions cannot
+separate that from chance (p = 0.25). It would take several hundred.
+
+So declared questions are indexed and not weighted: ranking `Answers` above
+the rest of the note cost ten points of first-place precision. What was not
+measured is whether an agent answers better with memory than without.
 
 </details>
 
