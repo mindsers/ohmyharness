@@ -68,12 +68,29 @@ impl Summary {
 
 /// Per-model price in dollars per million tokens, `(input, output)`.
 ///
-/// **Dated: read 2026-09 from Anthropic's pricing.** A model omh does not have
+/// **Dated: read 2026-10 from Anthropic's pricing.** A model omh does not have
 /// a row for is not free — it reports tokens and no cost, so a new model reads
 /// as "cost unknown" rather than "cost zero". Update the table, do not guess.
+///
+/// A key names one generation wherever generations of a family differ in
+/// price, because the longest prefix wins and a family key would price every
+/// later generation as the first. `claude-haiku-5-5` has no row: its price
+/// depends on the prompt's length, which one rate per model cannot say.
 pub const PRICES: &[(&str, f64, f64)] = &[
-    ("claude-opus-4", 15.0, 75.0),
+    ("claude-fable-5", 10.0, 50.0),
+    ("claude-mythos-5", 10.0, 50.0),
+    ("claude-opus-5", 5.0, 25.0),
+    ("claude-opus-5-5", 4.0, 20.0),
+    ("claude-opus-4-0", 15.0, 75.0),
+    ("claude-opus-4-2025", 15.0, 75.0),
+    ("claude-opus-4-1", 15.0, 75.0),
+    ("claude-opus-4-5", 5.0, 25.0),
+    ("claude-opus-4-6", 5.0, 25.0),
+    ("claude-opus-4-7", 5.0, 25.0),
+    ("claude-opus-4-8", 5.0, 25.0),
+    ("claude-sonnet-5", 2.0, 10.0),
     ("claude-sonnet-4", 3.0, 15.0),
+    ("claude-haiku-4-5", 1.0, 5.0),
     ("claude-3-5-haiku", 0.80, 4.0),
     ("claude-3-5-sonnet", 3.0, 15.0),
 ];
@@ -432,6 +449,26 @@ mod tests {
             Some(3.0 + 15.0)
         );
         assert_eq!(known.cost(), Some(18.0));
+    }
+
+    /// A generation is priced as itself, not as the family it shares a prefix
+    /// with: `claude-opus-4-5` costs a third of `claude-opus-4-1`, and a key
+    /// for the family would charge it the older price.
+    #[test]
+    fn a_model_is_priced_by_its_generation_not_its_family() {
+        for (model, price) in [
+            ("claude-opus-4-20250514", (15.0, 75.0)),
+            ("claude-opus-4-1-20250805", (15.0, 75.0)),
+            ("claude-opus-4-5-20251101", (5.0, 25.0)),
+            ("claude-opus-4-8", (5.0, 25.0)),
+            ("claude-opus-5", (5.0, 25.0)),
+            ("claude-opus-5-5", (4.0, 20.0)),
+            ("claude-sonnet-4-6", (3.0, 15.0)),
+            ("claude-sonnet-5-5", (2.0, 10.0)),
+            ("claude-haiku-4-5-20251001", (1.0, 5.0)),
+        ] {
+            assert_eq!(price_of(model), Some(price), "{model}");
+        }
     }
 
     /// Cache tokens are priced and counted, not dropped — on a Claude Code
