@@ -1930,7 +1930,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/base.rs", 3),
         ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences
         ("src/cmd/auth.rs", 3),
-        ("src/cmd/catalogue.rs", 12),
+        // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as
+        // the way back from a freeze, and `omh settings set <feature> off` with
+        // its `omh init` for a name omh owns.
+        ("src/cmd/catalogue.rs", 17),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         ("src/cmd/init.rs", 8),     // + the `omh upgrade` redirect when a repo is already set up
         ("src/cmd/upgrade.rs", 1),  // the `omh init` redirect when a repo is not set up
@@ -1967,8 +1970,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh settings edit`, where unset is given a table. + `omh settings set
         // <feature> off` under the server refusal and the part-of-a-feature
         // refusal, and `omh init` in both answers a switch in your defaults
-        // gives.
-        ("src/cmd/settings.rs", 24),
+        // gives. + `omh settings use`/`unuse` where `settings set` is given an
+        // entry of your catalogue.
+        ("src/cmd/settings.rs", 27),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start

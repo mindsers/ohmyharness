@@ -4740,6 +4740,90 @@ fn settings_switches_a_feature_for_the_repos_init_sets_up_after() {
     assert!(!held().contains("graph-first"));
 }
 
+/// What new repos take from your catalogue is changed from your defaults, as
+/// `omh use` and `omh unuse` change it for a repo: `[use]` in `default.toml`,
+/// which `omh init` seeds a repo's list from.
+///
+/// **No list is every entry**, so the first `unuse` writes the rest as one —
+/// and from then on an entry you add to your catalogue is not seeded. That is
+/// said, with the way back: `--all` takes the list out, so the kind follows
+/// the whole catalogue again.
+#[test]
+fn settings_use_and_unuse_change_what_new_repos_take() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md", "skills/review-diff/SKILL.md"]);
+    let doc = || {
+        std::fs::read_to_string(sb.home.join(".omh/default.toml"))
+            .unwrap_or_default()
+            .parse::<toml::Table>()
+            .unwrap_or_default()
+    };
+    let skills = || {
+        doc().get("use").and_then(|u| u.get("skills")).map(|v| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    let run = |argv: &[&str]| {
+        let out = sb.omh(argv);
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+
+    let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    assert!(
+        said.contains("every"),
+        "already taken, as all of them are: {said}"
+    );
+    assert_eq!(skills(), None, "and nothing written");
+
+    let (ok, said) = run(&["settings", "unuse", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    assert_eq!(skills(), Some(vec!["review-diff".to_string()]));
+    assert!(
+        said.contains("omh settings use skills --all"),
+        "the freeze is said, with the way back: {said}"
+    );
+
+    let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    assert_eq!(
+        skills(),
+        Some(vec!["review-diff".to_string(), "tdd".to_string()])
+    );
+
+    let (ok, said) = run(&["settings", "use", "skills", "nope"]);
+    assert!(!ok && said.contains("nope"), "{said}");
+    let (ok, said) = run(&["settings", "unuse", "skills", "nope"]);
+    assert!(!ok && said.contains("nope"), "{said}");
+
+    let (ok, said) = run(&["settings", "use", "skills", "--all"]);
+    assert!(ok, "{said}");
+    assert_eq!(skills(), None, "the whole catalogue again: {:?}", doc());
+
+    // omh's own are switched, not listed.
+    let (ok, said) = run(&["settings", "unuse", "hooks", "graph-first"]);
+    assert!(!ok, "{said}");
+    assert!(said.contains("omh settings set codegraph off"), "{said}");
+    // An entry handed to `settings set` is said to be one, with this verb.
+    let (ok, said) = run(&["settings", "set", "tdd", "on"]);
+    assert!(
+        !ok && said.contains("omh settings use skills tdd"),
+        "{said}"
+    );
+}
+
 /// `omh set` and `omh settings` are one letter apart and never confused.
 ///
 /// clap can be told to accept unambiguous prefixes. It is not, and this is
@@ -7963,7 +8047,12 @@ fn a_catalogue_entry_of_any_capability_is_not_a_setting() {
         ("mysubagent", "subagents"),
         ("myhook", "hooks"),
     ] {
-        for argv in [vec!["set", name, "on"], vec!["settings", "set", name, "on"]] {
+        // Each door names its own verb: a repo's list is `omh use`, what new
+        // repos take is `omh settings use`.
+        for (argv, verb) in [
+            (vec!["set", name, "on"], "omh use"),
+            (vec!["settings", "set", name, "on"], "omh settings use"),
+        ] {
             let out = sb.omh(&argv);
             let said = format!(
                 "{:?}\n{}{}",
@@ -7977,7 +8066,7 @@ fn a_catalogue_entry_of_any_capability_is_not_a_setting() {
                 argv.join(" ")
             );
             assert!(
-                said.contains(&format!("omh use {capability} {name}")),
+                said.contains(&format!("{verb} {capability} {name}")),
                 "the refusal spells the capability it found `{name}` in, or it                  is advice that does not work: {said}"
             );
         }
@@ -15484,6 +15573,26 @@ const EXERCISES: &[Exercise] = &[
     // A value omh cannot read: refused bare, so this is the run that writes.
     Exercise {
         argv: &["settings", "set", "--anyway", "persistence", "tmux"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // What new repos take: left out (which writes the rest as the list), taken
+    // back, and the list taken out so the kind follows the catalogue again.
+    Exercise {
+        argv: &["settings", "unuse", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "use", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "use", "skills", "--all"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: false,

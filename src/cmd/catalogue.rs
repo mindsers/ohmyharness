@@ -1107,3 +1107,160 @@ pub(crate) fn catalogue_names_unfiltered(
         .filter(|n| !owned.get(&cap).is_some_and(|o| o.contains_key(n)))
         .collect())
 }
+
+/// What the repos `omh init` sets up after take of one kind: `[use]` in your
+/// defaults, `None` for a kind with no list — every entry.
+fn seeded(paths: &Paths, cap: adapter::Capability) -> Result<Option<Vec<String>>> {
+    config::selection_in(paths, config::Layer::Personal, cap)
+}
+
+/// omh's own are a feature's, switched whole and never listed — the refusal
+/// `current_list` makes for a repo, said for your defaults.
+fn refuse_a_name_omh_owns(paths: &Paths, cap: adapter::Capability, name: &str) -> Result<()> {
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    if let Some(feature) = manifest.owns().get(&cap).and_then(|o| o.get(name)) {
+        anyhow::bail!(
+            "{cap}/{name} is omh's — part of the `{feature}` feature, which is switched \
+             whole. For the repos `omh init` sets up after:\n  omh settings set {feature} off"
+        );
+    }
+    Ok(())
+}
+
+/// `omh settings use`: have the repos `omh init` sets up after take an entry,
+/// or — `--all` — every entry of a kind again.
+pub(crate) fn defaults_use(
+    paths: &Paths,
+    key: &str,
+    name: Option<&str>,
+    all: bool,
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    let cap = crate::cmd::settings::capability_from(key)?;
+    let file = config::Layer::Personal.file(paths);
+    if all {
+        let had = seeded(paths, cap)?.is_some();
+        if had && !dry_run {
+            config::forget_selection(paths, config::Layer::Personal, cap)?;
+        }
+        let said = match (had, dry_run) {
+            (false, _) => format!("new repos already take every {cap} in your catalogue"),
+            (true, true) => format!("would have new repos take every {cap} in your catalogue"),
+            (true, false) => format!("new repos take every {cap} in your catalogue again"),
+        };
+        ctx.say(
+            &report::Action::new("defaults-use-all", said)
+                .data(serde_json::json!({ "capability": cap.to_string(), "changed": had })),
+        );
+        return Ok(());
+    }
+    let Some(name) = name else {
+        anyhow::bail!(
+            "omh settings use <capability> <name>, or omh settings use <capability> --all"
+        );
+    };
+    selection::validate_entry_name(name, cap, &file)?;
+    refuse_a_name_omh_owns(paths, cap, name)?;
+    let available = catalogue_names_unfiltered(paths, cap)?;
+    if !available.iter().any(|n| n == name) {
+        return Err(crate::cmd::settings::no_such_entry(cap, name, &available));
+    }
+    let (said, list) = match seeded(paths, cap)? {
+        None => (
+            format!(
+                "new repos already take every {cap} in your catalogue, {cap}/{name} among them"
+            ),
+            None,
+        ),
+        Some(names) if names.iter().any(|n| n == name) => {
+            (format!("new repos already take {cap}/{name}"), None)
+        }
+        Some(mut names) => {
+            names.push(name.to_string());
+            (
+                match dry_run {
+                    true => format!("new repos would take {cap}/{name}"),
+                    false => format!("new repos take {cap}/{name}"),
+                },
+                Some(names),
+            )
+        }
+    };
+    let mut action = report::Action::new("defaults-used", said).data(serde_json::json!({
+        "capability": cap.to_string(),
+        "name": name,
+        "changed": list.is_some(),
+    }));
+    if let (Some(list), false) = (list, dry_run) {
+        let w = config::write_selection(
+            paths,
+            config::Layer::Personal,
+            &BTreeMap::from([(cap, list)]),
+        )?;
+        action = action.note(format!("wrote → {} (seeds new repos)", w.path.display()));
+    }
+    ctx.say(&action);
+    Ok(())
+}
+
+/// `omh settings unuse`: have the repos `omh init` sets up after leave an
+/// entry out. On a kind with no list that writes the rest as one — and an
+/// entry added to the catalogue after it is not seeded, so that is said, with
+/// the way back.
+pub(crate) fn defaults_unuse(
+    paths: &Paths,
+    key: &str,
+    name: &str,
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    let cap = crate::cmd::settings::capability_from(key)?;
+    selection::validate_entry_name(name, cap, &config::Layer::Personal.file(paths))?;
+    refuse_a_name_omh_owns(paths, cap, name)?;
+    let (mut names, froze) = match seeded(paths, cap)? {
+        Some(names) => (names, false),
+        None => (catalogue_names_unfiltered(paths, cap)?, true),
+    };
+    if !names.iter().any(|n| n == name) {
+        anyhow::bail!(
+            "{cap}/{name} is not what new repos take — they take {}",
+            if names.is_empty() {
+                format!("no {cap}")
+            } else {
+                names.join(", ")
+            }
+        );
+    }
+    names.retain(|n| n != name);
+    let mut action = report::Action::new(
+        "defaults-unused",
+        match dry_run {
+            true => format!("new repos would leave out {cap}/{name}"),
+            false => format!("new repos leave out {cap}/{name}"),
+        },
+    )
+    .data(serde_json::json!({
+        "capability": cap.to_string(),
+        "name": name,
+        "froze_selection": froze,
+    }));
+    if froze {
+        action = action.note(format!(
+            "{cap} was every entry in your catalogue: the other {} are its list now, and one \
+             you add is not seeded until you use it. To follow the whole catalogue again:\n  \
+             omh settings use {cap} --all",
+            names.len()
+        ));
+    }
+    if !dry_run {
+        let w = config::write_selection(
+            paths,
+            config::Layer::Personal,
+            &BTreeMap::from([(cap, names)]),
+        )?;
+        action = action.note(format!("wrote → {} (seeds new repos)", w.path.display()));
+    }
+    ctx.say(&action);
+    Ok(())
+}

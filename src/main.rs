@@ -594,6 +594,21 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                         ctx,
                     )
                 }
+                Some(SettingsCmd::Use {
+                    capability,
+                    name,
+                    all,
+                }) => cmd::catalogue::defaults_use(
+                    &paths,
+                    capability,
+                    name.as_deref(),
+                    *all,
+                    cli.dry_run,
+                    ctx,
+                ),
+                Some(SettingsCmd::Unuse { capability, name }) => {
+                    cmd::catalogue::defaults_unuse(&paths, capability, name, cli.dry_run, ctx)
+                }
                 Some(SettingsCmd::Edit { capability, name }) => cmd::settings::edit(
                     &paths,
                     capability.as_deref(),
@@ -640,9 +655,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 cmd::settings::Names::AnEntryOf(feature) => Err(
                     cmd::settings::an_entry_is_not_a_feature(key, &feature, false),
                 ),
-                cmd::settings::Names::ACatalogueEntry(cap) => {
-                    Err(cmd::settings::a_catalogue_entry_is_not_a_setting(key, cap))
-                }
+                cmd::settings::Names::ACatalogueEntry(cap) => Err(
+                    cmd::settings::a_catalogue_entry_is_not_a_setting(key, cap, false),
+                ),
                 cmd::settings::Names::ASetting | cmd::settings::Names::Neither => {
                     if key == "account" {
                         cmd::settings::check_account(&paths, value, ctx)?;
@@ -671,9 +686,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 cmd::settings::Names::AnEntryOf(feature) => Err(
                     cmd::settings::an_entry_is_not_a_feature(key, &feature, false),
                 ),
-                cmd::settings::Names::ACatalogueEntry(cap) => {
-                    Err(cmd::settings::a_catalogue_entry_is_not_a_setting(key, cap))
-                }
+                cmd::settings::Names::ACatalogueEntry(cap) => Err(
+                    cmd::settings::a_catalogue_entry_is_not_a_setting(key, cap, false),
+                ),
                 cmd::settings::Names::ASetting | cmd::settings::Names::Neither => {
                     let reached = cmd::settings::reach(&paths, key, *local, *save)?;
                     cmd::settings::unset(&paths, key, harness.as_deref(), reached, cli.dry_run, ctx)

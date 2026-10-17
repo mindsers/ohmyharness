@@ -713,6 +713,58 @@ pub fn forget_feature(paths: &Paths, layer: Layer, feature: &str) -> Result<bool
     Ok(true)
 }
 
+/// Take a capability's list out of `[use]` in one layer, so what it seeds
+/// follows the whole catalogue again. Answers whether there was one.
+pub fn forget_selection(
+    paths: &Paths,
+    layer: Layer,
+    cap: crate::adapter::Capability,
+) -> Result<bool> {
+    let path = layer.file(paths);
+    let mut doc = read_doc(&path)?;
+    let Some(table) = doc
+        .get_mut(USE)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Ok(false);
+    };
+    if table.remove(&cap.to_string()).is_none() {
+        return Ok(false);
+    }
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// The list `[use]` in one layer holds for a capability: `None` when there is
+/// none, which is every entry.
+pub fn selection_in(
+    paths: &Paths,
+    layer: Layer,
+    cap: crate::adapter::Capability,
+) -> Result<Option<Vec<String>>> {
+    let path = layer.file(paths);
+    let doc = read_doc(&path)?;
+    let Some(item) = doc.get(USE).and_then(|t| t.get(cap.to_string())) else {
+        return Ok(None);
+    };
+    let Some(array) = item.as_array() else {
+        anyhow::bail!("[use] {cap} in {} is not a list", path.display());
+    };
+    array
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_string).with_context(|| {
+                format!(
+                    "[use] {cap} in {} holds a name that is not text",
+                    path.display()
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
 /// The repo layers a write to `table.key` has to reach.
 ///
 /// Always the committed file: what a project uses, and which of omh's features

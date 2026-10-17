@@ -666,7 +666,7 @@ pub(crate) fn no_legacy_write_over_a_name_omh_owns(
              that name is read by nothing.\n  omh set {name} off"
         ),
         Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(name, &feature, true)),
-        Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(name, cap)),
+        Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(name, cap, true)),
         Names::ASetting | Names::Neither => Ok(()),
     }
 }
@@ -676,12 +676,20 @@ pub(crate) fn no_legacy_write_over_a_name_omh_owns(
 pub(crate) fn a_catalogue_entry_is_not_a_setting(
     name: &str,
     cap: adapter::Capability,
+    defaults: bool,
 ) -> anyhow::Error {
-    anyhow::anyhow!(
-        "`{name}` is one of your {cap}, not a setting — what a project takes \
-         from your catalogue is `omh use`.\n  omh use {cap} {name}\n  \
-         omh unuse {cap} {name}"
-    )
+    match defaults {
+        true => anyhow::anyhow!(
+            "`{name}` is one of your {cap}, not a setting — what new repos take from \
+             your catalogue is `omh settings use`.\n  omh settings use {cap} {name}\n  \
+             omh settings unuse {cap} {name}"
+        ),
+        false => anyhow::anyhow!(
+            "`{name}` is one of your {cap}, not a setting — what a project takes \
+             from your catalogue is `omh use`.\n  omh use {cap} {name}\n  \
+             omh unuse {cap} {name}"
+        ),
+    }
 }
 
 /// The grouping, said where somebody has just guessed at it.
@@ -1429,7 +1437,11 @@ fn find_entry(cap: adapter::Capability, name: &str, dir: &std::path::Path) -> Re
 
 /// The refusal for a name nothing in the catalogue answers to, in the words
 /// `omh use` gives the same mistake.
-fn no_such_entry(cap: adapter::Capability, name: &str, held: &[String]) -> anyhow::Error {
+pub(crate) fn no_such_entry(
+    cap: adapter::Capability,
+    name: &str,
+    held: &[String],
+) -> anyhow::Error {
     anyhow::anyhow!(
         "your catalogue has no {cap} called `{name}`.\n  {cap}: {}",
         if held.is_empty() {

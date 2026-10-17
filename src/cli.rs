@@ -696,6 +696,31 @@ pub(crate) enum SettingsCmd {
         /// Which setting to drop.
         key: String,
     },
+    /// Have the repos `omh init` sets up after take an entry of your catalogue.
+    ///
+    /// `omh use` for your defaults: `[use]` in `default.toml`, which a new
+    /// repo's list is seeded from. No list means every entry, so a kind that
+    /// has none already takes this one.
+    Use {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: String,
+        /// Which entry.
+        name: Option<String>,
+        /// Take the list out, so new repos follow the whole catalogue again.
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+    },
+    /// Have the repos `omh init` sets up after leave an entry out.
+    ///
+    /// The first one on a kind with no list writes the rest as its list, and
+    /// says so: from then on, an entry you add is not seeded until you `use`
+    /// it, or `omh settings use <capability> --all`.
+    Unuse {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: String,
+        /// Which entry to leave out.
+        name: String,
+    },
     /// Open your defaults, or one catalogue entry, in $EDITOR.
     Edit {
         /// One of rules, skills, mcp, commands, subagents, hooks. Without it,
@@ -1045,6 +1070,8 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
             None
             | Some(SettingsCmd::Set { .. })
             | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Use { .. })
+            | Some(SettingsCmd::Unuse { .. })
             | Some(SettingsCmd::Rm { .. })
             | Some(SettingsCmd::Mcp { .. }) => true,
         },
@@ -1121,6 +1148,8 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
             None
             | Some(SettingsCmd::Set { .. })
             | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Use { .. })
+            | Some(SettingsCmd::Unuse { .. })
             | Some(SettingsCmd::Rm { .. })
             | Some(SettingsCmd::Mcp { .. }) => true,
         },
