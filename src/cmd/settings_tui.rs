@@ -883,6 +883,8 @@ fn hint(shape: &key::Shape) -> String {
         key::Shape::Paths => "a list of paths: [\".env\", \".env.local\"]".into(),
         key::Shape::Path => "an absolute path".into(),
         key::Shape::Duration => "a duration: 90s, 30m, 2h, 1d".into(),
+        key::Shape::Size => "a size: 4g, 512m".into(),
+        key::Shape::Count => "a number above zero: 2, 1.5".into(),
         key::Shape::Choice(allowed) => format!("one of {}", allowed.join(", ")),
     }
 }
