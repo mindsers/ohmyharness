@@ -6926,10 +6926,31 @@ impl Tty {
             .join("\n")
     }
 
-    /// Wait until `needle` is on the screen, or fail saying what is.
+    /// The screen's words as a person reads them: every row's text with the
+    /// box drawing taken off, run together, so a sentence that wrapped is one
+    /// sentence again.
+    ///
+    /// Where a line wraps depends on how long the paths in it are — a temp
+    /// directory is `/var/folders/…` on macOS and `/tmp/.tmp…` on Linux — so
+    /// `never a path` was one row on one and `never` / `a path` on the other,
+    /// and a test that looked for it passed on one and failed on the other.
+    fn read(&self) -> String {
+        let boxes = |c: char| "│┌┐└┘─├┤┬┴┼".contains(c);
+        self.screen()
+            .lines()
+            .map(|row| row.replace(boxes, " "))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Wait until `needle` is on the screen — as drawn, or as read across a
+    /// wrap — or fail saying what is.
     fn wait_for(&self, needle: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while !self.screen().contains(needle) {
+        while !self.screen().contains(needle) && !self.read().contains(needle) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "`{needle}` is not on the screen. It shows:\n{}",
