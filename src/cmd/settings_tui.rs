@@ -1002,17 +1002,42 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
     // heading of their own — where `[omh]` was one table row to open the file
     // for.
     let switched = feature_switches(paths);
+    let shipped = crate::base::Manifest::shipped();
     for feature in settings::shipped_features().unwrap_or_default() {
+        let mut about = vec![format!(
+            "one of omh's features — its servers, hooks and rules section, on or off \
+                 together, for the repos `omh init` sets up after. A repo that exists \
+                 keeps its own: `omh set {feature} off` there."
+        )];
+        // What switching it whole switches, by name: the sentence above named
+        // none of them.
+        match &shipped {
+            Ok(manifest) => {
+                about.push(String::new());
+                for (kind, label) in [
+                    (crate::base::Kind::Mcp, "server  "),
+                    (crate::base::Kind::Hook, "hooks   "),
+                    (crate::base::Kind::Rules, "rules   "),
+                ] {
+                    let names: Vec<&str> = manifest
+                        .entries
+                        .iter()
+                        .filter(|e| e.feature == feature && e.kind == kind)
+                        .map(|e| e.name.as_str())
+                        .collect();
+                    if !names.is_empty() {
+                        about.push(format!("{label}{}", names.join(", ")));
+                    }
+                }
+            }
+            Err(e) => about.push(format!("could not read what it brings: {e:#}")),
+        }
         out.rows.push(Row {
             value: switched
                 .get(&feature)
                 .map(|on| if *on { "on" } else { "off" }.to_string()),
             fallback: Some("on".into()),
-            about: vec![format!(
-                "one of omh's features — its servers, hooks and rules section, on or off \
-                     together, for the repos `omh init` sets up after. A repo that exists \
-                     keeps its own: `omh set {feature} off` there."
-            )],
+            about,
             edit: Edit::Choice(vec!["on".into(), "off".into()]),
             group: Some("features".into()),
             name: feature,
@@ -1410,6 +1435,36 @@ mod tests {
                 "`omh {}` is not a line omh accepts: {e}",
                 line[1..].join(" ")
             ),
+        }
+    }
+
+    /// A feature's row says what it brings — its server, its hooks, its
+    /// section of the rules — which is what switching it whole switches.
+    /// "Its servers, hooks and rules section" named none of them.
+    #[test]
+    fn a_feature_says_what_it_brings() {
+        let (_dir, paths) = paths();
+        let model = model(&paths);
+        let manifest = crate::base::Manifest::shipped().unwrap();
+        let defaults = page(&model, "defaults");
+        for feature in defaults
+            .rows
+            .iter()
+            .filter(|r| r.group.as_deref() == Some("features"))
+        {
+            let said = feature.about.join("\n");
+            for entry in manifest
+                .entries
+                .iter()
+                .filter(|e| e.feature == feature.name)
+            {
+                assert!(
+                    said.contains(&entry.name),
+                    "{}: no {}:\n{said}",
+                    feature.name,
+                    entry.name
+                );
+            }
         }
     }
 
