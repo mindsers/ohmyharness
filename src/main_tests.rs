@@ -906,7 +906,7 @@ fn nothing_still_offers_a_verb_that_was_retired() {
         format!("{:?}, {:?}", "claude", "--file"), // types the retired verb on purpose
         // The server's own `rm`, folded into the one `omh settings rm` that
         // takes every kind of catalogue entry. Scoped to `mcp`, because `rm`
-        // is a live verb under `s` and `memory`.
+        // is a live verb under `s`, `memory` and `settings` itself.
         format!("omh settings mcp {}", "rm"), // types the retired verb on purpose
         format!("{:?}, {:?}", "mcp", "rm"),   // types the retired verb on purpose
     ];
@@ -1948,11 +1948,14 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/session.rs", 15),
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
-        ("src/cmd/settings.rs", 13),
+        // + `omh settings edit mcp`, in the refusal of a name for a server.
+        ("src/cmd/settings.rs", 14),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
-        // beside a hook omh ships, and `omh <line>` when a child will not start.
-        ("src/cmd/settings_tui.rs", 4),
+        // beside a hook omh ships, `omh <line>` when a child will not start,
+        // and `omh <line>` twice in the error when the screen cannot come back
+        // after `$EDITOR`.
+        ("src/cmd/settings_tui.rs", 6),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather

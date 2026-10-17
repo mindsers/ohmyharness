@@ -988,7 +988,7 @@ mod tests {
         assert!(!said.contains("sk-arg-secret"), "{said}");
     }
 
-    /// The line shown for a new server names its environment and hides the    /// The line shown for a new server names its environment and hides the
+    /// The line shown for a new server names its environment and hides the
     /// values, and counts its arguments rather than drawing them: it stays on
     /// the screen where anybody looking can read it, and those are where a
     /// token goes.

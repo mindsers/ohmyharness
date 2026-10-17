@@ -1167,30 +1167,59 @@ mod tests {
             .join("\n")
     }
 
-    /// **No key writes.** Every key a person can press either moves, opens a
-    /// question, or comes back as an act — so a walk over every key on every
-    /// page that never answers `y` or submits a line must produce no `Run` of
-    /// anything but an editor, and no `Preview` it was not asked for.
+    /// **No key writes unasked.** Moving, paging, `a` and `i` open at most a
+    /// question; on no page does any of them come back as an act.
+    ///
+    /// The keys that do act are walked separately, because each has one thing
+    /// it may do: `d` and Delete unset a default at once (a `set` undone, which
+    /// asks nothing, as `omh settings unset` does not) and *preview* a removal,
+    /// never run one; `e` and `enter` open `$EDITOR` or a question. None of
+    /// them is a removal, a server added, a value set or an import.
     #[test]
     fn a_key_never_writes_without_being_asked_to() {
-        let keys: Vec<KeyEvent> = "jkhlg123456789aiqx"
+        let moves: Vec<KeyEvent> = "jkhlgG123456789aiqx"
             .chars()
             .map(press)
-            .chain([
-                code(KeyCode::Down),
-                code(KeyCode::Up),
-                code(KeyCode::Tab),
-                code(KeyCode::BackTab),
-                code(KeyCode::Esc),
-            ])
+            .chain(
+                [
+                    KeyCode::Down,
+                    KeyCode::Up,
+                    KeyCode::Left,
+                    KeyCode::Right,
+                    KeyCode::Home,
+                    KeyCode::End,
+                    KeyCode::Tab,
+                    KeyCode::BackTab,
+                    KeyCode::Esc,
+                ]
+                .map(code),
+            )
             .collect();
+        let acts = [
+            press('d'),
+            press('e'),
+            code(KeyCode::Delete),
+            code(KeyCode::Enter),
+        ];
         for page in 0..model().sections.len() {
-            for key in &keys {
+            for key in &moves {
                 let mut app = App::new(model(), true);
                 app.at = page;
                 match app.key(*key) {
                     Next::Stay | Next::Quit => {}
                     other => panic!("{key:?} on page {page} did {other:?} unasked"),
+                }
+            }
+            for key in &acts {
+                let mut app = App::new(model(), true);
+                app.at = page;
+                match app.key(*key) {
+                    Next::Stay
+                    | Next::Preview(Act::Remove { .. })
+                    | Next::Run(Act::Unset { .. })
+                    | Next::Run(Act::Edit { .. })
+                    | Next::Run(Act::EditDefaults) => {}
+                    other => panic!("{key:?} on page {page} did {other:?}"),
                 }
             }
         }

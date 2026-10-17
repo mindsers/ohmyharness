@@ -276,9 +276,12 @@ impl Paths {
 
     /// A `Paths` that works outside a repository.
     ///
-    /// `repo` is the cwd when there is no repo, which is honest: the caller
-    /// that needs this — `omh settings` — touches only `root`, and a command
-    /// that reaches for `repo` here would be asking a question with no answer.
+    /// `repo` is the cwd when there is no repo, which is honest: its callers —
+    /// `omh settings`, and `omh import` for everything but hooks — work on
+    /// `root`, and reach `repo` only to expand an adapter's `$REPO`. One import
+    /// path holds it — claude's servers, at `$REPO/.mcp.json` — and outside a
+    /// repo that is the directory you are in. A command that needed a real
+    /// `repo` here would be asking a question with no answer.
     pub fn anywhere(cwd: &Path) -> Result<Self> {
         Ok(Self {
             root: Self::home()?,

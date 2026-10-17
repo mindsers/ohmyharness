@@ -332,12 +332,7 @@ pub(crate) fn import_cmd(
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    let cap = adapter::Capability::from_key(capability).with_context(|| {
-        format!(
-            "`{capability}` is not a capability — expected {}",
-            crate::cmd::settings::capability_list()
-        )
-    })?;
+    let cap = crate::cmd::settings::capability_from(capability)?;
     // Hooks land in this repo's `.omh/hooks/`, so they need one. Everything else
     // lands in `~/.omh`, which is there outside a checkout too — refusing there
     // was `omh settings`' old defect, one verb over.
@@ -870,12 +865,7 @@ pub(crate) fn current_list(
     key: &str,
     name: &str,
 ) -> Result<(adapter::Capability, Vec<String>, bool)> {
-    let cap = adapter::Capability::from_key(key).with_context(|| {
-        format!(
-            "`{key}` is not a capability — expected {}",
-            crate::cmd::settings::capability_list()
-        )
-    })?;
+    let cap = crate::cmd::settings::capability_from(key)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let policy = settings::resolve(paths, &manifest)?;
     let file = config::Layer::Shared.file(paths);

@@ -1142,7 +1142,7 @@ pub(crate) fn open_in_editor(target: &EditTarget) -> Result<Edited> {
 /// Take one entry out of your catalogue, whatever kind it is.
 ///
 /// **One verb, and one rule for asking.** A server used to have its own `rm`
-/// under `omh settings mcp`, which removed without a word, and nothing removed
+/// under `omh settings mcp`, which removed without asking, and nothing removed
 /// anything else. Now a person at a terminal is asked, and anything else must
 /// say `--yes` — the rule `omh sNN rm` already follows, through the same
 /// `Consent`. A preview removes nothing, so it asks nothing.

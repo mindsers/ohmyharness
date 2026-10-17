@@ -6125,8 +6125,8 @@ fn settings_rm_takes_the_named_entry_of_any_kind_and_nothing_else() {
 
 /// Off a terminal, `rm` refuses without `--yes` — for every kind, servers too.
 ///
-/// One rule for asking, the one `omh sNN rm` and `omh prune` already follow:
-/// a person at a terminal is asked, and a script must say so. Piped rather
+/// One rule for asking, the one `omh sNN rm` already follows: a person at a
+/// terminal is asked, and a script must say so with `--yes`. Piped rather
 /// than null stdin, because a pipe that answers `y` is exactly the shape a
 /// guard has to refuse — see `omh_with_stdin`.
 #[test]
@@ -6226,7 +6226,8 @@ fn settings_rm_refuses_a_name_two_files_answer_to() {
 /// Two guards, either enough on its own: the name is refused before anything
 /// is joined to it, and the path that is removed is only ever one the
 /// catalogue directory listed. The wording pins the first; the files on disk
-/// pin both.
+/// pin that at least one of them holds — taking the second away alone leaves
+/// this green, because the first still refuses.
 #[test]
 fn settings_rm_refuses_a_name_that_is_a_path() {
     let sb = sandbox();
@@ -6682,8 +6683,11 @@ fn settings_works_outside_a_repository() {
 /// `omh` on a terminal of its own: a pseudo-terminal whose other end this test
 /// holds, so it can type and read what was drawn.
 ///
-/// Every other run here gets a pipe or nothing for stdin, which is exactly what
-/// a screen must not open on. This is the one shape that is a terminal.
+/// Nearly every other run here gets a pipe or nothing for stdin, which is
+/// exactly what a screen must not open on; this is the shape that is a
+/// terminal. `omh_on_a_terminal_with` can take stdin away, and
+/// `settings_typed_at_a_terminal_into_a_pipe_is_the_report` gives a terminal
+/// to stdin alone.
 struct Tty {
     child: std::process::Child,
     keys: std::fs::File,
@@ -14795,9 +14799,9 @@ struct Exercise {
 /// declared, naming itself.
 ///
 /// **Order is part of the table.** Half of these only mean something in
-/// sequence — `settings mcp rm demo` is a real removal after `settings mcp add
-/// demo` and a refusal without it, and `s01 rm` has to come last because it
-/// takes the session away.
+/// sequence — `settings rm mcp demo --yes` is a real removal after `settings mcp
+/// add demo` and a refusal without it, and `s01 rm` has to come last because
+/// it takes the session away.
 const EXERCISES: &[Exercise] = &[
     // ── things that read the machine ────────────────────────────────────
     //

@@ -320,7 +320,8 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<SessionsCmd>,
     },
-    /// Your defaults — what a repo starts from, and how to change them.
+    /// Your defaults and your catalogue — what a repo starts from, and how to
+    /// change it.
     ///
     /// Not `omh set`, which is this checkout. The two are one letter apart
     /// with opposite scopes, and clap is deliberately not told to accept
@@ -665,9 +666,9 @@ pub(crate) enum SessionsCmd {
 ///
 /// The five verbs are the ones that act on `~/.omh`: two that write a default,
 /// one that opens the file or an entry, one that removes an entry, and the MCP
-/// catalogue. Listing the catalogue is
-/// not among them — that is `omh info`, which is where the machine is
-/// described.
+/// catalogue. With no verb it is the report, or at a terminal a screen over
+/// your defaults and every catalogue entry — which is the catalogue listed
+/// for changing, while `omh info` is where the machine is described.
 #[derive(Subcommand)]
 pub(crate) enum SettingsCmd {
     /// Set one of your defaults, for every project you start after this.
@@ -883,7 +884,9 @@ pub(crate) const RETIRED: &[Retired] = &[
         said: "`--file` is `--from` now, as it is on `omh import`:\n  omh settings mcp import claude --from <path>",
     },
     // Folded into the one `rm` that takes every kind of catalogue entry.
-    // Under `mcp` only: `rm` is a live verb under `s` and `memory`.
+    // Under `mcp` only: `rm` is a live verb under `s`, `memory` and `settings`
+    // itself, and this is consulted only for a line clap refused — so
+    // `omh settings rm mcp rm`, a server called `rm`, parses and runs.
     Retired {
         spellings: &["rm"], // types the retired verb on purpose
         at: At::Under(&["mcp"]),
@@ -985,21 +988,6 @@ pub(crate) fn retired(argv: &[String]) -> Option<&'static str> {
     })
 }
 
-/// Whether this command does anything with the session it was handed.
-///
-/// The selector lifts a leading `sNN` into `cli.session` before the parser
-/// sees the line, so **any** command can arrive carrying one — `omh s01 why
-/// codegraph` parses as `omh why codegraph` with the id set. A command that
-/// does not read it must refuse the line rather than answer it. It used to
-/// answer: a correct report about the repo, exit 0, and the `s01` discarded in
-/// silence. That is a wrong answer wearing a right one's clothes, and it is the
-/// same defect `omh s01 ls` had, fixed there one spelling at a time.
-///
-/// **Exhaustively matched on purpose, with no wildcard.** A new command is then
-/// a compile error until somebody decides which side it is on — the decision
-/// cannot be skipped, and a list that rots cannot be the thing that protects
-/// this. `the_reads_and_the_refusals_agree_with_the_dispatch` checks the
-/// answers here against what the arms actually pass.
 /// Whether this command can show you what it would do without doing it.
 ///
 /// **A `--dry-run` that is accepted and discarded is a lie**, and it was one on
@@ -1094,7 +1082,8 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
 /// plan. `dispatch` applies that rule; this function answers the narrower
 /// question of whether the real run has anything to say.
 ///
-/// Exhaustive, like the two above, so a new command decides this too.
+/// Exhaustive, like `previews` and `consumes_session`, so a new command
+/// decides this too.
 pub(crate) fn answers_json(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::New { .. } => false,
@@ -1147,6 +1136,21 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
     }
 }
 
+/// Whether this command does anything with the session it was handed.
+///
+/// The selector lifts a leading `sNN` into `cli.session` before the parser
+/// sees the line, so **any** command can arrive carrying one — `omh s01 why
+/// codegraph` parses as `omh why codegraph` with the id set. A command that
+/// does not read it must refuse the line rather than answer it. It used to
+/// answer: a correct report about the repo, exit 0, and the `s01` discarded in
+/// silence. That is a wrong answer wearing a right one's clothes, and it is the
+/// same defect `omh s01 ls` had, fixed there one spelling at a time.
+///
+/// **Exhaustively matched on purpose, with no wildcard.** A new command is then
+/// a compile error until somebody decides which side it is on — the decision
+/// cannot be skipped, and a list that rots cannot be the thing that protects
+/// this. `the_reads_and_the_refusals_agree_with_the_dispatch` checks the
+/// answers here against what the arms actually pass.
 pub(crate) fn consumes_session(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Sessions { .. } => true,

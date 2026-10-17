@@ -2120,47 +2120,54 @@ it is the report above.
 │2 rules        0  ││                                                          │
 │3 skills       1  ││                                                          │
 │4 servers      2  ││                                                          │
-│5 commands     0  │└──────────────────────────────────────────────────────────┘
-│6 subagents    0  │┌ skills/tdd ──────────────────────────────────────────────┐
-│7 hooks        8  ││write the failing test first                              │
+│5 commands     0  ││                                                          │
+│6 subagents    0  │└──────────────────────────────────────────────────────────┘
+│7 hooks        8  │┌ skills/tdd ──────────────────────────────────────────────┐
+│                  ││write the failing test first                              │
 │                  ││at /Users/you/.omh/skills/tdd                             │
 │                  ││                                                          │
 │                  ││                                                          │
 │                  ││                                                          │
 └──────────────────┘└──────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│= omh settings rm skills review-diff --yes                                    │
+│= omh settings rm --yes skills review-diff                                    │
 │removed /Users/you/.omh/skills/review-diff                                    │
-│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
  ↑↓ move · ⇥ or 1-7 page · enter/e edit · a new · d remove · i import · q quit
 ```
 
 | | |
 |---|---|
-| `↑` `↓` (`j` `k`) | move in the list |
-| `⇥` `⇧⇥` (`h` `l`), `1`–`7` | change page |
+| `↓` `↑` (`j` `k`) | move in the list |
+| `⇥` `⇧⇥` or `→` `←` (`l` `h`), `1`–`7` | change page |
 | `enter` | set a default; open a rule, skill, command, subagent or hook in `$EDITOR` |
 | `e` | `$EDITOR` on the entry, or on the file a page lives in |
 | `a` | a new entry, opened in `$EDITOR`; a new server, asked for in three lines |
 | `d` | unset a default; remove an entry or a server, after asking |
 | `i` | import this kind from a harness whose adapter says where it keeps them |
-| `q` `esc` | leave |
+| `q` `esc` `ctrl-d` `ctrl-c` | leave |
+
+A letter held with Ctrl or Alt is not that letter: Ctrl-D leaves, and no other
+held key does anything — Ctrl-D does not unset the default under the cursor.
 
 **Every change is a command, run as one.** The screen has no write of its
 own: a key becomes the line you would have typed — `omh settings set`,
 `omh settings rm`, `omh settings mcp add`, `omh import` — which omh runs, and
 the screen shows the line above what it said. So its refusals, warnings and
 wording are that command's, and anything you did there you can script.
-Removing previews first, and asks in the preview's words; a hook omh ships is
-refused before the question rather than after it.
+Removing previews first, and asks in the preview's words, with the preview's
+warnings; a hook omh ships is refused before the question rather than after
+it. The one exception is `$EDITOR`, which the screen runs itself through
+`omh settings edit`'s own steps — a refusal printed by a child would land on
+the terminal just handed to the editor, behind the screen drawn back over it.
 
 **Your catalogue, and nothing of this checkout's.** A hook in a repo's
 `.omh/hooks/` is not on the hooks page, and the screen does not import hooks:
 a hook lands in a repo, so `omh import hooks <harness>` is run in one. A
-server is drawn the way `omh settings mcp ls` prints it: its command, its
-environment by name and its arguments by count, since those are where a token
-goes — and the line shown after adding one hides the same.
+server is drawn by its command, as `omh settings mcp ls` prints it, with its
+environment named and its arguments counted — never a value of either, since
+those are where a token goes — and the line shown after adding one hides the
+same.
 
 **Nothing read is drawn as a control sequence.** A skill's description, a
 hook's `does` and a command's output are drawn with every control character
@@ -2180,18 +2187,26 @@ is committed. It already has a home — `omh settings mcp add <name> <command>
 live in your catalogue; a repo overrides a server's environment without
 redeclaring it. See [Configuration](/reference/configuration/).
 
-**Your catalogue is `omh info`.** This command is your *defaults* — the five
-verbs above all act on `~/.omh`, and what you have in it is part of what
-`omh info` means by *what you have here*.
+**Your defaults and your catalogue.** The five verbs above all act on `~/.omh`;
+the screen is that catalogue listed for changing it. `omh info` is where the
+machine is described, and what you have in `~/.omh` is part of what it means
+by *what you have here*.
 
 **`edit` and `rm` take a name, so they validate one**: `omh settings edit
 skills ../../.ssh/id_rsa` is refused before `$EDITOR` sees it, and the same
 name is refused before `rm` deletes anything.
 
-**A new skill is a directory.** `omh settings edit skills tdd` makes
-`~/.omh/skills/tdd/` and opens the `SKILL.md` in it, because a skill is mounted
-as a directory holding one, and a bare file of that name is not that shape. An
-existing skill opens as the directory it is.
+**An entry opens as the file it is, and a new one is made the shape its kind
+is read in.** `omh settings edit rules house` opens `house.md`, the file
+`omh info` lists as `house`. A new rule, command or subagent is made `.md`, a
+new hook `.json`, and a new skill a directory with its `SKILL.md` opened — a
+skill is mounted as a directory holding one. A new skill nothing was saved into
+is taken back rather than left as an empty directory. An existing skill opens
+as the directory it is. A server has no file of its own, so `omh settings edit
+mcp` takes no name and opens `mcp.json`.
+
+**`$EDITOR` runs as a shell would run it**, so `EDITOR='code --wait'` works, and
+its status is the command's: an editor that fails fails the edit, naming it.
 
 **One `rm` for every kind of entry**, servers included — `omh settings rm mcp
 linear` and `omh settings rm skills review-diff` are the same act. At a
