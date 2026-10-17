@@ -1678,10 +1678,27 @@ impl App {
                     ]),
                 ],
             }),
-            (false, true) => Some(vec![Line::from(Span::styled(
-                "nothing matches",
-                self.look.dim(),
-            ))]),
+            // Where the hits are, when they are elsewhere: it said "nothing
+            // matches" over pages that held them.
+            (false, true) => {
+                let elsewhere: Vec<String> = (0..self.model.sections.len())
+                    .filter(|&i| i != self.at)
+                    .filter_map(|i| {
+                        let n = self.shown(i).len();
+                        (n > 0)
+                            .then(|| format!("{} {n}", capitalised(self.model.sections[i].title)))
+                    })
+                    .collect();
+                let said = match elsewhere.is_empty() {
+                    true => "nothing matches, on any page".to_string(),
+                    false => format!(
+                        "nothing on {} — {}",
+                        capitalised(section.title),
+                        elsewhere.join(" · ")
+                    ),
+                };
+                Some(vec![Line::from(Span::styled(said, self.look.dim()))])
+            }
             (false, false) => None,
         };
         if let Some(lines) = empty {

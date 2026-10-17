@@ -1358,7 +1358,7 @@ fn a_filter_narrows_the_page_and_acts_on_what_it_shows() {
     assert!(drawn(&app).contains("keep what works"));
     app.key(press('/'));
     app.key(press('z'));
-    assert!(drawn(&app).contains("nothing matches"));
+    assert!(drawn(&app).contains("nothing matches, on any page"));
     app.key(code(KeyCode::Enter));
     app.key(press('1'));
     assert!(app.filter.is_some(), "a filter is a search, across pages");
@@ -1826,6 +1826,31 @@ fn a_value_already_there_is_replaced_by_typing() {
             value: "".into()
         }),
         "backspace takes the whole of it"
+    );
+}
+
+/// A search with nothing on this page says where its hits are: Defaults
+/// said `nothing matches` while Skills and Hooks held them, and at 60
+/// columns those counts appeared nowhere.
+#[test]
+fn a_search_with_nothing_here_says_where_its_hits_are() {
+    let mut app = App::new(model(), true);
+    app.key(press('/'));
+    for c in "keep".chars() {
+        app.key(press(c));
+    }
+    for width in [120, 60] {
+        let screen = drawn_at(&app, width, 24);
+        assert!(
+            screen.contains("nothing on Defaults — Skills 1"),
+            "at {width}:\n{screen}"
+        );
+    }
+    app.key(press('z'));
+    assert!(
+        drawn(&app).contains("nothing matches, on any page"),
+        "{}",
+        drawn(&app)
     );
 }
 
