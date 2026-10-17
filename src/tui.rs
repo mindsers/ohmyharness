@@ -112,6 +112,10 @@ pub struct Row {
     pub about: Vec<String>,
     /// How `enter` changes its value, on your defaults.
     pub edit: Edit,
+    /// omh's own — a server of one of its features, a hook it ships — which
+    /// the command refuses to remove, so the screen does not offer to. `d`
+    /// still asks the command, and its refusal says what to do instead.
+    pub fixed: bool,
 }
 
 /// How `enter` sets a default.
@@ -1386,7 +1390,9 @@ impl App {
             Page::Defaults if row.edit == Edit::None => &[("e", "edit the file")],
             Page::Defaults if row.value.is_some() => &[("↵", "set"), ("d", "unset")],
             Page::Defaults => &[("↵", "set")],
+            Page::Servers if row.fixed => &[("e", "edit the file")],
             Page::Servers => &[("e", "edit the file"), ("d", "remove")],
+            Page::Entries(_) if row.fixed => &[("↵", "edit")],
             Page::Entries(_) => &[("↵", "edit"), ("d", "remove")],
         };
         lines.push(self.chips(keys));
@@ -1415,37 +1421,51 @@ impl App {
             Tone::Bad => "✗ ",
             Tone::Info => "· ",
         };
+        // Wrapped here rather than by the paragraph, so a long line goes on
+        // under its own text and not under the mark.
+        let room = usize::from(width).saturating_sub(3);
+        let mut opening = wrapped(&first.1, room).into_iter();
         let mut head = vec![
             Span::styled(format!(" {glyph}"), fade(self.look.tone(status.tone))),
-            Span::styled(first.1.clone(), fade(self.look.tone(first.0))),
+            Span::styled(
+                opening.next().unwrap_or_default(),
+                fade(self.look.tone(first.0)),
+            ),
         ];
-        let mut lines = Vec::new();
-        match &status.said {
-            Some(said) => {
-                let said = format!("$ omh {said} ");
-                let said_width = Span::raw(said.as_str()).width();
-                let used: usize = head.iter().map(Span::width).sum();
-                let room = usize::from(width).saturating_sub(used);
-                if said_width + 2 <= room {
+        // The command beside the first line where it fits, and after the last
+        // where it does not: between them it splits a sentence from the line
+        // it introduces.
+        let mut last = None;
+        if let Some(said) = &status.said {
+            let said = format!("$ omh {said} ");
+            let said_width = Span::raw(said.as_str()).width();
+            let used: usize = head.iter().map(Span::width).sum();
+            let room = usize::from(width).saturating_sub(used);
+            match said_width + 2 <= room {
+                true => {
                     head.push(Span::raw(" ".repeat(room - said_width)));
                     head.push(Span::styled(said, self.look.dim()));
-                    lines.push(Line::from(head));
-                } else {
-                    lines.push(Line::from(head));
-                    lines.push(Line::from(Span::styled(
+                }
+                false => {
+                    last = Some(Line::from(Span::styled(
                         format!("   {said}"),
                         self.look.dim(),
-                    )));
+                    )))
                 }
             }
-            None => lines.push(Line::from(head)),
         }
-        for (tone, line) in rest {
+        let mut lines = vec![Line::from(head)];
+        let more = opening.map(|l| (first.0, l)).chain(
+            rest.iter()
+                .flat_map(|(tone, line)| wrapped(line, room).into_iter().map(move |l| (*tone, l))),
+        );
+        for (tone, line) in more {
             lines.push(Line::from(Span::styled(
                 format!("   {line}"),
-                fade(self.look.tone(*tone)),
+                fade(self.look.tone(tone)),
             )));
         }
+        lines.extend(last);
         Some(Text::from(lines))
     }
 
@@ -1482,6 +1502,13 @@ impl App {
                 ("/", "filter"),
             ],
         };
+        // Not offered on what the command will not remove.
+        let fixed = self.row().is_some_and(|r| r.fixed);
+        let page: Vec<(&str, &str)> = page
+            .iter()
+            .copied()
+            .filter(|&key| !(fixed && key == ("d", "remove")))
+            .collect();
         let right = self.chips(&[("?", "help"), ("q", "quit")]);
         let room = usize::from(width).saturating_sub(right.width() + 2);
         let mut take = page.len();
@@ -1760,6 +1787,26 @@ fn ellipsized(text: &str, width: usize) -> String {
         out = next;
     }
     out.push('…');
+    out
+}
+
+/// `text` broken at its spaces into lines at most `width` wide, each keeping
+/// the line's own indent; a word wider than that is a line of its own.
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let indent: String = text.chars().take_while(|&c| c == ' ').collect();
+    let mut out = Vec::new();
+    let mut line = indent.clone();
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        let used = Span::raw(line.as_str()).width();
+        let started = used > indent.len();
+        if started && used + 1 + Span::raw(word).width() > width {
+            out.push(std::mem::replace(&mut line, indent.clone()));
+        } else if started {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    out.push(line);
     out
 }
 

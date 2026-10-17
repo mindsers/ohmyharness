@@ -946,8 +946,7 @@ pub fn refresh_own_servers(paths: &Paths, own: &BTreeMap<String, Server>) -> Res
     let mut changed = Vec::new();
     for (name, server) in own {
         // Only a server omh ships and the catalogue still holds: a name taken
-        // out with `omh settings rm mcp` stays out, which is what that command
-        // promises.
+        // out of `mcp.json` by hand stays out.
         match all.get(name) {
             Some(theirs) if theirs == server => {}
             Some(_) => {

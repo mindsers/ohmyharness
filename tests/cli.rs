@@ -6197,6 +6197,82 @@ fn settings_rm_refuses_a_hook_omh_ships_and_takes_one_of_yours() {
     assert!(!sb.home.join(".omh/hooks/mine.json").exists());
 }
 
+/// A server omh ships is refused, as a hook it ships is: `codegraph` and
+/// `memory` are omh's features, and a feature is switched off — whole, in a
+/// repo — rather than taken apart from your catalogue.
+///
+/// Every server a shipped manifest declares, read off `base/` rather than
+/// named here, so the next feature's server is held to it as well — and with
+/// `--yes` and `--dry-run` both, since the screen previews before it asks.
+#[test]
+fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    let mut owned = Vec::new();
+    for entry in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("base")).unwrap() {
+        let doc: toml::Table = std::fs::read_to_string(entry.unwrap().path())
+            .unwrap()
+            .parse()
+            .unwrap();
+        for e in doc["entry"].as_array().unwrap() {
+            if e["kind"].as_str() == Some("mcp") {
+                owned.push((
+                    e["name"].as_str().unwrap().to_string(),
+                    e["feature"].as_str().unwrap().to_string(),
+                ));
+            }
+        }
+    }
+    for server in ["codegraph", "memory"] {
+        assert!(owned.iter().any(|(n, _)| n == server), "{owned:?}");
+    }
+    let mut servers = serde_json::Map::new();
+    for (name, _) in &owned {
+        servers.insert(name.clone(), serde_json::json!({ "command": "true" }));
+    }
+    servers.insert("linear".into(), serde_json::json!({ "command": "npx" }));
+    let catalogue = sb.home.join(".omh/mcp.json");
+    std::fs::write(
+        &catalogue,
+        serde_json::json!({ "mcpServers": servers }).to_string(),
+    )
+    .unwrap();
+
+    for (name, feature) in &owned {
+        for argv in [
+            vec!["settings", "rm", "mcp", name, "--yes"],
+            vec!["--dry-run", "settings", "rm", "mcp", name],
+        ] {
+            let out = sb.omh(&argv);
+            let said = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success(), "`omh {}` removed it", argv.join(" "));
+            assert!(
+                said.contains(&format!("omh set {feature} off")),
+                "`omh {}` does not say what to do instead: {said}",
+                argv.join(" ")
+            );
+            assert!(
+                !String::from_utf8_lossy(&out.stdout).contains("would remove"),
+                "`omh {}` previewed a removal it refuses",
+                argv.join(" ")
+            );
+        }
+        let held = std::fs::read_to_string(&catalogue).unwrap();
+        assert!(held.contains(&format!("\"{name}\"")), "{name} went: {held}");
+    }
+
+    let out = sb.omh(&["settings", "rm", "mcp", "linear", "--yes"]);
+    assert!(
+        out.status.success(),
+        "a server of yours is yours to remove: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!std::fs::read_to_string(&catalogue)
+        .unwrap()
+        .contains("linear"));
+}
+
 /// A name that answers to two files is refused rather than guessed at.
 ///
 /// A catalogue name is a file with its extension off, so `house.md` and

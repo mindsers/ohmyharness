@@ -609,6 +609,13 @@ fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
             Default::default()
         }
     };
+    let shipped = match settings::shipped_servers() {
+        Ok(shipped) => shipped,
+        Err(e) => {
+            out.problem.get_or_insert_with(|| format!("{e:#}"));
+            Default::default()
+        }
+    };
     for (name, server) in held {
         // The command, as `omh settings mcp ls` prints it, and the arguments
         // only counted: `--header "Authorization: Bearer …"` is how a remote
@@ -639,6 +646,8 @@ fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
         out.rows.push(Row {
             badge: feature.map(|_| "omh".to_string()),
             summary: Some(server.command),
+            // Asked of what `rm` asks, so the screen offers what it will do.
+            fixed: shipped.contains_key(&name),
             name,
             about,
             ..Row::default()
@@ -694,6 +703,7 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
                 .to_string()
             }),
             about,
+            fixed: ships,
             ..Row::default()
         });
     }
@@ -1166,6 +1176,43 @@ mod tests {
                 .is_some_and(|w| w.contains("a link to nothing")),
             "{row:?}"
         );
+    }
+
+    /// What `rm` refuses to remove, the screen marks as fixed: omh's own
+    /// servers and the hooks it ships, asked of the same functions `rm` asks.
+    #[test]
+    fn what_rm_refuses_is_marked_fixed() {
+        let (_dir, paths) = paths();
+        let shipped = settings::shipped_servers().unwrap();
+        assert!(shipped.contains_key("codegraph") && shipped.contains_key("memory"));
+        let mut servers = serde_json::Map::new();
+        for name in shipped.keys() {
+            servers.insert(name.clone(), serde_json::json!({ "command": "true" }));
+        }
+        servers.insert("linear".into(), serde_json::json!({ "command": "npx" }));
+        write(
+            &config::mcp_path(&paths),
+            &serde_json::json!({ "mcpServers": servers }).to_string(),
+        );
+        let hook = settings::shipped_hooks()[0].clone();
+        let body = r#"{"on":"stop","run":"true","does":"x"}"#;
+        write(&paths.root.join(format!("hooks/{hook}.json")), body);
+        write(&paths.root.join("hooks/mine.json"), body);
+        let model = model(&paths);
+        let fixed = |title: &str, name: &str| {
+            page(&model, title)
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {title}/{name}"))
+                .fixed
+        };
+        for name in shipped.keys() {
+            assert!(fixed("servers", name), "servers/{name}");
+        }
+        assert!(!fixed("servers", "linear"));
+        assert!(fixed("hooks", &hook), "hooks/{hook}");
+        assert!(!fixed("hooks", "mine"));
     }
 
     fn write(path: &std::path::Path, body: &str) {

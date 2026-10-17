@@ -1240,6 +1240,21 @@ pub(crate) fn rm(
              repo running it:\n  omh unuse hooks {name}"
         );
     }
+    if cap == adapter::Capability::Mcp {
+        // Taking the server out took the feature's hooks and rules section with
+        // it, in every repo at once — `base::own` keeps that true for an
+        // `mcp.json` edited by hand, but no verb of omh's does it.
+        if let Some(feature) = shipped_servers()?.get(name) {
+            anyhow::bail!(
+                "the `{name}` server is omh's own — the {feature} feature, which is \
+                 switched off whole rather than taken apart. In a repo:\n  \
+                 omh set {feature} off\n\
+                 and for every repo `omh init` sets up after, `[omh] {feature} = false` \
+                 in {}",
+                config::Layer::Personal.file(paths).display()
+            );
+        }
+    }
     let what = match &entry {
         Some(path) => path.display().to_string(),
         None => format!("the `{name}` server from {}", source.display()),
@@ -1359,6 +1374,27 @@ fn no_such_entry(cap: adapter::Capability, name: &str, held: &[String]) -> anyho
             held.join(", ")
         }
     )
+}
+
+/// The servers omh ships, by name, each with the feature it is part of.
+///
+/// From the manifests in the binary, as [`shipped_hooks`] is from its hooks,
+/// rather than `~/.omh/base`: what omh owns is not a file that a stray or
+/// unreadable copy could make removable.
+pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for file in crate::bundled::Shipped::Base.files() {
+        let manifest: base::Manifest = toml::from_str(file.contents)
+            .with_context(|| format!("reading omh's own base/{}", file.name))?;
+        out.extend(
+            manifest
+                .entries
+                .into_iter()
+                .filter(|e| e.kind.capability() == adapter::Capability::Mcp)
+                .map(|e| (e.name, e.feature)),
+        );
+    }
+    Ok(out)
 }
 
 /// The hooks omh ships, by catalogue name — the ones `omh upgrade` rewrites.

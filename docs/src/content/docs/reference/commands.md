@@ -2180,8 +2180,9 @@ link to nothing is marked on its row.
 **Every change is a command, run as one.** The screen has no write of its
 own: a key becomes the line you would have typed — `omh settings set`,
 `omh settings rm`, `omh settings mcp add`, `omh import` — which omh runs, and
-the screen shows what it said marked ✓, `!` or ✗, with the line on the right,
-and marks the row it changed until the next key. So its refusals, warnings and
+the screen shows what it said marked ✓, `!` or ✗, with the line beside it or,
+where there is no room, after it, and marks the row it changed until the next
+key. So its refusals, warnings and
 wording are that command's, and anything you did there you can script.
 Removing previews first, and asks in the preview's words, with the preview's
 warnings; a hook omh ships is refused before the question rather than after
@@ -2245,7 +2246,10 @@ linear` and `omh settings rm skills review-diff` are the same act. At a
 terminal it asks; anywhere else it needs `--yes`. A name two files answer to
 (`house.md` and `house.txt`) is refused rather than guessed at, and so is a
 hook omh ships: `omh upgrade` would put it back, so the refusal names
-`omh unuse hooks <name>`, which stops a repo running it.
+`omh unuse hooks <name>`, which stops a repo running it. A server omh ships —
+`codegraph`, `memory` — is refused too: it is one of omh's features, switched
+off whole with `omh set <feature> off` rather than taken apart, and the screen
+does not offer to remove it.
 
 ```console
 $ omh settings rm skills review-diff

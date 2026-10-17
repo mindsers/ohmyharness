@@ -934,12 +934,12 @@ pub struct Own {
 /// Two ways a feature is off, and they are different acts:
 ///
 /// - **switched off here**, by `[omh]`. Nothing is uninstalled.
-/// - **removed**, by taking its server out of your profile. `remove` promises
-///   that `omh settings rm mcp codegraph` takes the hooks and the rules section
-///   with it, and that command only edits `mcp.json` — so the promise is kept
-///   here or nowhere. Before generation the hooks were files and removing the
-///   server left four of them behind; generating them unconditionally would
-///   have rebuilt that defect with no file left to delete.
+/// - **removed**, by its server leaving your profile — `mcp.json` edited by
+///   hand, since `omh settings rm` refuses omh's own servers. The hooks and the
+///   rules section go with it, and nothing but `mcp.json` changed — so that is
+///   kept here or nowhere. Before generation the hooks were files and removing
+///   the server left four of them behind; generating them unconditionally
+///   would have rebuilt that defect with no file left to delete.
 ///
 /// `installed` is the servers the resolved profile declares. A feature with no
 /// server of its own — `git-notice` — is unaffected by it.
@@ -1404,14 +1404,15 @@ mod tests {
         }
     }
 
-    /// `omh settings rm mcp codegraph` has to take the hooks and the rules
-    /// section with it. Before generation the four hooks were files and
+    /// A feature's server gone from `mcp.json` has to take the hooks and the
+    /// rules section with it. Before generation the four hooks were files and
     /// removing the server left them behind, nudging the agent toward
     /// something that was gone; generation would have reintroduced exactly
     /// that, because what omh generates was decided by the manifest alone.
     ///
-    /// The `remove` field promises this. A guard on the *string* — which is
-    /// what shipped first — passes just as happily when the instruction does
+    /// `omh settings rm` refuses omh's own servers now, but `mcp.json` is
+    /// yours to edit. A guard on the *string* of the `remove` field — which is
+    /// what shipped first — passed just as happily when the instruction did
     /// nothing, so this asserts the behaviour instead.
     #[test]
     fn removing_a_feature_server_stops_generating_the_rest_of_it() {

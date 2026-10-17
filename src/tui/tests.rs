@@ -241,6 +241,39 @@ fn every_layout_shows_the_row_its_detail_and_the_keys() {
     );
 }
 
+/// What omh owns is not offered for removal: no `d remove` in the detail or
+/// the keys. `d` still asks the command, whose refusal says why and what to do
+/// instead, so the screen keeps no rule of its own.
+#[test]
+fn what_omh_owns_is_not_offered_for_removal() {
+    let mut model = model();
+    model.sections[2].rows = vec![
+        Row {
+            badge: Some("omh".into()),
+            fixed: true,
+            ..row("codegraph")
+        },
+        row("linear"),
+    ];
+    let mut app = App::new(model, true);
+    app.key(press('3'));
+    // The detail's keys and the footer's, each on its own: either one
+    // offering it is the screen offering it.
+    let offered = |app: &App| {
+        let detail = app.detail_text().to_string();
+        let screen = drawn_at(app, 120, 30);
+        let footer = screen.lines().last().unwrap_or_default().to_string();
+        (detail.contains("d remove"), footer.contains("d remove"))
+    };
+    assert_eq!(offered(&app), (false, false), "codegraph");
+    assert!(matches!(
+        app.key(press('d')),
+        Next::Preview(Act::Remove { .. })
+    ));
+    app.key(press('j'));
+    assert_eq!(offered(&app), (true, true), "a server of yours");
+}
+
 /// The columns start on one line: the first page, the list's heading, and —
 /// where it is beside the list — the detail's title. Each began a line lower
 /// than the heading, and looked like a list that had slipped.
@@ -600,6 +633,44 @@ fn help_shows_every_key_and_any_key_closes_it() {
         "a key closes help, and does nothing else"
     );
     assert_eq!(app.modal, None);
+}
+
+/// What a command said reads as a paragraph: a line too long for the screen
+/// wraps under its own text rather than under the mark, and the command,
+/// when it cannot sit beside the first line, comes after the last — not
+/// between "In a repo:" and the line it introduces.
+#[test]
+fn what_a_command_said_wraps_under_itself_and_the_command_comes_last() {
+    let mut app = App::new(model(), true);
+    app.report(
+        "--dry-run settings rm --yes mcp codegraph".into(),
+        false,
+        "",
+        "omh: the `codegraph` server is omh's own — the codegraph feature, which is \
+         switched off whole rather than taken apart. In a repo:\n  omh set codegraph off",
+    );
+    let screen = drawn_at(&app, 80, 30);
+    let lines: Vec<&str> = screen.lines().collect();
+    let first = lines
+        .iter()
+        .position(|l| l.contains("✗ omh: the"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    let footer = lines.len() - 1;
+    let status = &lines[first + 1..footer];
+    assert!(
+        status.iter().all(|l| l.starts_with("   ")),
+        "a line of the status starts under the mark:\n{screen}"
+    );
+    assert!(
+        status
+            .last()
+            .is_some_and(|l| l.contains("$ omh --dry-run settings rm")),
+        "the command is not last:\n{screen}"
+    );
+    assert!(
+        status.iter().any(|l| l.contains("omh set codegraph off")),
+        "{screen}"
+    );
 }
 
 /// What a command said is one line with a mark for how it went and the

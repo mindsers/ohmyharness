@@ -613,7 +613,7 @@ There are three ways to take a feature away, at different reaches:
 |---|---|---|
 | switch it off in this repo | `omh set codegraph off` | this repo — the server, its hooks and its rules section together |
 | hand the decision back to omh's own default | `omh unset codegraph` | this repo |
-| take the server out of your catalogue | `omh settings rm mcp codegraph` | every repo |
+| switch it off in every repo `init` sets up after | `omh settings edit`, and `[omh] codegraph = false` in it | every new repo |
 
 **Feature names only.** `graph-first = false` is refused, naming the feature it
 belongs to — keeping the graph while dropping one of the things that make it
@@ -1178,7 +1178,9 @@ and one `[tools]` map per adapter.
 ## MCP servers
 
 Your MCP servers live in your catalogue. `omh settings mcp` lists and adds
-them, and `omh settings rm mcp` takes one out, as it takes out any other entry:
+them, and `omh settings rm mcp` takes one out, as it takes out any other entry
+— except omh's own, `codegraph` and `memory`, which are features and are
+switched off with [`[omh]`](#omh--omhs-own-features):
 
 ```console
 $ omh settings mcp ls

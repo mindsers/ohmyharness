@@ -1919,6 +1919,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
     // out is loud; a file appearing is loud; a shape quietly leaving one
     // file while another gains lines is loud, and no floor can see that.
     let expected: std::collections::BTreeMap<String, usize> = [
+        // Each `remove` says `omh set <feature> off`, and `omh init` for the
+        // every-new-repo route — which was `omh settings rm mcp <server>`
+        // until omh's own servers could no longer be removed.
         ("base/2026.08.toml", 19),
         ("src/auth.rs", 7),
         ("src/base.rs", 3),
@@ -1950,7 +1953,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         // + `omh settings edit mcp`, in the refusal of a name for a server.
-        ("src/cmd/settings.rs", 14),
+        // + `omh set <feature> off` and `omh init`, in the refusal for a
+        // server omh ships.
+        ("src/cmd/settings.rs", 16),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
