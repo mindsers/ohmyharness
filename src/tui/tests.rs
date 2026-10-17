@@ -62,6 +62,7 @@ fn model() -> Model {
                 ],
                 problem: None,
                 import: Import::Not("your defaults are typed, not imported".into()),
+                about: Vec::new(),
             },
             Section {
                 title: "skills",
@@ -78,6 +79,7 @@ fn model() -> Model {
                 ],
                 problem: None,
                 import: Import::From(vec!["claude".into(), "codex".into()]),
+                about: Vec::new(),
             },
             Section {
                 title: "servers",
@@ -85,6 +87,7 @@ fn model() -> Model {
                 rows: vec![],
                 problem: None,
                 import: Import::From(vec![]),
+                about: Vec::new(),
             },
             Section {
                 title: "hooks",
@@ -92,6 +95,7 @@ fn model() -> Model {
                 rows: vec![],
                 problem: Some("could not read ~/.omh/hooks: permission denied".into()),
                 import: Import::Not("a hook lands in a repo".into()),
+                about: Vec::new(),
             },
         ],
     }
@@ -433,6 +437,109 @@ fn a_long_list_says_there_is_more_and_keeps_its_heading() {
     assert_eq!(screen.matches("YOURS").count(), 1, "{screen}");
 }
 
+/// `?` lists every key, under what it is for, and a description too long for
+/// the box goes on under itself: at 60 columns they restarted under the key,
+/// and `g`, `G` and the line-editing keys were not there at all.
+#[test]
+fn help_lists_every_key_under_what_it_is_for() {
+    let mut app = App::new(model(), true);
+    app.key(press('?'));
+    let screen = drawn_at(&app, 120, 40);
+    for said in [
+        "MOVE", "CHANGE", "TYPING", "LEAVE", "g G", "ctrl-u", "ctrl-a", "a letter",
+    ] {
+        assert!(screen.contains(said), "no `{said}`:\n{screen}");
+    }
+    let screen = drawn_at(&app, 60, 40);
+    let (key, rest) = ("e", "$EDITOR on the entry");
+    let line = screen
+        .lines()
+        .position(|l| l.contains(rest))
+        .unwrap_or_else(|| panic!("{screen}"));
+    let column = screen.lines().nth(line).unwrap().find(rest).unwrap();
+    let next = screen.lines().nth(line + 1).unwrap();
+    let text_at = next
+        .char_indices()
+        .skip(3)
+        .find(|(_, c)| !c.is_whitespace() && *c != '│');
+    assert!(
+        text_at.is_some_and(|(at, _)| at >= column),
+        "`{key}`'s description wrapped under the key:\n{screen}"
+    );
+}
+
+/// A pick says what it is setting and marks both the value now and the one
+/// that applies unset: `account`'s marked nothing, though one applied.
+#[test]
+fn a_pick_says_what_it_sets_and_marks_the_default() {
+    let mut model = model();
+    model.sections[0].rows[1].about = vec!["Which runtime builds and runs the sandbox.".into()];
+    let mut app = App::new(model, true);
+    app.key(press('j'));
+    app.key(code(KeyCode::Enter));
+    // The box's own lines: the list and the detail behind it say both too.
+    let screen = drawn(&app);
+    let inside: Vec<String> = screen
+        .lines()
+        .skip_while(|l| !l.contains("╭ set runtime"))
+        .take_while(|l| !l.contains('╰'))
+        .filter_map(|l| {
+            let open = l.find('╭').or_else(|| l.find('│'))?;
+            Some(l[open..].to_string())
+        })
+        .collect();
+    let popup = inside.join("\n");
+    assert!(popup.contains("Which runtime builds"), "{screen}");
+    assert!(
+        inside
+            .iter()
+            .any(|l| l.contains("auto") && l.contains("default")),
+        "{screen}"
+    );
+}
+
+/// A page with nothing on it says what would be there, where it lives, and
+/// how to get one — with the room it has, not a blank pane.
+#[test]
+fn an_empty_page_says_what_belongs_on_it() {
+    let mut model = model();
+    model.sections[2].about = vec!["a server an agent can call, run by the harness".into()];
+    let mut app = App::new(model, true);
+    app.key(press('3'));
+    let screen = drawn_at(&app, 120, 30);
+    assert!(screen.contains("a server an agent can call"), "{screen}");
+}
+
+/// Enter on a server says what it can do, rather than nothing at all.
+#[test]
+fn enter_on_a_server_says_what_acts_on_it() {
+    let mut model = model();
+    model.sections[2].rows = vec![row("linear")];
+    let mut app = App::new(model, true);
+    app.key(press('3'));
+    assert_eq!(app.key(code(KeyCode::Enter)), Next::Stay);
+    let screen = drawn(&app);
+    assert!(
+        screen.contains("e opens") && screen.contains("d removes"),
+        "{screen}"
+    );
+}
+
+/// Narrow, the page's name and its count are one line, not a tab line, a
+/// heading saying the name again and a blank: two of twenty rows back.
+#[test]
+fn a_narrow_screen_names_the_page_once() {
+    let mut app = App::new(model(), true);
+    app.key(press('2'));
+    let screen = drawn_at(&app, 60, 20);
+    assert_eq!(screen.matches("Skills").count(), 1, "{screen}");
+    let first = screen
+        .lines()
+        .position(|l| l.contains("keep"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(first <= 3, "the first row is on line {first}:\n{screen}");
+}
+
 /// The columns start on one line: the first page, the list's heading, and —
 /// where it is beside the list — the detail's title. Each began a line lower
 /// than the heading, and looked like a list that had slipped.
@@ -607,6 +714,62 @@ fn a_value_is_checked_as_it_is_typed() {
         screen.contains("a duration: 90s, 30m, 2h"),
         "and the hint: {screen}"
     );
+}
+
+/// A box being typed into holds its width: it grew from 58 to 76 columns
+/// and re-centred the moment a warning appeared, under the cursor. Behind any
+/// box the screen is dim, and the one that removes is not coloured like help.
+#[test]
+fn a_popup_holds_still_and_says_what_kind_it_is() {
+    let check: Check = Box::new(|key, value| {
+        (key == "idle_timeout" && value.contains("soon"))
+            .then(|| "`idle_timeout` was given `soon`, which is not a duration omh can read — it takes `90s`, `30m`, `2h`, `1d`, or bare seconds".to_string())
+    });
+    let mut app = App::new(model(), true).with_check(check);
+    app.key(code(KeyCode::Enter));
+    let frame = |app: &App| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let corners = |buffer: &ratatui::buffer::Buffer| {
+        let y = (0..30)
+            .find(|&y| (0..120).any(|x| buffer[(x, y)].symbol() == "╭"))
+            .expect("a box");
+        let left = (0..120).find(|&x| buffer[(x, y)].symbol() == "╭").unwrap();
+        let right = (0..120).find(|&x| buffer[(x, y)].symbol() == "╮").unwrap();
+        (left, right, y)
+    };
+    let before = corners(&frame(&app));
+    for c in "soon".chars() {
+        app.key(press(c));
+    }
+    let buffer = frame(&app);
+    assert!(drawn(&app).contains("not a duration"));
+    let after = corners(&buffer);
+    assert_eq!((before.0, before.1), (after.0, after.1), "the box moved");
+    // Behind it, dim: the rail's first page is outside every box.
+    let (x, y) = (0..30u16)
+        .flat_map(|y| (0..20u16).map(move |x| (x, y)))
+        .find(|&(x, y)| buffer[(x, y)].symbol() == "D")
+        .unwrap();
+    assert!(
+        buffer[(x, y)].modifier.contains(Modifier::DIM),
+        "the screen behind is not dim"
+    );
+    // The box that removes is the warning's colour; help is not.
+    app.key(code(KeyCode::Esc));
+    app.confirm(vec!["would remove it".into()], vec![], Act::EditDefaults);
+    let (x, _, y) = corners(&frame(&app));
+    assert_eq!(
+        frame(&app)[(x, y)].fg,
+        Color::Yellow,
+        "a removal looks like help"
+    );
+    app.key(press('n'));
+    app.key(press('?'));
+    let (x, _, y) = corners(&frame(&app));
+    assert_ne!(frame(&app)[(x, y)].fg, Color::Yellow);
 }
 
 #[test]

@@ -2121,19 +2121,20 @@ is. From 70, what the row is sits under the list, as below; narrower, the
 pages are one line along the top.
 
 ```
- omh settings  /Users/you/.omh
-▌ Defaults        │ Defaults  8
-  Rules         1 │
-  Skills        2 │   carry_in        default: nothing carried
-  Servers       1 │   account         default: the only login captured
-  Commands      0 │ ✓ idle_timeout    45m
-  Subagents     0 │   sandbox_memory  default: the runtime's own
-  Hooks         0 │   sandbox_cpus    default: the runtime's own
+ omh settings  ~/.omh
+▌ 1 Defaults      │ Defaults  8
+  2 Rules       1 │
+  3 Skills      2 │   carry_in        default: nothing carried
+  4 Servers     1 │   account         default: no login captured — `omh auth <…
+  5 Commands    0 │ ✓ idle_timeout    45m
+  6 Subagents   0 │   sandbox_memory  default: the runtime's own
+  7 Hooks       0 │   sandbox_cpus    default: the runtime's own
                   │   runtime         default: auto
                   │   ca_cert         default: no extra CA
                   │   persistence     default: dtach
                   │
-                  │─────────────────────────────────────────────────────────────
+                  │
+                  ├─────────────────────────────────────────────────────────────
                   │ idle_timeout
                   │
                   │ How long a session may sit unused before omh stops it.
@@ -2141,10 +2142,9 @@ pages are one line along the top.
                   │ now     45m
                   │ a duration: 90s, 30m, 2h, 1d
                   │
-                  │ ↵ set  d unset
  ✓ wrote → /Users/you/.omh/default.toml (seeds new repos)
    $ omh settings set idle_timeout 45m
- ↑↓ move  ⇥ page  ↵ set  d unset  e edit the file  / filter       ? help  q quit
+ ↵ set  d unset  e edit the file  / filter  ⇥ page  ↑↓ move       ? help  q quit
 ```
 
 | | |
@@ -2173,10 +2173,20 @@ key your terminal uses to get past a program's mouse: Shift in most, Option in
 iTerm2.
 
 **A row says what it is**: a default, its value or, unset, what applies
-instead; an entry, its description; a hook, when it runs and what it does,
-yours under their own heading before the ones omh ships. A key nothing reads
-names the key it was probably meant to be, and a skill with no `SKILL.md` or a
-link to nothing is marked on its row.
+instead; an entry, its description; a hook, when it runs — as a column of its
+own — and what it does; a server, what it runs, its arguments counted and its
+environment named. Hooks and servers are yours first, then omh's own, under a
+heading each. A key nothing reads is under one of its own, naming the key it was
+probably meant to be, and a skill with no `SKILL.md` or a link to nothing is
+marked on its row.
+
+**The rail says what a page holds before you go to it**: its number, how many,
+`!` where an entry has a warning and `✗` where omh could not look — whose
+count is `—`, not `0`. **The foot lists the keys that act here**, the row's
+first: one that would only be refused is not there — no `d` on omh's own,
+no `i` where nothing imports — and while a box is open, the box's own. `?`
+lists every key. A list longer than its room has a thumb at its edge, and keeps
+the heading of the group you are in at the top.
 
 **Every change is a command, run as one.** The screen has no write of its
 own: a key becomes the line you would have typed — `omh settings set`,

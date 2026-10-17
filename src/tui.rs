@@ -54,6 +54,8 @@ pub struct Section {
     /// that reads as "you have no skills".
     pub problem: Option<String>,
     pub import: Import,
+    /// What belongs on the page, said where an empty one has room for it.
+    pub about: Vec<String>,
 }
 
 /// Which kind of page, by what each key does on it.
@@ -298,6 +300,10 @@ struct Pick {
     at: usize,
     /// The option that is the current value, marked.
     current: Option<usize>,
+    /// The option that applies when nothing is set, marked too.
+    fallback: Option<usize>,
+    /// What is being set, as the row says it.
+    about: Vec<String>,
     then: Chosen,
 }
 
@@ -657,7 +663,10 @@ impl App {
                 }
                 Next::Stay
             }
-            Page::Servers => Next::Stay,
+            Page::Servers => {
+                self.note("a server is a record in mcp.json — e opens it, d removes one");
+                Next::Stay
+            }
             Page::Entries(_) => self.edit(),
         }
     }
@@ -691,10 +700,16 @@ impl App {
         if typed {
             options.push(ANOTHER.to_string());
         }
+        let fallback = row
+            .fallback
+            .as_ref()
+            .and_then(|f| options.iter().position(|o| o == f));
         self.modal = Some(Modal::Pick(Pick {
             title: format!("set {}", row.name),
             at: current.unwrap_or(0),
             current,
+            fallback,
+            about: row.about.clone(),
             options,
             then: match typed {
                 true => Chosen::ValueOrTyped {
@@ -793,6 +808,8 @@ impl App {
                     options: harnesses.clone(),
                     at: 0,
                     current: None,
+                    fallback: None,
+                    about: Vec::new(),
                     then: Chosen::Import {
                         capability: capability.into(),
                     },
@@ -1043,7 +1060,7 @@ impl App {
                 .areas(body);
                 self.draw_pages(f, pages);
                 self.draw_rule(f, a);
-                self.draw_list(f, list);
+                self.draw_list(f, list, true);
                 self.draw_rule(f, b);
                 // Level with the list's heading, as the pages are.
                 self.draw_detail(f, detail.inner(Margin::new(1, 0)));
@@ -1058,7 +1075,7 @@ impl App {
                 self.draw_pages(f, pages);
                 self.draw_rule(f, a);
                 // Where the list's rule meets the column's, one line, not two.
-                if let Some(y) = self.draw_stacked(f, rest) {
+                if let Some(y) = self.draw_stacked(f, rest, true) {
                     f.buffer_mut()[(a.x, y)]
                         .set_symbol("├")
                         .set_style(self.look.dim());
@@ -1069,7 +1086,8 @@ impl App {
                     Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
                 self.draw_tabs(f, tabs);
                 self.hit.borrow_mut().pages = Rect::default();
-                self.draw_stacked(f, rest);
+                // The page's name and count are the tab line's, here.
+                self.draw_stacked(f, rest, false);
             }
         }
         if let Some(text) = status {
@@ -1114,7 +1132,7 @@ impl App {
     /// detail among the page's rows, up to two fifths. Sized by the selected
     /// one, the list grew and shrank under every `j`. A page with no row has
     /// no detail and no rule. Answers the rule's line, for the junction.
-    fn draw_stacked(&self, f: &mut Frame, area: Rect) -> Option<u16> {
+    fn draw_stacked(&self, f: &mut Frame, area: Rect, head: bool) -> Option<u16> {
         let section = self.section()?;
         let width = area.width.saturating_sub(2);
         let tallest = match self.row() {
@@ -1140,7 +1158,7 @@ impl App {
             Constraint::Length(height.saturating_sub(1)),
         ])
         .areas(area);
-        self.draw_list(f, list);
+        self.draw_list(f, list, head);
         if height == 0 {
             return None;
         }
@@ -1211,18 +1229,38 @@ impl App {
         let Some(section) = self.section() else {
             return;
         };
-        let line = Line::from(vec![
+        let count = match (&section.problem, section.rows.is_empty()) {
+            (Some(_), true) => "—".to_string(),
+            _ => self.shown(self.at).len().to_string(),
+        };
+        let mut line = vec![
             Span::styled(" ‹ ", self.look.dim()),
             Span::styled(capitalised(section.title), self.look.title()),
+            Span::styled(format!("  {count}"), self.look.dim()),
             Span::styled(
                 format!("  {}/{} ›", self.at + 1, self.model.sections.len()),
                 self.look.dim(),
             ),
-        ]);
-        f.render_widget(Paragraph::new(line), area);
+        ];
+        if let Some(filter) = &self.filter {
+            line.push(Span::styled(
+                format!(
+                    "   / {}{}",
+                    filter.text,
+                    if filter.typing { "▏" } else { "" }
+                ),
+                match filter.typing {
+                    true => self.look.accent(),
+                    false => self.look.dim(),
+                },
+            ));
+        }
+        f.render_widget(Paragraph::new(Line::from(line)), area);
     }
 
-    fn draw_list(&self, f: &mut Frame, area: Rect) {
+    /// The page's rows, under its heading — which a narrow screen's tab line
+    /// says instead, when `head` is false.
+    fn draw_list(&self, f: &mut Frame, area: Rect, head: bool) {
         let Some(section) = self.section() else {
             return;
         };
@@ -1235,12 +1273,12 @@ impl App {
             (Some(_), true) => "—".to_string(),
             _ => shown.len().to_string(),
         };
-        let mut head = vec![
+        let mut heading = vec![
             Span::styled(capitalised(section.title), self.look.title()),
             Span::styled(format!("  {count}"), self.look.dim()),
         ];
         if let Some(filter) = &self.filter {
-            head.push(Span::styled(
+            heading.push(Span::styled(
                 format!(
                     "   / {}{}",
                     filter.text,
@@ -1252,13 +1290,10 @@ impl App {
                 },
             ));
         }
-        let [head_area, _, mut list] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-        ])
-        .areas(area);
-        f.render_widget(Paragraph::new(Line::from(head)), head_area);
+        let lines = if head { 2 } else { 0 };
+        let [head_area, mut list] =
+            Layout::vertical([Constraint::Length(lines), Constraint::Fill(1)]).areas(area);
+        f.render_widget(Paragraph::new(Line::from(heading)), head_area);
 
         // Above what was found, never instead of it — the servers page with
         // omh's base set unreadable has both — and as tall as it needs, up to
@@ -1510,6 +1545,15 @@ impl App {
     fn detail_text(&self) -> Text<'static> {
         match (self.section(), self.row()) {
             (Some(section), Some(row)) => self.detail_for(section, row),
+            // Nothing on the page: what would be, where it lives, how to get
+            // one — rather than a blank pane.
+            (Some(section), None) if section.problem.is_none() => Text::from(
+                section
+                    .about
+                    .iter()
+                    .map(|l| Line::raw(l.clone()))
+                    .collect::<Vec<_>>(),
+            ),
             _ => Text::default(),
         }
     }
@@ -1749,8 +1793,13 @@ impl App {
         Line::from(spans)
     }
 
-    /// A box over the screen, as tall and as wide as what it says.
-    fn popup(&self, f: &mut Frame, title: &str, text: Text<'static>) -> Rect {
+    /// A box over the screen, as tall as what it says.
+    ///
+    /// One being typed into is one width from first key to last: sized by
+    /// what it said, it grew and re-centred when a warning appeared, under
+    /// the cursor. The rest are as wide as they say. Behind any box the screen
+    /// is dim, and the one that removes is in the warning's colour.
+    fn popup(&self, f: &mut Frame, title: &str, text: Text<'static>, kind: Popup) -> Rect {
         let screen = f.area();
         let widest = text.lines.iter().map(Line::width).max().unwrap_or(0) as u16;
         // Never wider than a comfortable line — a long warning wraps in the box
@@ -1758,9 +1807,14 @@ impl App {
         // own minimum, a screen gets a box as wide as it is: `clamp` with the
         // bounds the wrong way round is a panic, in raw mode.
         let most = screen.width.saturating_sub(2).clamp(1, 76);
-        let width = (widest + 4)
-            .max(Span::raw(title).width() as u16 + 6)
-            .clamp(36.min(most), most);
+        let width = match kind {
+            Popup::Typing => 64.min(most),
+            Popup::Showing | Popup::Removing => (widest + 4)
+                .max(Span::raw(title).width() as u16 + 6)
+                .clamp(36.min(most), most),
+        };
+        f.buffer_mut()
+            .set_style(screen, Style::default().add_modifier(Modifier::DIM));
         let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
         let height = (paragraph.line_count(width.saturating_sub(4)) as u16 + 2)
             .min(screen.height.saturating_sub(2).max(1));
@@ -1770,7 +1824,10 @@ impl App {
             paragraph.block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
-                    .border_style(self.look.accent())
+                    .border_style(match kind {
+                        Popup::Removing => self.look.tone(Tone::Warn),
+                        Popup::Typing | Popup::Showing => self.look.accent(),
+                    })
                     .title(Span::styled(format!(" {title} "), self.look.title()))
                     .padding(Padding::horizontal(1)),
             ),
@@ -1808,7 +1865,7 @@ impl App {
         }
         lines.push(Line::default());
         lines.push(self.chips(&[("↵", "save"), ("esc", "cancel")]));
-        let area = self.popup(f, &input.title, Text::from(lines));
+        let area = self.popup(f, &input.title, Text::from(lines), Popup::Typing);
         let above = Paragraph::new(Text::from(before))
             .wrap(Wrap { trim: false })
             .line_count(area.width.saturating_sub(4)) as u16;
@@ -1839,38 +1896,42 @@ impl App {
             Span::styled("y", self.look.key()),
             Span::styled(" remove · any other key keeps it", self.look.dim()),
         ]));
-        self.popup(f, &title, Text::from(lines));
+        self.popup(f, &title, Text::from(lines), Popup::Removing);
     }
 
     fn draw_pick(&self, f: &mut Frame, pick: &Pick) {
         let mut lines: Vec<Line> = pick
-            .options
+            .about
             .iter()
-            .enumerate()
-            .map(|(i, option)| {
-                let here = i == pick.at;
-                let mut spans = vec![
-                    match here {
-                        true => Span::styled("▸ ", self.look.accent()),
-                        false => Span::raw("  "),
-                    },
-                    Span::styled(
-                        option.clone(),
-                        match here {
-                            true => self.look.title(),
-                            false => Style::default(),
-                        },
-                    ),
-                ];
-                if pick.current == Some(i) {
-                    spans.push(Span::styled("  now", self.look.dim()));
-                }
-                Line::from(spans)
-            })
+            .map(|l| Line::from(Span::styled(l.clone(), self.look.dim())))
             .collect();
-        lines.push(Line::default());
-        lines.push(self.chips(&[("↵", "choose"), ("esc", "cancel")]));
-        self.popup(f, &pick.title, Text::from(lines));
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(pick.options.iter().enumerate().map(|(i, option)| {
+            let here = i == pick.at;
+            let mut spans = vec![
+                match here {
+                    true => Span::styled("▸ ", self.look.accent()),
+                    false => Span::raw("  "),
+                },
+                Span::styled(
+                    option.clone(),
+                    match here {
+                        true => self.look.title(),
+                        false => Style::default(),
+                    },
+                ),
+            ];
+            if pick.current == Some(i) {
+                spans.push(Span::styled("  now", self.look.dim()));
+            }
+            if pick.fallback == Some(i) {
+                spans.push(Span::styled("  default", self.look.dim()));
+            }
+            Line::from(spans)
+        }));
+        self.popup(f, &pick.title, Text::from(lines), Popup::Showing);
     }
 
     fn draw_form(&self, f: &mut Frame, form: &Form) {
@@ -1908,7 +1969,7 @@ impl App {
             ("↵", "next, then add"),
             ("esc", "cancel"),
         ]));
-        let area = self.popup(f, "new server", Text::from(lines));
+        let area = self.popup(f, "new server", Text::from(lines), Popup::Typing);
         let field = &form.fields[form.at];
         let typed_before = drawn_field(form.at, &field.text[..field.cursor]);
         let x = area.x
@@ -1922,40 +1983,79 @@ impl App {
     }
 
     fn draw_help(&self, f: &mut Frame) {
-        let rows: &[(&str, &str)] = &[
-            ("↑↓  j k", "move in the list"),
-            ("⇥ ⇧⇥  → ←  l h", "change page"),
-            ("1–7", "go to a page"),
-            ("↵", "set a default · open an entry in $EDITOR"),
-            ("e", "$EDITOR on the entry, or on the page's file"),
-            ("a", "a new entry, or a new server"),
-            ("d", "unset a default · remove an entry, after asking"),
-            ("i", "import from a harness"),
-            ("/", "filter the list — esc takes it off"),
-            ("click", "select · again to open · wheel to scroll"),
-            ("q  esc  ctrl-d", "leave"),
+        let groups: &[(&str, &[(&str, &str)])] = &[
+            (
+                "move",
+                &[
+                    ("↑↓  j k", "move in the list"),
+                    ("g G  home end", "to the top, to the bottom"),
+                    ("⇥ ⇧⇥  → ←  l h", "change page"),
+                    ("1–7", "go to a page"),
+                    ("click", "select · again to open · wheel to scroll"),
+                ],
+            ),
+            (
+                "change",
+                &[
+                    ("↵", "set a default · open an entry in $EDITOR"),
+                    ("e", "$EDITOR on the entry, or on the page's file"),
+                    ("a", "a new entry, or a new server"),
+                    ("d", "unset a default · remove an entry, after asking"),
+                    ("i", "import from a harness"),
+                    ("/", "filter the list — esc takes it off"),
+                ],
+            ),
+            (
+                "typing",
+                &[
+                    ("← →  home end", "move in the line"),
+                    ("ctrl-a  ctrl-e", "to its start, to its end"),
+                    ("ctrl-u", "clear what is before the cursor"),
+                    (
+                        "a letter",
+                        "in a list to pick from, go to the option it starts",
+                    ),
+                ],
+            ),
+            ("leave", &[("q  esc  ctrl-d  ctrl-c", "leave")]),
         ];
-        let width = rows
+        let width = groups
             .iter()
+            .flat_map(|(_, rows)| rows.iter())
             .map(|(k, _)| Span::raw(*k).width())
             .max()
             .unwrap_or(0);
-        let mut lines: Vec<Line> = rows
-            .iter()
-            .map(|(key, does)| {
-                Line::from(vec![
-                    Span::styled(pad(key, width), self.look.key()),
-                    Span::raw("  "),
-                    Span::raw(does.to_string()),
-                ])
-            })
-            .collect();
+        // What a description has beside its key, in the widest box this
+        // screen gets: one too long goes on under itself, not under the key.
+        let most = usize::from(f.area().width.saturating_sub(2).clamp(1, 76));
+        let room = most.saturating_sub(4 + width + 2).max(12);
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, (heading, rows)) in groups.iter().enumerate() {
+            if i > 0 {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(Span::styled(
+                heading.to_uppercase(),
+                self.look.dim(),
+            )));
+            for (key, does) in rows.iter() {
+                for (j, part) in wrapped(does, room).into_iter().enumerate() {
+                    lines.push(Line::from(vec![
+                        Span::styled(pad(if j == 0 { key } else { "" }, width), self.look.key()),
+                        Span::raw("  "),
+                        Span::raw(part),
+                    ]));
+                }
+            }
+        }
         lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
+        for part in wrapped(
             "every change is a command, shown once it runs · any key closes this",
-            self.look.dim(),
-        )));
-        self.popup(f, "keys", Text::from(lines));
+            most.saturating_sub(4),
+        ) {
+            lines.push(Line::from(Span::styled(part, self.look.dim())));
+        }
+        self.popup(f, "keys", Text::from(lines), Popup::Showing);
     }
 }
 
@@ -2236,6 +2336,17 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+/// What a box is for, which is how it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Popup {
+    /// Typed into: one width from the first key to the last.
+    Typing,
+    /// Read: as wide as what it says.
+    Showing,
+    /// Asking to remove: in the warning's colour.
+    Removing,
 }
 
 /// The screen's styles.

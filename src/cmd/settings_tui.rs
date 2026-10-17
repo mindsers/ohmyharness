@@ -439,11 +439,72 @@ pub(crate) fn model(paths: &Paths) -> Model {
             ),
             (Err(e), _) => Import::Not(format!("could not read the adapters: {e:#}")),
         };
+        section.about = belongs(cap, &section.import);
         sections.push(section);
     }
     Model {
-        root: paths.root.display().to_string(),
+        root: tilde(&paths.root, dirs::home_dir().as_deref()),
         sections,
+    }
+}
+
+/// What belongs on a page, for one with nothing on it yet: what the kind is,
+/// where one lives in your catalogue, and how to get one.
+fn belongs(cap: Capability, import: &Import) -> Vec<String> {
+    let (what, at) = match cap {
+        Capability::Rules => (
+            "a rule is Markdown omh adds to the instructions every session is given",
+            "rules/<name>.md",
+        ),
+        Capability::Skills => (
+            "a skill is a directory with a SKILL.md, which an agent loads when a task calls for it",
+            "skills/<name>/SKILL.md",
+        ),
+        Capability::Mcp => (
+            "a server is a program an agent can call tools in, run by the harness",
+            "a record in mcp.json",
+        ),
+        Capability::Commands => (
+            "a command is a prompt you run by its name",
+            "commands/<name>.md",
+        ),
+        Capability::Subagents => (
+            "a subagent is an agent of its own that the main one can hand work to",
+            "subagents/<name>.md",
+        ),
+        Capability::Hooks => (
+            "a hook is a command omh runs at a moment in a session — its start, before or \
+             after a tool, the end of a turn",
+            "hooks/<name>.json",
+        ),
+    };
+    let mut out = vec![what.to_string(), format!("at    {at}"), String::new()];
+    out.push(match cap {
+        Capability::Mcp => "a adds one".into(),
+        _ => "a makes one in $EDITOR".into(),
+    });
+    if let Import::From(harnesses) = import {
+        if !harnesses.is_empty() {
+            out.push(format!("i imports from {}", harnesses.join(", ")));
+        }
+    }
+    out
+}
+
+/// A path from your home down, as the header says it: `~/.omh`.
+fn tilde(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(below) => format!("~/{}", below.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// A path from the catalogue down — `hooks/mine.json` — since the header
+/// already says where the catalogue is.
+fn within(paths: &Paths, path: &std::path::Path) -> String {
+    match path.strip_prefix(&paths.root) {
+        Ok(below) => below.display().to_string(),
+        Err(_) => path.display().to_string(),
     }
 }
 
@@ -454,6 +515,7 @@ fn section(page: Page, title: &'static str) -> Section {
         rows: Vec::new(),
         problem: None,
         import: Import::From(Vec::new()),
+        about: Vec::new(),
     }
 }
 
@@ -534,7 +596,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                 name: name.clone(),
                 value: Some(table_summary(&doc, name)),
                 about: vec![
-                    format!("a table in {}", file.display()),
+                    format!("a table in {}", within(paths, &file)),
                     "e opens the file to change it".into(),
                 ],
                 ..Row::default()
@@ -546,15 +608,19 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                     Some(meant) => format!("nothing omh reads — did you mean `{meant}`?"),
                     None => "nothing omh reads".into(),
                 }),
-                about: vec![format!("in {}", file.display())],
+                about: vec![format!("file  {}", within(paths, &file))],
                 edit: Edit::Text {
                     hint: String::new(),
                 },
+                // Apart from the keys omh reads, under a heading saying so.
+                group: Some("read by nothing".into()),
                 ..Row::default()
             },
         };
         out.rows.push(row);
     }
+    // Tables are read; the heading is for what is not, so it comes last.
+    out.rows.sort_by_key(|r| r.group.is_some());
     out
 }
 
@@ -687,7 +753,7 @@ fn servers(paths: &Paths) -> Section {
         if !env.is_empty() {
             about.push(format!("env   {env}"));
         }
-        about.push(format!("in    {}", path.display()));
+        about.push(format!("file  {}", within(paths, &path)));
         let feature = shipped.get(&name);
         if let Some(feature) = feature {
             about.push(format!(
@@ -748,11 +814,18 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
         }
     };
     let shipped = settings::shipped_hooks();
+    let mut triggers = std::collections::BTreeMap::new();
     for (name, path) in listed {
         let ships = cap == Capability::Hooks && shipped.contains(&name);
         let said = describe(cap, &path);
+        if let Some(trigger) = &said.trigger {
+            triggers.insert(name.clone(), trigger.clone());
+        }
         let mut about = said.more;
-        about.push(format!("at {}", path.display()));
+        about.push(match path.is_dir() {
+            true => format!("dir   {}", within(paths, &path)),
+            false => format!("file  {}", within(paths, &path)),
+        });
         if ships {
             about.push(
                 "omh ships this one and `omh upgrade` refreshes it — `omh unuse hooks` \
@@ -782,6 +855,17 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
     if cap == Capability::Hooks {
         out.rows
             .sort_by_key(|r| r.group.as_deref() != Some("yours"));
+        // When it runs, as a column: the one somebody scans first.
+        let width = triggers
+            .values()
+            .map(|t| t.chars().count())
+            .max()
+            .unwrap_or(0);
+        for row in &mut out.rows {
+            if let (Some(trigger), Some(what)) = (triggers.get(&row.name), &row.summary) {
+                row.summary = Some(format!("{trigger:<width$}  {what}"));
+            }
+        }
     }
     out
 }
@@ -790,6 +874,8 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
 #[derive(Debug, Default)]
 struct Described {
     summary: Option<String>,
+    /// When a hook runs, kept apart so the page can line it up as a column.
+    trigger: Option<String>,
     badge: Option<String>,
     warning: Option<String>,
     more: Vec<String>,
@@ -847,7 +933,8 @@ fn describe(cap: Capability, path: &std::path::Path) -> Described {
                     false => format!("{} {tools}", h.on),
                 };
                 Described {
-                    summary: Some(format!("{on} · {what}")),
+                    summary: Some(what.clone()),
+                    trigger: Some(on.clone()),
                     badge: h.stack.clone(),
                     more: vec![format!("on    {on}"), format!("does  {what}")],
                     ..Described::default()
@@ -1100,6 +1187,56 @@ mod tests {
         assert!(!everything.contains("sk-arg") && !everything.contains("sk-env"));
     }
 
+    /// A path on the screen is said from the catalogue down, and the header's
+    /// from your home: a full path on every row broke mid-word at 100 columns
+    /// and said `/Users/first.last/.omh` again on every one.
+    #[test]
+    fn paths_are_said_from_the_catalogue_down() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("hooks/mine.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        write(
+            &paths.root.join("skills/tdd/SKILL.md"),
+            "---\ndescription: x\n---\n",
+        );
+        write(&paths.root.join("default.toml"), "carry_ins = []\n");
+        let model = model(&paths);
+        let about = |title: &str, name: &str| {
+            page(&model, title)
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .about
+                .join("\n")
+        };
+        assert!(
+            about("hooks", "mine").contains("file  hooks/mine.json"),
+            "{}",
+            about("hooks", "mine")
+        );
+        assert!(
+            about("skills", "tdd").contains("dir   skills/tdd"),
+            "{}",
+            about("skills", "tdd")
+        );
+        assert!(about("defaults", "carry_ins").contains("file  default.toml"));
+        let everything = format!("{model:?}");
+        let root = paths.root.display().to_string();
+        assert!(
+            !everything
+                .replace(&format!("root: {root:?}"), "")
+                .contains(&root),
+            "a full path is still drawn: {everything}"
+        );
+        // The header's, from your home.
+        let home = paths.root.parent().unwrap();
+        assert_eq!(tilde(&paths.root, Some(home)), "~/.omh");
+        assert_eq!(tilde(&paths.root, None), root);
+    }
+
     /// **Could not look is not none.** A catalogue directory omh cannot read
     /// is said on its page, and the page is not drawn as an empty kind.
     #[cfg(unix)]
@@ -1295,7 +1432,10 @@ mod tests {
                 "rust-test",
                 r#"{"on":"turn-end","stack":"rust","run":"cargo test"}"#,
             ),
-            ("mine", r#"{"on":"turn-end","run":"make check"}"#),
+            (
+                "mine",
+                r#"{"on":"before-tool","tools":["edit"],"run":"make check"}"#,
+            ),
         ] {
             write(&paths.root.join(format!("hooks/{name}.json")), body);
         }
@@ -1305,11 +1445,42 @@ mod tests {
         assert_eq!(names, ["mine", "rust-test"]);
         assert_eq!(hooks.rows[0].group.as_deref(), Some("yours"));
         assert_eq!(hooks.rows[1].group.as_deref(), Some("shipped with omh"));
+        // When it runs is a column of its own, the one somebody scans first:
+        // what it does starts at the same place on every row.
         assert_eq!(
             hooks.rows[1].summary.as_deref(),
-            Some("turn-end · cargo test")
+            Some("turn-end          cargo test")
+        );
+        assert_eq!(
+            hooks.rows[0].summary.as_deref(),
+            Some("before-tool edit  make check")
         );
         assert_eq!(hooks.rows[1].badge.as_deref(), Some("rust"));
+    }
+
+    /// Every page of your catalogue says what belongs on it, for when there is
+    /// nothing on it yet; and a key nothing reads is under its own heading,
+    /// apart from the ones omh does.
+    #[test]
+    fn a_page_says_what_belongs_on_it_and_unread_keys_stand_apart() {
+        let (_dir, paths) = paths();
+        write(&paths.root.join("default.toml"), "carry_ins = []\n");
+        let model = model(&paths);
+        for section in model.sections.iter().filter(|s| s.page != Page::Defaults) {
+            assert!(!section.about.is_empty(), "{} says nothing", section.title);
+        }
+        let defaults = page(&model, "defaults");
+        let unread = defaults
+            .rows
+            .iter()
+            .find(|r| r.name == "carry_ins")
+            .unwrap();
+        assert_eq!(unread.group.as_deref(), Some("read by nothing"));
+        assert!(defaults
+            .rows
+            .iter()
+            .filter(|r| key::describes(&r.name).is_some())
+            .all(|r| r.group.is_none()));
     }
 
     /// A link to nothing is an entry no harness can read, and says so.
