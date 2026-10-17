@@ -1145,9 +1145,9 @@ pub(crate) fn defaults_use(
             config::forget_selection(paths, config::Layer::Personal, cap)?;
         }
         let said = match (had, dry_run) {
-            (false, _) => format!("new repos already take every {cap} in your catalogue"),
-            (true, true) => format!("would have new repos take every {cap} in your catalogue"),
-            (true, false) => format!("new repos take every {cap} in your catalogue again"),
+            (false, _) => format!("new repos already take all your {cap}"),
+            (true, true) => format!("new repos would take all your {cap} again"),
+            (true, false) => format!("new repos take all your {cap} again"),
         };
         ctx.say(
             &report::Action::new("defaults-use-all", said)
@@ -1168,9 +1168,7 @@ pub(crate) fn defaults_use(
     }
     let (said, list) = match seeded(paths, cap)? {
         None => (
-            format!(
-                "new repos already take every {cap} in your catalogue, {cap}/{name} among them"
-            ),
+            format!("new repos already take all your {cap}, {cap}/{name} among them"),
             None,
         ),
         Some(names) if names.iter().any(|n| n == name) => {
@@ -1246,11 +1244,14 @@ pub(crate) fn defaults_unuse(
         "froze_selection": froze,
     }));
     if froze {
+        let rest = match names.len() {
+            0 => "its list is empty now".to_string(),
+            n => format!("the other {n} are its list now"),
+        };
         action = action.note(format!(
-            "{cap} was every entry in your catalogue: the other {} are its list now, and one \
-             you add is not seeded until you use it. To follow the whole catalogue again:\n  \
-             omh settings use {cap} --all",
-            names.len()
+            "{cap} followed your whole catalogue: {rest}, and one you add is not seeded \
+             until you use it. To follow the whole catalogue again:\n  \
+             omh settings use {cap} --all"
         ));
     }
     if !dry_run {

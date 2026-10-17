@@ -4783,7 +4783,7 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
     assert!(ok, "{said}");
     assert!(
-        said.contains("every"),
+        said.contains("already take all your skills"),
         "already taken, as all of them are: {said}"
     );
     assert_eq!(skills(), None, "and nothing written");
@@ -4811,6 +4811,13 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     let (ok, said) = run(&["settings", "use", "skills", "--all"]);
     assert!(ok, "{said}");
     assert_eq!(skills(), None, "the whole catalogue again: {:?}", doc());
+    assert!(said.contains("take all your skills again"), "{said}");
+    // A kind of one, left out, has an empty list — said as one.
+    sb.catalogue(&["rules/house.md"]);
+    let (ok, said) = run(&["settings", "unuse", "rules", "house"]);
+    assert!(ok, "{said}");
+    assert!(said.contains("its list is empty now"), "{said}");
+    assert!(!said.contains("other 0"), "{said}");
 
     // omh's own are switched, not listed.
     let (ok, said) = run(&["settings", "unuse", "hooks", "graph-first"]);
