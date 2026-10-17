@@ -338,7 +338,13 @@ pub(crate) fn import_cmd(
             crate::cmd::settings::capability_list()
         )
     })?;
-    let paths = Paths::discover(cwd)?;
+    // Hooks land in this repo's `.omh/hooks/`, so they need one. Everything else
+    // lands in `~/.omh`, which is there outside a checkout too — refusing there
+    // was `omh settings`' old defect, one verb over.
+    let paths = match cap {
+        adapter::Capability::Hooks => Paths::discover(cwd)?,
+        _ => Paths::anywhere(cwd)?,
+    };
     let adapter = Adapter::find(&paths.adapters(), harness)?;
     let binding = adapter
         .supports(cap)

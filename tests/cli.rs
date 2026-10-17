@@ -10604,6 +10604,50 @@ fn importing_a_skill_puts_it_in_your_catalogue() {
     );
 }
 
+/// Importing into your catalogue needs no repo, because the catalogue is not
+/// in one.
+///
+/// A skill, a rule, a command and a subagent all land in `~/.omh`, and the
+/// command refused outside a checkout with a sentence about worktree branches
+/// — the defect `omh settings` had, one verb over. Hooks still need a repo:
+/// they land in its `.omh/hooks/`, so outside one there is nowhere to put
+/// them, and that refusal stays.
+#[test]
+fn importing_into_your_catalogue_works_outside_a_repository() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(
+        ".claude/skills/review-diff/SKILL.md",
+        "---\nname: review-diff\n---\n\nbody\n",
+    );
+    fx.theirs(".claude/CLAUDE.md", "always write the test first\n");
+    let outside = fx.home.join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+
+    for capability in ["skills", "rules"] {
+        let out = fx.omh_in(&outside, &["import", capability, "claude"]);
+        assert!(
+            out.status.success(),
+            "`omh import {capability} claude` writes ~/.omh and needs no worktree: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(fx.mine("skills/review-diff/SKILL.md").is_some());
+    assert!(fx.mine("rules/claude.md").is_some());
+
+    let out = fx.omh_in(&outside, &["import", "hooks", "claude"]);
+    assert!(
+        !out.status.success(),
+        "a hook lands in a repo, and there is none here"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("git repository"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// **Rules are imported from your own file, never this project's.**
 ///
 /// `rules::compose` already puts the repo's `CLAUDE.md` into every session, so

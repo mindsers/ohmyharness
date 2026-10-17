@@ -2221,7 +2221,8 @@ import from claude skills (~/.claude/skills)
 **Hooks land in the repo, not the catalogue** — a hook binds to a project's
 own commands, so `cargo test` here and `pnpm test` next door is one name and
 two bodies. They go to `<repo>/.omh/hooks/` and into `[use]`, or they would
-arrive dead. Everything else is yours across projects and goes to `~/.omh`.
+arrive dead. Everything else is yours across projects and goes to `~/.omh` —
+so it needs no repo, and `omh import skills claude` works from anywhere.
 
 **A symlink is refused at any depth, as is a name that is a path** — an
 imported entry is content omh will mount read-only into a sandbox, and neither
