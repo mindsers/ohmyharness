@@ -1077,6 +1077,9 @@ pub(crate) struct EditTarget {
     /// A new skill's directory: made for this edit, and taken back if the
     /// editor saved nothing into it.
     new_skill: Option<std::path::PathBuf>,
+    /// What a new entry opens as: its kind's shape, written before the editor
+    /// runs and taken back if it is saved untouched.
+    skeleton: Option<String>,
 }
 
 /// How an edit ended, when the editor did not fail.
@@ -1108,6 +1111,7 @@ pub(crate) fn edit_target(
         return Ok(EditTarget {
             file: layer.file(paths),
             new_skill: None,
+            skeleton: None,
         });
     };
     let cap = capability_from(key)?;
@@ -1116,6 +1120,7 @@ pub(crate) fn edit_target(
         return Ok(EditTarget {
             file: dir,
             new_skill: None,
+            skeleton: None,
         });
     };
     // A server is a record in one file, so there is no file of its own to
@@ -1172,20 +1177,41 @@ pub(crate) fn edit_target(
         (adapter::Capability::Skills, Some(skill)) if skill.is_dir() => EditTarget {
             file: skill.join("SKILL.md"),
             new_skill: None,
+            skeleton: None,
         },
         (_, Some(file)) => EditTarget {
             file,
             new_skill: None,
+            skeleton: None,
         },
         (adapter::Capability::Skills, None) => EditTarget {
             file: exact.join("SKILL.md"),
             new_skill: Some(exact),
+            skeleton: Some(skeleton(cap, name)),
         },
         (_, None) => EditTarget {
             file: exact,
             new_skill: None,
+            skeleton: Some(skeleton(cap, name)),
         },
     })
+}
+
+/// What a new entry of a kind opens as. A skill and a subagent are read by
+/// their front matter's `name` and `description`, and an empty `SKILL.md` had
+/// neither, so its first line of prose became its description; a hook is
+/// JSON, and an empty file is not one omh can run.
+fn skeleton(cap: adapter::Capability, name: &str) -> String {
+    match cap {
+        adapter::Capability::Skills | adapter::Capability::Subagents => {
+            format!("---\nname: {name}\ndescription: \n---\n\n")
+        }
+        adapter::Capability::Commands => "---\ndescription: \n---\n\n".to_string(),
+        adapter::Capability::Hooks => {
+            "{\n  \"on\": \"turn-end\",\n  \"run\": \"\"\n}\n".to_string()
+        }
+        adapter::Capability::Rules | adapter::Capability::Mcp => format!("# {name}\n\n"),
+    }
 }
 
 /// `$EDITOR` on a target, the way a shell would run it.
@@ -1206,21 +1232,44 @@ pub(crate) fn open_in_editor(target: &EditTarget) -> Result<Edited> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    // Empty is unset, as git reads it: `sh -c ' "$@"'` runs the file itself.
-    let editor = std::env::var("EDITOR")
-        .ok()
-        .filter(|e| !e.trim().is_empty())
-        .unwrap_or_else(|| "vi".into());
+    // `create_new`, so it can only make the file: never one already there, and
+    // never through a link where one would go.
+    if let Some(skeleton) = &target.skeleton {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target.file)
+            .and_then(|mut f| f.write_all(skeleton.as_bytes()))
+            .with_context(|| format!("starting {}", target.file.display()))?;
+    }
+    // `$VISUAL`, then `$EDITOR`, then vi, as git reads them — and empty is
+    // unset: `sh -c ' "$@"'` runs the file itself.
+    let (var, editor) = ["VISUAL", "EDITOR"]
+        .into_iter()
+        .find_map(|var| {
+            std::env::var(var)
+                .ok()
+                .filter(|e| !e.trim().is_empty())
+                .map(|e| (var, e))
+        })
+        .unwrap_or(("EDITOR", "vi".into()));
     let status = Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} \"$@\""))
         .arg("sh")
         .arg(&target.file)
         .status()
-        .with_context(|| format!("starting $EDITOR `{editor}`"));
+        .with_context(|| format!("starting ${var} `{editor}`"));
     // Settled however the editor ended — and kept as a value rather than
     // `?`d, because if the editor failed, *that* is the error: the cleanup's
     // own failure ran first once and was all anybody was told.
+    // A skeleton saved untouched is no entry: taken back, however the editor
+    // ended, so the skill's directory can be settled after it.
+    let untouched = match &target.skeleton {
+        Some(skeleton) => take_back_untouched(&target.file, skeleton),
+        None => Ok(false),
+    };
     let settled = made.map(|dir| settle_new_skill(dir, &target.file));
     let status = status?;
     if !status.success() {
@@ -1228,11 +1277,12 @@ pub(crate) fn open_in_editor(target: &EditTarget) -> Result<Edited> {
             // What `sh` says on the terminal the editor was handed is behind
             // the screen once it is drawn back, so the status is put in words.
             Some(127) => format!(
-                "$EDITOR `{editor}` is not a command `sh` could find — is $EDITOR spelled right?"
+                "${var} `{editor}` is not a command `sh` could find — is ${var} spelled right?"
             ),
-            Some(126) => format!("$EDITOR `{editor}` could not be run — is it executable?"),
+            Some(126) => format!("${var} `{editor}` could not be run — is it executable?"),
             _ => format!(
-                "$EDITOR `{editor}` exited with {status}, on {}",
+                "${var} `{editor}` exited with status {}, on {}",
+                status.code().map_or("unknown".into(), |c| c.to_string()),
                 target.file.display()
             ),
         };
@@ -1241,7 +1291,27 @@ pub(crate) fn open_in_editor(target: &EditTarget) -> Result<Edited> {
             _ => anyhow::anyhow!(failed),
         });
     }
-    settled.unwrap_or(Ok(Edited::Done))
+    let untouched = untouched?;
+    match settled {
+        Some(settled) => settled,
+        None if untouched => Ok(Edited::NothingSaved(target.file.clone())),
+        None => Ok(Edited::Done),
+    }
+}
+
+/// Remove a new entry's file if it still holds only its skeleton. Answers
+/// whether it did.
+fn take_back_untouched(file: &std::path::Path, skeleton: &str) -> Result<bool> {
+    match std::fs::read_to_string(file) {
+        Ok(held) if held == skeleton => {
+            std::fs::remove_file(file)
+                .with_context(|| format!("taking back {}", file.display()))?;
+            Ok(true)
+        }
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
+    }
 }
 
 /// What became of a new skill's directory once the editor closed.
@@ -1516,8 +1586,15 @@ pub(crate) fn shipped_hooks() -> Vec<String> {
 /// lists the ones there are.
 pub(crate) fn capability_from(key: &str) -> Result<adapter::Capability> {
     adapter::Capability::from_key(key).with_context(|| {
+        // One letter off is a typo, and the kinds are plural: `skill`, `hook`.
+        let near = adapter::Capability::ALL
+            .iter()
+            .map(|c| c.key())
+            .find(|k| k.strip_suffix('s') == Some(key));
         format!(
-            "`{key}` is not a capability — expected {}",
+            "`{key}` is not a capability — {}expected {}",
+            near.map(|k| format!("did you mean `{k}`? "))
+                .unwrap_or_default(),
             capability_list()
         )
     })

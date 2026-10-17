@@ -126,6 +126,9 @@ pub struct Row {
     /// What flips that — the command, worked out by the caller, so the screen
     /// keeps no rule about `[use]` or features of its own.
     pub toggle: Option<Act>,
+    /// The key one nothing reads was probably meant to be: Enter moves its
+    /// value there.
+    pub meant: Option<String>,
 }
 
 /// How `enter` sets a default.
@@ -189,6 +192,13 @@ pub enum Act {
         capability: String,
         name: String,
     },
+    /// A key nothing reads, its value moved to the key it was meant to be:
+    /// that one set, this one unset.
+    Move {
+        from: String,
+        to: String,
+        value: String,
+    },
 }
 
 impl Act {
@@ -200,6 +210,7 @@ impl Act {
             }
             Act::Edit { name, .. } => name.clone(),
             Act::Use { name, .. } | Act::Unuse { name, .. } => Some(name.clone()),
+            Act::Move { to, .. } => Some(to.clone()),
             Act::AddServer { name, .. } => Some(name.clone()),
             Act::EditDefaults | Act::Remove { .. } | Act::Import { .. } => None,
         }
@@ -218,6 +229,8 @@ pub enum Next {
     /// asks in the words of the preview, so a refusal comes before the
     /// question rather than after somebody has said yes.
     Preview(Act),
+    /// Read your catalogue again: a file changed outside the screen.
+    Reload,
 }
 
 /// How a status line reads.
@@ -247,6 +260,12 @@ pub struct App {
     changed: Option<String>,
     /// The row the act being run will change, once the page is read again.
     pending: Option<(usize, String)>,
+    /// What undoes the act being run, kept once the command says it worked.
+    pending_undo: Option<Act>,
+    /// What undoes the last change that worked, for `u`.
+    undo: Option<Act>,
+    /// Every command that worked, as shown — said once the screen closes.
+    ran: Vec<String>,
     /// Where the last draw put things, for a mouse to find them.
     hit: RefCell<Hit>,
 }
@@ -361,6 +380,8 @@ struct Form {
     fields: [Typed; 3],
     at: usize,
     error: Option<String>,
+    /// Esc was pressed with something typed: the next one throws it away.
+    leaving: bool,
 }
 
 const FORM_LABELS: [&str; 3] = [
@@ -395,11 +416,19 @@ impl App {
             filter: None,
             changed: None,
             pending: None,
+            pending_undo: None,
+            undo: None,
+            ran: Vec::new(),
             hit: RefCell::new(Hit::default()),
         }
     }
 
     /// Ask this, as a value is typed, what omh would say about it.
+    /// Every command the screen ran that worked, in order, as it showed them.
+    pub fn ran(&self) -> &[String] {
+        &self.ran
+    }
+
     pub fn with_check(mut self, check: Check) -> Self {
         self.check = Some(check);
         self
@@ -444,6 +473,15 @@ impl App {
     /// What a command said, in its own words: its answer, then what it
     /// wrote to stderr — warnings when it worked, the refusal when it did not.
     pub fn report(&mut self, said: String, ok: bool, stdout: &str, stderr: &str) {
+        // What undoes it is kept only once it worked; the last change that did
+        // is what `u` undoes, and one that did not is not a change.
+        match ok {
+            true => {
+                self.undo = self.pending_undo.take();
+                self.ran.push(clean(&said));
+            }
+            false => self.pending_undo = None,
+        }
         let (out, err) = if ok {
             (Tone::Ok, Tone::Warn)
         } else {
@@ -512,17 +550,23 @@ impl App {
             Some(modal) => self.key_in_modal(modal, key),
             None if self.filter.as_ref().is_some_and(|f| f.typing) => self.key_in_filter(key),
             None if plain(key) => self.key_on_page(key),
-            // Ctrl-D leaves, as it leaves a shell; every other held letter is
-            // not the letter.
+            // Ctrl-D leaves, as it leaves a shell, and Ctrl-L reads again, as
+            // it redraws one; every other held letter is not the letter.
             None if key.code == KeyCode::Char('d')
                 && key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 Next::Quit
             }
+            None if key.code == KeyCode::Char('l')
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Next::Reload
+            }
             None => Next::Stay,
         };
         if let Next::Run(act) = &next {
             self.pending = act.subject().map(|name| (self.at, name));
+            self.pending_undo = self.inverse(act);
         }
         next
     }
@@ -552,6 +596,7 @@ impl App {
                         let next = self.enter();
                         if let Next::Run(act) = &next {
                             self.pending = act.subject().map(|name| (self.at, name));
+                            self.pending_undo = self.inverse(act);
                         }
                         return next;
                     }
@@ -561,6 +606,53 @@ impl App {
             _ => {}
         }
         Next::Stay
+    }
+
+    /// The command that undoes an act, from what the screen shows now: a
+    /// value set back to the one it had, or unset if it had none; an unset put
+    /// back; a `use` left out again. `None` where there is no inverse to run —
+    /// a removal, which takes the file with it.
+    fn inverse(&self, act: &Act) -> Option<Act> {
+        let had = |key: &str| {
+            self.model
+                .sections
+                .iter()
+                .filter(|s| s.page == Page::Defaults)
+                .flat_map(|s| &s.rows)
+                .find(|r| r.name == key)
+                .and_then(|r| r.value.clone())
+        };
+        match act {
+            Act::Set { key, .. } | Act::SetAnyway { key, .. } => Some(match had(key) {
+                Some(value) => Act::Set {
+                    key: key.clone(),
+                    value,
+                },
+                None => Act::Unset { key: key.clone() },
+            }),
+            Act::Unset { key } => had(key).map(|value| Act::Set {
+                key: key.clone(),
+                value,
+            }),
+            Act::Use { capability, name } => Some(Act::Unuse {
+                capability: capability.clone(),
+                name: name.clone(),
+            }),
+            Act::Unuse { capability, name } => Some(Act::Use {
+                capability: capability.clone(),
+                name: name.clone(),
+            }),
+            Act::Move { from, to, value } => Some(Act::Move {
+                from: to.clone(),
+                to: from.clone(),
+                value: value.clone(),
+            }),
+            Act::EditDefaults
+            | Act::Edit { .. }
+            | Act::Remove { .. }
+            | Act::AddServer { .. }
+            | Act::Import { .. } => None,
+        }
     }
 
     fn key_on_page(&mut self, key: KeyEvent) -> Next {
@@ -598,6 +690,11 @@ impl App {
                 self.rows[self.at] = 0;
             }
             KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('u') => {
+                if let Some(act) = self.undo.take() {
+                    return Next::Run(act);
+                }
+            }
             // Whether new repos get the row: the act it carries, the caller's.
             KeyCode::Char(' ') => {
                 if let Some(act) = self.row().and_then(|r| r.toggle.clone()) {
@@ -636,10 +733,9 @@ impl App {
         Next::Stay
     }
 
+    /// The filter goes with you: it is a search, and the rail says what it
+    /// finds on every page.
     fn go_to(&mut self, page: usize) {
-        if page != self.at {
-            self.filter = None;
-        }
         self.at = page;
     }
 
@@ -660,7 +756,7 @@ impl App {
             return Vec::new();
         };
         let needle = match &self.filter {
-            Some(f) if page == self.at && !f.text.is_empty() => f.text.to_lowercase(),
+            Some(f) if !f.text.is_empty() => f.text.to_lowercase(),
             _ => return (0..section.rows.len()).collect(),
         };
         section
@@ -686,6 +782,24 @@ impl App {
                 let Some(row) = self.row().cloned() else {
                     return Next::Stay;
                 };
+                if let Some(meant) = &row.meant {
+                    let taken = section
+                        .rows
+                        .iter()
+                        .any(|r| &r.name == meant && r.value.is_some());
+                    if taken {
+                        self.note(format!(
+                            "{meant} is set already — d removes {}, or e opens the file",
+                            row.name
+                        ));
+                        return Next::Stay;
+                    }
+                    return Next::Run(Act::Move {
+                        from: row.name.clone(),
+                        to: meant.clone(),
+                        value: row.value.clone().unwrap_or_default(),
+                    });
+                }
                 match &row.edit {
                     Edit::None => {
                         self.note(format!(
@@ -788,6 +902,7 @@ impl App {
                     fields: Default::default(),
                     at: 0,
                     error: None,
+                    leaving: false,
                 }));
             }
             Page::Entries(capability) => {
@@ -961,7 +1076,14 @@ impl App {
             return Next::Stay;
         }
         match key.code {
-            KeyCode::Esc => return Next::Stay,
+            // Something typed is asked about once before it goes.
+            KeyCode::Esc if form.leaving || form.fields.iter().all(|f| f.text.is_empty()) => {
+                return Next::Stay;
+            }
+            KeyCode::Esc => {
+                form.leaving = true;
+                form.error = Some("esc again throws away what is typed".into());
+            }
             KeyCode::Tab | KeyCode::Down => form.at = (form.at + 1).min(2),
             KeyCode::BackTab | KeyCode::Up => form.at = form.at.saturating_sub(1),
             KeyCode::Enter if form.at < 2 => form.at += 1,
@@ -969,6 +1091,7 @@ impl App {
             _ => {
                 form.fields[form.at].edit(key);
                 form.error = None;
+                form.leaving = false;
             }
         }
         self.modal = Some(Modal::Form(form));
@@ -1250,8 +1373,17 @@ impl App {
             // same number forever.
             let warned = s.rows.iter().any(|r| r.warning.is_some());
             let mut right = Vec::new();
+            let searching = self.filter.as_ref().is_some_and(|f| !f.text.is_empty());
             match (s.problem.is_some(), s.page) {
                 (true, _) => right.push(Span::styled("✗", self.look.tone(Tone::Bad))),
+                // What a search finds here, of how many.
+                (false, _) if searching => right.push(Span::styled(
+                    format!("{}/{}", self.shown(i).len(), s.rows.len()),
+                    match self.shown(i).is_empty() {
+                        true => self.look.dim(),
+                        false => self.look.accent(),
+                    },
+                )),
                 (false, page) => {
                     if warned {
                         right.push(Span::styled("!", self.look.tone(Tone::Warn)));
@@ -1796,7 +1928,13 @@ impl App {
             None if self.filter.as_ref().is_some_and(|f| f.typing) => {
                 vec![("↵", "keep the filter"), ("esc", "drop it"), ("↑↓", "move")]
             }
-            None => self.page_keys(),
+            None => {
+                let mut keys = self.page_keys();
+                if self.undo.is_some() {
+                    keys.insert(0, ("u", "undoes it"));
+                }
+                keys
+            }
         };
         let right = self.chips(&[("?", "help"), ("q", "quit")]);
         let room = usize::from(width).saturating_sub(right.width() + 2);
@@ -1824,7 +1962,9 @@ impl App {
             let importable = matches!(&section.import, Import::From(h) if !h.is_empty());
             match section.page {
                 Page::Defaults => {
-                    if let Some(row) = row.filter(|r| r.edit != Edit::None) {
+                    if row.is_some_and(|r| r.meant.is_some()) {
+                        keys.push(("↵", "move it to the key it meant"));
+                    } else if let Some(row) = row.filter(|r| r.edit != Edit::None) {
                         keys.push(("↵", "set"));
                         if row.value.is_some() {
                             keys.push(("d", "unset"));
@@ -2103,7 +2243,13 @@ impl App {
                     ),
                 ],
             ),
-            ("leave", &[("q  esc  ctrl-d  ctrl-c", "leave")]),
+            (
+                "leave",
+                &[
+                    ("q  esc  ctrl-d  ctrl-c", "leave"),
+                    ("ctrl-l", "read your catalogue again"),
+                ],
+            ),
         ];
         let width = groups
             .iter()

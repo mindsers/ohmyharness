@@ -192,6 +192,10 @@ impl Sandbox {
             .env("HOME", &self.home)
             .env("PATH", path)
             .env("EDITOR", self.bin.join("fake-editor"))
+            // Read before `$EDITOR`, so one in the environment running the
+            // suite would open a real editor: taken out, and set where a test
+            // means it.
+            .env_remove("VISUAL")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -219,7 +223,11 @@ impl Sandbox {
             .current_dir(&self.repo)
             .env("HOME", &self.home)
             .env("PATH", path)
-            .env("EDITOR", self.bin.join("fake-editor"));
+            .env("EDITOR", self.bin.join("fake-editor"))
+            // Read before `$EDITOR`, so one in the environment running the
+            // suite would open a real editor: taken out, and set where a test
+            // means it.
+            .env_remove("VISUAL");
         for (k, v) in env {
             command.env(k, v);
         }
@@ -256,6 +264,10 @@ impl Sandbox {
             .env("HOME", &self.home)
             .env("PATH", path)
             .env("EDITOR", self.bin.join("fake-editor"))
+            // Read before `$EDITOR`, so one in the environment running the
+            // suite would open a real editor: taken out, and set where a test
+            // means it.
+            .env_remove("VISUAL")
             .output()
             .expect("the binary under test must run")
     }
@@ -7103,6 +7115,15 @@ fn an_editor_that_fails_fails_the_edit_and_one_with_arguments_runs() {
         said.contains("failing-editor") && said.contains('3'),
         "{said}"
     );
+    // In words, once: it read "exited with exit status: 3".
+    assert!(said.contains("exited with status 3"), "{said}");
+    // And the variable named is the one it came from.
+    let out = sb.omh_env(
+        &["settings", "edit"],
+        &[("VISUAL", &failing.display().to_string())],
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("$VISUAL"), "{said}");
 
     let with_args = format!("{} --wait", sb.bin.join("fake-editor").display());
     let out = sb.omh_env(&["settings", "edit"], &[("EDITOR", &with_args)]);
@@ -7182,7 +7203,7 @@ fn an_editor_that_fails_is_the_error_whatever_the_cleanup_found() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(
-        said.contains("locking-editor") && said.contains("exit status: 3"),
+        said.contains("locking-editor") && said.contains("exited with status 3"),
         "the editor's failure is the error: {said}"
     );
 }
@@ -7292,6 +7313,118 @@ fn an_existing_skill_opens_at_its_skill_md() {
     assert!(
         sb.home.join(".omh/skills/half/notes.md").exists(),
         "a half-made skill keeps what is in it"
+    );
+}
+
+/// A new entry opens as its kind's skeleton, not an empty file: a new skill's
+/// `SKILL.md` had no front matter, so its description became its first line
+/// of prose; a new hook was an empty `.json` omh could not run. One saved
+/// untouched is taken back, as a new skill nothing was saved into is.
+#[test]
+fn a_new_entry_opens_as_its_kinds_skeleton() {
+    let sb = sandbox();
+    sb.seed_base();
+    let appending = sb.bin.join("appending-editor");
+    std::fs::write(&appending, "#!/bin/sh\nprintf 'written\\n' >> \"$1\"\n").unwrap();
+    std::fs::set_permissions(
+        &appending,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let appending = appending.display().to_string();
+    for (cap, name, file, says) in [
+        (
+            "skills",
+            "commit-msg",
+            "skills/commit-msg/SKILL.md",
+            "name: commit-msg",
+        ),
+        (
+            "subagents",
+            "researcher",
+            "subagents/researcher.md",
+            "description:",
+        ),
+        ("hooks", "mine", "hooks/mine.json", "\"on\""),
+        ("rules", "house", "rules/house.md", "# house"),
+    ] {
+        let out = sb.omh_env(&["settings", "edit", cap, name], &[("EDITOR", &appending)]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let held = std::fs::read_to_string(sb.home.join(".omh").join(file)).unwrap();
+        assert!(
+            held.contains(says) && held.contains("written"),
+            "{file}: {held:?}"
+        );
+    }
+    // Untouched, taken back.
+    let out = sb.omh(&["settings", "edit", "commands", "pr"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sb.home.join(".omh/commands/pr.md").exists());
+}
+
+/// Help speaks of omh, never of the parser it is built with: `omh settings
+/// --help` told people that "clap is deliberately not told" something.
+#[test]
+fn help_never_names_the_parser() {
+    let sb = sandbox();
+    for argv in [
+        vec!["settings", "--help"],
+        vec!["--help"],
+        vec!["set", "--help"],
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        assert!(!said.contains("clap"), "`omh {}`: {said}", argv.join(" "));
+    }
+}
+
+/// A kind spelled one letter off is named: `omh settings rm skill tdd` was
+/// told what the kinds are and left to find the one it meant.
+#[test]
+fn a_kind_spelled_nearly_right_is_named() {
+    let sb = sandbox();
+    sb.seed_base();
+    for (typed, meant) in [("skill", "skills"), ("hook", "hooks"), ("rule", "rules")] {
+        let out = sb.omh(&["settings", "rm", typed, "x", "--yes"]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+        assert!(said.contains(&format!("did you mean `{meant}`")), "{said}");
+    }
+}
+
+/// `$VISUAL` is read before `$EDITOR`, as git reads them: with `VISUAL` set
+/// and `EDITOR=false`, the edit ran `false`. An empty one is none, and the
+/// next is read.
+#[test]
+fn visual_is_read_before_editor() {
+    let sb = sandbox();
+    sb.seed_base();
+    let fake = sb.bin.join("fake-editor").display().to_string();
+    let out = sb.omh_env(
+        &["settings", "edit"],
+        &[("VISUAL", &fake), ("EDITOR", "false")],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(sb.opened_in_the_editor().contains("default.toml"));
+    let out = sb.omh_env(
+        &["settings", "edit"],
+        &[("VISUAL", " "), ("EDITOR", "false")],
+    );
+    assert!(
+        !out.status.success(),
+        "an empty VISUAL is none, and EDITOR is read"
     );
 }
 
@@ -7519,6 +7652,10 @@ impl Sandbox {
                 .env("HOME", &self.home)
                 .env("PATH", path)
                 .env("EDITOR", self.bin.join("fake-editor"))
+                // Read before `$EDITOR`, so one in the environment running the
+                // suite would open a real editor: taken out, and set where a test
+                // means it.
+                .env_remove("VISUAL")
                 .env("TERM", "xterm-256color")
                 .stdout(slave.try_clone().unwrap())
                 .stderr(slave.try_clone().unwrap());
@@ -7895,6 +8032,13 @@ fn a_default_is_set_on_the_screen() {
     assert!(
         template.contains("idle_timeout = \"45m\""),
         "got: {template}"
+    );
+    // What it ran is printed once the screen is gone, where scrollback keeps
+    // it: the screen held the terminal, so nothing it did was left behind.
+    let after = &raw[raw.rfind("\x1b[?1049l").expect("left the screen")..];
+    assert!(
+        after.contains("omh settings set idle_timeout 45m"),
+        "nothing left behind: {after:?}"
     );
 }
 

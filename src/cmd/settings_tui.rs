@@ -46,12 +46,24 @@ pub(crate) fn wanted(json: bool, dry_run: bool) -> bool {
         && std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
-pub(crate) fn run(paths: &Paths, color: bool) -> Result<()> {
+pub(crate) fn run(paths: &Paths, color: bool, ctx: &crate::out::Ctx) -> Result<()> {
     let mut app = App::new(model(paths), color).with_check(Box::new(|name, value| {
         key::describes(name).and_then(|k| key::quarrel(k, value))
     }));
     let mut screen = Screen::open()?;
-    drive(&mut app, &mut screen.terminal, paths)
+    let driven = drive(&mut app, &mut screen.terminal, paths);
+    // The screen gone, what it ran is said where scrollback keeps it: it held
+    // the terminal, so nothing it did was left behind — a session's commands,
+    // to read back or paste into a script.
+    drop(screen);
+    if !app.ran().is_empty() {
+        let mut said = crate::report::Action::new("settings-screen-ran", "the screen ran:");
+        for line in app.ran() {
+            said = said.note(format!("omh {line}"));
+        }
+        ctx.say(&said);
+    }
+    driven
 }
 
 /// The terminal while the screen has it, given back however this ends.
@@ -117,6 +129,10 @@ fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) 
         match next {
             Next::Stay => {}
             Next::Quit => return Ok(()),
+            Next::Reload => {
+                app.reload(model(paths));
+                terminal.clear().context("drawing the screen")?;
+            }
             Next::Preview(act) => {
                 let mut line = vec!["--dry-run".to_string()];
                 line.extend(argv(&act));
@@ -142,13 +158,7 @@ fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) 
                         name.as_deref(),
                         &line,
                     )?,
-                    _ => match omh(&exe, &line) {
-                        Ok(out) => report(app, &line, &out),
-                        // On the screen rather than out of it: a child that
-                        // would not start is one failed act, and leaving took
-                        // every unsaved thing on the screen with it.
-                        Err(e) => app.report(shown(&line), false, "", &format!("{e:#}")),
-                    },
+                    _ => run_all(app, &exe, &command_lines(&act)),
                 }
                 app.reload(model(paths));
             }
@@ -235,6 +245,53 @@ fn after_edit(model: &Model, capability: Option<&str>, name: Option<&str>) -> Op
     }
 }
 
+/// Every command line an act is, in order: one, but for a move — the key it
+/// was meant to be set, then the one nothing reads unset.
+pub(crate) fn command_lines(act: &Act) -> Vec<Vec<String>> {
+    match act {
+        Act::Move { from, .. } => vec![
+            argv(act),
+            ["settings", "unset", "--", from].map(String::from).to_vec(),
+        ],
+        _ => vec![argv(act)],
+    }
+}
+
+/// Run an act's lines in order, stopping at the first that fails, and say
+/// what they said as one: what ran, joined, and every line's output.
+fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) {
+    let shown_all = lines
+        .iter()
+        .map(|l| shown(l))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let (mut out, mut err) = (String::new(), String::new());
+    for line in lines {
+        match omh(exe, line) {
+            Ok(done) => {
+                out.push_str(&String::from_utf8_lossy(&done.stdout));
+                err.push_str(&String::from_utf8_lossy(&done.stderr));
+                if !done.status.success() {
+                    if done.stdout.is_empty() && done.stderr.is_empty() {
+                        err.push_str(&format!("it ended with {}, and said nothing", done.status));
+                    }
+                    app.report(shown_all, false, &out, &err);
+                    return;
+                }
+            }
+            // On the screen rather than out of it: a child that would not
+            // start is one failed act, and leaving took every unsaved thing on
+            // the screen with it.
+            Err(e) => {
+                err.push_str(&format!("{e:#}"));
+                app.report(shown_all, false, &out, &err);
+                return;
+            }
+        }
+    }
+    app.report(shown_all, true, &out, &err);
+}
+
 /// The command line an act is, after `omh`.
 ///
 /// Flags first, then `--`, then what the act names: a value like `-x` — or
@@ -251,6 +308,8 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
     match act {
         Act::Set { key, value } => s(&["settings", "set", "--", key, value]),
         Act::SetAnyway { key, value } => s(&["settings", "set", "--anyway", "--", key, value]),
+        // The first of its two lines; `command_lines` adds the unset after it.
+        Act::Move { to, value, .. } => s(&["settings", "set", "--", to, value]),
         Act::Use { capability, name } => s(&["settings", "use", "--", capability, name]),
         Act::Unuse { capability, name } => s(&["settings", "unuse", "--", capability, name]),
         Act::Unset { key } => s(&["settings", "unset", "--", key]),
@@ -816,6 +875,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                 },
                 // Apart from the keys omh reads, under a heading saying so.
                 group: Some("read by nothing".into()),
+                meant: nearest_key(name).map(String::from),
                 ..Row::default()
             },
         };
@@ -1201,6 +1261,26 @@ mod tests {
                 "`{value}` did not arrive as the value"
             );
         }
+        // A move is two lines: the key it meant set, the typo unset.
+        let moved: Vec<Cmd> = command_lines(&Act::Move {
+            from: "carry_ins".into(),
+            to: "carry_in".into(),
+            value: "[\".env\"]".into(),
+        })
+        .into_iter()
+        .map(|line| {
+            let mut argv = vec!["omh".to_string()];
+            argv.extend(line);
+            Cli::try_parse_from(&argv).unwrap().cmd
+        })
+        .collect();
+        assert!(matches!(
+            moved.as_slice(),
+            [
+                Cmd::Settings { cmd: Some(SettingsCmd::Set { key: set, value, .. }) },
+                Cmd::Settings { cmd: Some(SettingsCmd::Unset { key: unset }) },
+            ] if set == "carry_in" && value == "[\".env\"]" && unset == "carry_ins"
+        ));
         // What new repos take: `settings use` and `unuse`, by kind and name.
         assert!(matches!(
             parsed(&Act::Use { capability: "skills".into(), name: "-x".into() }),
@@ -1791,6 +1871,7 @@ mod tests {
             row("carry_ins").warning.as_deref(),
             Some("nothing omh reads — did you mean `carry_in`?")
         );
+        assert_eq!(row("carry_ins").meant.as_deref(), Some("carry_in"));
         // A table holds something, and says what: `[use]` was drawn unset.
         assert_eq!(row("[use]").edit, Edit::None);
         assert_eq!(row("[use]").value.as_deref(), Some("skills = []"));

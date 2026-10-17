@@ -541,7 +541,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             match cmd {
                 // At a terminal it is a screen, and anywhere else the report.
                 None if cmd::settings_tui::wanted(cli.json, cli.dry_run) => {
-                    cmd::settings_tui::run(&paths, !ctx.palette.is_plain())
+                    cmd::settings_tui::run(&paths, !ctx.palette.is_plain(), ctx)
                 }
                 None => cmd::settings::show_settings(&paths, ctx),
                 Some(SettingsCmd::Set { key, value, anyway }) => {

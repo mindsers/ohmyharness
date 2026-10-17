@@ -1987,7 +1987,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // row's about, and `omh settings set <feature>` on a hook of yours
         // named as one of omh's own. + `omh init` refusing, twice, in a
         // list's warning — a kind that is not one, a value that is not a list.
-        ("src/cmd/settings_tui.rs", 16),
+        // + `omh <line>` for each command the screen ran, said once it closes.
+        ("src/cmd/settings_tui.rs", 17),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
