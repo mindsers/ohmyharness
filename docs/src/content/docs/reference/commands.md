@@ -2133,7 +2133,7 @@ defaults, then one page per kind of catalogue entry — rules, skills, servers,
 commands, subagents, hooks. Piped, redirected, or with `--json` or `--dry-run`,
 it is the report above.
 
-From 100 columns it is three: the pages, the list, and what the selected row
+From 120 columns it is three: the pages, the list, and what the selected row
 is. From 70, what the row is sits under the list, as below; narrower, the
 pages are one line along the top.
 

@@ -1320,12 +1320,14 @@ impl App {
         self.draw_head(f, head);
         match Width::of(area.width) {
             Width::Wide => {
+                // The detail a fixed width, the list the rest: shared 6:5, the
+                // list at 100 columns was narrower than stacking gave it at 99.
                 let [pages, a, list, b, detail] = Layout::horizontal([
                     Constraint::Length(18),
                     Constraint::Length(1),
-                    Constraint::Fill(6),
+                    Constraint::Fill(1),
                     Constraint::Length(1),
-                    Constraint::Fill(5),
+                    Constraint::Length(40),
                 ])
                 .areas(body);
                 self.draw_pages(f, pages);
@@ -2441,8 +2443,8 @@ enum Width {
 impl Width {
     fn of(columns: u16) -> Self {
         match columns {
-            100.. => Width::Wide,
-            70..=99 => Width::Medium,
+            120.. => Width::Wide,
+            70..=119 => Width::Medium,
             _ => Width::Narrow,
         }
     }

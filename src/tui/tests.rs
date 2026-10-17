@@ -1593,6 +1593,30 @@ fn a_heading_keeps_the_filter_and_says_when_it_is_cut() {
     assert!(heading.contains('…'), "{heading}");
 }
 
+/// Three columns from 120 only, the detail a fixed width and the list the
+/// rest: at 100 the list dropped to 44 columns, narrower than the stacked
+/// layout gave it at 99, while the detail used 6 of its 28 rows.
+#[test]
+fn three_columns_from_120_with_the_list_given_the_room() {
+    let app = App::new(model(), true);
+    let rules = |width: u16| {
+        let screen = drawn_at(&app, width, 30);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("idle_timeout") && l.contains("30m"))
+            .unwrap_or_default()
+            .to_string();
+        row.char_indices()
+            .filter(|(_, c)| *c == '│')
+            .map(|(i, _)| row[..i].chars().count())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rules(110).len(), 1, "stacked below 120: {:?}", rules(110));
+    let wide = rules(120);
+    assert_eq!(wide.len(), 2, "{wide:?}");
+    assert!(wide[1] - wide[0] >= 58, "the list is {} wide", wide[1] - wide[0]);
+}
+
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
 /// act the row carries; the row's `●`/`○` and the page's heading say which way
 /// it is now. A row with nothing to flip takes no `space`.
