@@ -47,7 +47,9 @@ pub(crate) fn wanted(json: bool, dry_run: bool) -> bool {
 }
 
 pub(crate) fn run(paths: &Paths, color: bool, ctx: &crate::out::Ctx) -> Result<()> {
-    let mut app = App::new(model(paths), color).with_check(Box::new(refusal));
+    let mut app = App::new(model(paths), color)
+        .with_check(Box::new(refusal))
+        .with_home(dirs::home_dir().map(|h| h.display().to_string()));
     let mut screen = Screen::open()?;
     let mut ran = Vec::new();
     let driven = drive(&mut app, &mut screen.terminal, paths, &mut ran);

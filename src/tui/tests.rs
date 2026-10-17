@@ -1553,6 +1553,22 @@ fn a_warning_outranks_a_change_and_the_bar_is_one_tone() {
     assert!(colours.len() <= 1, "the bar runs {colours:?}: {line}");
 }
 
+/// What a command printed says your home as `~`, as the screen says every
+/// path of its own — and only your home: `/Users/young` is not `/Users/you`.
+#[test]
+fn what_a_command_printed_says_your_home_as_tilde() {
+    let mut app = App::new(model(), true).with_home(Some("/Users/you".into()));
+    app.report(
+        "settings set idle_timeout 45m".into(),
+        true,
+        "wrote → /Users/you/.omh/default.toml\nkept /Users/young/notes",
+        "",
+    );
+    let screen = drawn_at(&app, 120, 30);
+    assert!(screen.contains("wrote → ~/.omh/default.toml"), "{screen}");
+    assert!(screen.contains("/Users/young/notes"), "{screen}");
+}
+
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
 /// act the row carries; the row's `●`/`○` and the page's heading say which way
 /// it is now. A row with nothing to flip takes no `space`.

@@ -8283,7 +8283,8 @@ fn a_default_is_set_on_the_screen() {
     tty.send("\r");
     tty.wait_for("idle_timeout =");
     tty.send("45m\r");
-    tty.wait_for("wrote →");
+    // What the command said, as the screen says paths: from your home down.
+    tty.wait_for("wrote → ~/.omh/default.toml");
     tty.send("q");
     let (status, raw) = tty.finish();
     assert!(status.success(), "{raw}");

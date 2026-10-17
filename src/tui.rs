@@ -266,6 +266,9 @@ pub struct App {
     status: Option<Status>,
     look: Look,
     check: Option<Check>,
+    /// Your home, said as `~` in what a command printed — as the screen says
+    /// every path of its own.
+    home: Option<String>,
     filter: Option<Filter>,
     /// The row an act just changed, marked until the next key.
     changed: Option<String>,
@@ -419,6 +422,7 @@ impl App {
             status: None,
             look: Look { color },
             check: None,
+            home: None,
             filter: None,
             changed: None,
             pending: None,
@@ -432,6 +436,34 @@ impl App {
     pub fn with_check(mut self, check: Check) -> Self {
         self.check = Some(check);
         self
+    }
+
+    /// Say `home` as `~` in what a command printed, for display alone: the
+    /// line that ran is the line that ran.
+    pub fn with_home(mut self, home: Option<String>) -> Self {
+        self.home = home.filter(|h| !h.is_empty());
+        self
+    }
+
+    /// A line a command printed, its paths from your home down.
+    fn homed(&self, line: &str) -> String {
+        let Some(home) = &self.home else {
+            return clean(line);
+        };
+        let mut out = String::new();
+        let mut rest = line;
+        while let Some(at) = rest.find(home.as_str()) {
+            let after = &rest[at + home.len()..];
+            out.push_str(&rest[..at]);
+            // Only the home itself: `/Users/you` in `/Users/young` is not it.
+            match after.chars().next() {
+                None | Some('/') => out.push('~'),
+                Some(_) => out.push_str(home),
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+        clean(&out)
     }
 
     /// A fresh read, after an act. The selection follows the row by name, so
@@ -490,8 +522,9 @@ impl App {
                 // Every line here is omh's: its name said again is noise.
                 text.lines()
                     .filter(|l| !l.trim().is_empty())
-                    .map(move |l| (tone, clean(l.strip_prefix("omh: ").unwrap_or(l))))
+                    .map(move |l| (tone, l.strip_prefix("omh: ").unwrap_or(l)))
             })
+            .map(|(tone, l)| (tone, self.homed(l)))
             .collect();
         if lines.is_empty() {
             lines.push(if ok {
@@ -527,8 +560,8 @@ impl App {
     /// and any warning it gave on the way.
     pub fn confirm(&mut self, lines: Vec<String>, warnings: Vec<String>, act: Act) {
         self.modal = Some(Modal::Confirm {
-            lines: lines.iter().map(|l| clean(l)).collect(),
-            warnings: warnings.iter().map(|l| clean(l)).collect(),
+            lines: lines.iter().map(|l| self.homed(l)).collect(),
+            warnings: warnings.iter().map(|l| self.homed(l)).collect(),
             act,
         });
     }
