@@ -626,9 +626,11 @@ pub(crate) fn model(paths: &Paths) -> Model {
                     .iter()
                     .filter_map(|a| {
                         let template = a.supports(cap)?.import.as_deref()?;
+                        let (from, empty) = import_from(paths, template);
                         Some(crate::tui::Source {
                             harness: a.name.to_string(),
-                            from: import_from(paths, template),
+                            from,
+                            empty,
                         })
                     })
                     .collect(),
@@ -815,7 +817,7 @@ fn feature_switches(paths: &Paths) -> std::collections::BTreeMap<String, bool> {
 /// Where an import reads, as the pick says it: the adapter's path on this
 /// host — from where omh was started, for `$REPO` — and whether there is
 /// anything there. The bare list of harness names said neither.
-fn import_from(paths: &Paths, template: &str) -> String {
+fn import_from(paths: &Paths, template: &str) -> (String, bool) {
     let home = dirs::home_dir();
     let at = crate::adapter::expand_host(
         template,
@@ -828,9 +830,10 @@ fn import_from(paths: &Paths, template: &str) -> String {
         false => tilde(&at, home.as_deref()),
     };
     match at.try_exists() {
-        Ok(true) => shown,
-        Ok(false) => format!("{shown} — nothing there"),
-        Err(e) => format!("{shown} — could not look: {e}"),
+        Ok(true) => (shown, false),
+        Ok(false) => (format!("{shown} — nothing there"), true),
+        // Could not look is not none: offered, and the import says why.
+        Err(e) => (format!("{shown} — could not look: {e}"), false),
     }
 }
 

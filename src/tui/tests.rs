@@ -83,10 +83,12 @@ fn model() -> Model {
                     Source {
                         harness: "claude".into(),
                         from: "~/.claude/skills".into(),
+                        empty: false,
                     },
                     Source {
                         harness: "codex".into(),
                         from: "~/.codex/skills — nothing there".into(),
+                        empty: true,
                     },
                 ]),
                 about: Vec::new(),
@@ -1315,13 +1317,13 @@ fn import_picks_from_the_harnesses_that_keep_this_kind() {
             .any(|l| l.contains("claude") && l.contains("~/.claude/skills")),
         "{screen}"
     );
-    assert!(screen.contains("nothing there"), "{screen}");
-    app.key(press('j'));
+    // Codex, with nothing there, is named and not offered.
+    assert!(screen.contains("nothing there in codex"), "{screen}");
     assert_eq!(
         app.key(code(KeyCode::Enter)),
         Next::Run(Act::Import {
             capability: "skills".into(),
-            harness: "codex".into()
+            harness: "claude".into()
         })
     );
     app.key(press('4'));
@@ -1742,6 +1744,38 @@ fn the_stacked_detail_says_the_value_first_and_when_it_is_cut() {
     assert!(!screen.contains("↓ more"), "{screen}");
 }
 
+/// A source with nothing in it is not offered: all four said `— nothing
+/// there` and could still be picked, and picking one failed with advice — a
+/// flag — the screen cannot follow. The others are offered and the empty ones
+/// named; with nothing anywhere, no pick opens.
+#[test]
+fn a_source_with_nothing_in_it_is_not_offered() {
+    let mut app = App::new(model(), true);
+    app.key(press('2'));
+    app.key(press('i'));
+    let Some(Modal::Pick(pick)) = &app.modal else {
+        panic!("no pick: {}", drawn(&app));
+    };
+    assert_eq!(pick.options, ["claude"]);
+    assert!(
+        pick.about.iter().any(|l| l.contains("codex")),
+        "{:?}",
+        pick.about
+    );
+
+    let mut model = model();
+    if let Import::From(sources) = &mut model.sections[1].import {
+        for s in sources.iter_mut() {
+            s.empty = true;
+        }
+    }
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    app.key(press('i'));
+    assert_eq!(app.modal, None, "a pick of nothing: {}", drawn(&app));
+    assert!(drawn(&app).contains("nothing to import"), "{}", drawn(&app));
+}
+
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
 /// act the row carries; the row's `●`/`○` and the page's heading say which way
 /// it is now. A row with nothing to flip takes no `space`.
@@ -1839,6 +1873,7 @@ fn a_servers_page_omh_could_not_read_takes_no_add() {
     model.sections[2].import = Import::From(vec![Source {
         harness: "claude".into(),
         from: "./.mcp.json".into(),
+        empty: false,
     }]);
     let mut app = App::new(model, true);
     app.key(press('3'));

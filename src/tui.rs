@@ -101,6 +101,8 @@ pub struct Source {
     pub harness: String,
     /// The place, as the caller says it: `~/.claude/skills — nothing there`.
     pub from: String,
+    /// Nothing is there to import.
+    pub empty: bool,
 }
 
 /// One default, one server, or one entry.
@@ -994,16 +996,44 @@ impl App {
         if section.page == Page::Servers && section.problem.is_some() {
             return self.note("omh could not read your servers — e opens the file to fix it");
         }
+        // A source with nothing in it is not offered: picked, it failed with
+        // advice — a flag — the screen cannot follow. The empty ones named.
+        let (empty, offered): (Vec<&Source>, Vec<&Source>) = match &section.import {
+            Import::From(harnesses) => harnesses.iter().partition(|h| h.empty),
+            Import::Not(_) => (Vec::new(), Vec::new()),
+        };
         let line = match (section.page.capability(), &section.import) {
+            (Some(_), Import::From(harnesses)) if !harnesses.is_empty() && offered.is_empty() => {
+                format!(
+                    "nothing to import — {} {} none",
+                    empty
+                        .iter()
+                        .map(|h| h.harness.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if empty.len() == 1 { "has" } else { "have" }
+                )
+            }
             (Some(capability), Import::From(harnesses)) if !harnesses.is_empty() => {
+                let about = match empty.is_empty() {
+                    true => Vec::new(),
+                    false => vec![format!(
+                        "nothing there in {}",
+                        empty
+                            .iter()
+                            .map(|h| h.harness.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )],
+                };
                 self.modal = Some(Modal::Pick(Pick {
                     title: format!("import {} from", section.title),
-                    options: harnesses.iter().map(|h| h.harness.clone()).collect(),
-                    notes: harnesses.iter().map(|h| h.from.clone()).collect(),
+                    options: offered.iter().map(|h| h.harness.clone()).collect(),
+                    notes: offered.iter().map(|h| h.from.clone()).collect(),
                     at: 0,
                     current: None,
                     fallback: None,
-                    about: Vec::new(),
+                    about,
                     typed: String::new(),
                     then: Chosen::Import {
                         capability: capability.into(),
@@ -2650,6 +2680,7 @@ fn cleaned(mut model: Model) -> Model {
                     .map(|h| Source {
                         harness: clean(&h.harness),
                         from: clean(&h.from),
+                        empty: h.empty,
                     })
                     .collect(),
             ),
