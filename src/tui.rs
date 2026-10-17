@@ -2075,6 +2075,18 @@ impl App {
     /// a popup's own while one is open, and otherwise the row's first, then the
     /// page's, then moving — the order they are dropped in from the right.
     fn keys(&self, width: u16) -> Line<'static> {
+        // What `u` undoes, said: "u undoes it" read as the row under the
+        // cursor, where it is the last change that worked.
+        let undoes = self.undo.as_ref().map(|act| match act {
+            Act::Set { key, value } | Act::SetAnyway { key, value } => {
+                format!("{key} back to {}", ellipsized(value, 16))
+            }
+            Act::Unset { key } => format!("{key} unset again"),
+            Act::Use { capability, name } => format!("{capability}/{name} back to new repos"),
+            Act::Unuse { capability, name } => format!("{capability}/{name} left out again"),
+            Act::Move { to, .. } => format!("{to} back where it was"),
+            _ => "undo".to_string(),
+        });
         let page: Vec<(&str, &str)> = match &self.modal {
             // What `↵` will do, as it stands: it said `save` while it wrote
             // anyway, and while it opened $EDITOR.
@@ -2109,8 +2121,8 @@ impl App {
             }
             None => {
                 let mut keys = self.page_keys();
-                if self.undo.is_some() {
-                    keys.insert(0, ("u", "undoes it"));
+                if let Some(undo) = &undoes {
+                    keys.insert(0, ("u", undo.as_str()));
                 }
                 keys
             }

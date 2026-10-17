@@ -1889,7 +1889,12 @@ fn u_undoes_the_last_change() {
         "nothing until it is said to have worked"
     );
     app.report("settings set idle_timeout 45m".into(), true, "wrote", "");
-    assert!(drawn(&app).contains("u undoes"), "{}", drawn(&app));
+    // What it undoes, said: "u undoes it" read as the row under the cursor.
+    assert!(
+        drawn(&app).contains("u idle_timeout back to 30m"),
+        "{}",
+        drawn(&app)
+    );
     let undo = app.key(press('u'));
     assert_eq!(
         undo,
@@ -2003,7 +2008,11 @@ fn space_is_undone_by_what_the_caller_says_undoes_it() {
     assert_eq!(app.key(press(' ')), Next::Run(guard));
     app.report("settings use -- skills review-diff".into(), true, "", "");
     assert_eq!(app.key(press('u')), Next::Stay);
-    assert!(!drawn(&app).contains("u undoes"), "{}", drawn(&app));
+    let footer = drawn(&app).lines().last().unwrap_or_default().to_string();
+    assert!(
+        !footer.trim_start().starts_with("u "),
+        "u is offered: {footer}"
+    );
 }
 
 /// Enter on a key that was probably meant to be another moves its value
