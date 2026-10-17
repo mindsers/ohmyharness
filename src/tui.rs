@@ -1227,6 +1227,27 @@ mod tests {
         }
     }
 
+    /// The question shows what the preview warned about, not only what it
+    /// answered: stderr is where a warning goes, and the box drew stdout alone.
+    #[test]
+    fn the_question_shows_the_previews_warnings() {
+        let mut app = App::new(model(), true);
+        app.confirm(
+            vec!["would remove ~/.omh/skills/keep".into()],
+            vec!["warning: a repo still uses skills/keep".into()],
+            Act::Remove {
+                capability: "skills".into(),
+                name: "keep".into(),
+            },
+        );
+        let screen = drawn(&app);
+        assert!(
+            screen.contains("would remove ~/.omh/skills/keep"),
+            "{screen}"
+        );
+        assert!(screen.contains("a repo still uses skills/keep"), "{screen}");
+    }
+
     /// Only a plain `y` says yes — not Ctrl-Y, not Alt-Y.
     #[test]
     fn only_a_plain_y_says_yes() {
