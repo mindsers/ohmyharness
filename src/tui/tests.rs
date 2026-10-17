@@ -481,6 +481,42 @@ fn help_lists_every_key_under_what_it_is_for() {
     );
 }
 
+/// Help is read whole at 80×24, where it was cut after `ctrl-a` with no way
+/// on — `j` closed it. It scrolls with the keys a list does, and only esc, q
+/// and `?` close it. It lists `u`, says `/` searches every page, and keeps
+/// ctrl-l out of the keys that leave, which it is not one of.
+#[test]
+fn help_scrolls_where_it_is_cut_and_lists_every_key() {
+    let mut app = App::new(model(), true);
+    app.key(press('?'));
+    let mut seen = String::new();
+    for _ in 0..30 {
+        let screen = drawn_at(&app, 80, 24);
+        seen.push_str(&screen);
+        assert!(
+            matches!(app.modal, Some(Modal::Help { .. })),
+            "closed:\n{screen}"
+        );
+        app.key(press('j'));
+    }
+    for said in ["undo", "ctrl-l", "every page", "every change is a command"] {
+        assert!(seen.contains(said), "never shown: `{said}`");
+    }
+    let screen = drawn_at(&app, 120, 40);
+    let leave = screen.find("LEAVE").expect("a LEAVE group");
+    let reread = screen.find("read your catalogue again").expect("ctrl-l");
+    assert!(reread < leave, "ctrl-l is under LEAVE:\n{screen}");
+    for key in [press('x'), press(' ')] {
+        app.key(key);
+        assert!(matches!(app.modal, Some(Modal::Help { .. })));
+    }
+    for close in [code(KeyCode::Esc), press('q'), press('?')] {
+        app.key(press('?'));
+        app.key(close);
+        assert_eq!(app.modal, None, "{close:?} did not close it");
+    }
+}
+
 /// A pick says what it is setting and marks both the value now and the one
 /// that applies unset: `account`'s marked nothing, though one applied.
 #[test]
@@ -1253,26 +1289,24 @@ fn a_filter_searches_every_page() {
     );
 }
 
-/// `?` shows every key, and any key closes it.
+/// `?` shows every key, and a key help has no use for does nothing: it
+/// neither reaches the page — `d` there unsets a default — nor closes help,
+/// which any key did, so `j` to read on closed it instead.
 #[test]
-fn help_shows_every_key_and_any_key_closes_it() {
+fn help_shows_every_key_and_a_key_it_has_no_use_for_does_nothing() {
     let mut app = App::new(model(), true);
     app.key(press('?'));
     let screen = drawn(&app);
     for key in [
         "change page",
-        "filter the list",
+        "search every page",
         "import from a harness",
         "leave",
     ] {
         assert!(screen.contains(key), "{screen}");
     }
-    assert_eq!(
-        app.key(press('d')),
-        Next::Stay,
-        "a key closes help, and does nothing else"
-    );
-    assert_eq!(app.modal, None);
+    assert_eq!(app.key(press('d')), Next::Stay, "`d` reached the page");
+    assert!(matches!(app.modal, Some(Modal::Help { .. })));
 }
 
 /// What a command said reads as a paragraph: a line too long for the screen

@@ -306,6 +306,8 @@ struct Hit {
     /// For each row of `list` on screen, the shown row it is — `None` for a
     /// heading or a blank.
     lines: Vec<Option<usize>>,
+    /// How far help can scroll at the size it was last drawn.
+    help_end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,7 +322,9 @@ enum Modal {
     },
     Pick(Pick),
     Form(Form),
-    Help,
+    Help {
+        scroll: usize,
+    },
 }
 
 /// A line being typed, and where the cursor is in it.
@@ -684,7 +688,7 @@ impl App {
                 });
                 self.rows[self.at] = 0;
             }
-            KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('?') => self.modal = Some(Modal::Help { scroll: 0 }),
             KeyCode::Char('u') => {
                 if let Some(act) = self.undo.take() {
                     return Next::Run(act);
@@ -977,7 +981,23 @@ impl App {
 
     fn key_in_modal(&mut self, modal: Modal, key: KeyEvent) -> Next {
         match modal {
-            Modal::Help => Next::Stay,
+            // Scrolled as a list is; closed only by the keys that close
+            // everything — `j` closed it, at 80×24 where it was cut.
+            Modal::Help { mut scroll } => {
+                let end = self.hit.borrow().help_end;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => return Next::Stay,
+                    KeyCode::Down | KeyCode::Char('j') => scroll = (scroll + 1).min(end),
+                    KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                    KeyCode::Home | KeyCode::Char('g') => scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => scroll = end,
+                    KeyCode::PageDown => scroll = (scroll + 10).min(end),
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(10),
+                    _ => {}
+                }
+                self.modal = Some(Modal::Help { scroll });
+                Next::Stay
+            }
             Modal::Confirm { act, .. } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => Next::Run(act),
                 // Anything else keeps it, the rule `ask::confirm` follows: one
@@ -1318,7 +1338,7 @@ impl App {
             }) => self.draw_confirm(f, lines, warnings, act),
             Some(Modal::Pick(pick)) => self.draw_pick(f, pick),
             Some(Modal::Form(form)) => self.draw_form(f, form),
-            Some(Modal::Help) => self.draw_help(f),
+            Some(Modal::Help { scroll }) => self.draw_help(f, *scroll),
             None => {}
         }
     }
@@ -1958,7 +1978,7 @@ impl App {
                     ("esc", "cancel"),
                 ]
             }
-            Some(Modal::Help) => vec![("any key", "closes")],
+            Some(Modal::Help { .. }) => vec![("j k", "scroll"), ("esc", "close")],
             None if self.filter.as_ref().is_some_and(|f| f.typing) => {
                 vec![("↵", "keep the filter"), ("esc", "drop it"), ("↑↓", "move")]
             }
@@ -2256,7 +2276,7 @@ impl App {
         ));
     }
 
-    fn draw_help(&self, f: &mut Frame) {
+    fn draw_help(&self, f: &mut Frame, scroll: usize) {
         let groups: &[(&str, &[(&str, &str)])] = &[
             (
                 "move",
@@ -2277,7 +2297,9 @@ impl App {
                     ("d", "unset a default · remove an entry, after asking"),
                     ("i", "import from a harness"),
                     ("space", "whether the repos `omh init` sets up after get it"),
-                    ("/", "filter the list — esc takes it off"),
+                    ("u", "undo the last change"),
+                    ("/", "search every page — esc takes it off"),
+                    ("ctrl-l", "read your catalogue again"),
                 ],
             ),
             (
@@ -2292,13 +2314,7 @@ impl App {
                     ),
                 ],
             ),
-            (
-                "leave",
-                &[
-                    ("q  esc  ctrl-d  ctrl-c", "leave"),
-                    ("ctrl-l", "read your catalogue again"),
-                ],
-            ),
+            ("leave", &[("q  esc  ctrl-d  ctrl-c", "leave")]),
         ];
         let width = groups
             .iter()
@@ -2331,10 +2347,25 @@ impl App {
         }
         lines.push(Line::default());
         for part in wrapped(
-            "every change is a command, shown once it runs · any key closes this",
+            "every change is a command, shown once it runs · esc closes this",
             most.saturating_sub(4),
         ) {
             lines.push(Line::from(Span::styled(part, self.look.dim())));
+        }
+        // What fits, from where it is scrolled to, and a line saying there is
+        // more: cut at 80×24, it ended mid-list with nothing to say so.
+        let room = usize::from(f.area().height.saturating_sub(4)).max(2);
+        let end = lines.len().saturating_sub(room - 1);
+        self.hit.borrow_mut().help_end = if lines.len() > room { end } else { 0 };
+        if lines.len() > room {
+            let at = scroll.min(end);
+            let cue = match (at > 0, at < end) {
+                (true, true) => "↑↓ more — j k scroll",
+                (false, _) => "↓ more — j k scroll",
+                (true, false) => "↑ more — k scrolls back",
+            };
+            lines = lines.into_iter().skip(at).take(room - 1).collect();
+            lines.push(Line::from(Span::styled(cue, self.look.dim())));
         }
         self.popup(f, "keys", Text::from(lines), Popup::Showing);
     }

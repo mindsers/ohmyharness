@@ -2177,7 +2177,7 @@ pages are one line along the top.
 | `space` | whether the repos `omh init` sets up after get the entry: `●` they do, `○` they do not |
 | `/` | search every page by name, description or value — the rail counts what each holds; `esc` takes it off |
 | `u` | undo the last change that has an exact inverse: a value set back, an unset put back, a `space` flipped back — not one that wrote a guard's kind as a list, or took a rule off the middle of its list |
-| `?` | every key, on the screen |
+| `?` | every key, on the screen — `j` `k` scroll it where it is cut, and `esc`, `q` or `?` close it |
 | `ctrl-l` | read your catalogue again, for a file changed outside the screen |
 | `q` `esc` `ctrl-d` `ctrl-c` | leave |
 
