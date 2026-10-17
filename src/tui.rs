@@ -393,11 +393,17 @@ struct Form {
     leaving: bool,
 }
 
-const FORM_LABELS: [&str; 3] = [
-    "name: ",
-    "command and arguments: ",
-    "env (KEY=VALUE …), or nothing: ",
+/// One label column, so the three values start level: they started at three
+/// columns, after labels that were sentences. What each takes is said under
+/// it, while it is the field being typed.
+const FORM_LABELS: [&str; 3] = ["name", "command", "env"];
+const FORM_HINTS: [&str; 3] = [
+    "what a `[use]` list calls it",
+    "program and arguments — a token goes in env",
+    "KEY=VALUE …, or nothing — values are never shown",
 ];
+/// The label column's width, with the gap after it.
+const FORM_LABEL: usize = 9;
 
 /// No modifier but Shift: a letter as it was typed.
 ///
@@ -2335,7 +2341,7 @@ impl App {
             lines.push(Line::from(vec![
                 Span::styled(if here { "▸ " } else { "  " }, self.look.accent()),
                 Span::styled(
-                    label.to_string(),
+                    pad(label, FORM_LABEL),
                     match here {
                         true => self.look.title(),
                         false => self.look.dim(),
@@ -2344,31 +2350,29 @@ impl App {
                 Span::raw(typed),
             ]));
         }
+        // What the field takes, under the value column, wrapped there: the
+        // hint's second line went back to column 0.
+        let indent = " ".repeat(2 + FORM_LABEL);
+        let room = usize::from(f.area().width.saturating_sub(2).clamp(1, 64))
+            .saturating_sub(4 + indent.len())
+            .max(12);
+        for part in wrapped(FORM_HINTS[form.at], room) {
+            lines.push(Line::from(Span::styled(
+                format!("{indent}{part}"),
+                self.look.dim(),
+            )));
+        }
         if let Some(e) = &form.error {
             lines.push(Line::from(Span::styled(
                 format!("✗ {e}"),
                 self.look.tone(Tone::Bad),
             )));
         }
-        if form.at == 1 {
-            lines.push(Line::from(Span::styled(
-                "  a token goes in env: arguments are kept as typed, and env values are not shown",
-                self.look.dim(),
-            )));
-        }
-        lines.push(Line::default());
-        lines.push(self.chips(&[
-            ("⇥", "next field"),
-            ("↵", "next, then add"),
-            ("esc", "cancel"),
-        ]));
+        // The keys are the footer's.
         let area = self.popup(f, "new server", Text::from(lines), Popup::Typing);
         let field = &form.fields[form.at];
         let typed_before = drawn_field(form.at, &field.text[..field.cursor]);
-        let x = area.x
-            + 4
-            + Span::raw(FORM_LABELS[form.at]).width() as u16
-            + Span::raw(typed_before.as_str()).width() as u16;
+        let x = area.x + 4 + FORM_LABEL as u16 + Span::raw(typed_before.as_str()).width() as u16;
         f.set_cursor_position((
             x.min(area.right().saturating_sub(2)),
             (area.y + 1 + form.at as u16).min(area.bottom().saturating_sub(2)),

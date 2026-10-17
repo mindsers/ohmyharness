@@ -1138,6 +1138,54 @@ fn the_env_mask_reads_a_line_as_words_does() {
     }
 }
 
+/// The form's values start in one column, and a field's hint goes on under
+/// its value: they started at three columns — after `name: `, `command and
+/// arguments: ` and `env (KEY=VALUE …), or nothing: ` — and the hint's second
+/// line went back to column 0.
+#[test]
+fn the_form_s_values_start_in_one_column() {
+    let mut app = App::new(model(), true);
+    app.key(press('3'));
+    app.key(press('a'));
+    typed(&mut app, "gh");
+    typed(&mut app, "npx -y @acme/mcp");
+    for c in "GH_TOKEN=x".chars() {
+        app.key(press(c));
+    }
+    let screen = drawn_at(&app, 80, 24);
+    let column = |text: &str| {
+        let line = screen
+            .lines()
+            .find(|l| l.contains(text))
+            .unwrap_or_else(|| panic!("no {text}:\n{screen}"));
+        line[..line.find(text).unwrap()].chars().count()
+    };
+    let at = column("gh");
+    assert_eq!(column("npx -y"), at, "{screen}");
+    assert_eq!(column("GH_TOKEN"), at, "{screen}");
+    // The hint under env, wrapped at 60 columns, goes on under the value.
+    let screen = drawn_at(&app, 60, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+    let env = lines.iter().position(|l| l.contains("GH_TOKEN")).unwrap();
+    let start = lines[env][..lines[env].find("GH_TOKEN").unwrap()]
+        .chars()
+        .count();
+    for hint in &lines[env + 1..env + 3] {
+        let text = hint.trim_end_matches([' ', '│']);
+        if let Some((i, _)) = text
+            .char_indices()
+            .skip(1)
+            .find(|(_, c)| !c.is_whitespace() && *c != '│')
+        {
+            let col = text[..i].chars().count();
+            assert!(
+                col >= start,
+                "a hint line at {col}, the value at {start}:\n{screen}"
+            );
+        }
+    }
+}
+
 /// **A value typed into env is not drawn.** The list hides a server's env
 /// values and the status line hides them in the line it shows, and the form
 /// drew them as typed — the one place on the screen a token was on it. Each

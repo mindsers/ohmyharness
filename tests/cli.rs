@@ -8349,11 +8349,11 @@ fn a_server_is_added_on_the_screen() {
     tty.send("4"); // the servers section
     tty.wait_for("no servers");
     tty.send("a");
-    tty.wait_for("name:");
+    tty.wait_for("what a `[use]` list calls it");
     tty.send("linear\r");
-    tty.wait_for("command and arguments:");
+    tty.wait_for("a token goes in env");
     tty.send("npx -y mcp-remote 'https://mcp.linear.app/sse'\r");
-    tty.wait_for("env (KEY=VALUE");
+    tty.wait_for("values are never shown");
     tty.send("\r");
     tty.wait_for("wrote →");
     tty.send("q");
