@@ -615,21 +615,28 @@ fn the_columns_start_level() {
     }
 }
 
-/// An unset default says what applies instead; a table says what it holds.
+/// An unset default says what applies instead, dimmed — the dim is what
+/// says it is not yours, and it survives `NO_COLOR` — and a table says what
+/// it holds. `default:` before nine of thirteen rows was noise the dim
+/// already carried; the detail says it once, beside the value.
 #[test]
 fn a_default_says_what_it_is_and_what_applies_when_unset() {
-    let app = App::new(model(), true);
+    let mut app = App::new(model(), true);
     let screen = drawn(&app);
-    let line = |name: &str| {
+    let line = |screen: &str, name: &str| {
         screen
             .lines()
             .find(|l| l.contains(name))
             .unwrap_or_default()
             .to_string()
     };
-    assert!(line("runtime").contains("default: auto"), "{screen}");
-    assert!(line("[use]").contains("skills = [\"tdd\"]"), "{screen}");
+    assert!(line(&screen, "runtime").contains("auto"), "{screen}");
+    assert!(!screen.contains("default:"), "{screen}");
+    assert!(line(&screen, "[use]").contains("skills = [\"tdd\"]"), "{screen}");
     assert!(!screen.contains("(unset)"), "{screen}");
+    app.key(press('j'));
+    let screen = drawn(&app);
+    assert!(screen.contains("auto · default"), "{screen}");
 }
 
 /// A page's rows under their headings, and `j` steps from the last row of one

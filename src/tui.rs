@@ -1787,8 +1787,9 @@ impl App {
                 None => (v.clone(), Style::default()),
             },
             (_, None, Page::Defaults) => (
+                // Dim says it is not yours, and survives `NO_COLOR`.
                 match &row.fallback {
-                    Some(f) => format!("default: {f}"),
+                    Some(f) => f.clone(),
                     None => "not set".to_string(),
                 },
                 dim,
@@ -1864,7 +1865,7 @@ impl App {
                 (None, Some(f)) => vec![
                     Span::styled("now     ", self.look.dim()),
                     Span::raw(f.clone()),
-                    Span::styled("  (unset)", self.look.dim()),
+                    Span::styled(" · default", self.look.dim()),
                 ],
                 (None, None) => vec![Span::styled("unset", self.look.dim())],
             }));
