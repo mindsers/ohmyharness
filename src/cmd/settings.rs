@@ -489,18 +489,31 @@ pub(crate) enum Names {
     Neither,
 }
 
+/// The base manifest [`names`] and [`feature_switch`] answer by, one read for
+/// both: `~/.omh/base`, or — before the first `omh init` writes it — the
+/// binary's, which is what `init` installs. A home not set up yet is where
+/// your defaults are set first, and without this `omh settings set codegraph
+/// off` could not tell the feature from a setting and wrote a bare key nothing
+/// reads.
+fn base_manifest(paths: &Paths) -> Result<base::Manifest> {
+    match paths.base().try_exists() {
+        Ok(false) => base::Manifest::shipped(),
+        _ => base::Manifest::load_dir(&paths.base()),
+    }
+}
+
 pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
     if key::describes(name).is_some() {
         return Names::ASetting;
     }
     // **Reported and withdrawn, never fatal.** The manifest is consulted only
-    // to *rule out* a feature name, and a home where `omh init` has not run has
-    // none — which must not be how `omh unset <key>` starts failing, since that
-    // is the command a person runs to get a secret out of git. Propagating the
-    // error made an ordinary repo-local write depend on the health of a
-    // directory the user never mentioned, and the `Neither` arm below promises
-    // the opposite in as many words.
-    let manifest = match base::Manifest::load_dir(&paths.base()) {
+    // to *rule out* a feature name, and a base set omh cannot read must not be
+    // how `omh unset <key>` starts failing, since that is the command a person
+    // runs to get a secret out of git. Propagating the error made an ordinary
+    // repo-local write depend on the health of a directory the user never
+    // mentioned, and the `Neither` arm below promises the opposite in as many
+    // words. A home `omh init` has not set up is not one: [`base_manifest`].
+    let manifest = match base_manifest(paths) {
         Ok(m) => m,
         Err(e) => {
             ctx.warn(&format!(
@@ -1471,19 +1484,12 @@ pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, Str
 pub(crate) fn shipped_owned(
     cap: adapter::Capability,
 ) -> Result<std::collections::BTreeMap<String, String>> {
-    let mut out = std::collections::BTreeMap::new();
-    for file in crate::bundled::Shipped::Base.files() {
-        let manifest: base::Manifest = toml::from_str(file.contents)
-            .with_context(|| format!("reading omh's own base/{}", file.name))?;
-        out.extend(
-            manifest
-                .entries
-                .into_iter()
-                .filter(|e| e.kind.capability() == cap)
-                .map(|e| (e.name, e.feature)),
-        );
-    }
-    Ok(out)
+    Ok(base::Manifest::shipped()?
+        .entries
+        .into_iter()
+        .filter(|e| e.kind.capability() == cap)
+        .map(|e| (e.name, e.feature))
+        .collect())
 }
 
 /// omh's features, from the manifests in the binary — what `[omh]` switches.
@@ -1544,7 +1550,7 @@ pub(crate) fn feature_switch(
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    let manifest = base::Manifest::load_dir(&paths.base())?;
+    let manifest = base_manifest(paths)?;
     let features: std::collections::BTreeSet<&str> = manifest
         .entries
         .iter()

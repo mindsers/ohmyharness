@@ -4435,6 +4435,10 @@ fn unset_tells_an_entry_from_the_feature_that_contains_it() {
 /// do with what was typed — in a home where `omh init` had never run, `omh set
 /// my_new_key 1` exited 1, and so did `omh unset`, which is the command a
 /// person runs to get a secret out of git.
+///
+/// A base set that is not there yet is asked of the binary, which is what
+/// `init` would install, so the check is whole; one that is there and cannot
+/// be read is the reduced check, said.
 #[test]
 fn a_settings_write_survives_a_base_set_it_cannot_read() {
     let sb = sandbox();
@@ -4452,6 +4456,21 @@ fn a_settings_write_survives_a_base_set_it_cannot_read() {
         sb.settings().contains("my_new_key"),
         "and the value is written: {}",
         sb.settings()
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("base set"),
+        "a base not there yet is the binary's, checked whole: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let base = sb.home.join(".omh/base");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("2026.08.toml"), "not a manifest").unwrap();
+    let out = sb.omh(&["set", "my_other_key", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
     // Said, not swallowed: omh could not check the name against its features.
     assert!(
@@ -4738,6 +4757,61 @@ fn settings_switches_a_feature_for_the_repos_init_sets_up_after() {
     assert!(!out.status.success());
     assert!(said.contains("omh settings set codegraph off"), "{said}");
     assert!(!held().contains("graph-first"));
+}
+
+/// Your defaults are changed before `omh init` has ever run, which is when
+/// you are most likely to be setting them.
+///
+/// `~/.omh/base` is written by the first `init`, and the defaults verbs read
+/// what omh owns from it: `use` and `unuse` failed on it, and `settings set
+/// codegraph off` could not tell a feature from a setting and wrote a bare
+/// `codegraph` key nothing reads. What omh ships is in the binary.
+#[test]
+fn your_defaults_are_changed_before_omh_init_has_ever_run() {
+    let sb = sandbox();
+    sb.catalogue(&["skills/tdd/SKILL.md"]);
+    assert!(
+        !sb.home.join(".omh/base").exists(),
+        "the fixture is a fresh machine"
+    );
+    let doc = || {
+        std::fs::read_to_string(sb.home.join(".omh/default.toml"))
+            .unwrap_or_default()
+            .parse::<toml::Table>()
+            .unwrap()
+    };
+    let run = |argv: &[&str]| {
+        let out = sb.omh(argv);
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+
+    let (ok, said) = run(&["settings", "set", "codegraph", "off"]);
+    assert!(ok, "{said}");
+    assert_eq!(
+        doc()["omh"]["codegraph"].as_bool(),
+        Some(false),
+        "{:?}",
+        doc()
+    );
+    assert!(!doc().contains_key("codegraph"), "no bare key: {:?}", doc());
+    assert!(!said.contains("could not read"), "{said}");
+
+    let (ok, said) = run(&["settings", "unuse", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    let (ok, said) = run(&["settings", "unuse", "hooks", "graph-first"]);
+    assert!(
+        !ok && said.contains("omh settings set codegraph off"),
+        "{said}"
+    );
 }
 
 /// What new repos take from your catalogue is changed from your defaults:

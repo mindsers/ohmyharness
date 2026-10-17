@@ -1149,16 +1149,7 @@ pub(crate) fn new_repo_takes(
     let left_out = config::list_in(paths, layer, config::UNUSE, cap)?.unwrap_or_default();
     let every = match in_repo {
         true => catalogue_names(paths, cap)?,
-        // What omh owns asked of the binary, as the screen asks it for servers:
-        // an unread `~/.omh/base` cannot make every page a failure.
-        false => {
-            let owned = crate::cmd::settings::shipped_owned(cap)?;
-            Profile::resolve(paths)
-                .entries(cap)?
-                .into_iter()
-                .filter(|n| !owned.contains_key(n))
-                .collect()
-        }
+        false => defaults_catalogue(paths, cap)?,
     };
     Ok(NewRepo {
         listed: false,
@@ -1169,6 +1160,19 @@ pub(crate) fn new_repo_takes(
         left_out,
         guards,
     })
+}
+
+/// The names your defaults may list for `cap`: your catalogue, minus omh's
+/// own — asked of the binary, not `~/.omh/base`, which the first `omh init`
+/// writes. Before it, an unread base made every defaults verb a failure and
+/// every page of the screen one.
+fn defaults_catalogue(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String>> {
+    let owned = crate::cmd::settings::shipped_owned(cap)?;
+    Ok(Profile::resolve(paths)
+        .entries(cap)?
+        .into_iter()
+        .filter(|n| !owned.contains_key(n))
+        .collect())
 }
 
 /// Every kind's list, as `omh init` writes it into a new repo.
@@ -1183,9 +1187,8 @@ pub(crate) fn new_repo_lists(
 
 /// omh's own are a feature's, switched whole and never listed — the refusal
 /// `current_list` makes for a repo, said for your defaults.
-fn refuse_a_name_omh_owns(paths: &Paths, cap: adapter::Capability, name: &str) -> Result<()> {
-    let manifest = base::Manifest::load_dir(&paths.base())?;
-    if let Some(feature) = manifest.owns().get(&cap).and_then(|o| o.get(name)) {
+fn refuse_a_name_omh_owns(cap: adapter::Capability, name: &str) -> Result<()> {
+    if let Some(feature) = crate::cmd::settings::shipped_owned(cap)?.get(name) {
         anyhow::bail!(
             "{cap}/{name} is omh's — part of the `{feature}` feature, which is switched \
              whole. For the repos `omh init` sets up after:\n  omh settings set {feature} off"
@@ -1231,8 +1234,8 @@ pub(crate) fn defaults_use(
         );
     };
     selection::validate_entry_name(name, cap, &file)?;
-    refuse_a_name_omh_owns(paths, cap, name)?;
-    let available = catalogue_names_unfiltered(paths, cap)?;
+    refuse_a_name_omh_owns(cap, name)?;
+    let available = defaults_catalogue(paths, cap)?;
     if !available.iter().any(|n| n == name) {
         return Err(crate::cmd::settings::no_such_entry(cap, name, &available));
     }
@@ -1323,10 +1326,10 @@ pub(crate) fn defaults_unuse(
     let cap = crate::cmd::settings::capability_from(key)?;
     let layer = config::Layer::Personal;
     selection::validate_entry_name(name, cap, &layer.file(paths))?;
-    refuse_a_name_omh_owns(paths, cap, name)?;
+    refuse_a_name_omh_owns(cap, name)?;
     let now = new_repo_takes(paths, cap, false)?;
     if !now.takes.iter().any(|n| n == name) {
-        let available = catalogue_names_unfiltered(paths, cap)?;
+        let available = defaults_catalogue(paths, cap)?;
         if !available.iter().any(|n| n == name) {
             return Err(crate::cmd::settings::no_such_entry(cap, name, &available));
         }
