@@ -4964,6 +4964,51 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     );
 }
 
+/// A removal says what goes with it before it asks, and that it cannot be
+/// undone: a server's env — by name, never by value — the files in a skill's
+/// directory, and of a link, that only the link goes. `d y` on a server took
+/// its token with it, and on a skill a directory of notes, without a word.
+#[test]
+fn rm_says_what_goes_with_it_and_that_it_cannot_be_undone() {
+    let sb = sandbox();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"linear":{"command":"npx","env":{"LINEAR_TOKEN":"sk-live-123"}}}}"#,
+    )
+    .unwrap();
+    sb.catalogue(&["skills/half-made/SKILL.md", "skills/half-made/notes.txt"]);
+    let elsewhere = sb.home.join("elsewhere/linked");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("SKILL.md"), "x").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, sb.home.join(".omh/skills/linked")).unwrap();
+    let preview = |kind: &str, name: &str| {
+        let out = sb.omh(&["--dry-run", "settings", "rm", kind, name]);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{said}");
+        said
+    };
+
+    let said = preview("mcp", "linear");
+    assert!(said.contains("LINEAR_TOKEN"), "{said}");
+    assert!(!said.contains("sk-live-123"), "never the value: {said}");
+    assert!(said.contains("cannot be undone"), "{said}");
+
+    let said = preview("skills", "half-made");
+    assert!(
+        said.contains("notes.txt") && said.contains("cannot be undone"),
+        "{said}"
+    );
+
+    let said = preview("skills", "linked");
+    assert!(said.contains("only the link"), "{said}");
+    assert!(
+        !said.contains("cannot be undone"),
+        "what it points at stays: {said}"
+    );
+}
+
 /// Removing an entry your defaults' `[use]` names says so before it goes:
 /// the list would go on naming it, and every repo `omh init` sets up after
 /// would be told it is missing. The preview says it, so the screen's

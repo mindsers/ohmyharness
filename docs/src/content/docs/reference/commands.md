@@ -2323,10 +2323,14 @@ hook omh ships: `omh upgrade` would put it back, so the refusal names
 `omh unuse hooks <name>`, which stops a repo running it. A server omh ships —
 `codegraph`, `memory` — is refused too: it is one of omh's features, switched
 off whole with `omh set <feature> off` rather than taken apart, and the screen
-does not offer to remove it.
+does not offer to remove it. There is no trash, so before it asks it says
+what goes with the entry and that it cannot be undone — a server's env by
+name, never by value; the files in a skill's directory; of a link, that only
+the link goes:
 
 ```console
 $ omh settings rm skills review-diff
+omh: 1 file goes with it — SKILL.md — and it cannot be undone
 remove /Users/you/.omh/skills/review-diff? (y/N)
   > y
 removed /Users/you/.omh/skills/review-diff

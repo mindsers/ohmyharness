@@ -1428,6 +1428,9 @@ pub(crate) fn rm(
              omh settings unuse {cap} {name}"
         ));
     }
+    // What goes with it, before the question: there is no trash, so this is
+    // the last that is said of it.
+    ctx.warn(&what_goes(paths, name, entry.as_deref())?);
     if dry_run {
         ctx.say(
             &report::Action::new("catalogue-entry-planned", format!("would remove {what}")).data(
@@ -1470,6 +1473,63 @@ pub(crate) fn rm(
             serde_json::json!({ "capability": cap.to_string(), "name": name, "removed": true }),
         ),
     );
+    Ok(())
+}
+
+/// What a removal takes with it, said before it asks: a server's env, by
+/// name and never by value; the files in an entry's directory; of a link,
+/// that only the link goes.
+fn what_goes(paths: &Paths, name: &str, entry: Option<&std::path::Path>) -> Result<String> {
+    const FOR_GOOD: &str = "it cannot be undone";
+    let Some(path) = entry else {
+        let env: Vec<String> = config::held_server(paths, name)?
+            .map(|s| s.env.into_keys().collect())
+            .unwrap_or_default();
+        return Ok(match env.is_empty() {
+            true => FOR_GOOD.to_string(),
+            false => format!("its env goes with it — {} — and {FOR_GOOD}", env.join(", ")),
+        });
+    };
+    if path.is_symlink() {
+        let to = std::fs::read_link(path)
+            .map(|t| format!(", {},", t.display()))
+            .unwrap_or_default();
+        return Ok(format!("only the link goes — what it points at{to} stays"));
+    }
+    if !path.is_dir() {
+        return Ok(FOR_GOOD.to_string());
+    }
+    let mut files = Vec::new();
+    files_in(path, path, &mut files)
+        .with_context(|| format!("reading what is in {}", path.display()))?;
+    files.sort();
+    let named = match files.len() {
+        0 => return Ok(format!("it is empty, and {FOR_GOOD}")),
+        n if n <= 5 => files.join(", "),
+        n => format!("{}, and {} more", files[..4].join(", "), n - 4),
+    };
+    let count = match files.len() {
+        1 => "1 file goes".to_string(),
+        n => format!("{n} files go"),
+    };
+    Ok(format!("{count} with it — {named} — and {FOR_GOOD}"))
+}
+
+/// Every file under `dir`, named from `root`.
+fn files_in(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() && !path.is_symlink() {
+            files_in(root, &path, out)?;
+        } else {
+            out.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
     Ok(())
 }
 

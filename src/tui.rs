@@ -904,6 +904,9 @@ impl App {
         };
         match section.page {
             Page::Defaults => self.note("every key omh reads is listed — enter sets one"),
+            Page::Servers if section.problem.is_some() => {
+                self.note("omh could not read your servers — e opens the file to fix it")
+            }
             Page::Servers => {
                 self.modal = Some(Modal::Form(Form {
                     fields: Default::default(),
@@ -961,6 +964,9 @@ impl App {
         let Some(section) = self.section() else {
             return;
         };
+        if section.page == Page::Servers && section.problem.is_some() {
+            return self.note("omh could not read your servers — e opens the file to fix it");
+        }
         let line = match (section.page.capability(), &section.import) {
             (Some(capability), Import::From(harnesses)) if !harnesses.is_empty() => {
                 self.modal = Some(Modal::Pick(Pick {
@@ -1987,9 +1993,12 @@ impl App {
                     if row.is_some_and(|r| r.toggle.is_some()) {
                         keys.push(("space", "new repos"));
                     }
-                    keys.push(("a", "add"));
-                    if importable {
-                        keys.push(("i", "import"));
+                    // An unread file takes no add: the form filled, then failed.
+                    if section.problem.is_none() {
+                        keys.push(("a", "add"));
+                        if importable {
+                            keys.push(("i", "import"));
+                        }
                     }
                     keys.push(("e", "edit the file"));
                 }

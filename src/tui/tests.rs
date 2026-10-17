@@ -1508,6 +1508,32 @@ fn u_undoes_the_last_change() {
     assert_eq!(app.key(press('u')), Next::Stay);
 }
 
+/// A servers page whose file omh could not read takes no `a` or `i`: the
+/// form let three fields be filled, and the add then failed on the file it
+/// could not read. `e` is the way in, to fix the file.
+#[test]
+fn a_servers_page_omh_could_not_read_takes_no_add() {
+    let mut model = model();
+    model.sections[2].problem = Some("parsing ~/.omh/mcp.json: trailing characters".into());
+    model.sections[2].import = Import::From(vec![Source {
+        harness: "claude".into(),
+        from: "./.mcp.json".into(),
+    }]);
+    let mut app = App::new(model, true);
+    app.key(press('3'));
+    let screen = drawn_at(&app, 120, 30);
+    let footer = screen.lines().last().unwrap_or_default();
+    assert!(
+        !footer.contains("add") && !footer.contains("import"),
+        "{footer}"
+    );
+    assert!(footer.contains("edit the file"), "{footer}");
+    for key in ['a', 'i'] {
+        app.key(press(key));
+        assert_eq!(app.modal, None, "`{key}` opened something: {}", drawn(&app));
+    }
+}
+
 /// `space` is undone by what the caller says undoes it, not by the opposite
 /// verb: `use` on a guard of a kind with no list writes the kind as a list,
 /// and `unuse` after it left the list standing — the rest of the kind frozen,
