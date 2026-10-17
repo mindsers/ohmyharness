@@ -7174,7 +7174,7 @@ impl Tty {
     /// `never a path` was one row on one and `never` / `a path` on the other,
     /// and a test that looked for it passed on one and failed on the other.
     fn read(&self) -> String {
-        let boxes = |c: char| "│┌┐└┘─├┤┬┴┼".contains(c);
+        let boxes = |c: char| "│┌┐└┘─├┤┬┴┼╭╮╰╯".contains(c);
         self.screen()
             .lines()
             .map(|row| row.replace(boxes, " "))
@@ -7481,6 +7481,24 @@ fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
         raw[left..].contains("\x1b[?1049h"),
         "the screen did not come back after the editor:\n{raw}"
     );
+    // And the mouse given back each time the terminal is: before `$EDITOR`
+    // has it, and before the shell does at the end. Left captured, every
+    // click and scroll after is an escape sequence typed at a prompt.
+    let capture = "\x1b[?1000h";
+    let release = "\x1b[?1000l";
+    assert!(
+        raw.contains(capture),
+        "the screen never took the mouse:\n{raw:?}"
+    );
+    assert!(
+        raw[..left].rfind(release) > raw[..left].rfind(capture),
+        "the mouse was still captured when the editor got the terminal"
+    );
+    let last_leave = raw.rfind("\x1b[?1049l").expect("left at the end");
+    assert!(
+        raw[..last_leave].rfind(release) > raw[..last_leave].rfind(capture),
+        "the mouse was still captured when the shell got the terminal back"
+    );
 }
 
 /// A rule opens as the file it is, from the screen as from the command.
@@ -7557,7 +7575,13 @@ fn a_removal_omh_refuses_asks_nothing() {
     tty.wait_for("hooks/config-guard");
     tty.send("d");
     tty.wait_for("omh ships hooks/config-guard");
-    assert!(!tty.screen().contains("sure?"), "{}", tty.screen());
+    // The question's own words, not its title: a title can be reworded, and
+    // a check for an old one passes over a box that is still there.
+    assert!(
+        !tty.read().contains("any other key keeps it"),
+        "a refused removal still asked: {}",
+        tty.screen()
+    );
     tty.send("y");
     tty.send("q");
     let (status, raw) = tty.finish();

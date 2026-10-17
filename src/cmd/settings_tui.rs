@@ -26,10 +26,12 @@ use crate::adapter::{Adapter, Capability};
 use crate::cmd::harvest::plural;
 use crate::cmd::settings::{self, Edited};
 use crate::profile::Paths;
-use crate::tui::{Act, App, Import, Model, Next, Page, Row, Section};
+use crate::tui::{Act, App, Edit, Import, Model, Next, Page, Row, Section};
 use crate::{base, config, hook, key};
 use anyhow::{Context, Result};
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
 
 /// Whether this run should be a screen rather than the report.
 ///
@@ -45,7 +47,9 @@ pub(crate) fn wanted(json: bool, dry_run: bool) -> bool {
 }
 
 pub(crate) fn run(paths: &Paths, color: bool) -> Result<()> {
-    let mut app = App::new(model(paths), color);
+    let mut app = App::new(model(paths), color).with_check(Box::new(|name, value| {
+        key::describes(name).and_then(|k| key::quarrel(k, value))
+    }));
     let mut screen = Screen::open()?;
     drive(&mut app, &mut screen.terminal, paths)
 }
@@ -56,25 +60,43 @@ pub(crate) fn run(paths: &Paths, color: bool) -> Result<()> {
 /// the only way out: `try_init` turns raw mode on *before* it enters the
 /// alternate screen and asks the terminal its size, so a failure in either
 /// returned with raw mode on, and the shell somebody came back to needed
-/// `reset`. ratatui's panic hook covers a panic; this covers every `?`.
+/// `reset`.
+///
+/// **And the mouse.** The screen takes clicks, and ratatui's `restore` — and
+/// the panic hook `try_init` installs — knows nothing of mouse capture: left
+/// on, every click and scroll in the shell after is an escape sequence typed
+/// at the prompt. So capture is given back here, in `suspend` before
+/// `$EDITOR`, and in a panic hook of this screen's own, before ratatui's.
 struct Screen {
     terminal: ratatui::DefaultTerminal,
 }
 
 impl Screen {
     fn open() -> Result<Self> {
-        match ratatui::try_init() {
-            Ok(terminal) => Ok(Self { terminal }),
+        let terminal = match ratatui::try_init() {
+            Ok(terminal) => terminal,
             Err(e) => {
                 ratatui::restore();
-                Err(e).context("opening the screen")
+                return Err(e).context("opening the screen");
             }
-        }
+        };
+        let theirs = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+            theirs(info);
+        }));
+        // Built before the capture, so a capture that fails is given back by
+        // the guard like everything else.
+        let screen = Self { terminal };
+        ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture)
+            .context("taking the mouse")?;
+        Ok(screen)
     }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
         ratatui::restore();
     }
 }
@@ -82,16 +104,17 @@ impl Drop for Screen {
 fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) -> Result<()> {
     let exe = std::env::current_exe().context("finding omh")?;
     loop {
-        terminal.draw(|f| app.draw(f))?;
+        terminal
+            .draw(|f| app.draw(f))
+            .context("drawing the screen")?;
         // A resize, a focus change, a paste: none is a key, and the next draw
         // is the whole answer to each.
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let next = match event::read().context("reading the terminal")? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => app.key(key),
+            Event::Mouse(mouse) => app.mouse(mouse),
+            _ => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match app.key(key) {
+        match next {
             Next::Stay => {}
             Next::Quit => return Ok(()),
             Next::Preview(act) => {
@@ -149,33 +172,35 @@ fn edit(
             return Ok(());
         }
     };
-    suspend()?;
+    suspend().context("handing the terminal to $EDITOR")?;
     let edited = settings::open_in_editor(&target);
-    // If the screen cannot come back, what the editor did still reaches the
-    // person, in the error that ends the screen.
-    resume(terminal).with_context(|| match &edited {
-        Ok(_) => format!("after `omh {}`, which worked", shown(line)),
-        Err(e) => format!("after `omh {}`, which failed: {e:#}", shown(line)),
-    })?;
-    match edited {
-        Ok(Edited::Done) => app.report(shown(line), true, "editor closed", ""),
-        Ok(Edited::Kept(dir)) => app.report(
-            shown(line),
+    let (ok, said, warned) = match &edited {
+        Ok(Edited::Done) => (true, "editor closed".to_string(), String::new()),
+        Ok(Edited::Kept(dir)) => (
             true,
-            "editor closed",
-            &settings::kept_without_skill_md(&dir),
+            "editor closed".to_string(),
+            settings::kept_without_skill_md(dir),
         ),
-        Ok(Edited::NothingSaved(dir)) => app.report(
-            shown(line),
+        Ok(Edited::NothingSaved(dir)) => (
             true,
-            &format!(
+            format!(
                 "editor closed — nothing was saved into {}, so it was not made",
                 dir.display()
             ),
-            "",
+            String::new(),
         ),
-        Err(e) => app.report(shown(line), false, "", &format!("{e:#}")),
-    }
+        Err(e) => (false, String::new(), format!("{e:#}")),
+    };
+    // If the screen cannot come back, what the editor did still reaches the
+    // person, in the error that ends the screen.
+    resume(terminal).with_context(|| {
+        format!(
+            "after `omh {}`: {}",
+            shown(line),
+            if ok { &said } else { &warned }
+        )
+    })?;
+    app.report(shown(line), ok, &said, &warned);
     Ok(())
 }
 
@@ -330,6 +355,7 @@ fn said(line: &[String]) -> String {
 }
 
 fn suspend() -> Result<()> {
+    ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
     ratatui::crossterm::terminal::disable_raw_mode()?;
     ratatui::crossterm::execute!(
         std::io::stdout(),
@@ -344,6 +370,7 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         ratatui::crossterm::terminal::EnterAlternateScreen
     )?;
     ratatui::crossterm::terminal::enable_raw_mode()?;
+    ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
     terminal.clear()?;
     Ok(())
 }
@@ -357,7 +384,7 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 pub(crate) fn model(paths: &Paths) -> Model {
     let adapters = Adapter::load_dir(&paths.adapters());
     let manifest = base::Manifest::load_dir(&paths.base());
-    let mut sections = vec![defaults(paths)];
+    let mut sections = vec![defaults(paths, &adapters)];
     for cap in Capability::ALL {
         let mut section = match cap {
             Capability::Mcp => servers(paths, &manifest),
@@ -398,9 +425,20 @@ fn section(page: Page, title: &'static str) -> Section {
     }
 }
 
+/// What a value of this shape looks like, for the line it is typed into.
+fn hint(shape: &key::Shape) -> String {
+    match shape {
+        key::Shape::Text => String::new(),
+        key::Shape::Paths => "a list of paths: [\".env\", \".env.local\"]".into(),
+        key::Shape::Path => "an absolute path".into(),
+        key::Shape::Duration => "a duration: 90s, 30m, 2h, 1d".into(),
+        key::Shape::Choice(allowed) => format!("one of {}", allowed.join(", ")),
+    }
+}
+
 /// Every key omh reads, set or not — the half no settings file can show — and
 /// anything else the file holds, named for what it is.
-fn defaults(paths: &Paths) -> Section {
+fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
     let mut out = section(Page::Defaults, "defaults");
     out.import = Import::Not("your defaults are typed, not imported".into());
     let file = config::Layer::Personal.file(paths);
@@ -412,32 +450,121 @@ fn defaults(paths: &Paths) -> Section {
         }
     };
     for k in key::KEYS {
+        let edit = match (k.name, &k.shape) {
+            (_, key::Shape::Choice(allowed)) => {
+                Edit::Choice(allowed.iter().map(|a| a.to_string()).collect())
+            }
+            // The logins omh has captured, offered by name — and still a line
+            // to type into, for `codex:work`, one harness's own.
+            ("account", _) => match logins(paths, adapters) {
+                Ok(names) if !names.is_empty() => Edit::Suggest(names),
+                _ => Edit::Text {
+                    hint: "a login's name, as `omh auth <harness> -n <name>` captured it".into(),
+                },
+            },
+            (_, shape) => Edit::Text { hint: hint(shape) },
+        };
         out.rows.push(Row {
             name: k.name.to_string(),
             value: mine.get(k.name).cloned(),
-            note: None,
+            fallback: Some(k.unset.to_string()),
             about: vec![k.does.to_string()],
-            settable: true,
+            edit,
+            ..Row::default()
         });
     }
+    let doc = config::read_doc(&file);
     for (name, value) in &mine {
         if key::describes(name).is_some() {
             continue;
         }
         let table = name.starts_with('[');
-        out.rows.push(Row {
-            name: name.clone(),
-            value: (!table).then(|| value.clone()),
-            note: Some(if table {
-                "a table".into()
-            } else {
-                "nothing omh reads".into()
-            }),
-            about: vec![format!("in {}", file.display())],
-            settable: !table,
-        });
+        let row = match table {
+            // What the table holds, on one line: `[use]` was drawn as unset.
+            true => Row {
+                name: name.clone(),
+                value: Some(table_summary(&doc, name)),
+                about: vec![
+                    format!("a table in {}", file.display()),
+                    "e opens the file to change it".into(),
+                ],
+                ..Row::default()
+            },
+            false => Row {
+                name: name.clone(),
+                value: Some(value.clone()),
+                warning: Some(match nearest_key(name) {
+                    Some(meant) => format!("nothing omh reads — did you mean `{meant}`?"),
+                    None => "nothing omh reads".into(),
+                }),
+                about: vec![format!("in {}", file.display())],
+                edit: Edit::Text {
+                    hint: String::new(),
+                },
+                ..Row::default()
+            },
+        };
+        out.rows.push(row);
     }
     out
+}
+
+/// Every login captured for any harness, by name.
+fn logins(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Result<Vec<String>> {
+    let Ok(adapters) = adapters else {
+        anyhow::bail!("could not read the adapters");
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for adapter in adapters {
+        names.extend(crate::auth::accounts(paths, adapter)?);
+    }
+    Ok(names.into_iter().collect())
+}
+
+/// A table of the defaults file on one line: `skills = ["tdd"] · hooks = []`.
+fn table_summary(doc: &Result<toml_edit::DocumentMut>, name: &str) -> String {
+    let key = name.trim_start_matches('[').trim_end_matches(']');
+    let Ok(doc) = doc else {
+        return "a table".into();
+    };
+    match doc.get(key).and_then(|item| item.as_table()) {
+        Some(table) if table.is_empty() => "empty".into(),
+        Some(table) => table
+            .iter()
+            .map(|(k, v)| format!("{k} = {}", v.to_string().trim()))
+            .collect::<Vec<_>>()
+            .join(" · "),
+        None => "a table".into(),
+    }
+}
+
+/// The key a name nothing reads was probably meant to be: one edit or two
+/// away, the way `carry_ins` is from `carry_in`.
+fn nearest_key(name: &str) -> Option<&'static str> {
+    key::KEYS
+        .iter()
+        .map(|k| (distance(name, k.name), k.name))
+        .filter(|(d, _)| *d <= 2)
+        .min()
+        .map(|(_, k)| k)
+}
+
+/// How many single-character edits turn `a` into `b`.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let here = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(here + 1);
+            prev = here;
+        }
+    }
+    row[b.len()]
 }
 
 fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
@@ -493,14 +620,18 @@ fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
             ));
         }
         about.push(format!("in    {}", path.display()));
+        let feature = owned.get(&name);
+        if let Some(feature) = feature {
+            about.push(format!(
+                "omh's own — the {feature} feature; `omh set {feature} off` switches it off in a repo"
+            ));
+        }
         out.rows.push(Row {
-            note: owned
-                .get(&name)
-                .map(|feature| format!("omh's — the {feature} feature")),
+            badge: feature.map(|_| "omh".to_string()),
+            summary: Some(server.command),
             name,
-            value: Some(server.command),
             about,
-            settable: false,
+            ..Row::default()
         });
     }
     out
@@ -527,10 +658,11 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
     };
     let shipped = settings::shipped_hooks();
     for (name, path) in listed {
-        let shipped = cap == Capability::Hooks && shipped.contains(&name);
-        let mut about = describe(cap, &path);
+        let ships = cap == Capability::Hooks && shipped.contains(&name);
+        let said = describe(cap, &path);
+        let mut about = said.more;
         about.push(format!("at {}", path.display()));
-        if shipped {
+        if ships {
             about.push(
                 "omh ships this one and `omh upgrade` refreshes it — `omh unuse hooks` \
                  stops a repo running it"
@@ -538,43 +670,98 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
             );
         }
         out.rows.push(Row {
-            note: shipped.then(|| "shipped with omh".to_string()),
             name,
-            value: None,
+            summary: said.summary,
+            badge: said.badge,
+            warning: said.warning,
+            // Yours first, then omh's: the eight it ships are the same on every
+            // machine, and the ones you wrote are the ones you came to change.
+            group: (cap == Capability::Hooks).then(|| {
+                match ships {
+                    true => "shipped with omh",
+                    false => "yours",
+                }
+                .to_string()
+            }),
             about,
-            settable: false,
+            ..Row::default()
         });
+    }
+    if cap == Capability::Hooks {
+        out.rows
+            .sort_by_key(|r| r.group.as_deref() != Some("yours"));
     }
     out
 }
 
-/// One line saying what an entry is, from the entry itself.
+/// What an entry says about itself, read from the entry.
+#[derive(Debug, Default)]
+struct Described {
+    summary: Option<String>,
+    badge: Option<String>,
+    warning: Option<String>,
+    more: Vec<String>,
+}
+
+/// What an entry is, from the entry itself.
 ///
 /// A file that will not read says so, in place of a description: the row is
 /// still there and still removable, and an empty description would read as
 /// an entry with nothing to say rather than one omh could not open. So does a
 /// skill with no `SKILL.md` — half made, or half removed — which looks like
-/// any other skill and is one nothing loads.
-fn describe(cap: Capability, path: &std::path::Path) -> Vec<String> {
+/// any other skill and is one nothing loads, and a link to nothing, which
+/// `listed` keeps and which is an entry no harness can read.
+fn describe(cap: Capability, path: &std::path::Path) -> Described {
+    let warned = |warning: String| Described {
+        warning: Some(warning),
+        ..Described::default()
+    };
+    if path.is_symlink() && !path.exists() {
+        let to = std::fs::read_link(path)
+            .map(|t| t.display().to_string())
+            .unwrap_or_else(|e| format!("somewhere omh could not read ({e})"));
+        return warned(format!("a link to nothing — {to}"));
+    }
     let file = match cap {
         Capability::Skills if path.is_dir() => path.join("SKILL.md"),
         _ => path.to_path_buf(),
     };
     if file.is_dir() {
-        return Vec::new();
+        return Described::default();
     }
     let raw = match std::fs::read_to_string(&file) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && cap == Capability::Skills => {
-            return vec!["no SKILL.md in it — nothing will load this skill".into()];
+            return warned("no SKILL.md in it — nothing will load this skill".into());
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(e) => return vec![format!("could not read {}: {e}", file.display())],
+        Err(e) => return warned(format!("could not read {}: {e}", file.display())),
     };
     if cap == Capability::Hooks {
         return match hook::Hook::parse(&raw, &file.display().to_string()) {
-            Ok(h) => vec![h.does().to_string()],
-            Err(e) => vec![format!("not a hook omh can run: {e:#}")],
+            Ok(h) => {
+                let what = match &h.action {
+                    hook::Action::Run(cmd) => cmd.clone(),
+                    hook::Action::Refuse { text } => format!("refuses — {text}"),
+                    hook::Action::Inject { text, .. } => format!("tells the agent — {text}"),
+                };
+                let tools = h
+                    .tools
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let on = match tools.is_empty() {
+                    true => h.on.to_string(),
+                    false => format!("{} {tools}", h.on),
+                };
+                Described {
+                    summary: Some(format!("{on} · {what}")),
+                    badge: h.stack.clone(),
+                    more: vec![format!("on    {on}"), format!("does  {what}")],
+                    ..Described::default()
+                }
+            }
+            Err(e) => warned(format!("not a hook omh can run: {e:#}")),
         };
     }
     // A `description:` in front matter is what the entry says about itself;
@@ -589,7 +776,12 @@ fn describe(cap: Capability, path: &std::path::Path) -> Vec<String> {
             .find(|l| !l.is_empty() && *l != "---" && !l.contains(':'))
             .map(|l| l.trim_start_matches('#').trim().to_string())
     };
-    described.or_else(first).into_iter().collect()
+    let summary = described.or_else(first);
+    Described {
+        more: summary.iter().cloned().collect(),
+        summary,
+        ..Described::default()
+    }
 }
 
 #[cfg(test)]
@@ -824,8 +1016,92 @@ mod tests {
         }
         let row = |n: &str| defaults.rows.iter().find(|r| r.name == n).unwrap();
         assert_eq!(row("idle_timeout").value.as_deref(), Some("45m"));
-        assert_eq!(row("carry_ins").note.as_deref(), Some("nothing omh reads"));
-        assert!(!row("[use]").settable);
+        // A key nothing reads is said to be one — and, near a key omh does
+        // read, which one it was probably meant to be.
+        assert_eq!(
+            row("carry_ins").warning.as_deref(),
+            Some("nothing omh reads — did you mean `carry_in`?")
+        );
+        // A table holds something, and says what: `[use]` was drawn unset.
+        assert_eq!(row("[use]").edit, Edit::None);
+        assert_eq!(row("[use]").value.as_deref(), Some("skills = []"));
+        // Every unset key says what applies instead, from the table.
+        for k in key::KEYS {
+            assert_eq!(row(k.name).fallback.as_deref(), Some(k.unset), "{}", k.name);
+        }
+    }
+
+    /// A key with a fixed set of values is picked from exactly that set — the
+    /// table's, not a copy of it.
+    #[test]
+    fn a_key_with_choices_is_picked_from_the_tables_choices() {
+        let (_dir, paths) = paths();
+        let model = model(&paths);
+        let defaults = page(&model, "defaults");
+        for k in key::KEYS {
+            let row = defaults.rows.iter().find(|r| r.name == k.name).unwrap();
+            match k.shape {
+                key::Shape::Choice(allowed) => assert_eq!(
+                    row.edit,
+                    Edit::Choice(allowed.iter().map(|a| a.to_string()).collect()),
+                    "{}",
+                    k.name
+                ),
+                _ => assert!(
+                    matches!(row.edit, Edit::Text { .. } | Edit::Suggest(_)),
+                    "{} is typed or suggested",
+                    k.name
+                ),
+            }
+        }
+    }
+
+    /// Hooks are yours first and then omh's, each saying when it runs and
+    /// what it does, with its stack as a badge.
+    #[test]
+    fn hooks_are_yours_first_and_say_when_they_run() {
+        let (_dir, paths) = paths();
+        for (name, body) in [
+            (
+                "rust-test",
+                r#"{"on":"turn-end","stack":"rust","run":"cargo test"}"#,
+            ),
+            ("mine", r#"{"on":"turn-end","run":"make check"}"#),
+        ] {
+            write(&paths.root.join(format!("hooks/{name}.json")), body);
+        }
+        let model = model(&paths);
+        let hooks = page(&model, "hooks");
+        let names: Vec<&str> = hooks.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["mine", "rust-test"]);
+        assert_eq!(hooks.rows[0].group.as_deref(), Some("yours"));
+        assert_eq!(hooks.rows[1].group.as_deref(), Some("shipped with omh"));
+        assert_eq!(
+            hooks.rows[1].summary.as_deref(),
+            Some("turn-end · cargo test")
+        );
+        assert_eq!(hooks.rows[1].badge.as_deref(), Some("rust"));
+    }
+
+    /// A link to nothing is an entry no harness can read, and says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_nothing_says_so() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(paths.root.join("rules")).unwrap();
+        std::os::unix::fs::symlink(
+            paths.root.join("gone.md"),
+            paths.root.join("rules/house.md"),
+        )
+        .unwrap();
+        let model = model(&paths);
+        let row = &page(&model, "rules").rows[0];
+        assert!(
+            row.warning
+                .as_deref()
+                .is_some_and(|w| w.contains("a link to nothing")),
+            "{row:?}"
+        );
     }
 
     fn write(path: &std::path::Path, body: &str) {
@@ -940,7 +1216,9 @@ mod tests {
         let model = model(&paths);
         let row = &page(&model, "skills").rows[0];
         assert!(
-            row.about.iter().any(|l| l.contains("no SKILL.md")),
+            row.warning
+                .as_deref()
+                .is_some_and(|w| w.contains("no SKILL.md")),
             "{row:?}"
         );
     }

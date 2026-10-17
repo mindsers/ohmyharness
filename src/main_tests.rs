@@ -1952,10 +1952,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/settings.rs", 14),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
-        // beside a hook omh ships, `omh <line>` when a child will not start,
-        // and `omh <line>` twice in the error when the screen cannot come back
-        // after `$EDITOR`.
-        ("src/cmd/settings_tui.rs", 6),
+        // beside a hook omh ships, `omh <line>` when a child will not start
+        // and in the error when the screen cannot come back after `$EDITOR`,
+        // `omh auth <harness> -n <name>` in the account's hint, and
+        // `omh set <feature> off` beside a server a feature owns.
+        ("src/cmd/settings_tui.rs", 7),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
@@ -2010,9 +2011,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh s attach` as what rewrites them.
         ("src/ssh.rs", 2),
         ("src/stack.rs", 1),
-        // The screen's header, `omh settings`, and `= omh <line>` above what
-        // the command it ran said.
-        ("src/tui.rs", 2),
+        // The screen's header, `omh settings`; `$ omh <line>` beside what the
+        // command it ran said; and `omh settings edit <capability> <name>` in
+        // the box that names a new entry.
+        ("src/tui.rs", 3),
         ("src/why.rs", 3),
     ]
     .into_iter()
