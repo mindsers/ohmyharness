@@ -47,9 +47,7 @@ pub(crate) fn wanted(json: bool, dry_run: bool) -> bool {
 }
 
 pub(crate) fn run(paths: &Paths, color: bool, ctx: &crate::out::Ctx) -> Result<()> {
-    let mut app = App::new(model(paths), color).with_check(Box::new(|name, value| {
-        key::describes(name).and_then(|k| key::quarrel(k, value))
-    }));
+    let mut app = App::new(model(paths), color).with_check(Box::new(refusal));
     let mut screen = Screen::open()?;
     let mut ran = Vec::new();
     let driven = drive(&mut app, &mut screen.terminal, paths, &mut ran);
@@ -82,6 +80,14 @@ fn what_ran(ran: &[(String, bool)]) -> Option<crate::report::Action> {
     Some(said)
 }
 
+/// What `omh settings set` would refuse a value for, asked as it is typed.
+fn refusal(name: &str, value: &str) -> Option<String> {
+    match key::describes(name) {
+        Some(k) => key::quarrel(k, value),
+        None => Some(format!("nothing in omh reads `{name}`")),
+    }
+}
+
 /// `omh settings` off a terminal: your defaults, and your catalogue as the
 /// screen reads it — each page's count, what new repos get, and every entry
 /// that is wrong — so a broken entry is not visible only on a terminal.
@@ -90,7 +96,7 @@ pub(crate) fn show(paths: &Paths, ctx: &crate::out::Ctx) -> Result<()> {
     said.meant = said
         .unread
         .iter()
-        .filter_map(|u| nearest_key(&u.key).map(|k| (u.key.clone(), k.to_string())))
+        .filter_map(|u| key::nearest(&u.key).map(|k| (u.key.clone(), k.to_string())))
         .collect();
     said.catalogue = model(paths)
         .sections
@@ -1003,7 +1009,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             false => Row {
                 name: name.clone(),
                 value: Some(value.clone()),
-                warning: Some(match nearest_key(name) {
+                warning: Some(match key::nearest(name) {
                     Some(meant) => format!("nothing omh reads — did you mean `{meant}`?"),
                     None => "nothing omh reads".into(),
                 }),
@@ -1013,7 +1019,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                 },
                 // Apart from the keys omh reads, under a heading saying so.
                 group: Some("read by nothing".into()),
-                meant: nearest_key(name).map(String::from),
+                meant: key::nearest(name).map(String::from),
                 ..Row::default()
             },
         };
@@ -1081,35 +1087,6 @@ fn table_summary(doc: &Result<toml_edit::DocumentMut>, name: &str) -> String {
             .join(" · "),
         None => "a table".into(),
     }
-}
-
-/// The key a name nothing reads was probably meant to be: one edit or two
-/// away, the way `carry_ins` is from `carry_in`.
-fn nearest_key(name: &str) -> Option<&'static str> {
-    key::KEYS
-        .iter()
-        .map(|k| (distance(name, k.name), k.name))
-        .filter(|(d, _)| *d <= 2)
-        .min()
-        .map(|(_, k)| k)
-}
-
-/// How many single-character edits turn `a` into `b`.
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let here = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb))
-                .min(row[j] + 1)
-                .min(here + 1);
-            prev = here;
-        }
-    }
-    row[b.len()]
 }
 
 fn servers(paths: &Paths) -> Section {
@@ -1367,6 +1344,18 @@ mod tests {
                 line[1..].join(" ")
             ),
         }
+    }
+
+    /// The screen asks, as a value is typed, what the command would refuse
+    /// it for — a key nothing reads among them, now that `set` refuses one —
+    /// so `↵` twice writes it anyway rather than meeting a refusal that names
+    /// a flag the screen cannot pass.
+    #[test]
+    fn the_screen_asks_what_set_would_refuse() {
+        assert!(refusal("idle_timeout", "45m").is_none());
+        assert!(refusal("idle_timeout", "soon").is_some());
+        let unread = refusal("my_new_key", "1").unwrap_or_default();
+        assert!(unread.contains("nothing in omh reads"), "{unread:?}");
     }
 
     /// A shell's reading of a line `said` wrote: words, single quotes, `'\''`.

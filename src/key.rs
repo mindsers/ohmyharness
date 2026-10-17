@@ -178,6 +178,34 @@ pub fn describes(name: &str) -> Option<&'static Key> {
     KEYS.iter().find(|k| k.name == name)
 }
 
+/// The key a name nothing reads was probably meant to be: one edit or two
+/// away, the way `carry_ins` is from `carry_in`.
+pub fn nearest(name: &str) -> Option<&'static str> {
+    KEYS.iter()
+        .map(|k| (distance(name, k.name), k.name))
+        .filter(|(d, _)| *d <= 2)
+        .min()
+        .map(|(_, k)| k)
+}
+
+/// How many single-character edits turn `a` into `b`.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let here = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(here + 1);
+            prev = here;
+        }
+    }
+    row[b.len()]
+}
+
 /// What is wrong with this value for this key, if omh can tell.
 ///
 /// `Choice`, `Path` and `Duration` are what is checkable here; `Text` and
@@ -186,10 +214,10 @@ pub fn describes(name: &str) -> Option<&'static Key> {
 /// `Duration` because the alternative was hearing about it at the next launch,
 /// on stderr, while a session was starting.
 ///
-/// Every one of these **warns**; none refuses. `idle::parse_duration` returns
-/// `None` rather than erroring so a typo in one layer cannot stop you working,
-/// and refusing the write here would undo that from the other end — see the
-/// rule `cmd::settings::set` states where it raises the warning.
+/// A write refuses on one of these unless `--anyway` — the rule
+/// `cmd::settings::set` states where it asks. A launch only warns:
+/// `idle::parse_duration` returns `None` rather than erroring, so a value in
+/// one layer that only a newer omh reads cannot stop you working.
 ///
 /// `None` back from here means *nothing to say*, never *this is fine*.
 pub fn quarrel(key: &Key, value: &str) -> Option<String> {

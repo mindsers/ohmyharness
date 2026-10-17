@@ -1366,8 +1366,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // `use`, `unuse` and `use --all` in the synopsis.
         ("docs/src/content/docs/reference/commands.md", 152),
         // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
-        // the `--anyway` line it prints, and the run with it.
-        ("docs/src/content/docs/reference/configuration.md", 50),
+        // the `--anyway` line it prints, and the run with it. + the same two for
+        // a key nothing reads: the `--anyway` line it prints, and the run.
+        ("docs/src/content/docs/reference/configuration.md", 52),
         ("docs/src/content/docs/reference/memory.md", 1),
     ]
     .into_iter()

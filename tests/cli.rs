@@ -3667,7 +3667,7 @@ fn set_mentions_git_where_git_was_asked_for_or_cannot_be_vouched_for() {
 
     // omh routed a key it has never heard of into a file git carries. It
     // cannot vouch for the value, and that is the half retyping does not undo.
-    let unknown = sb.omh(&["set", "carry_ins", "[\".env\"]"]);
+    let unknown = sb.omh(&["set", "--anyway", "carry_ins", "[\".env\"]"]);
     let flagged = String::from_utf8_lossy(&unknown.stderr).to_string();
     assert!(
         flagged.contains("COMMITTED") && flagged.contains("carry_ins"),
@@ -4457,7 +4457,7 @@ fn a_settings_write_survives_a_base_set_it_cannot_read() {
     sb.git_init();
     // Deliberately no `seed_base()`.
 
-    let out = sb.omh(&["set", "my_new_key", "1"]);
+    let out = sb.omh(&["set", "--anyway", "my_new_key", "1"]);
     assert!(
         out.status.success(),
         "a hand-editable settings file must not be refused because ~/.omh/base \
@@ -4478,7 +4478,7 @@ fn a_settings_write_survives_a_base_set_it_cannot_read() {
     let base = sb.home.join(".omh/base");
     std::fs::create_dir_all(&base).unwrap();
     std::fs::write(base.join("2026.08.toml"), "not a manifest").unwrap();
-    let out = sb.omh(&["set", "my_other_key", "1"]);
+    let out = sb.omh(&["set", "--anyway", "my_other_key", "1"]);
     assert!(
         out.status.success(),
         "{}",
@@ -5728,7 +5728,7 @@ fn the_committed_warning_is_kept_for_what_it_is_for() {
 
     // A key nothing classified, sent to the committed file because that is what
     // omh does with one it has never heard of. Still worth saying out loud.
-    let unknown = sb.omh(&["set", "somekey", "somevalue"]);
+    let unknown = sb.omh(&["set", "--anyway", "somekey", "somevalue"]);
     assert!(unknown.status.success());
     assert!(
         String::from_utf8_lossy(&unknown.stderr).contains("COMMITTED"),
@@ -10403,36 +10403,60 @@ fn committing_a_key_that_carries_a_secret_names_the_key() {
     );
 }
 
-/// A key omh does not read is written, and said so.
+/// A key omh does not read is refused, with the one it was likely meant as,
+/// unless `--anyway` — as a value omh cannot read is.
 ///
-/// `set` accepts any key at all — it has to, since a settings file is
-/// hand-editable and omh must not refuse a key a newer version will read. But
-/// accepting it silently means `carry_ins` and `idle_timout` land in the file,
-/// are never read by anything, and look exactly like a setting that took.
-///
-/// So it is written and named: the value is not lost, and the typo is not
-/// discovered by wondering why nothing changed.
+/// It was written and named, since a settings file is hand-editable and a key
+/// a newer omh reads must not be refused by this one. But that is how
+/// `carry_ins` got made: exit 0, a warning above the `wrote →`, and a key that
+/// looks exactly like a setting that took. The newer key is the rare case and
+/// has `--anyway`; the typo is the common one, stopped where it was typed.
 #[test]
-fn a_setting_omh_does_not_read_is_written_and_named() {
+fn a_setting_omh_does_not_read_is_refused_unless_anyway() {
     let sb = sandbox();
+    sb.git_init();
+    let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).to_string();
 
     let typo = sb.omh(&["set", "carry_ins", "[\".env\"]"]);
-    let said = String::from_utf8_lossy(&typo.stderr).to_string();
+    let said = stderr(&typo);
+    assert!(!typo.status.success(), "{said}");
+    assert!(said.contains("did you mean `carry_in`"), "{said}");
+    assert!(said.contains("omh set --anyway carry_ins"), "{said}");
     assert!(
-        typo.status.success(),
-        "an unknown key is still written: {said}"
+        !sb.settings().contains("carry_ins"),
+        "nothing written: {}",
+        sb.settings()
+    );
+
+    let typo = sb.omh(&["settings", "set", "idel_timeout", "45m"]);
+    let said = stderr(&typo);
+    assert!(!typo.status.success(), "{said}");
+    assert!(said.contains("did you mean `idle_timeout`"), "{said}");
+    assert!(
+        said.contains("omh settings set --anyway idel_timeout"),
+        "{said}"
     );
     assert!(
-        said.contains("carry_ins"),
-        "and omh says which key it knows nothing about: {said}"
+        !sb.home.join(".omh/default.toml").exists(),
+        "nothing written"
+    );
+
+    let anyway = sb.omh(&["set", "--anyway", "carry_ins", "[\".env\"]"]);
+    let said = stderr(&anyway);
+    assert!(anyway.status.success(), "{said}");
+    assert!(sb.settings().contains("carry_ins"), "{}", sb.settings());
+    assert!(
+        said.contains("nothing in omh reads `carry_ins`"),
+        "still named: {said}"
     );
 
     // A key omh does read says nothing extra — the warning has to mean
     // something, and one that fires for every write means nothing.
     let known = sb.omh(&["set", "carry_in", "[\".env\"]"]);
-    let quiet = String::from_utf8_lossy(&known.stderr).to_string();
+    let quiet = stderr(&known);
+    assert!(known.status.success(), "{quiet}");
     assert!(
-        !quiet.contains("nothing reads"),
+        !quiet.contains("nothing in omh reads"),
         "a key omh reads is not reported as unknown: {quiet}"
     );
 }

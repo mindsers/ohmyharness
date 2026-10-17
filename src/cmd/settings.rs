@@ -484,9 +484,9 @@ pub(crate) enum Names {
     /// which is how this checked `skills` alone and told somebody with a rule
     /// of that name that nothing reads it.
     ACatalogueEntry(adapter::Capability),
-    /// Neither. Written as a key and reported, the way it always was — a
-    /// settings file is hand-editable and a key a newer omh reads must not be
-    /// refused by this one.
+    /// Neither. A key, which `set` refuses unless `--anyway` when nothing in
+    /// this omh reads it — `--anyway` is how a key a newer omh reads is
+    /// written.
     Neither,
 }
 
@@ -772,32 +772,38 @@ pub(crate) fn set(
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    // Written either way. A settings file is hand-editable and a key a newer
-    // omh will read must not be refused by this one — but a key *this* omh
-    // reads nothing from looks identical to one that took, and `carry_ins` is
-    // a plausible thing to type. Named, not refused.
+    // Refused, unless `--anyway`: a key this omh reads nothing from, and a
+    // value it cannot read. Both were written either way, so that what a newer
+    // omh reads is not refused by this one — and the cost was `carry_ins`
+    // made with exit 0 and a warning above the `wrote →`, and `persistence =
+    // tmux` found at the next launch, in another command, minutes later. The
+    // newer key or value is the rare case and has `--anyway`; the typo is the
+    // common one, stopped where it was typed.
+    let again = match reach.layers.as_slice() {
+        [config::Layer::Personal] => format!("omh settings set --anyway {key} <value>"),
+        _ => format!("omh set --anyway {key} <value>"),
+    };
     match key::describes(key) {
+        None if !anyway => {
+            let meant = key::nearest(key)
+                .map(|k| format!(" — did you mean `{k}`?"))
+                .unwrap_or_else(|| ".".into());
+            anyhow::bail!(
+                "nothing in omh reads `{key}`{meant} Nothing was written. For a key only a \
+                 newer omh reads:\n  {}",
+                again
+            );
+        }
         None => ctx.warn(&format!(
-            "nothing in omh reads `{key}` — it is written, and it will sit there"
+            "nothing in omh reads `{key}` — written anyway, and it will sit there"
         )),
-        // Refused, unless `--anyway`. It was written either way, so that a
-        // value a newer omh accepts is not refused by this one — and the cost
-        // was `persistence = tmux` written with exit 0 and found at the next
-        // launch, in another command, minutes later. The newer value is the
-        // rare case and has `--anyway`; the typo is the common one, stopped
-        // where it was typed.
         Some(k) => {
             if let Some(quarrel) = key::quarrel(k, value) {
                 if !anyway {
-                    let again = match reach.layers.as_slice() {
-                        [config::Layer::Personal] => {
-                            format!("omh settings set --anyway {key} <value>")
-                        }
-                        _ => format!("omh set --anyway {key} <value>"),
-                    };
                     anyhow::bail!(
                         "{quarrel}. Nothing was written. For a value only a newer omh \
-                         reads:\n  {again}"
+                         reads:\n  {}",
+                        again
                     );
                 }
                 ctx.warn(&format!("{quarrel} — written anyway"));
