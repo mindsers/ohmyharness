@@ -985,15 +985,24 @@ pub(crate) fn edit(
     layer: config::Layer,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    if let Edited::NothingSaved(dir) =
-        open_in_editor(&edit_target(paths, capability, name, layer)?)?
-    {
-        ctx.progress(&format!(
+    match open_in_editor(&edit_target(paths, capability, name, layer)?)? {
+        Edited::Done => {}
+        Edited::NothingSaved(dir) => ctx.progress(&format!(
             "nothing was saved into {}, so it was not made",
             dir.display()
-        ));
+        )),
+        Edited::Kept(dir) => ctx.warn(&kept_without_skill_md(&dir)),
     }
     Ok(())
+}
+
+/// The sentence for a new skill kept with no `SKILL.md`, one spelling for the
+/// command and the screen.
+pub(crate) fn kept_without_skill_md(dir: &std::path::Path) -> String {
+    format!(
+        "kept {}: it holds files but no SKILL.md, so nothing will load it as a skill",
+        dir.display()
+    )
 }
 
 /// What `edit` opens, and the new skill's directory it has to make first.
@@ -1007,8 +1016,10 @@ pub(crate) struct EditTarget {
 /// How an edit ended, when the editor did not fail.
 pub(crate) enum Edited {
     Done,
-    /// A new skill's directory was taken back: the editor saved no `SKILL.md`.
+    /// A new skill's directory was taken back: the editor saved nothing in it.
     NothingSaved(std::path::PathBuf),
+    /// A new skill's directory was kept, holding files but no `SKILL.md`.
+    Kept(std::path::PathBuf),
 }
 
 /// Where `omh settings edit` opens, worked out before anything is made or run.
@@ -1052,24 +1063,45 @@ pub(crate) fn edit_target(
         );
     }
     selection::validate_entry_name(name, cap, &dir)?;
-    if let Lookup::Found(file) = find_entry(cap, name, &dir)? {
-        return Ok(EditTarget {
+    // The file the kind is read as, by its exact name, first: the name joined
+    // with `format!` and not `with_extension`, which replaces whatever follows
+    // the last dot — `v1.2` became `v1.md`, another rule. And an exact match
+    // wins over the extension-blind lookup, so an editor's `house.md~` beside
+    // `house.md` cannot make `house` two files to the edit that wrote it.
+    let exact = match cap {
+        adapter::Capability::Skills => dir.join(name),
+        adapter::Capability::Hooks => dir.join(format!("{name}.json")),
+        _ => dir.join(format!("{name}.md")),
+    };
+    let found = if exact
+        .try_exists()
+        .with_context(|| format!("reading {}", exact.display()))?
+    {
+        Some(exact.clone())
+    } else {
+        match find_entry(cap, name, &dir)? {
+            Lookup::Found(path) => Some(path),
+            Lookup::Absent { .. } => None,
+        }
+    };
+    Ok(match (cap, found) {
+        // A skill opens at its `SKILL.md` whether it is new, whole or half
+        // made — the one file that makes a directory a skill, and the one an
+        // editor can open. Given the directory, `nano` cannot, and `vi` lists.
+        (adapter::Capability::Skills, Some(skill)) if skill.is_dir() => EditTarget {
+            file: skill.join("SKILL.md"),
+            new_skill: None,
+        },
+        (_, Some(file)) => EditTarget {
             file,
             new_skill: None,
-        });
-    }
-    let entry = dir.join(name);
-    Ok(match cap {
-        adapter::Capability::Skills => EditTarget {
-            file: entry.join("SKILL.md"),
-            new_skill: Some(entry),
         },
-        adapter::Capability::Hooks => EditTarget {
-            file: entry.with_extension("json"),
-            new_skill: None,
+        (adapter::Capability::Skills, None) => EditTarget {
+            file: exact.join("SKILL.md"),
+            new_skill: Some(exact),
         },
-        _ => EditTarget {
-            file: entry.with_extension("md"),
+        (_, None) => EditTarget {
+            file: exact,
             new_skill: None,
         },
     })
@@ -1093,7 +1125,11 @@ pub(crate) fn open_in_editor(target: &EditTarget) -> Result<Edited> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    // Empty is unset, as git reads it: `sh -c ' "$@"'` runs the file itself.
+    let editor = std::env::var("EDITOR")
+        .ok()
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| "vi".into());
     let status = Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} \"$@\""))
@@ -1101,42 +1137,56 @@ pub(crate) fn open_in_editor(target: &EditTarget) -> Result<Edited> {
         .arg(&target.file)
         .status()
         .with_context(|| format!("starting $EDITOR `{editor}`"));
-    // Taken back however the editor ended, if nothing was saved into it: an
-    // empty directory is drawn and counted as a skill no harness can read.
-    // `remove_dir` rather than `_all`, so it can only ever take an empty one —
-    // a directory something else was saved into is somebody's work, and kept.
-    let taken_back = match made {
-        Some(dir)
-            if !target
-                .file
-                .try_exists()
-                .with_context(|| format!("reading {}", target.file.display()))? =>
-        {
-            match std::fs::remove_dir(dir) {
-                Ok(()) => Some(dir.clone()),
-                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => None,
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!(
-                            "nothing was saved into {}, and it could not be taken back",
-                            dir.display()
-                        )
-                    })
-                }
-            }
-        }
-        _ => None,
-    };
+    // Settled however the editor ended — and kept as a value rather than
+    // `?`d, because if the editor failed, *that* is the error: the cleanup's
+    // own failure ran first once and was all anybody was told.
+    let settled = made.map(|dir| settle_new_skill(dir, &target.file));
     let status = status?;
-    anyhow::ensure!(
-        status.success(),
-        "$EDITOR `{editor}` exited with {status}, on {}",
-        target.file.display()
-    );
-    Ok(match taken_back {
-        Some(dir) => Edited::NothingSaved(dir),
-        None => Edited::Done,
-    })
+    if !status.success() {
+        let failed = match status.code() {
+            // What `sh` says on the terminal the editor was handed is behind
+            // the screen once it is drawn back, so the status is put in words.
+            Some(127) => format!(
+                "$EDITOR `{editor}` is not a command `sh` could find — is $EDITOR spelled right?"
+            ),
+            Some(126) => format!("$EDITOR `{editor}` could not be run — is it executable?"),
+            _ => format!(
+                "$EDITOR `{editor}` exited with {status}, on {}",
+                target.file.display()
+            ),
+        };
+        return Err(match settled {
+            Some(Err(also)) => anyhow::anyhow!("{failed} — and {also:#}"),
+            _ => anyhow::anyhow!(failed),
+        });
+    }
+    settled.unwrap_or(Ok(Edited::Done))
+}
+
+/// What became of a new skill's directory once the editor closed.
+///
+/// `remove_dir` rather than `_all`, so it can only ever take an empty one: a
+/// directory something else was saved into is somebody's work, kept — and
+/// said, since it holds no `SKILL.md` and nothing will load it.
+fn settle_new_skill(dir: &std::path::Path, file: &std::path::Path) -> Result<Edited> {
+    if file
+        .try_exists()
+        .with_context(|| format!("reading {}", file.display()))?
+    {
+        return Ok(Edited::Done);
+    }
+    match std::fs::remove_dir(dir) {
+        Ok(()) => Ok(Edited::NothingSaved(dir.to_path_buf())),
+        Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            Ok(Edited::Kept(dir.to_path_buf()))
+        }
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "nothing was saved into {}, and it could not be taken back",
+                dir.display()
+            )
+        }),
+    }
 }
 
 /// Take one entry out of your catalogue, whatever kind it is.

@@ -6432,7 +6432,8 @@ fn the_way_out_the_base_set_prints_is_a_way_out() {
 /// A skill is mounted as a directory holding `SKILL.md`, and `edit` opened the
 /// bare name — so `omh settings edit skills tdd` made a *file* called `tdd`,
 /// not the shape a skill is mounted in, which `omh info` still counted as a
-/// skill. An existing skill still opens as the directory it is.
+/// skill. An existing skill opens at its `SKILL.md` too — see
+/// `an_existing_skill_opens_at_its_skill_md`.
 #[test]
 fn a_new_skill_is_a_directory_and_the_editor_opens_its_skill_md() {
     let sb = sandbox();
@@ -6466,8 +6467,8 @@ fn a_new_skill_is_a_directory_and_the_editor_opens_its_skill_md() {
         sb.opened_in_the_editor()
             .lines()
             .last()
-            .is_some_and(|l| l.ends_with(".omh/skills/review-diff")),
-        "an existing skill opens as it is: {}",
+            .is_some_and(|l| l.ends_with(".omh/skills/review-diff/SKILL.md")),
+        "an existing skill opens at its SKILL.md: {}",
         sb.opened_in_the_editor()
     );
 }
@@ -6607,6 +6608,244 @@ fn an_editor_that_fails_fails_the_edit_and_one_with_arguments_runs() {
         "{}",
         sb.opened_in_the_editor()
     );
+}
+
+/// A new skill an editor saved something else into is kept, and said to be
+/// one nothing will load.
+///
+/// The directory is somebody's work once a file is in it, so it stays — but
+/// it was kept in silence, exit 0, holding `notes.md` and no `SKILL.md`: the
+/// half-made skill omh had just learned to take back, made quietly instead.
+#[test]
+fn a_new_skill_saved_without_its_skill_md_is_kept_and_said() {
+    let sb = sandbox();
+    sb.seed_base();
+    let elsewhere = sb.bin.join("notes-editor");
+    std::fs::write(
+        &elsewhere,
+        "#!/bin/sh\nprintf 'x' > \"$(dirname \"$1\")/notes.md\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &elsewhere,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "tdd"],
+        &[("EDITOR", &elsewhere.display().to_string())],
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        sb.home.join(".omh/skills/tdd/notes.md").exists(),
+        "the work stays"
+    );
+    assert!(said.contains("no SKILL.md"), "and it is said: {said}");
+}
+
+/// An editor that fails is the error, whatever the cleanup after it found.
+///
+/// The cleanup ran first and its `?` won: an editor that left its directory
+/// unreadable and exited 3 was reported as `reading …/SKILL.md: Permission
+/// denied`, and the exit 3 — the thing that went wrong — was never said.
+#[cfg(unix)]
+#[test]
+fn an_editor_that_fails_is_the_error_whatever_the_cleanup_found() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads through 0o000, so nothing would be tested
+    }
+    let sb = sandbox();
+    sb.seed_base();
+    let locking = sb.bin.join("locking-editor");
+    std::fs::write(
+        &locking,
+        "#!/bin/sh\nchmod 000 \"$(dirname \"$1\")\"\nexit 3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&locking, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "tdd"],
+        &[("EDITOR", &locking.display().to_string())],
+    );
+    let dir = sb.home.join(".omh/skills/tdd");
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        said.contains("locking-editor") && said.contains("exit status: 3"),
+        "the editor's failure is the error: {said}"
+    );
+}
+
+/// An editor that is not there is said in words, not as status 127.
+///
+/// `sh` prints `command not found` on the terminal the editor was handed —
+/// behind the screen, once it is drawn back — so the only thing left to read
+/// was `exit status: 127`.
+#[test]
+fn an_editor_that_is_not_there_is_said_in_words() {
+    let sb = sandbox();
+    sb.seed_base();
+    let out = sb.omh_env(&["settings", "edit"], &[("EDITOR", "nvimm-not-a-program")]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        said.contains("nvimm-not-a-program") && said.contains("is $EDITOR spelled right"),
+        "{said}"
+    );
+}
+
+/// Import never writes through a link that stands where an entry would go.
+///
+/// The destination was checked with `exists()`, which answers `false` for a
+/// link to nothing — so a dangling `~/.omh/skills/tdd` read as free, and the
+/// copy went through it, to wherever it pointed.
+#[cfg(unix)]
+#[test]
+fn import_never_writes_through_a_link_where_an_entry_would_go() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.seed_adapters();
+    // A rule, because a rule is one file and `fs::copy` follows a link to
+    // write it; a skill's directory would have stopped at `create_dir_all`.
+    sb.theirs(".claude/CLAUDE.md", "always write the test first\n");
+    std::fs::create_dir_all(sb.home.join(".omh/rules")).unwrap();
+    let outside = sb.home.join("outside.md");
+    std::os::unix::fs::symlink(&outside, sb.home.join(".omh/rules/claude.md")).unwrap();
+    let out = sb.omh(&["import", "rules", "claude"]);
+    assert!(
+        !outside.exists(),
+        "import wrote through the link: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A name with a dot in it keeps the dot, and an editor's backup beside an
+/// entry does not stand in the way of editing it.
+///
+/// The extension was put on with `with_extension`, which replaces whatever
+/// follows the last dot: `edit rules v1.2` opened `rules/v1.md` — another
+/// rule, when one was there. And a name is a file with its extension off, so
+/// Emacs leaving `house.md~` made `house` two files, and `edit rules house`
+/// refused the file it had just been used on.
+#[test]
+fn a_dotted_name_keeps_its_dot_and_a_backup_does_not_block_an_edit() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["rules/v1.md", "rules/house.md", "rules/house.md~"]);
+    for (cap, name, opened) in [
+        ("rules", "v1.2", ".omh/rules/v1.2.md"),
+        ("commands", "foo.bar", ".omh/commands/foo.bar.md"),
+        ("hooks", "pre.commit", ".omh/hooks/pre.commit.json"),
+        ("rules", "house", ".omh/rules/house.md"),
+    ] {
+        let out = sb.omh(&["settings", "edit", cap, name]);
+        assert!(
+            out.status.success(),
+            "`omh settings edit {cap} {name}`: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let log = sb.opened_in_the_editor();
+        let last = log.lines().last().unwrap_or_default();
+        assert!(
+            last.ends_with(opened),
+            "{cap} {name} opened {last}, not {opened}"
+        );
+    }
+}
+
+/// An existing skill opens at its `SKILL.md`, as a new one does.
+///
+/// It opened as the directory, which `nano` cannot edit and `vi` lists; and a
+/// skill directory with no `SKILL.md` in it — half made — opened as a
+/// directory too, rather than at the one file that would make it a skill.
+#[test]
+fn an_existing_skill_opens_at_its_skill_md() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/half/notes.md"]);
+    for (name, opened) in [
+        ("review-diff", ".omh/skills/review-diff/SKILL.md"),
+        ("half", ".omh/skills/half/SKILL.md"),
+    ] {
+        let out = sb.omh(&["settings", "edit", "skills", name]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let log = sb.opened_in_the_editor();
+        let last = log.lines().last().unwrap_or_default();
+        assert!(last.ends_with(opened), "{name} opened {last}, not {opened}");
+    }
+    assert!(
+        sb.home.join(".omh/skills/half/notes.md").exists(),
+        "a half-made skill keeps what is in it"
+    );
+}
+
+/// An empty `$EDITOR` is no editor set, as git reads it.
+///
+/// `sh -c ' "$@"'` ran the file being edited as if it were the program.
+#[test]
+fn an_empty_editor_is_no_editor_set() {
+    let sb = sandbox();
+    sb.seed_base();
+    let vi = sb.bin.join("vi");
+    std::fs::write(
+        &vi,
+        format!(
+            "#!/bin/sh\nprintf 'vi %s\\n' \"$*\" >> {}\n",
+            sb.bin.join("editor.log").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&vi, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    for empty in ["", "  "] {
+        let out = sb.omh_env(&["settings", "edit"], &[("EDITOR", empty)]);
+        assert!(
+            out.status.success(),
+            "EDITOR={empty:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(
+        sb.opened_in_the_editor().starts_with("vi "),
+        "{}",
+        sb.opened_in_the_editor()
+    );
+}
+
+/// `omh settings` works from your home directory, where `.omh/mcp.json` is
+/// your catalogue's own file and not a repo declaring a server.
+///
+/// Outside a repo, a checkout's `.omh` is the directory you are in plus
+/// `.omh` — from `~`, the catalogue itself — and the check that refuses a
+/// repo declaring a server refused your own servers file: `omh settings mcp
+/// ls` and `omh settings rm mcp` both failed in `~`.
+#[test]
+fn settings_works_from_your_home_directory() {
+    let sb = sandbox();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+    for argv in [
+        vec!["settings", "mcp", "ls"],
+        vec!["settings", "rm", "mcp", "linear", "--yes"],
+    ] {
+        let out = sb.omh_in(&sb.home, &argv);
+        assert!(
+            out.status.success(),
+            "`omh {}` from ~: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 /// Any server can be removed, whatever its name.

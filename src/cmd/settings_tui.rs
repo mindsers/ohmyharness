@@ -159,6 +159,12 @@ fn edit(
     })?;
     match edited {
         Ok(Edited::Done) => app.report(shown(line), true, "editor closed", ""),
+        Ok(Edited::Kept(dir)) => app.report(
+            shown(line),
+            true,
+            "editor closed",
+            &settings::kept_without_skill_md(&dir),
+        ),
         Ok(Edited::NothingSaved(dir)) => app.report(
             shown(line),
             true,

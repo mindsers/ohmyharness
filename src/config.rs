@@ -455,7 +455,16 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
 /// when deciding whether a feature's server is still there.
 fn refuse_a_repo_server(paths: &Paths) -> Result<()> {
     let stray = paths.repo.join(".omh").join("mcp.json");
-    if stray.exists() {
+    // Outside a repo, `repo` is the directory you are in — and from `~`, its
+    // `.omh/mcp.json` *is* the catalogue's file. Refusing that refused your
+    // own servers to `omh settings mcp ls` run in your home directory.
+    let own = mcp_path(paths);
+    let same = stray == own
+        || matches!(
+            (stray.canonicalize(), own.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        );
+    if !same && stray.exists() {
         anyhow::bail!(
             "{}: a repo names servers from your catalogue, it cannot declare one — \
              nothing reads this file. Add it with `omh settings mcp add`, and put a \

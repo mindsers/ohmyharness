@@ -278,10 +278,13 @@ impl Paths {
     ///
     /// `repo` is the cwd when there is no repo, which is honest: its callers —
     /// `omh settings`, and `omh import` for everything but hooks — work on
-    /// `root`, and reach `repo` only to expand an adapter's `$REPO`. One import
-    /// path holds it — claude's servers, at `$REPO/.mcp.json` — and outside a
-    /// repo that is the directory you are in. A command that needed a real
-    /// `repo` here would be asking a question with no answer.
+    /// `root`, and reach `repo` for two things. One is an adapter's `$REPO` —
+    /// claude's servers import from `$REPO/.mcp.json`, which outside a repo is
+    /// the directory you are in. The other is `config::servers` refusing a
+    /// repo that declares a server in `<repo>/.omh/mcp.json` — which, from
+    /// `~`, is the catalogue's own file, and is told apart from one. A command
+    /// that needed a real `repo` here would be asking a question with no
+    /// answer.
     pub fn anywhere(cwd: &Path) -> Result<Self> {
         Ok(Self {
             root: Self::home()?,

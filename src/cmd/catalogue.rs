@@ -465,13 +465,38 @@ pub(crate) fn import_entries(
         } else {
             name.clone()
         });
-        if to.exists() {
-            considered.push(report::Considered {
-                name: stem,
-                verdict: report::Verdict::Kept,
-                detail: "already in your catalogue".into(),
-            });
-            continue;
+        // Anything standing there, a link to nothing included: `exists()`
+        // answers `false` for a dangling link, and the copy then wrote through
+        // it — to wherever it pointed, outside the catalogue.
+        match std::fs::symlink_metadata(&to) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                considered.push(report::Considered {
+                    name: stem,
+                    verdict: report::Verdict::Skipped,
+                    detail: format!(
+                        "a link stands at {}, and omh will not write through one",
+                        to.display()
+                    ),
+                });
+                continue;
+            }
+            Ok(_) => {
+                considered.push(report::Considered {
+                    name: stem,
+                    verdict: report::Verdict::Kept,
+                    detail: "already in your catalogue".into(),
+                });
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                considered.push(report::Considered {
+                    name: stem,
+                    verdict: report::Verdict::Skipped,
+                    detail: format!("could not look at {}: {e}", to.display()),
+                });
+                continue;
+            }
         }
         // **The flag reaches the copy.** It did not: `dry_run` was never
         // threaded past the dispatcher, so `omh import skills claude
