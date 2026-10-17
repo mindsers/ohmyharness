@@ -1500,31 +1500,33 @@ impl App {
             // not look, `!` where a row has a warning, and how many. Your
             // defaults are every key omh reads, so a count there would be the
             // same number forever.
+            // In fixed columns — the mark, then the count right-aligned — so
+            // a `!` sits under a `!`: it moved with the count beside it.
             let warned = s.rows.iter().any(|r| r.warning.is_some());
-            let mut right = Vec::new();
             let searching = self.filter.as_ref().is_some_and(|f| !f.text.is_empty());
-            match (s.problem.is_some(), s.page) {
-                (true, _) => right.push(Span::styled("✗", self.look.tone(Tone::Bad))),
+            let state = match (s.problem.is_some(), warned) {
+                (true, _) => Span::styled("✗", self.look.tone(Tone::Bad)),
+                (false, true) => Span::styled("!", self.look.tone(Tone::Warn)),
+                (false, false) => Span::raw(" "),
+            };
+            let count = match (s.problem.is_some(), s.page) {
+                (true, _) => Span::raw(pad_left("", 3)),
                 // What a search finds here, of how many.
-                (false, _) if searching => right.push(Span::styled(
-                    format!("{}/{}", self.shown(i).len(), s.rows.len()),
+                (false, _) if searching => Span::styled(
+                    pad_left(&format!("{}/{}", self.shown(i).len(), s.rows.len()), 5),
                     match self.shown(i).is_empty() {
                         true => self.look.dim(),
                         false => self.look.accent(),
                     },
-                )),
-                (false, page) => {
-                    if warned {
-                        right.push(Span::styled("!", self.look.tone(Tone::Warn)));
-                    }
-                    if page != Page::Defaults {
-                        right.push(Span::styled(
-                            format!("{}{}", if warned { " " } else { "" }, s.rows.len()),
-                            self.look.dim(),
-                        ));
-                    }
-                }
-            }
+                ),
+                (false, Page::Defaults) => Span::raw(pad_left("", 3)),
+                (false, _) => Span::styled(pad_left(&s.rows.len().to_string(), 3), self.look.dim()),
+            };
+            let right = match searching && s.problem.is_none() {
+                // A search's `n/m` takes the mark's column too.
+                true => vec![count],
+                false => vec![state, count],
+            };
             let used: usize = right.iter().map(Span::width).sum();
             let number = Span::styled(format!("{} ", i + 1), self.look.dim());
             let width = usize::from(area.width).saturating_sub(2 + 2 + used + 1);
@@ -2541,6 +2543,12 @@ impl App {
         }
         self.popup(f, "keys", Text::from(lines), Popup::Showing);
     }
+}
+
+/// `text` right-aligned in `width` columns.
+fn pad_left(text: &str, width: usize) -> String {
+    let used = Span::raw(text).width();
+    format!("{}{text}", " ".repeat(width.saturating_sub(used)))
 }
 
 /// How wide the screen is, for the layout it gets.

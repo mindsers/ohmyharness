@@ -1854,6 +1854,30 @@ fn a_search_with_nothing_here_says_where_its_hits_are() {
     );
 }
 
+/// The rail's marks are in one column and its counts right-aligned after
+/// them: `1 Defaults    !` had it at column 16 and `3 Skills    ! 4` at 14.
+#[test]
+fn the_rail_s_marks_are_in_one_column() {
+    let mut model = model();
+    model.sections[0].rows[0].warning = Some("x".into());
+    model.sections[1].rows[0].warning = Some("x".into());
+    let app = App::new(model, true);
+    let screen = drawn_at(&app, 120, 30);
+    let at = |page: &str, mark: char| {
+        let line = screen
+            .lines()
+            .find(|l| l.contains(page))
+            .unwrap_or_else(|| panic!("{screen}"));
+        let rail = &line[..line.find('│').unwrap()];
+        rail.chars()
+            .position(|c| c == mark)
+            .unwrap_or_else(|| panic!("no {mark} on {page}:\n{screen}"))
+    };
+    let defaults = at("Defaults", '!');
+    assert_eq!(at("Skills", '!'), defaults, "{screen}");
+    assert_eq!(at("Hooks", '✗'), defaults, "{screen}");
+}
+
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
 /// act the row carries; the row's `●`/`○` and the page's heading say which way
 /// it is now. A row with nothing to flip takes no `space`.
