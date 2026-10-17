@@ -909,8 +909,9 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             (_, key::Shape::Choice(allowed)) => {
                 Edit::Choice(allowed.iter().map(|a| a.to_string()).collect())
             }
-            // The logins omh has captured, offered by name — and still a line
-            // to type into, for `codex:work`, one harness's own.
+            // The logins omh has captured, by name and by one harness's — and
+            // only those, since a launch takes nothing else: `another…` let a
+            // name be typed, which was for `codex:work`, and that is here.
             ("account", _) => {
                 let typed = Edit::Text {
                     hint: "a login's name, as `omh auth <harness> -n <name>` captured it".into(),
@@ -919,10 +920,13 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                     Ok(held) => {
                         (fallback, warning) = unset_account(&held);
                         let names: std::collections::BTreeSet<String> =
-                            held.into_iter().flat_map(|(_, names)| names).collect();
+                            held.iter().flat_map(|(_, names)| names.clone()).collect();
+                        let qualified = held.iter().flat_map(|(harness, names)| {
+                            names.iter().map(move |n| format!("{harness}:{n}"))
+                        });
                         match names.is_empty() {
                             true => typed,
-                            false => Edit::Suggest(names.into_iter().collect()),
+                            false => Edit::Choice(names.into_iter().chain(qualified).collect()),
                         }
                     }
                     Err(e) => {
@@ -2241,8 +2245,8 @@ mod tests {
                     k.name
                 ),
                 _ => assert!(
-                    matches!(row.edit, Edit::Text { .. } | Edit::Suggest(_)),
-                    "{} is typed or suggested",
+                    matches!(row.edit, Edit::Text { .. } | Edit::Choice(_)),
+                    "{} is typed, or picked from what there is",
                     k.name
                 ),
             }
@@ -2275,7 +2279,13 @@ mod tests {
             .iter()
             .find(|r| r.name == "account")
             .unwrap();
-        assert_eq!(row.edit, Edit::Suggest(vec!["work".into()]));
+        // Every value a launch takes, and only those: `another…` let one be
+        // typed, and every login there is is already here — `claude:work`
+        // for one harness's, which was what typing was for.
+        assert_eq!(
+            row.edit,
+            Edit::Choice(vec!["work".into(), "claude:work".into()])
+        );
         assert_eq!(row.warning, None);
         assert_eq!(
             row.fallback.as_deref(),

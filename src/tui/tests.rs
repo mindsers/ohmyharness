@@ -56,7 +56,7 @@ fn model() -> Model {
                     },
                     Row {
                         fallback: Some("the only login captured".into()),
-                        edit: Edit::Suggest(vec!["personal".into(), "work".into()]),
+                        edit: Edit::Choice(vec!["personal".into(), "work".into()]),
                         ..row("account")
                     },
                 ],
@@ -713,29 +713,40 @@ fn a_word_typed_in_a_pick_goes_to_the_option_it_spells() {
     assert_eq!(typed(&mut app, "poz"), set("podman"));
 }
 
-/// A suggestion is picked, or another is typed.
+/// A new entry named as one that is there is said in the box, which stays
+/// open: `a tdd` on Skills opened the skill that was already there, as
+/// though it were new — the server form's own check, missing here.
 #[test]
-fn a_suggestion_is_picked_or_another_typed() {
+fn a_new_entry_named_as_one_that_is_there_is_said() {
     let mut app = App::new(model(), true);
-    for _ in 0..3 {
-        app.key(press('j'));
+    app.key(press('2'));
+    let name = app.model.sections[1].rows[0].name.clone();
+    app.key(press('a'));
+    for c in name.chars() {
+        app.key(press(c));
     }
-    app.key(code(KeyCode::Enter));
-    assert!(drawn(&app).contains(ANOTHER));
-    app.key(code(KeyCode::End));
+    assert_eq!(app.key(code(KeyCode::Enter)), Next::Stay);
+    let Some(Modal::Input(input)) = &app.modal else {
+        panic!("the box closed: {}", drawn(&app));
+    };
+    let said = input.error.clone().unwrap_or_default();
+    assert!(said.contains(&name) && said.contains("already"), "{said:?}");
+    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    for c in "fresh".chars() {
+        app.key(press(c));
+    }
     assert_eq!(
         app.key(code(KeyCode::Enter)),
-        Next::Stay,
-        "another… asks for a line"
-    );
-    assert_eq!(
-        typed(&mut app, "codex:work"),
-        Next::Run(Act::Set {
-            key: "account".into(),
-            value: "codex:work".into()
+        Next::Run(Act::Edit {
+            capability: "skills".into(),
+            name: Some("fresh".into())
         })
     );
 }
+
+// `a_suggestion_is_picked_or_another_typed` went with `another…`: every login
+// a launch takes is offered by name and by one harness's, so there was nothing
+// left to type — `account_offers_the_logins_captured` in the driver says so.
 
 /// A value is checked as it is typed, by what the caller handed in.
 #[test]

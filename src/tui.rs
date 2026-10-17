@@ -154,8 +154,6 @@ pub enum Edit {
     Text { hint: String },
     /// One of these, and nothing else.
     Choice(Vec<String>),
-    /// One of these, or another typed in — logins omh has, for `account`.
-    Suggest(Vec<String>),
 }
 
 /// What a key asked for: one command line omh accepts.
@@ -374,20 +372,9 @@ struct Pick {
 /// What a picked option becomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Chosen {
-    Import {
-        capability: String,
-    },
-    Value {
-        key: String,
-    },
-    /// A value, or — for the last option — a line to type one into.
-    ValueOrTyped {
-        key: String,
-    },
+    Import { capability: String },
+    Value { key: String },
 }
-
-/// The last option of a [`Chosen::ValueOrTyped`] pick.
-const ANOTHER: &str = "another…";
 
 /// A new server, asked for in one form rather than three questions in a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -816,8 +803,7 @@ impl App {
                         ));
                     }
                     Edit::Text { hint } => self.ask_value(&row, hint),
-                    Edit::Choice(options) => self.pick_value(&row, options.clone(), false),
-                    Edit::Suggest(options) => self.pick_value(&row, options.clone(), true),
+                    Edit::Choice(options) => self.pick_value(&row, options.clone()),
                 }
                 Next::Stay
             }
@@ -851,14 +837,11 @@ impl App {
         }));
     }
 
-    fn pick_value(&mut self, row: &Row, mut options: Vec<String>, typed: bool) {
+    fn pick_value(&mut self, row: &Row, options: Vec<String>) {
         let current = row
             .value
             .as_ref()
             .and_then(|v| options.iter().position(|o| o == v.trim_matches('"')));
-        if typed {
-            options.push(ANOTHER.to_string());
-        }
         let fallback = row
             .fallback
             .as_ref()
@@ -872,13 +855,8 @@ impl App {
             notes: Vec::new(),
             options,
             typed: String::new(),
-            then: match typed {
-                true => Chosen::ValueOrTyped {
-                    key: row.name.clone(),
-                },
-                false => Chosen::Value {
-                    key: row.name.clone(),
-                },
+            then: Chosen::Value {
+                key: row.name.clone(),
             },
         }));
     }
@@ -1100,18 +1078,7 @@ impl App {
                 capability,
                 harness: option,
             }),
-            Chosen::ValueOrTyped { key } if option == ANOTHER => {
-                let row = self
-                    .row()
-                    .cloned()
-                    .filter(|r| r.name == key)
-                    .unwrap_or_default();
-                self.ask_value(&Row { name: key, ..row }, "");
-                Next::Stay
-            }
-            Chosen::Value { key } | Chosen::ValueOrTyped { key } => {
-                Next::Run(Act::Set { key, value: option })
-            }
+            Chosen::Value { key } => Next::Run(Act::Set { key, value: option }),
         }
     }
 
@@ -1230,6 +1197,22 @@ impl App {
                 let name = line.trim().to_string();
                 if name.is_empty() {
                     input.error = Some("a name, first".into());
+                    self.modal = Some(Modal::Input(input));
+                    return Next::Stay;
+                }
+                // The server form's own check: one that is there opened as
+                // though it were new.
+                let there = self
+                    .model
+                    .sections
+                    .iter()
+                    .filter(|s| s.page.capability() == Some(capability.as_str()))
+                    .flat_map(|s| &s.rows)
+                    .any(|r| r.name == name);
+                if there {
+                    input.error = Some(format!(
+                        "`{name}` is already one of yours — ↵ on its row opens it"
+                    ));
                     self.modal = Some(Modal::Input(input));
                     return Next::Stay;
                 }
@@ -1862,7 +1845,7 @@ impl App {
                 ],
                 (None, None) => vec![Span::styled("unset", self.look.dim())],
             }));
-            if let Edit::Choice(options) | Edit::Suggest(options) = &row.edit {
+            if let Edit::Choice(options) = &row.edit {
                 if !options.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled("one of  ", self.look.dim()),
@@ -2558,7 +2541,6 @@ fn cleaned(mut model: Model) -> Model {
                 Edit::None => Edit::None,
                 Edit::Text { hint } => Edit::Text { hint: clean(hint) },
                 Edit::Choice(options) => Edit::Choice(all(options)),
-                Edit::Suggest(options) => Edit::Suggest(all(options)),
             };
         }
     }
