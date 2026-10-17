@@ -1488,6 +1488,44 @@ fn u_undoes_the_last_change() {
     assert_eq!(app.key(press('u')), Next::Stay);
 }
 
+/// `space` is undone by what the caller says undoes it, not by the opposite
+/// verb: `use` on a guard of a kind with no list writes the kind as a list,
+/// and `unuse` after it left the list standing — the rest of the kind frozen,
+/// where `u` promised the file back. Where nothing undoes a flip exactly,
+/// `u` is not offered.
+#[test]
+fn space_is_undone_by_what_the_caller_says_undoes_it() {
+    let mut model = model();
+    let unuse = Act::Unuse {
+        capability: "skills".into(),
+        name: "keep".into(),
+    };
+    let back = Act::Use {
+        capability: "skills".into(),
+        name: "keep".into(),
+    };
+    model.sections[1].rows[0].seeded = Some(true);
+    model.sections[1].rows[0].toggle = Some(unuse.clone());
+    model.sections[1].rows[0].untoggle = Some(back.clone());
+    let guard = Act::Use {
+        capability: "skills".into(),
+        name: "review-diff".into(),
+    };
+    model.sections[1].rows[1].seeded = Some(false);
+    model.sections[1].rows[1].toggle = Some(guard.clone());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    assert_eq!(app.key(press(' ')), Next::Run(unuse.clone()));
+    app.report("settings unuse -- skills keep".into(), true, "", "");
+    assert_eq!(app.key(press('u')), Next::Run(back));
+
+    app.key(press('j'));
+    assert_eq!(app.key(press(' ')), Next::Run(guard));
+    app.report("settings use -- skills review-diff".into(), true, "", "");
+    assert_eq!(app.key(press('u')), Next::Stay);
+    assert!(!drawn(&app).contains("u undoes"), "{}", drawn(&app));
+}
+
 /// Enter on a key that was probably meant to be another moves its value
 /// there, the typo with it: fixing `carry_ins` was two acts on two rows, and
 /// the value was retyped in between. Where the meant key has a value already,

@@ -557,10 +557,29 @@ fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
             );
         }
         let (capability, name) = (cap.key().to_string(), row.name.clone());
-        row.toggle = Some(match on {
-            true => Act::Unuse { capability, name },
-            false => Act::Use { capability, name },
-        });
+        let (unuse, use_it) = (
+            Act::Unuse {
+                capability: capability.clone(),
+                name: name.clone(),
+            },
+            Act::Use { capability, name },
+        );
+        // What puts the file back: the opposite verb, except where the flip
+        // writes more than its own name. A guard taken by a kind with no list
+        // writes the kind as one; a rule taken off its list comes back at the
+        // end of it, and rules are read in the list's order.
+        let last = now.takes.last() == Some(&row.name);
+        let guard = now.guards.contains(&row.name);
+        (row.toggle, row.untoggle) = match on {
+            true => {
+                let exact = !now.listed || cap != Capability::Rules || last;
+                (Some(unuse), exact.then_some(use_it))
+            }
+            false => {
+                let exact = now.listed || !guard;
+                (Some(use_it), exact.then_some(unuse))
+            }
+        };
     }
     let total = section.rows.iter().filter(|r| r.seeded.is_some()).count();
     let got = section
@@ -1746,6 +1765,56 @@ mod tests {
             seeds.as_deref(),
             Some("new repos get all but 1, and no guards, by stack")
         );
+    }
+
+    /// What undoes a flip is worked out with it, from what the flip writes:
+    /// the opposite verb where that puts the file back, and nothing where it
+    /// does not — a guard taken by a kind with no list writes the kind as one,
+    /// and a rule taken off the middle of its list would come back at the end,
+    /// where rules read in another order.
+    #[test]
+    fn what_undoes_a_flip_is_worked_out_with_it() {
+        let (_dir, paths) = paths();
+        for (at, body) in [
+            ("hooks/mine.json", r#"{"on":"turn-end","run":"make check"}"#),
+            ("hooks/other.json", r#"{"on":"turn-end","run":"make lint"}"#),
+            (
+                "hooks/my-guard.json",
+                r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+            ),
+            ("rules/a.md", "# a\n"),
+            ("rules/b.md", "# b\n"),
+            ("rules/c.md", "# c\n"),
+        ] {
+            write(&paths.root.join(at), body);
+        }
+        write(
+            &paths.root.join("default.toml"),
+            "[use]\nrules = [\"a\", \"b\"]\n\n[unuse]\nhooks = [\"other\"]\n",
+        );
+        let model = model(&paths);
+        let back = |title: &str, name: &str| {
+            page(&model, title)
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {title}/{name}"))
+                .untoggle
+                .clone()
+        };
+        let act = |use_it: bool, capability: &str, name: &str| {
+            let (capability, name) = (capability.to_string(), name.to_string());
+            Some(match use_it {
+                true => Act::Use { capability, name },
+                false => Act::Unuse { capability, name },
+            })
+        };
+        assert_eq!(back("hooks", "mine"), act(true, "hooks", "mine"));
+        assert_eq!(back("hooks", "other"), act(false, "hooks", "other"));
+        assert_eq!(back("hooks", "my-guard"), None, "a list, written whole");
+        assert_eq!(back("rules", "a"), None, "a would come back after b");
+        assert_eq!(back("rules", "b"), act(true, "rules", "b"));
+        assert_eq!(back("rules", "c"), act(false, "rules", "c"));
     }
 
     /// `[use]` naming an entry your catalogue does not have is marked, as

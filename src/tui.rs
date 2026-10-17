@@ -126,6 +126,11 @@ pub struct Row {
     /// What flips that — the command, worked out by the caller, so the screen
     /// keeps no rule about `[use]` or features of its own.
     pub toggle: Option<Act>,
+    /// What undoes the flip exactly, worked out by the caller with it — `None`
+    /// where no one command puts the file back: a guard taken by a kind with
+    /// no list writes the kind as one, and a rule taken off its list goes
+    /// back at the end of it, where it reads differently.
+    pub untoggle: Option<Act>,
     /// The key one nothing reads was probably meant to be: Enter moves its
     /// value there.
     pub meant: Option<String>,
@@ -610,8 +615,9 @@ impl App {
 
     /// The command that undoes an act, from what the screen shows now: a
     /// value set back to the one it had, or unset if it had none; an unset put
-    /// back; a `use` left out again. `None` where there is no inverse to run —
-    /// a removal, which takes the file with it.
+    /// back; a flip by what its row says undoes it. `None` where there is no
+    /// inverse to run — a removal, which takes the file with it, and a flip
+    /// no one command puts back.
     fn inverse(&self, act: &Act) -> Option<Act> {
         let had = |key: &str| {
             self.model
@@ -634,14 +640,15 @@ impl App {
                 key: key.clone(),
                 value,
             }),
-            Act::Use { capability, name } => Some(Act::Unuse {
-                capability: capability.clone(),
-                name: name.clone(),
-            }),
-            Act::Unuse { capability, name } => Some(Act::Use {
-                capability: capability.clone(),
-                name: name.clone(),
-            }),
+            // The caller's, beside the flip it worked out: the opposite verb
+            // is not always the way back.
+            Act::Use { .. } | Act::Unuse { .. } => self
+                .model
+                .sections
+                .iter()
+                .flat_map(|s| &s.rows)
+                .find(|r| r.toggle.as_ref() == Some(act))
+                .and_then(|r| r.untoggle.clone()),
             Act::Move { from, to, value } => Some(Act::Move {
                 from: to.clone(),
                 to: from.clone(),
