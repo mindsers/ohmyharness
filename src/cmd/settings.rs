@@ -1181,11 +1181,19 @@ pub(crate) fn edit_target(
         // A skill opens at its `SKILL.md` whether it is new, whole or half
         // made — the one file that makes a directory a skill, and the one an
         // editor can open. Given the directory, `nano` cannot, and `vi` lists.
-        (adapter::Capability::Skills, Some(skill)) if skill.is_dir() => EditTarget {
-            file: skill.join("SKILL.md"),
-            new_skill: None,
-            skeleton: None,
-        },
+        // One with no `SKILL.md` yet opens at the skeleton a new one does: an
+        // empty file let the editor's first line become the description.
+        (adapter::Capability::Skills, Some(skill)) if skill.is_dir() => {
+            let file = skill.join("SKILL.md");
+            let missing = !file
+                .try_exists()
+                .with_context(|| format!("reading {}", file.display()))?;
+            EditTarget {
+                file,
+                new_skill: None,
+                skeleton: missing.then(|| skeleton(cap, name)),
+            }
+        }
         (_, Some(file)) => EditTarget {
             file,
             new_skill: None,

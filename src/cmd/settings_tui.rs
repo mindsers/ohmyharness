@@ -1322,10 +1322,24 @@ fn describe(cap: Capability, path: &std::path::Path) -> Described {
             .find(|l| !l.is_empty() && *l != "---" && !l.contains(':'))
             .map(|l| l.trim_start_matches('#').trim().to_string())
     };
-    let summary = described.or_else(first);
+    // A skill or a subagent is chosen by its description: an empty one, or
+    // none, is one an agent is shown nothing for.
+    let chosen_by_it = matches!(cap, Capability::Skills | Capability::Subagents);
+    let warning = match described.as_deref() {
+        _ if !chosen_by_it => None,
+        Some("") => {
+            Some("its `description:` is empty — what an agent is shown to know when to use it")
+        }
+        None => Some(
+            "no `description:` in its front matter — what an agent is shown to know when to use it",
+        ),
+        Some(_) => None,
+    };
+    let summary = described.filter(|d| !d.is_empty()).or_else(first);
     Described {
         more: summary.iter().cloned().collect(),
         summary,
+        warning: warning.map(String::from),
         ..Described::default()
     }
 }
@@ -1346,6 +1360,39 @@ mod tests {
                 line[1..].join(" ")
             ),
         }
+    }
+
+    /// A skill or a subagent with no description in its front matter is
+    /// marked: the description is what an agent is shown to know when to use
+    /// one. An empty `description:` — what the skeleton opens with — drew a
+    /// blank row with no warning, and a `SKILL.md` stripped of its front
+    /// matter drew its first line of prose as though that were one.
+    #[test]
+    fn an_entry_with_no_description_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = |name: &str, body: &str| {
+            let at = dir.path().join(name);
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(at.join("SKILL.md"), body).unwrap();
+            describe(Capability::Skills, &at)
+        };
+        let warned = |d: Described| d.warning.unwrap_or_default();
+        assert!(
+            warned(skill("empty", "---\nname: empty\ndescription: \n---\n\n"))
+                .contains("description")
+        );
+        assert!(warned(skill("bare", "# Bare\n\nDoes things.\n")).contains("description"));
+        assert_eq!(
+            skill("whole", "---\nname: whole\ndescription: does x\n---\n").warning,
+            None
+        );
+        let agent = dir.path().join("researcher.md");
+        std::fs::write(&agent, "---\nname: researcher\n---\nprose\n").unwrap();
+        assert!(warned(describe(Capability::Subagents, &agent)).contains("description"));
+        // A rule has no front matter to speak of; its heading is what it says.
+        let rule = dir.path().join("house.md");
+        std::fs::write(&rule, "# house\n").unwrap();
+        assert_eq!(describe(Capability::Rules, &rule).warning, None);
     }
 
     /// The screen asks, as a value is typed, what the command would refuse

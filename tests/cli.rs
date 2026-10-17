@@ -7413,6 +7413,34 @@ fn a_new_entry_opens_as_its_kinds_skeleton() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!sb.home.join(".omh/commands/pr.md").exists());
+
+    // A skill's directory with no `SKILL.md` yet opens at the skeleton too:
+    // it opened an empty file, and the editor's first line became the
+    // description. Untouched, the `SKILL.md` goes and the directory stays.
+    sb.catalogue(&["skills/half/notes.md"]);
+    let skill = sb.home.join(".omh/skills/half/SKILL.md");
+    let out = sb.omh(&["settings", "edit", "skills", "half"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!skill.exists(), "untouched, taken back");
+    assert!(sb.home.join(".omh/skills/half/notes.md").exists());
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "half"],
+        &[("EDITOR", &appending)],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let held = std::fs::read_to_string(&skill).unwrap();
+    assert!(
+        held.contains("name: half") && held.contains("written"),
+        "{held:?}"
+    );
 }
 
 /// Help speaks of omh, never of the parser it is built with: `omh settings
@@ -7440,6 +7468,11 @@ fn the_report_lists_the_catalogue_and_what_is_wrong_in_it() {
     let sb = sandbox();
     sb.seed_base();
     sb.catalogue(&["skills/tdd/SKILL.md", "skills/half-made/notes.txt"]);
+    std::fs::write(
+        sb.home.join(".omh/skills/tdd/SKILL.md"),
+        "---\nname: tdd\ndescription: test first\n---\n",
+    )
+    .unwrap();
     std::os::unix::fs::symlink("/nowhere/gone", sb.home.join(".omh/skills/gone")).unwrap();
     std::fs::write(
         sb.home.join(".omh/default.toml"),
