@@ -588,6 +588,52 @@ fn a_server_is_one_form_and_its_command_is_split_like_a_shell() {
     assert!(matches!(&app.modal, Some(Modal::Form(f)) if f.at == 0));
 }
 
+/// **The mask reads a line the way the line is read.** What is added is cut
+/// by `words` — shell quoting, `\\` escapes — and a mask with rules of its
+/// own drew whatever the two disagreed on: `K=q\\ z` is one value to `words`
+/// and ended at the space for the mask, so `z` was drawn. Every value below is
+/// lowercase and every name uppercase, so a lowercase letter on the screen is
+/// a value drawn.
+#[test]
+fn the_env_mask_reads_a_line_as_words_does() {
+    for (line, values) in [
+        ("K=qz", vec!["qz"]),
+        ("K=q\\ z", vec!["q z"]),
+        ("K=\"q\\\"z y\"", vec!["q\"z y"]),
+        ("'K=q z'", vec!["q z"]),
+        ("K=q\"z y\"", vec!["qz y"]),
+        ("\"K\"=qz", vec!["qz"]),
+        ("K='q z' L=yy", vec!["q z", "yy"]),
+        ("K=", vec![""]),
+    ] {
+        let parsed = parse_env(&words(line).unwrap()).unwrap();
+        assert_eq!(
+            parsed.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>(),
+            values,
+            "`{line}` is not the case it claims to be"
+        );
+        let chars: Vec<char> = line.chars().collect();
+        let masked = masked_env(&chars);
+        assert_eq!(
+            masked.chars().count(),
+            chars.len(),
+            "the cursor would drift"
+        );
+        assert!(
+            !masked.chars().any(|c| c.is_lowercase()),
+            "`{line}` is drawn as `{masked}`"
+        );
+    }
+    // A line that does not parse yet — mid-typing — draws no value either.
+    for line in ["K=q\\", "K=\"q z", "K='q"] {
+        let masked = masked_env(&line.chars().collect::<Vec<_>>());
+        assert!(
+            !masked.chars().any(|c| c.is_lowercase()),
+            "`{line}` → `{masked}`"
+        );
+    }
+}
+
 /// **A value typed into env is not drawn.** The list hides a server's env
 /// values and the status line hides them in the line it shows, and the form
 /// drew them as typed — the one place on the screen a token was on it. Each

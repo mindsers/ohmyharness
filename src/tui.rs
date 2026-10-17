@@ -2023,33 +2023,53 @@ fn cleaned(mut model: Model) -> Model {
     model
 }
 
-/// An env line as it is drawn: every name, and every value as `•` — a quoted
-/// one to its closing quote, since a space inside it is still the value.
+/// An env line as it is drawn: every name, and every value as `•`.
+///
+/// **Read the way [`words`] reads it**, rule for rule — quotes, `\\` escapes,
+/// whitespace — because `words` is what cuts the line that is added. A mask
+/// with rules of its own drew whatever the two disagreed on: `K=a\\ b` is one
+/// value to `words`, and ended at the space for the mask. A character is drawn
+/// until its word's content has taken its first `=`, which is where
+/// `parse_env` splits it; every one after, to the end of the word, is `•` —
+/// quotes and backslashes too. One character out for each in, so the cursor
+/// lands where it is.
 fn masked_env(text: &[char]) -> String {
-    let (mut value, mut quote) = (false, None);
-    text.iter()
-        .map(|&c| match (value, quote, c) {
-            (true, Some(q), _) if c == q => {
+    let mut out = String::with_capacity(text.len());
+    let mut quote: Option<char> = None;
+    // The current word's content has taken its `=`: what follows is a value.
+    let mut value = false;
+    let mut chars = text.iter().copied();
+    let mut draw = |out: &mut String, c: char, value: &mut bool, content: bool| {
+        out.push(if *value { '•' } else { c });
+        if content && c == '=' {
+            *value = true;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => {
+                draw(&mut out, c, &mut value, false);
                 quote = None;
-                '•'
             }
-            (true, Some(_), _) => '•',
-            (true, None, '\'' | '"') => {
+            (Some('"'), '\\') | (None, '\\') => {
+                draw(&mut out, c, &mut value, false);
+                if let Some(next) = chars.next() {
+                    draw(&mut out, next, &mut value, true);
+                }
+            }
+            (Some(_), c) => draw(&mut out, c, &mut value, true),
+            (None, '\'' | '"') => {
+                draw(&mut out, c, &mut value, false);
                 quote = Some(c);
-                '•'
             }
-            (_, None, ' ') => {
+            (None, c) if c.is_whitespace() => {
+                out.push(c);
                 value = false;
-                ' '
             }
-            (false, _, '=') => {
-                value = true;
-                '='
-            }
-            (true, _, _) => '•',
-            (false, _, _) => c,
-        })
-        .collect()
+            (None, c) => draw(&mut out, c, &mut value, true),
+        }
+    }
+    out
 }
 
 /// A form field as it is drawn: the env field masked, the others as typed.
