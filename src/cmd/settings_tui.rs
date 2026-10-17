@@ -889,9 +889,15 @@ mod tests {
             page(&read, "defaults").problem.is_some(),
             "a defaults file that will not parse"
         );
+        // By name: in this fixture the base set is absent too, which says a
+        // problem of its own on the same page.
         assert!(
-            page(&read, "servers").problem.is_some(),
-            "a servers file that will not parse"
+            page(&read, "servers")
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("mcp.json")),
+            "a servers file that will not parse: {:?}",
+            page(&read, "servers").problem
         );
         assert!(page(&read, "servers").rows.is_empty());
 
