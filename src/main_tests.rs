@@ -1979,13 +1979,12 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
         // and in the error when the screen cannot come back after `$EDITOR`,
-        // `omh auth <harness> -n <name>` in the account's hint, and
-        // `omh set <feature> off` beside a server a feature owns. +
+        // and `omh auth <harness> -n <name>` in the account's hint. +
         // `omh auth <harness>` where no login is captured, and `omh upgrade`
         // after an edit to a hook omh ships. + `omh init` and `omh set
         // <feature> off` in a feature row's about, and `omh init` in the
         // `[use]` row's about and its warning.
-        ("src/cmd/settings_tui.rs", 13),
+        ("src/cmd/settings_tui.rs", 12),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather

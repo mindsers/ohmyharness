@@ -2182,8 +2182,10 @@ iTerm2.
 **A row says what it is**: a default, its value or, unset, what applies
 instead; an entry, its description; a hook, when it runs — as a column of its
 own — and what it does; a server, what it runs, its arguments counted and its
-environment named. Hooks and servers are yours first, then omh's own, under a
-heading each. A key nothing reads is under one of its own, naming the key it was
+environment named. Hooks are yours first, then omh's own, under a heading each.
+The servers page is yours alone: omh's own servers — `codegraph`, `memory` —
+are parts of its features, switched with their hooks and rules on your defaults
+page and listed nowhere else. A key nothing reads is under one of its own, naming the key it was
 probably meant to be, and a skill with no `SKILL.md` or a link to nothing is
 marked on its row.
 
@@ -2233,9 +2235,10 @@ the catalogue — and the refusal names the `rm` that takes it out.
 or `○`, and each page's heading says how many: *new repos get all* while a kind
 has no list — every entry, including one you add later — or *new repos get 1 of
 4* once it has one. `space` changes an entry, running `omh settings use` or
-`unuse`, which write `[use]` in `~/.omh/default.toml`; on a server omh owns it
-runs `omh settings set <feature> on|off`, since a feature is switched whole. The
-first `unuse` on a kind with no list writes the rest as its list, and says so —
+`unuse`, which write `[use]` in `~/.omh/default.toml`. A feature of omh's is
+switched in one place, its row on your defaults page —
+`omh settings set <feature> on|off` — whole, with its server, hooks and rules.
+The first `unuse` on a kind with no list writes the rest as its list, and says so —
 an entry added after it is not seeded until you `use` it — and
 `omh settings use <capability> --all` takes the list out again. Your defaults
 list omh's features too, under their own heading, and `[use]` is marked when it

@@ -456,8 +456,8 @@ pub(crate) fn model(paths: &Paths) -> Model {
 /// it — and how many the page's new repos get.
 ///
 /// An entry of yours is `[use]` in your defaults: no list is every entry, and
-/// `omh settings use`/`unuse` change one. A server omh owns is its feature's,
-/// switched by `omh settings set <feature> on|off`. "All" is said only while a
+/// `omh settings use`/`unuse` change one. (omh's own servers are not rows:
+/// they are its features', on your defaults page.) "All" is said only while a
 /// kind has no list — a list holding every entry is not the same fact, since
 /// an entry added after it is not seeded.
 fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
@@ -468,28 +468,14 @@ fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
             return;
         }
     };
-    let owned = settings::shipped_servers().unwrap_or_default();
-    let switched = feature_switches(paths);
     for row in &mut section.rows {
-        match (cap, owned.get(&row.name)) {
-            (Capability::Mcp, Some(feature)) => {
-                let on = switched.get(feature).copied().unwrap_or(true);
-                row.seeded = Some(on);
-                row.toggle = Some(Act::Set {
-                    key: feature.clone(),
-                    value: if on { "off" } else { "on" }.into(),
-                });
-            }
-            _ => {
-                let on = list.as_ref().is_none_or(|l| l.contains(&row.name));
-                row.seeded = Some(on);
-                let (capability, name) = (cap.key().to_string(), row.name.clone());
-                row.toggle = Some(match on {
-                    true => Act::Unuse { capability, name },
-                    false => Act::Use { capability, name },
-                });
-            }
-        }
+        let on = list.as_ref().is_none_or(|l| l.contains(&row.name));
+        row.seeded = Some(on);
+        let (capability, name) = (cap.key().to_string(), row.name.clone());
+        row.toggle = Some(match on {
+            true => Act::Unuse { capability, name },
+            false => Act::Use { capability, name },
+        });
     }
     let total = section.rows.len();
     let got = section
@@ -562,7 +548,8 @@ fn belongs(cap: Capability, import: &Import) -> Vec<String> {
             "skills/<name>/SKILL.md",
         ),
         Capability::Mcp => (
-            "a server is a program an agent can call tools in, run by the harness",
+            "a server is a program an agent can call tools in, run by the harness — \
+             omh's own are its features', switched on your defaults page",
             "a record in mcp.json",
         ),
         Capability::Commands => (
@@ -868,7 +855,10 @@ fn servers(paths: &Paths) -> Section {
             return out;
         }
     };
-    // Which are omh's, asked of the binary, as `rm` and `mcp add` ask it.
+    // Which are omh's, asked of the binary, as `rm` and `mcp add` ask it: a
+    // feature's server is the feature's, switched with its hooks and rules on
+    // your defaults page and listed nowhere else — here it read as a server
+    // that could be switched apart from them.
     let shipped = match settings::shipped_servers() {
         Ok(shipped) => shipped,
         Err(e) => {
@@ -876,7 +866,10 @@ fn servers(paths: &Paths) -> Section {
             Default::default()
         }
     };
-    for (name, server) in held {
+    for (name, server) in held
+        .into_iter()
+        .filter(|(name, _)| !shipped.contains_key(name))
+    {
         // The command, as `omh settings mcp ls` prints it, and the arguments
         // only counted: `--header "Authorization: Bearer …"` is how a remote
         // server is reached, and this is drawn for anybody looking at the
@@ -895,12 +888,6 @@ fn servers(paths: &Paths) -> Section {
             about.push(format!("env   {env}"));
         }
         about.push(format!("file  {}", within(paths, &path)));
-        let feature = shipped.get(&name);
-        if let Some(feature) = feature {
-            about.push(format!(
-                "omh's own — the {feature} feature; `omh settings set {feature} off` switches it off for new repos"
-            ));
-        }
         // Names and counts, as the detail says them: never a value.
         let mut summary = vec![server.command.clone()];
         if !server.args.is_empty() {
@@ -915,23 +902,11 @@ fn servers(paths: &Paths) -> Section {
         }
         out.rows.push(Row {
             summary: Some(summary.join(" · ")),
-            // Grouped as hooks are: yours, the ones you came to change, and
-            // then omh's own.
-            group: Some(
-                match feature {
-                    Some(_) => "omh's own",
-                    None => "yours",
-                }
-                .to_string(),
-            ),
-            // Asked of what `rm` asks, so the screen offers what it will do.
-            fixed: feature.is_some(),
             name,
             about,
             ..Row::default()
         });
     }
-    out.rows.sort_by_key(|r| r.fixed);
     out
 }
 
@@ -1317,9 +1292,10 @@ mod tests {
         assert!(!everything.contains("sk-arg-secret"), "{everything}");
     }
 
-    /// Servers are grouped as hooks are, yours first and then omh's own, and
-    /// each says what it runs in names and counts. `memory  omh omh` was the
-    /// badge and then the command, and every server of yours read `npx`.
+    /// The servers page is yours: each says what it runs in names and counts —
+    /// every one read `npx`. omh's own are parts of its features, switched on
+    /// your defaults page, and not listed here: switching `codegraph` here read
+    /// as turning the server alone off.
     #[test]
     fn servers_are_yours_first_and_say_what_they_run() {
         let (_dir, paths) = paths();
@@ -1335,16 +1311,11 @@ mod tests {
             .iter()
             .map(|r| (r.name.as_str(), r.group.as_deref(), r.summary.as_deref()))
             .collect();
+        // omh's own server is not here at all: it is part of a feature, and a
+        // feature is on your defaults page alone.
         assert_eq!(
             rows,
-            [
-                (
-                    "linear",
-                    Some("yours"),
-                    Some("npx · 4 args · env LINEAR_TOKEN")
-                ),
-                ("memory", Some("omh's own"), Some("omh · 2 args")),
-            ]
+            [("linear", None, Some("npx · 4 args · env LINEAR_TOKEN"))]
         );
         assert!(servers.rows.iter().all(|r| r.badge.is_none()));
         let everything = format!("{model:?}");
@@ -1487,17 +1458,19 @@ mod tests {
             page(&model, "rules").seeds.as_deref(),
             Some("new repos get all")
         );
-        // A server omh owns is its feature's, switched — not listed.
-        let own = row("servers", "codegraph");
-        assert_eq!(own.seeded, Some(false));
-        assert_eq!(
-            own.toggle,
-            Some(Act::Set {
-                key: "codegraph".into(),
-                value: "on".into()
-            })
-        );
+        // A server omh owns is part of its feature, and a feature is switched
+        // in one place — your defaults, with its hooks and rules. On the
+        // servers page it had its own ● and `space`, which ran the same switch
+        // and read as turning the server alone off: it is not listed there.
+        assert!(page(&model, "servers")
+            .rows
+            .iter()
+            .all(|r| r.name != "codegraph"));
         assert_eq!(row("servers", "linear").seeded, Some(true));
+        assert_eq!(
+            page(&model, "servers").seeds.as_deref(),
+            Some("new repos get all")
+        );
         // Your defaults list the features, switched for new repos, under their
         // own heading — not as an `[omh]` table.
         let defaults = page(&model, "defaults");
@@ -1805,8 +1778,9 @@ mod tests {
         );
     }
 
-    /// What `rm` refuses to remove, the screen marks as fixed: omh's own
-    /// servers and the hooks it ships, asked of the same functions `rm` asks.
+    /// What `rm` refuses to remove, the screen marks as fixed or leaves out: a
+    /// hook omh ships is fixed, and omh's own servers are not on the servers
+    /// page at all — they are its features', on your defaults page.
     #[test]
     fn what_rm_refuses_is_marked_fixed() {
         let (_dir, paths) = paths();
@@ -1834,9 +1808,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("no {title}/{name}"))
                 .fixed
         };
-        for name in shipped.keys() {
-            assert!(fixed("servers", name), "servers/{name}");
-        }
+        let servers: Vec<&str> = page(&model, "servers")
+            .rows
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(servers, ["linear"], "omh's own are its features'");
         assert!(!fixed("servers", "linear"));
         assert!(fixed("hooks", &hook), "hooks/{hook}");
         assert!(!fixed("hooks", "mine"));
@@ -1967,10 +1944,10 @@ mod tests {
         let read = model(&unsure);
         let servers = page(&read, "servers");
         // Which servers are omh's is asked of the binary, as `rm` asks it, so
-        // an unreadable base set under `~/.omh` leaves it known.
+        // an unreadable base set under `~/.omh` leaves it known — and omh's own
+        // is its feature's, on your defaults page, not a row here.
         assert_eq!(servers.problem, None, "{servers:?}");
-        assert_eq!(servers.rows.len(), 1, "and the server is still listed");
-        assert_eq!(servers.rows[0].group.as_deref(), Some("omh's own"));
+        assert!(servers.rows.is_empty(), "{servers:?}");
         for title in ["skills", "rules", "servers"] {
             match &page(&read, title).import {
                 Import::Not(why) => assert!(why.contains("adapters"), "{title}: {why}"),
