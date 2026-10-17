@@ -206,6 +206,43 @@ impl Sandbox {
         child.wait_with_output().expect("wait")
     }
 
+    /// Run with these variables set over the sandbox's own — an `$EDITOR`
+    /// that writes, say, where the default one only records.
+    fn omh_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let path = match std::env::var("PATH") {
+            Ok(rest) => format!("{}:{rest}", self.bin.display()),
+            Err(_) => self.bin.display().to_string(),
+        };
+        let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
+        command
+            .args(args)
+            .current_dir(&self.repo)
+            .env("HOME", &self.home)
+            .env("PATH", path)
+            .env("EDITOR", self.bin.join("fake-editor"));
+        for (k, v) in env {
+            command.env(k, v);
+        }
+        command.output().expect("the binary under test must run")
+    }
+
+    /// An `$EDITOR` that records what it was asked to open, as `fake-editor`
+    /// does, and then writes something into it — a person who saved.
+    fn saving_editor(&self) -> String {
+        let editor = self.bin.join("saving-editor");
+        std::fs::write(
+            &editor,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf 'saved\\n' > \"$1\"\n",
+                self.bin.join("editor.log").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        editor.display().to_string()
+    }
+
     /// Run somewhere other than the sandbox repo — outside one, for the
     /// commands whose subject is a file that does not live in a repository.
     fn omh_in(&self, cwd: &Path, args: &[&str]) -> Output {
@@ -5454,7 +5491,8 @@ fn a_dry_run_writes_nothing() {
         vec!["settings", "set", "idle_timeout", "45m"],
         vec!["settings", "unset", "idle_timeout"],
         vec!["settings", "mcp", "add", "srv", "echo"],
-        vec!["settings", "mcp", "rm", "srv0"],
+        vec!["settings", "rm", "mcp", "srv0", "--yes"],
+        vec!["settings", "rm", "skills", "review-diff", "--yes"],
         vec!["memory", "rm", "proj"],
     ];
 
@@ -5964,7 +6002,7 @@ fn remember_without_source_writes_the_default_its_help_names() {
 
 /// A name nothing answers to is refused, whichever command you typed.
 ///
-/// `omh settings mcp rm nope` exited **0** and said *"nope is not in your
+/// Removing a server called `nope` exited **0** and said *"nope is not in your
 /// catalogue"* — a typo reported as success, which is the one thing every
 /// sibling already refuses to do. `use`, `unuse`, `memory rm` and
 /// `memory promote` all exit 1 on the same mistake, and one of them carries a
@@ -5981,7 +6019,8 @@ fn a_name_nothing_answers_to_is_refused_whichever_command_you_typed() {
     sb.catalogue(&["skills/real/SKILL.md"]);
 
     for argv in [
-        vec!["settings", "mcp", "rm", "nope"],
+        vec!["settings", "rm", "mcp", "nope", "--yes"],
+        vec!["settings", "rm", "skills", "nope", "--yes"],
         vec!["unuse", "skills", "nope"],
         vec!["use", "skills", "nope"],
         vec!["memory", "rm", "nope"],
@@ -5998,6 +6037,316 @@ fn a_name_nothing_answers_to_is_refused_whichever_command_you_typed() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+/// One `rm` for everything in your catalogue, and it takes exactly the entry
+/// it was named.
+///
+/// Until this, only a server could be removed — under `omh settings mcp`,
+/// without asking — and nothing removed a skill, a rule or a command: that was
+/// `rm -rf` under `~/.omh` by hand, in a
+/// directory mounted into every sandbox. Asserted as a difference between two
+/// fingerprints, so an `rm` that took a neighbour too is as red as one that
+/// took nothing.
+#[test]
+fn settings_rm_takes_the_named_entry_of_any_kind_and_nothing_else() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&[
+        "skills/review-diff/SKILL.md",
+        "skills/review-diff/scripts/run.sh",
+        "skills/review/SKILL.md",
+        "rules/house.md",
+        "commands/ship.md",
+        "subagents/critic.md",
+    ]);
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "github", "echo"])
+        .status
+        .success());
+
+    for (argv, took) in [
+        (
+            ["settings", "rm", "skills", "review-diff", "--yes"],
+            vec![
+                "removed .omh/skills/review-diff/",
+                "removed .omh/skills/review-diff/SKILL.md",
+                "removed .omh/skills/review-diff/scripts/",
+                "removed .omh/skills/review-diff/scripts/run.sh",
+            ],
+        ),
+        (
+            ["settings", "rm", "rules", "house", "--yes"],
+            vec!["removed .omh/rules/house.md"],
+        ),
+        (
+            ["settings", "rm", "commands", "ship", "--yes"],
+            vec!["removed .omh/commands/ship.md"],
+        ),
+        (
+            ["settings", "rm", "subagents", "critic", "--yes"],
+            vec!["removed .omh/subagents/critic.md"],
+        ),
+        (
+            ["settings", "rm", "mcp", "linear", "--yes"],
+            vec!["rewrote .omh/mcp.json"],
+        ),
+    ] {
+        let before = fingerprint(&sb);
+        let out = sb.omh(&argv);
+        assert!(
+            out.status.success(),
+            "`omh {}` failed: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let changed: Vec<String> = differs(&before, &fingerprint(&sb))
+            .into_iter()
+            .map(|d| d.replace(&format!("{}/", sb.home.display()), ""))
+            .collect();
+        assert_eq!(
+            changed,
+            took,
+            "`omh {}` must take that entry and only that entry",
+            argv.join(" ")
+        );
+    }
+
+    // The server went, and the one beside it in the same file did not.
+    let servers = std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap();
+    assert!(!servers.contains("linear"), "{servers}");
+    assert!(servers.contains("github"), "{servers}");
+}
+
+/// Off a terminal, `rm` refuses without `--yes` — for every kind, servers too.
+///
+/// One rule for asking, the one `omh sNN rm` already follows: a person at a
+/// terminal is asked, and a script must say so with `--yes`. Piped rather
+/// than null stdin, because a pipe that answers `y` is exactly the shape a
+/// guard has to refuse — see `omh_with_stdin`.
+#[test]
+fn settings_rm_off_a_terminal_refuses_without_yes_whatever_the_kind() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+
+    for argv in [
+        ["settings", "rm", "skills", "review-diff"],
+        ["settings", "rm", "mcp", "linear"],
+    ] {
+        let before = fingerprint(&sb);
+        let out = sb.omh_with_stdin(&argv, "y\n");
+        assert!(
+            !out.status.success(),
+            "`omh {}` removed something with nobody asked",
+            argv.join(" ")
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("--yes"),
+            "and says what would let it: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(differs(&before, &fingerprint(&sb)), Vec::<String>::new());
+    }
+}
+
+/// A hook omh ships is refused: `omh upgrade` would only put it back.
+///
+/// The shipped hooks are managed — `install_bundled` rewrites every one of them
+/// on each upgrade — so removing one is a deletion that undoes itself at the
+/// next release, after the person who made it has stopped thinking about it.
+/// What they wanted is for a repo not to run it, and that is `unuse`.
+#[test]
+fn settings_rm_refuses_a_hook_omh_ships_and_takes_one_of_yours() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["hooks"]);
+    std::fs::write(
+        sb.home.join(".omh/hooks/mine.json"),
+        r#"{"on":"stop","run":"true","does":"mine"}"#,
+    )
+    .unwrap();
+
+    let out = sb.omh(&["settings", "rm", "hooks", "rust-test", "--yes"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "removed a hook omh ships");
+    assert!(said.contains("omh upgrade"), "and says why: {said}");
+    assert!(
+        said.contains("omh unuse hooks rust-test"),
+        "and what to do: {said}"
+    );
+    assert!(sb.home.join(".omh/hooks/rust-test.json").exists());
+
+    let out = sb.omh(&["settings", "rm", "hooks", "mine", "--yes"]);
+    assert!(
+        out.status.success(),
+        "a hook of yours is yours to remove: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sb.home.join(".omh/hooks/mine.json").exists());
+}
+
+/// A server omh ships is refused, as a hook it ships is: `codegraph` and
+/// `memory` are omh's features, and a feature is switched off — whole, in a
+/// repo — rather than taken apart from your catalogue.
+///
+/// Every server a shipped manifest declares, read off `base/` rather than
+/// named here, so the next feature's server is held to it as well — and with
+/// `--yes` and `--dry-run` both, since the screen previews before it asks.
+#[test]
+fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    let mut owned = Vec::new();
+    for entry in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("base")).unwrap() {
+        let doc: toml::Table = std::fs::read_to_string(entry.unwrap().path())
+            .unwrap()
+            .parse()
+            .unwrap();
+        for e in doc["entry"].as_array().unwrap() {
+            if e["kind"].as_str() == Some("mcp") {
+                owned.push((
+                    e["name"].as_str().unwrap().to_string(),
+                    e["feature"].as_str().unwrap().to_string(),
+                ));
+            }
+        }
+    }
+    for server in ["codegraph", "memory"] {
+        assert!(owned.iter().any(|(n, _)| n == server), "{owned:?}");
+    }
+    let mut servers = serde_json::Map::new();
+    for (name, _) in &owned {
+        servers.insert(name.clone(), serde_json::json!({ "command": "true" }));
+    }
+    servers.insert("linear".into(), serde_json::json!({ "command": "npx" }));
+    let catalogue = sb.home.join(".omh/mcp.json");
+    std::fs::write(
+        &catalogue,
+        serde_json::json!({ "mcpServers": servers }).to_string(),
+    )
+    .unwrap();
+
+    for (name, feature) in &owned {
+        for argv in [
+            vec!["settings", "rm", "mcp", name, "--yes"],
+            vec!["--dry-run", "settings", "rm", "mcp", name],
+        ] {
+            let out = sb.omh(&argv);
+            let said = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success(), "`omh {}` removed it", argv.join(" "));
+            assert!(
+                said.contains(&format!("omh set {feature} off")),
+                "`omh {}` does not say what to do instead: {said}",
+                argv.join(" ")
+            );
+            assert!(
+                !String::from_utf8_lossy(&out.stdout).contains("would remove"),
+                "`omh {}` previewed a removal it refuses",
+                argv.join(" ")
+            );
+        }
+        let held = std::fs::read_to_string(&catalogue).unwrap();
+        assert!(held.contains(&format!("\"{name}\"")), "{name} went: {held}");
+    }
+
+    let out = sb.omh(&["settings", "rm", "mcp", "linear", "--yes"]);
+    assert!(
+        out.status.success(),
+        "a server of yours is yours to remove: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!std::fs::read_to_string(&catalogue)
+        .unwrap()
+        .contains("linear"));
+}
+
+/// A name that answers to two files is refused rather than guessed at.
+///
+/// A catalogue name is a file with its extension off, so `house.md` and
+/// `house.txt` are both `rules/house`. Removing either would be omh choosing
+/// which of your files to delete; removing both would be deleting one nobody
+/// named.
+#[test]
+fn settings_rm_refuses_a_name_two_files_answer_to() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["rules/house.md", "rules/house.txt"]);
+
+    let out = sb.omh(&["settings", "rm", "rules", "house", "--yes"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "chose a file to delete");
+    assert!(
+        said.contains("house.md") && said.contains("house.txt"),
+        "and names both: {said}"
+    );
+    assert!(sb.home.join(".omh/rules/house.md").exists());
+    assert!(sb.home.join(".omh/rules/house.txt").exists());
+}
+
+/// A name that is a path is refused as one, and nothing is deleted.
+///
+/// Two guards, either enough on its own: the name is refused before anything
+/// is joined to it, and the path that is removed is only ever one the
+/// catalogue directory listed. The wording pins the first; the files on disk
+/// pin that at least one of them holds — taking the second away alone leaves
+/// this green, because the first still refuses.
+#[test]
+fn settings_rm_refuses_a_name_that_is_a_path() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::write(sb.home.join("precious"), "x").unwrap();
+
+    for name in ["../../precious", "..", "review-diff/SKILL.md"] {
+        let out = sb.omh(&["settings", "rm", "skills", name, "--yes"]);
+        assert!(!out.status.success(), "`{name}` reached a delete");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("never a path"),
+            "`{name}` is refused as a path, not looked up as a name: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(sb.home.join("precious").exists());
+    assert!(sb.home.join(".omh/skills/review-diff/SKILL.md").exists());
+}
+
+/// The server's own `rm` is retired by name, and points at the one `rm`.
+#[test]
+fn the_server_rm_answers_to_the_one_rm() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+
+    let out = sb.omh(&["settings", "mcp", "rm", "linear"]); // types the retired verb on purpose
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty(), "ran something before refusing");
+    assert!(
+        said.contains("omh settings rm mcp") && !said.contains("unrecognized subcommand"),
+        "names the replacement, not clap's complaint: {said}"
+    );
+    assert!(std::fs::read_to_string(sb.home.join(".omh/mcp.json"))
+        .unwrap()
+        .contains("linear"));
 }
 
 /// A name this repo cannot use is not a name your catalogue lacks.
@@ -6154,6 +6503,453 @@ fn the_way_out_the_base_set_prints_is_a_way_out() {
     );
 }
 
+/// A new skill is a directory, and the editor opens the file a harness reads.
+///
+/// A skill is mounted as a directory holding `SKILL.md`, and `edit` opened the
+/// bare name — so `omh settings edit skills tdd` made a *file* called `tdd`,
+/// not the shape a skill is mounted in, which `omh info` still counted as a
+/// skill. An existing skill opens at its `SKILL.md` too — see
+/// `an_existing_skill_opens_at_its_skill_md`.
+#[test]
+fn a_new_skill_is_a_directory_and_the_editor_opens_its_skill_md() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    let saving = sb.saving_editor();
+
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "tdd"],
+        &[("EDITOR", &saving)],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.home.join(".omh/skills/tdd").is_dir(),
+        "a skill is a directory"
+    );
+    let opened = sb.opened_in_the_editor();
+    assert!(
+        opened.contains(".omh/skills/tdd/SKILL.md"),
+        "and the file in it is the one opened: {opened}"
+    );
+    assert!(sb.home.join(".omh/skills/tdd/SKILL.md").is_file());
+
+    let out = sb.omh(&["settings", "edit", "skills", "review-diff"]);
+    assert!(out.status.success());
+    assert!(
+        sb.opened_in_the_editor()
+            .lines()
+            .last()
+            .is_some_and(|l| l.ends_with(".omh/skills/review-diff/SKILL.md")),
+        "an existing skill opens at its SKILL.md: {}",
+        sb.opened_in_the_editor()
+    );
+}
+
+/// A new skill nothing was saved into is not left behind.
+///
+/// The directory has to exist before `$EDITOR` can save `SKILL.md` into it,
+/// and an editor quit without saving left it there: an empty directory, drawn
+/// on the screen and counted by `omh info` as a skill, holding nothing any
+/// harness reads. Taken back, and said.
+#[test]
+fn a_new_skill_nothing_was_saved_into_is_not_left_behind() {
+    let sb = sandbox();
+    sb.seed_base();
+    // The sandbox's own editor records what it was asked to open and writes
+    // nothing — somebody who quit without saving.
+    let out = sb.omh(&["settings", "edit", "skills", "fresh"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !sb.home.join(".omh/skills/fresh").exists(),
+        "an empty skill was left behind"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing was saved"),
+        "and it says so: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Editing an entry opens the file it is, and a new one gets its kind's
+/// extension.
+///
+/// A catalogue name is a file with its extension off, and `edit` joined the
+/// name back on without one: `omh settings edit rules house` opened a new,
+/// empty `rules/house` beside `house.md`, after which `rm rules house` refused
+/// because two files answered to it. A new rule, command, subagent or hook was
+/// made with no extension, which nothing loads — rules are read as `.md`, hooks
+/// as `.json`.
+#[test]
+fn editing_an_entry_opens_the_file_it_is_and_a_new_one_has_its_kinds_extension() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&[
+        "rules/house.md",
+        "commands/ship.md",
+        "subagents/critic.md",
+        "hooks/mine.json",
+    ]);
+    for (cap, name, opened) in [
+        ("rules", "house", ".omh/rules/house.md"),
+        ("commands", "ship", ".omh/commands/ship.md"),
+        ("subagents", "critic", ".omh/subagents/critic.md"),
+        ("hooks", "mine", ".omh/hooks/mine.json"),
+        ("rules", "tone", ".omh/rules/tone.md"),
+        ("commands", "deploy", ".omh/commands/deploy.md"),
+        ("subagents", "scout", ".omh/subagents/scout.md"),
+        ("hooks", "fresh", ".omh/hooks/fresh.json"),
+    ] {
+        let out = sb.omh(&["settings", "edit", cap, name]);
+        assert!(
+            out.status.success(),
+            "`omh settings edit {cap} {name}`: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let last = sb.opened_in_the_editor();
+        let last = last.lines().last().unwrap_or_default();
+        assert!(
+            last.ends_with(opened),
+            "`omh settings edit {cap} {name}` opened {last}, not {opened}"
+        );
+    }
+}
+
+/// A server is a record in one file, not a file of its own, so `edit` takes no
+/// name for one.
+///
+/// It joined the name under `mcp.json` and made the parent — so with no server
+/// yet, `omh settings edit mcp linear` made a *directory* called `mcp.json`,
+/// after which nothing could read the servers at all.
+#[test]
+fn settings_edit_refuses_a_name_for_a_server() {
+    let sb = sandbox();
+    sb.seed_base();
+    let out = sb.omh(&["settings", "edit", "mcp", "linear"]);
+    assert!(!out.status.success(), "a server name reached the editor");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("omh settings edit mcp"),
+        "and it says what opens the file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sb.home.join(".omh/mcp.json").is_dir());
+    assert!(sb.opened_in_the_editor().is_empty());
+}
+
+/// An editor that fails fails the edit, saying which one; one written with
+/// arguments is run the way a shell runs it.
+///
+/// `edit` threw `$EDITOR`'s status away, so `EDITOR=false omh settings edit`
+/// exited 0. And `EDITOR='code --wait'` — the commonest way to spell one — was
+/// run as a program called `code --wait`, which does not exist, and the error
+/// said only `No such file or directory`.
+#[test]
+fn an_editor_that_fails_fails_the_edit_and_one_with_arguments_runs() {
+    let sb = sandbox();
+    sb.seed_base();
+    let failing = sb.bin.join("failing-editor");
+    std::fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    std::fs::set_permissions(
+        &failing,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let out = sb.omh_env(
+        &["settings", "edit"],
+        &[("EDITOR", &failing.display().to_string())],
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a failed editor reported success");
+    assert!(
+        said.contains("failing-editor") && said.contains('3'),
+        "{said}"
+    );
+
+    let with_args = format!("{} --wait", sb.bin.join("fake-editor").display());
+    let out = sb.omh_env(&["settings", "edit"], &[("EDITOR", &with_args)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.opened_in_the_editor().contains("--wait"),
+        "{}",
+        sb.opened_in_the_editor()
+    );
+}
+
+/// A new skill an editor saved something else into is kept, and said to be
+/// one nothing will load.
+///
+/// The directory is somebody's work once a file is in it, so it stays — but
+/// it was kept in silence, exit 0, holding `notes.md` and no `SKILL.md`: the
+/// half-made skill omh had just learned to take back, made quietly instead.
+#[test]
+fn a_new_skill_saved_without_its_skill_md_is_kept_and_said() {
+    let sb = sandbox();
+    sb.seed_base();
+    let elsewhere = sb.bin.join("notes-editor");
+    std::fs::write(
+        &elsewhere,
+        "#!/bin/sh\nprintf 'x' > \"$(dirname \"$1\")/notes.md\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &elsewhere,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "tdd"],
+        &[("EDITOR", &elsewhere.display().to_string())],
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        sb.home.join(".omh/skills/tdd/notes.md").exists(),
+        "the work stays"
+    );
+    assert!(said.contains("no SKILL.md"), "and it is said: {said}");
+}
+
+/// An editor that fails is the error, whatever the cleanup after it found.
+///
+/// The cleanup ran first and its `?` won: an editor that left its directory
+/// unreadable and exited 3 was reported as `reading …/SKILL.md: Permission
+/// denied`, and the exit 3 — the thing that went wrong — was never said.
+#[cfg(unix)]
+#[test]
+fn an_editor_that_fails_is_the_error_whatever_the_cleanup_found() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads through 0o000, so nothing would be tested
+    }
+    let sb = sandbox();
+    sb.seed_base();
+    let locking = sb.bin.join("locking-editor");
+    std::fs::write(
+        &locking,
+        "#!/bin/sh\nchmod 000 \"$(dirname \"$1\")\"\nexit 3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&locking, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "tdd"],
+        &[("EDITOR", &locking.display().to_string())],
+    );
+    let dir = sb.home.join(".omh/skills/tdd");
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        said.contains("locking-editor") && said.contains("exit status: 3"),
+        "the editor's failure is the error: {said}"
+    );
+}
+
+/// An editor that is not there is said in words, not as status 127.
+///
+/// `sh` prints `command not found` on the terminal the editor was handed —
+/// behind the screen, once it is drawn back — so the only thing left to read
+/// was `exit status: 127`.
+#[test]
+fn an_editor_that_is_not_there_is_said_in_words() {
+    let sb = sandbox();
+    sb.seed_base();
+    let out = sb.omh_env(&["settings", "edit"], &[("EDITOR", "nvimm-not-a-program")]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        said.contains("nvimm-not-a-program") && said.contains("is $EDITOR spelled right"),
+        "{said}"
+    );
+}
+
+/// Import never writes through a link that stands where an entry would go.
+///
+/// The destination was checked with `exists()`, which answers `false` for a
+/// link to nothing — so a dangling `~/.omh/skills/tdd` read as free, and the
+/// copy went through it, to wherever it pointed.
+#[cfg(unix)]
+#[test]
+fn import_never_writes_through_a_link_where_an_entry_would_go() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.seed_adapters();
+    // A rule, because a rule is one file and `fs::copy` follows a link to
+    // write it; a skill's directory would have stopped at `create_dir_all`.
+    sb.theirs(".claude/CLAUDE.md", "always write the test first\n");
+    std::fs::create_dir_all(sb.home.join(".omh/rules")).unwrap();
+    let outside = sb.home.join("outside.md");
+    std::os::unix::fs::symlink(&outside, sb.home.join(".omh/rules/claude.md")).unwrap();
+    let out = sb.omh(&["import", "rules", "claude"]);
+    assert!(
+        !outside.exists(),
+        "import wrote through the link: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A name with a dot in it keeps the dot, and an editor's backup beside an
+/// entry does not stand in the way of editing it.
+///
+/// The extension was put on with `with_extension`, which replaces whatever
+/// follows the last dot: `edit rules v1.2` opened `rules/v1.md` — another
+/// rule, when one was there. And a name is a file with its extension off, so
+/// Emacs leaving `house.md~` made `house` two files, and `edit rules house`
+/// refused the file it had just been used on.
+#[test]
+fn a_dotted_name_keeps_its_dot_and_a_backup_does_not_block_an_edit() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["rules/v1.md", "rules/house.md", "rules/house.md~"]);
+    for (cap, name, opened) in [
+        ("rules", "v1.2", ".omh/rules/v1.2.md"),
+        ("commands", "foo.bar", ".omh/commands/foo.bar.md"),
+        ("hooks", "pre.commit", ".omh/hooks/pre.commit.json"),
+        ("rules", "house", ".omh/rules/house.md"),
+    ] {
+        let out = sb.omh(&["settings", "edit", cap, name]);
+        assert!(
+            out.status.success(),
+            "`omh settings edit {cap} {name}`: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let log = sb.opened_in_the_editor();
+        let last = log.lines().last().unwrap_or_default();
+        assert!(
+            last.ends_with(opened),
+            "{cap} {name} opened {last}, not {opened}"
+        );
+    }
+}
+
+/// An existing skill opens at its `SKILL.md`, as a new one does.
+///
+/// It opened as the directory, which `nano` cannot edit and `vi` lists; and a
+/// skill directory with no `SKILL.md` in it — half made — opened as a
+/// directory too, rather than at the one file that would make it a skill.
+#[test]
+fn an_existing_skill_opens_at_its_skill_md() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/half/notes.md"]);
+    for (name, opened) in [
+        ("review-diff", ".omh/skills/review-diff/SKILL.md"),
+        ("half", ".omh/skills/half/SKILL.md"),
+    ] {
+        let out = sb.omh(&["settings", "edit", "skills", name]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let log = sb.opened_in_the_editor();
+        let last = log.lines().last().unwrap_or_default();
+        assert!(last.ends_with(opened), "{name} opened {last}, not {opened}");
+    }
+    assert!(
+        sb.home.join(".omh/skills/half/notes.md").exists(),
+        "a half-made skill keeps what is in it"
+    );
+}
+
+/// An empty `$EDITOR` is no editor set, as git reads it.
+///
+/// `sh -c ' "$@"'` ran the file being edited as if it were the program.
+#[test]
+fn an_empty_editor_is_no_editor_set() {
+    let sb = sandbox();
+    sb.seed_base();
+    let vi = sb.bin.join("vi");
+    std::fs::write(
+        &vi,
+        format!(
+            "#!/bin/sh\nprintf 'vi %s\\n' \"$*\" >> {}\n",
+            sb.bin.join("editor.log").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&vi, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    for empty in ["", "  "] {
+        let out = sb.omh_env(&["settings", "edit"], &[("EDITOR", empty)]);
+        assert!(
+            out.status.success(),
+            "EDITOR={empty:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(
+        sb.opened_in_the_editor().starts_with("vi "),
+        "{}",
+        sb.opened_in_the_editor()
+    );
+}
+
+/// `omh settings` works from your home directory, where `.omh/mcp.json` is
+/// your catalogue's own file and not a repo declaring a server.
+///
+/// Outside a repo, a checkout's `.omh` is the directory you are in plus
+/// `.omh` — from `~`, the catalogue itself — and the check that refuses a
+/// repo declaring a server refused your own servers file: `omh settings mcp
+/// ls` and `omh settings rm mcp` both failed in `~`.
+#[test]
+fn settings_works_from_your_home_directory() {
+    let sb = sandbox();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+    for argv in [
+        vec!["settings", "mcp", "ls"],
+        vec!["settings", "rm", "mcp", "linear", "--yes"],
+    ] {
+        let out = sb.omh_in(&sb.home, &argv);
+        assert!(
+            out.status.success(),
+            "`omh {}` from ~: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// Any server can be removed, whatever its name.
+///
+/// `mcp add` and `mcp import` take a server's name as it is, and the server
+/// `rm` it replaced did too — so checking the name as a *path* before looking
+/// for the server left `org/x` in the catalogue with no command that could
+/// take it out. No path is made from a server's name.
+#[test]
+fn any_server_can_be_removed_whatever_its_name() {
+    let sb = sandbox();
+    sb.seed_base();
+    for name in ["org/x", ".x"] {
+        assert!(sb
+            .omh(&["settings", "mcp", "add", name, "echo"])
+            .status
+            .success());
+        let out = sb.omh(&["settings", "rm", "mcp", name, "--yes"]);
+        assert!(
+            out.status.success(),
+            "`{name}` could not be removed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let servers = std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap();
+        assert!(!servers.contains(name), "{servers}");
+    }
+}
+
 /// `omh settings` works where the file it edits lives — outside a repo.
 ///
 /// Its own docs open with "**You**, before a repo exists". It refused with a
@@ -6194,6 +6990,779 @@ fn settings_works_outside_a_repository() {
         assert!(
             !said.contains("git repository"),
             "`omh {}` answered about worktree branches: {said}",
+            argv.join(" ")
+        );
+    }
+}
+
+/// `omh` on a terminal of its own: a pseudo-terminal whose other end this test
+/// holds, so it can type and read what was drawn.
+///
+/// Nearly every other run here gets a pipe or nothing for stdin, which is
+/// exactly what a screen must not open on; this is the shape that is a
+/// terminal. `omh_on_a_terminal_with` can take stdin away, and
+/// `settings_typed_at_a_terminal_into_a_pipe_is_the_report` gives a terminal
+/// to stdin alone.
+struct Tty {
+    child: std::process::Child,
+    keys: std::fs::File,
+    drawn: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// Done once the child is gone and its last frame is read — EOF on macOS,
+    /// EIO on Linux — so `finish` joins it rather than guessing how long the
+    /// last frame takes to arrive.
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// A pseudo-terminal: the end this test holds, and the end a child is given.
+fn pty() -> (std::fs::File, std::fs::File) {
+    use std::os::fd::FromRawFd;
+    // `ptsname` answers in a static buffer, so two tests opening a terminal
+    // at once could read each other's name.
+    static NAMING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (master, slave) = unsafe {
+        let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(fd >= 0, "posix_openpt: {}", std::io::Error::last_os_error());
+        assert_eq!(libc::grantpt(fd), 0);
+        assert_eq!(libc::unlockpt(fd), 0);
+        let name = {
+            let _held = NAMING.lock().unwrap();
+            std::ffi::CStr::from_ptr(libc::ptsname(fd))
+                .to_string_lossy()
+                .into_owned()
+        };
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name)
+            .unwrap();
+        // A fresh pseudo-terminal is 0×0, and a screen drawn into that is
+        // a screen of nothing. Set on the slave: macOS refuses it on the
+        // master.
+        let size = libc::winsize {
+            ws_row: 40,
+            ws_col: 120,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            libc::ioctl(
+                std::os::fd::AsRawFd::as_raw_fd(&slave),
+                libc::TIOCSWINSZ as _,
+                &size
+            ),
+            0,
+            "TIOCSWINSZ: {}",
+            std::io::Error::last_os_error()
+        );
+        (std::fs::File::from_raw_fd(fd), slave)
+    };
+    (master, slave)
+}
+
+impl Sandbox {
+    fn omh_on_a_terminal(&self, args: &[&str]) -> Tty {
+        self.omh_on_a_terminal_with(args, &[], true)
+    }
+
+    /// `omh_on_a_terminal`, with variables set over the sandbox's own, and with
+    /// stdin either the terminal or nothing at all — `omh settings < file` has
+    /// a terminal to draw on and none to read keys from.
+    fn omh_on_a_terminal_with(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin_is_the_terminal: bool,
+    ) -> Tty {
+        use std::os::unix::process::CommandExt;
+        let (master, slave) = pty();
+        let path = match std::env::var("PATH") {
+            Ok(rest) => format!("{}:{rest}", self.bin.display()),
+            Err(_) => self.bin.display().to_string(),
+        };
+        let child = {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
+            command
+                .args(args)
+                .current_dir(&self.repo)
+                .env("HOME", &self.home)
+                .env("PATH", path)
+                .env("EDITOR", self.bin.join("fake-editor"))
+                .env("TERM", "xterm-256color")
+                .stdout(slave.try_clone().unwrap())
+                .stderr(slave.try_clone().unwrap());
+            for (k, v) in env {
+                command.env(k, v);
+            }
+            if stdin_is_the_terminal {
+                command.stdin(slave);
+            } else {
+                command.stdin(std::process::Stdio::null());
+            }
+            // Its own session, with this terminal as the controlling one — what
+            // a shell gives a program it starts. Without it `/dev/tty` names
+            // the terminal the *suite* runs in. Taken through stdout, which is
+            // the terminal whatever stdin is.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() < 0 || libc::ioctl(1, libc::TIOCSCTTY as _, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            command.spawn().expect("the binary under test must run")
+        };
+        // Drained from the start: a pseudo-terminal's buffer is small, and a
+        // child that fills it stops drawing until somebody reads.
+        let drawn = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut screen = master.try_clone().unwrap();
+        let into = drawn.clone();
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut screen, &mut buf) {
+                    // Linux answers EIO rather than 0 once the child is gone.
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => into.lock().unwrap().extend_from_slice(&buf[..n]),
+                }
+            }
+        });
+        Tty {
+            child,
+            keys: master,
+            drawn,
+            reader: Some(reader),
+        }
+    }
+}
+
+impl Tty {
+    /// Everything drawn so far, escapes and all.
+    fn raw(&self) -> String {
+        String::from_utf8_lossy(&self.drawn.lock().unwrap()).into_owned()
+    }
+
+    /// What the terminal shows **now**, row by row.
+    ///
+    /// Replayed rather than searched: a screen redraws only the cells that
+    /// changed, so moving from `skills/keep` to `skills/review-diff` writes
+    /// `review-diff` and nothing else — the full word never passes through the
+    /// stream. So the bytes are played onto a grid the size this terminal
+    /// was given, honouring the few sequences a screen uses to place text.
+    fn screen(&self) -> String {
+        const ROWS: usize = 40;
+        const COLS: usize = 120;
+        let raw = self.raw();
+        let mut grid = vec![vec![' '; COLS]; ROWS];
+        let (mut row, mut col) = (0usize, 0usize);
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => match chars.next() {
+                    Some('[') => {
+                        let mut params = String::new();
+                        let mut last = ' ';
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                last = c;
+                                break;
+                            }
+                            params.push(c);
+                        }
+                        let private = params.starts_with('?');
+                        let nums: Vec<usize> = params
+                            .trim_start_matches('?')
+                            .split(';')
+                            .map(|n| n.parse().unwrap_or(0))
+                            .collect();
+                        let n = |i: usize, default: usize| {
+                            nums.get(i).copied().filter(|n| *n > 0).unwrap_or(default)
+                        };
+                        match last {
+                            'H' | 'f' => {
+                                row = (n(0, 1) - 1).min(ROWS - 1);
+                                col = (n(1, 1) - 1).min(COLS - 1);
+                            }
+                            'A' => row = row.saturating_sub(n(0, 1)),
+                            'B' => row = (row + n(0, 1)).min(ROWS - 1),
+                            'C' => col = (col + n(0, 1)).min(COLS - 1),
+                            'D' => col = col.saturating_sub(n(0, 1)),
+                            'G' => col = (n(0, 1) - 1).min(COLS - 1),
+                            'd' => row = (n(0, 1) - 1).min(ROWS - 1),
+                            'J' if nums.first() == Some(&2) || nums.first() == Some(&3) => {
+                                grid = vec![vec![' '; COLS]; ROWS];
+                            }
+                            'J' => {
+                                for cell in &mut grid[row][col..] {
+                                    *cell = ' ';
+                                }
+                                for line in &mut grid[row + 1..] {
+                                    *line = vec![' '; COLS];
+                                }
+                            }
+                            'K' => {
+                                for cell in &mut grid[row][col..] {
+                                    *cell = ' ';
+                                }
+                            }
+                            // Entering or leaving the alternate screen: a
+                            // different page, so nothing on this one survives.
+                            'h' | 'l' if private && nums.first() == Some(&1049) => {
+                                grid = vec![vec![' '; COLS]; ROWS];
+                                (row, col) = (0, 0);
+                            }
+                            _ => {}
+                        }
+                    }
+                    // OSC: up to BEL or ST.
+                    Some(']') => {
+                        while let Some(c) = chars.next() {
+                            if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                '\r' => col = 0,
+                '\n' => row = (row + 1).min(ROWS - 1),
+                c if c.is_control() => {}
+                c => {
+                    if col < COLS {
+                        grid[row][col] = c;
+                    }
+                    col += 1;
+                }
+            }
+        }
+        grid.iter()
+            .map(|line| line.iter().collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The screen's words as a person reads them: every row's text with the
+    /// box drawing taken off, run together, so a sentence that wrapped is one
+    /// sentence again.
+    ///
+    /// Where a line wraps depends on how long the paths in it are — a temp
+    /// directory is `/var/folders/…` on macOS and `/tmp/.tmp…` on Linux — so
+    /// `never a path` was one row on one and `never` / `a path` on the other,
+    /// and a test that looked for it passed on one and failed on the other.
+    fn read(&self) -> String {
+        let boxes = |c: char| "│┌┐└┘─├┤┬┴┼╭╮╰╯".contains(c);
+        self.screen()
+            .lines()
+            .map(|row| row.replace(boxes, " "))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Wait until `needle` is on the screen — as drawn, or as read across a
+    /// wrap — or fail saying what is.
+    fn wait_for(&self, needle: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !self.screen().contains(needle) && !self.read().contains(needle) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "`{needle}` is not on the screen. It shows:\n{}",
+                self.screen()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Type, as a person would: what is sent is bytes on the terminal.
+    fn send(&mut self, keys: &str) {
+        if let Err(e) = std::io::Write::write_all(&mut self.keys, keys.as_bytes()) {
+            panic!(
+                "could not type {keys:?} ({e}) — omh is no longer reading. The screen shows:\n{}",
+                self.screen()
+            );
+        }
+    }
+
+    /// Wait until nothing has been drawn for a moment: a frame arrives in
+    /// several writes, and a snapshot taken between two of them is half a
+    /// frame.
+    fn settle(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut seen = self.drawn.lock().unwrap().len();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            let now = self.drawn.lock().unwrap().len();
+            if now == seen || std::time::Instant::now() > deadline {
+                return;
+            }
+            seen = now;
+        }
+    }
+
+    /// Press one key and wait for the screen to answer it, so the next key
+    /// is sent to the screen this one produced — not raced past it.
+    ///
+    /// The snapshot is taken once the screen has settled: taken mid-frame,
+    /// the rest of the *previous* frame read as the answer, and every later
+    /// key in a loop went one frame behind.
+    fn step(&mut self, keys: &str) {
+        self.settle();
+        let before = self.screen();
+        self.send(keys);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.screen() == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{keys:?} changed nothing on the screen:\n{before}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.settle();
+    }
+
+    /// Wait for it to exit, and answer how it did and what it drew.
+    fn finish(mut self) -> (std::process::ExitStatus, String) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                if let Some(reader) = self.reader.take() {
+                    reader.join().unwrap();
+                }
+                return (status, self.raw());
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!(
+                    "still running after `q`. The screen shows:\n{}",
+                    self.screen()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// `omh settings` at a terminal is a screen, and looking at it writes nothing.
+///
+/// The report it prints anywhere else is for a pipe; at a terminal the
+/// question is usually "and change it", which a report cannot answer. Leaving
+/// has to hand the terminal back as it was found — the alternate screen exited
+/// — or the shell it returns to is a mess somebody has to `reset`.
+#[test]
+fn settings_at_a_terminal_is_a_screen_and_looking_writes_nothing() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    let before = fingerprint(&sb);
+
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("3");
+    tty.wait_for("review-diff");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+
+    assert!(status.success(), "{status:?}\n{raw}");
+    assert!(
+        raw.contains("\x1b[?1049h"),
+        "it never opened a screen:\n{raw}"
+    );
+    assert!(
+        raw.trim_end().ends_with("\x1b[?1049l")
+            || raw.rfind("\x1b[?1049l") > raw.rfind("\x1b[?1049h"),
+        "and it left the screen it opened:\n{raw}"
+    );
+    assert_eq!(differs(&before, &fingerprint(&sb)), Vec::<String>::new());
+}
+
+/// Typed at a terminal and piped into another program, it is the report.
+///
+/// `omh settings | less` has a person at the keyboard and a pipe for stdout,
+/// and a screen drawn into the pipe is escape sequences in somebody's pager.
+/// Both ends have to be a terminal.
+#[test]
+fn settings_typed_at_a_terminal_into_a_pipe_is_the_report() {
+    let sb = sandbox();
+    sb.seed_base();
+    let (_keys, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("settings")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .stdin(slave)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("waited on a terminal for keys, drawing into a pipe");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let out = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("\x1b[?1049h"), "{said}");
+    assert!(said.contains("idle_timeout"), "{said}");
+}
+
+/// At a terminal, `--json` and `--dry-run` still get the report: both are a
+/// script's flags, and a script is not going to drive a screen.
+#[test]
+fn settings_at_a_terminal_answers_json_with_the_report() {
+    let sb = sandbox();
+    sb.seed_base();
+    for argv in [["--json", "settings"], ["--dry-run", "settings"]] {
+        let tty = sb.omh_on_a_terminal(&argv);
+        let (status, raw) = tty.finish();
+        assert!(status.success(), "{raw}");
+        assert!(
+            !raw.contains("\x1b[?1049h"),
+            "`omh {}` opened a screen",
+            argv.join(" ")
+        );
+        assert!(
+            raw.contains("idle_timeout"),
+            "and printed the report: {raw}"
+        );
+    }
+}
+
+/// A default is set on the screen the way `omh settings set` sets it.
+///
+/// Selected by reading what is drawn rather than by counting keypresses: the
+/// selected row's description appears below the list, so the test moves until
+/// it sees the one it wants.
+#[test]
+fn a_default_is_set_on_the_screen() {
+    let sb = sandbox();
+    sb.seed_base();
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    for _ in 0..12 {
+        if tty.screen().contains("How long a session may sit unused") {
+            break;
+        }
+        tty.step("j");
+    }
+    tty.wait_for("How long a session may sit unused");
+    tty.send("\r");
+    tty.wait_for("idle_timeout =");
+    tty.send("45m\r");
+    tty.wait_for("wrote →");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+
+    let template = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
+    assert!(
+        template.contains("idle_timeout = \"45m\""),
+        "got: {template}"
+    );
+}
+
+/// An entry is removed on the screen, after it asks — in the words of the
+/// preview `omh settings rm --dry-run` gives.
+#[test]
+fn an_entry_is_removed_on_the_screen_after_it_asks() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/keep/SKILL.md"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("3"); // the skills section
+    tty.wait_for("skills/keep");
+    for _ in 0..4 {
+        if tty.screen().contains("skills/review-diff") {
+            break;
+        }
+        tty.step("j");
+    }
+    tty.wait_for("skills/review-diff");
+    tty.send("d");
+    tty.wait_for("would remove");
+    tty.send("y");
+    tty.wait_for("removed");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    assert!(!sb.home.join(".omh/skills/review-diff").exists());
+    assert!(sb.home.join(".omh/skills/keep/SKILL.md").exists());
+}
+
+/// A server is added on the screen, its command split the way a shell would.
+#[test]
+fn a_server_is_added_on_the_screen() {
+    let sb = sandbox();
+    sb.seed_base();
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("4"); // the servers section
+    tty.wait_for("no servers");
+    tty.send("a");
+    tty.wait_for("name:");
+    tty.send("linear\r");
+    tty.wait_for("command and arguments:");
+    tty.send("npx -y mcp-remote 'https://mcp.linear.app/sse'\r");
+    tty.wait_for("env (KEY=VALUE");
+    tty.send("\r");
+    tty.wait_for("wrote →");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+
+    let servers: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(servers["mcpServers"]["linear"]["command"], "npx");
+    assert_eq!(
+        servers["mcpServers"]["linear"]["args"],
+        serde_json::json!(["-y", "mcp-remote", "https://mcp.linear.app/sse"])
+    );
+}
+
+/// `$EDITOR` gets the terminal, and the screen comes back after it.
+#[test]
+fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("3");
+    tty.wait_for("skills/review-diff");
+    tty.send("e");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !sb.opened_in_the_editor().contains("skills/review-diff") {
+        assert!(std::time::Instant::now() < deadline, "{}", tty.screen());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    tty.wait_for("closed");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    // Left before the editor ran, and back after it: a screen still drawn
+    // under `$EDITOR` is two programs painting one terminal.
+    let entered = raw.find("\x1b[?1049h").expect("a screen");
+    let left = raw[entered..]
+        .find("\x1b[?1049l")
+        .map(|i| entered + i)
+        .unwrap_or_else(|| panic!("the screen was never left for the editor:\n{raw}"));
+    let back = raw[left..]
+        .find("\x1b[?1049h")
+        .map(|i| left + i)
+        .unwrap_or_else(|| panic!("the screen did not come back after the editor:\n{raw}"));
+    // And the mouse given back each time the terminal is: before `$EDITOR`
+    // has it, and before the shell does at the end. Left captured, every
+    // click and scroll after is an escape sequence typed at a prompt.
+    let capture = "\x1b[?1000h";
+    let release = "\x1b[?1000l";
+    assert!(
+        raw.contains(capture),
+        "the screen never took the mouse:\n{raw:?}"
+    );
+    assert!(
+        raw[..left].rfind(release) > raw[..left].rfind(capture),
+        "the mouse was still captured when the editor got the terminal"
+    );
+    assert!(
+        raw[back..].contains(capture),
+        "the mouse was not taken back with the screen after the editor"
+    );
+    let last_leave = raw.rfind("\x1b[?1049l").expect("left at the end");
+    assert!(
+        raw[..last_leave].rfind(release) > raw[..last_leave].rfind(capture),
+        "the mouse was still captured when the shell got the terminal back"
+    );
+}
+
+/// A rule opens as the file it is, from the screen as from the command.
+///
+/// The screen's rows carry a name without its extension, and editing joined
+/// it back on bare: `enter` on `rules/house` opened a new, empty
+/// `rules/house` beside `house.md`.
+#[test]
+fn a_rule_opens_from_the_screen_as_the_file_it_is() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["rules/house.md"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("2");
+    tty.wait_for("rules/house");
+    tty.send("\r");
+    tty.wait_for("closed");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    let opened = sb.opened_in_the_editor();
+    assert!(
+        opened.trim_end().ends_with(".omh/rules/house.md"),
+        "{opened}"
+    );
+    assert!(!sb.home.join(".omh/rules/house").exists());
+}
+
+/// An editor that fails is said on the screen, in the editor's words.
+///
+/// It was said as "the editor did not exit cleanly" whatever had happened —
+/// and when omh refused before any editor ran, the refusal itself was
+/// printed behind the screen.
+#[test]
+fn an_editor_that_fails_is_said_on_the_screen() {
+    let sb = sandbox();
+    sb.seed_base();
+    let failing = sb.bin.join("failing-editor");
+    std::fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    std::fs::set_permissions(
+        &failing,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let failing = failing.display().to_string();
+    let mut tty = sb.omh_on_a_terminal_with(&["settings"], &[("EDITOR", &failing)], true);
+    tty.wait_for("idle_timeout");
+    tty.send("e");
+    tty.wait_for("exited with");
+    tty.wait_for("failing-editor");
+    // And a name refused before any editor runs is refused on the screen.
+    tty.send("3a");
+    tty.wait_for("name:");
+    tty.send("team/review\r");
+    tty.wait_for("never a path");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+}
+
+/// A removal omh refuses asks nothing: the refusal is the answer.
+///
+/// The preview is what asks, so a hook omh ships is refused before the
+/// question; a `y` typed after it removes nothing.
+#[test]
+fn a_removal_omh_refuses_asks_nothing() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.seed_catalogue(&["hooks"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("7");
+    tty.wait_for("hooks/config-guard");
+    tty.send("d");
+    tty.wait_for("omh ships hooks/config-guard");
+    // The question's own words, not its title: a title can be reworded, and
+    // a check for an old one passes over a box that is still there.
+    assert!(
+        !tty.read().contains("any other key keeps it"),
+        "a refused removal still asked: {}",
+        tty.screen()
+    );
+    tty.send("y");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    assert!(sb.home.join(".omh/hooks/config-guard.json").exists());
+}
+
+/// With a terminal to draw on and none to read keys from, it is the report.
+///
+/// `omh settings < answers` would have opened a screen waiting on a file for
+/// keys it will never send.
+#[test]
+fn settings_with_stdin_off_a_terminal_is_the_report() {
+    let sb = sandbox();
+    sb.seed_base();
+    let tty = sb.omh_on_a_terminal_with(&["settings"], &[], false);
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    assert!(!raw.contains("\x1b[?1049h"), "it opened a screen: {raw}");
+    assert!(raw.contains("idle_timeout"), "{raw}");
+}
+
+/// `omh settings rm` at a terminal asks, and only a yes removes.
+///
+/// Every other run here gives the command a pipe or nothing, so the question
+/// itself was never asked by any test — taking it out stayed green.
+#[test]
+fn settings_rm_at_a_terminal_asks_and_only_a_yes_removes() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/keep/SKILL.md"]);
+    for (answer, removed) in [("n", false), ("\r", false), ("y", true)] {
+        let mut tty = sb.omh_on_a_terminal(&["settings", "rm", "skills", "keep"]);
+        tty.wait_for("(y/N)");
+        tty.send(answer);
+        if answer != "\r" {
+            tty.send("\r");
+        }
+        let (status, raw) = tty.finish();
+        assert_eq!(status.success(), removed, "answering {answer:?}: {raw}");
+        assert_eq!(
+            !sb.home.join(".omh/skills/keep").exists(),
+            removed,
+            "answering {answer:?}"
+        );
+    }
+}
+
+/// A catalogue directory omh cannot read is said, by `rm` and by `import`,
+/// and never as an empty one.
+///
+/// `rm`'s "your catalogue has no skills called…" and `import`'s "claude has no
+/// skills here" are both true of an empty directory and false of one omh could
+/// not open — and each sends somebody looking for a typo that is not there.
+#[cfg(unix)]
+#[test]
+fn a_directory_omh_cannot_read_is_said_never_read_as_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads through 0o000, so nothing would be tested
+    }
+    let sb = sandbox();
+    sb.seed_base();
+    sb.seed_adapters();
+    sb.catalogue(&["skills/keep/SKILL.md"]);
+    sb.theirs(".claude/skills/tdd/SKILL.md", "---\nname: tdd\n---\n");
+
+    for (locked, argv, absent) in [
+        (
+            sb.home.join(".omh/skills"),
+            vec!["settings", "rm", "skills", "keep", "--yes"],
+            "has no skills called",
+        ),
+        (
+            sb.home.join(".claude"),
+            vec!["import", "skills", "claude"],
+            "has no skills here",
+        ),
+    ] {
+        let was = std::fs::metadata(&locked).unwrap().permissions().mode();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = sb.omh(&argv);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(was)).unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success(),
+            "`omh {}` succeeded: {said}",
+            argv.join(" ")
+        );
+        assert!(
+            !said.contains(absent),
+            "`omh {}` read an unreadable directory as an empty one: {said}",
+            argv.join(" ")
+        );
+        assert!(
+            said.contains("ermission denied"),
+            "`omh {}` did not say why: {said}",
             argv.join(" ")
         );
     }
@@ -6897,7 +8466,7 @@ fn what_config_held_answers_to_settings() {
         "what `mcp add` wrote is what `mcp ls` reads: {}",
         String::from_utf8_lossy(&listed.stdout)
     );
-    let removed = sb.omh(&["settings", "mcp", "rm", "srv1"]);
+    let removed = sb.omh(&["settings", "rm", "mcp", "srv1", "--yes"]);
     assert!(removed.status.success());
     assert!(
         !String::from_utf8_lossy(&sb.omh(&["settings", "mcp", "ls"]).stdout).contains("srv1"),
@@ -7096,7 +8665,7 @@ fn a_retired_spelling_somewhere_other_than_the_verb_gets_claps_own_refusal() {
             "unexpected argument",
         ),
         (
-            vec!["settings", "mcp", "rm", "x", "--force"],
+            vec!["settings", "rm", "mcp", "x", "--force"],
             "unexpected argument",
         ),
         (vec!["memory", "rm", "x", "--force"], "unexpected argument"),
@@ -10369,6 +11938,50 @@ fn importing_a_skill_puts_it_in_your_catalogue() {
     );
 }
 
+/// Importing into your catalogue needs no repo, because the catalogue is not
+/// in one.
+///
+/// A skill, a rule, a command and a subagent all land in `~/.omh`, and the
+/// command refused outside a checkout with a sentence about worktree branches
+/// — the defect `omh settings` had, one verb over. Hooks still need a repo:
+/// they land in its `.omh/hooks/`, so outside one there is nowhere to put
+/// them, and that refusal stays.
+#[test]
+fn importing_into_your_catalogue_works_outside_a_repository() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(
+        ".claude/skills/review-diff/SKILL.md",
+        "---\nname: review-diff\n---\n\nbody\n",
+    );
+    fx.theirs(".claude/CLAUDE.md", "always write the test first\n");
+    let outside = fx.home.join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+
+    for capability in ["skills", "rules"] {
+        let out = fx.omh_in(&outside, &["import", capability, "claude"]);
+        assert!(
+            out.status.success(),
+            "`omh import {capability} claude` writes ~/.omh and needs no worktree: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(fx.mine("skills/review-diff/SKILL.md").is_some());
+    assert!(fx.mine("rules/claude.md").is_some());
+
+    let out = fx.omh_in(&outside, &["import", "hooks", "claude"]);
+    assert!(
+        !out.status.success(),
+        "a hook lands in a repo, and there is none here"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("git repository"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// **Rules are imported from your own file, never this project's.**
 ///
 /// `rules::compose` already puts the repo's `CLAUDE.md` into every session, so
@@ -13550,9 +15163,9 @@ struct Exercise {
 /// declared, naming itself.
 ///
 /// **Order is part of the table.** Half of these only mean something in
-/// sequence — `settings mcp rm demo` is a real removal after `settings mcp add
-/// demo` and a refusal without it, and `s01 rm` has to come last because it
-/// takes the session away.
+/// sequence — `settings rm mcp demo --yes` is a real removal after `settings mcp
+/// add demo` and a refusal without it, and `s01 rm` has to come last because
+/// it takes the session away.
 const EXERCISES: &[Exercise] = &[
     // ── things that read the machine ────────────────────────────────────
     //
@@ -13681,8 +15294,24 @@ const EXERCISES: &[Exercise] = &[
         expect: Expect::Ok,
         runtime: false,
     },
+    // The one `rm`, for a server and for an entry. Off a terminal it refuses
+    // without `--yes`, and the stdin here is null, so that refusal is a real
+    // run of the bare spelling; the preview needs no consent, since it removes
+    // nothing.
     Exercise {
-        argv: &["settings", "mcp", "rm", "demo"],
+        argv: &["settings", "rm", "mcp", "demo", "--yes"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "rm", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["--yes"]),
+        runtime: false,
+    },
+    Exercise {
+        argv: &["--dry-run", "settings", "rm", "skills", "review-diff"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: false,

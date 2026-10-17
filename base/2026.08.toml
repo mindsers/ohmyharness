@@ -23,7 +23,7 @@ kind    = "mcp"
 feature = "codegraph"
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
-remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `[omh] codegraph = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 command = "codebase-memory-mcp"
 
   [[entry.measured]]
@@ -60,7 +60,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the agent is given the module map instead of discovering it by reading files"
-remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `[omh] codegraph = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 
   [[entry.measured]]
   what  = "per context rebuild"
@@ -78,7 +78,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "structural questions answer in one call instead of an iterative grep"
-remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `[omh] codegraph = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 
   [[entry.measured]]
   what  = "per grep"
@@ -96,7 +96,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "one symbol instead of a whole file, when the file is big enough for that to matter"
-remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `[omh] codegraph = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 
   [[entry.measured]]
   what  = "when it fires"
@@ -120,7 +120,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the graph describes the code as it is now, not as the session found it"
-remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `[omh] codegraph = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 
   [[entry.measured]]
   what  = "per turn"
@@ -138,7 +138,7 @@ kind    = "rules"
 feature = "codegraph"
 since   = "2026.08"
 because = "a graph the agent has not been told about is a graph it never queries — the four hooks fire while it is already doing something, and this is what is true before it starts"
-remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `[omh] codegraph = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
@@ -262,7 +262,7 @@ kind    = "mcp"
 feature = "memory"
 since   = "2026.08"
 because = "what a session learned outlives it — a removed session leaves no transcript to grep"
-remove  = "omh set memory off — the feature and its server together. Your notes stay where they are; `omh settings mcp rm memory` takes the server out of your catalogue for every repo"
+remove  = "omh set memory off — the feature and its server together. Your notes stay where they are; `[omh] memory = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 command = "omh"
 args    = [
   "memory", "serve",
@@ -302,7 +302,7 @@ kind    = "rules"
 feature = "memory"
 since   = "2026.08"
 because = "*record what surprised you* is a trigger, and an agent cannot look up a rule it does not know it needs — no tool description can carry that. The note shape rides along for the case `memory::deliver` documents: a session that got no memory server writes the file by hand"
-remove  = "omh set memory off — the feature and its server together. Your notes stay where they are; `omh settings mcp rm memory` takes the server out of your catalogue for every repo"
+remove  = "omh set memory off — the feature and its server together. Your notes stay where they are; `[omh] memory = false` in ~/.omh/default.toml does the same for every repo `omh init` sets up after"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"

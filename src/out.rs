@@ -104,9 +104,11 @@ impl Palette {
 
     /// Whether anything omh prints through this will carry colour.
     ///
-    /// Asked by the two commands that hand the terminal to git: git honours
-    /// neither `NO_COLOR` nor omh's `--color`, so the answer resolved here has
-    /// to be passed to it as `--color=<when>` or the user's flag does nothing.
+    /// Asked by the commands that hand the terminal to something that does not
+    /// read omh's flags: git honours neither `NO_COLOR` nor omh's `--color`,
+    /// so the answer resolved here has to be passed to it as `--color=<when>`;
+    /// and the `omh settings` screen draws through ratatui, which is told here
+    /// whether to paint at all.
     pub fn is_plain(&self) -> bool {
         !self.styled
     }

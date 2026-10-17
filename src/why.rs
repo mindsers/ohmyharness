@@ -791,10 +791,7 @@ mod tests {
             out.contains("gitnexus"),
             "the alternatives are missing:\n{out}"
         );
-        assert!(
-            out.contains("omh settings mcp rm codegraph"),
-            "no way out:\n{out}"
-        );
+        assert!(out.contains("omh set codegraph off"), "no way out:\n{out}");
     }
 
     /// Cost is measured and benefit is argued: two different kinds of claim.

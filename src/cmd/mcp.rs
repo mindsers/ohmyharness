@@ -62,46 +62,6 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
             Ok(())
         }
 
-        McpCmd::Rm { name } => {
-            // **Refused, not reported.** A name that was not there is a typo
-            // far more often than a plan, and this arm used to exit 0 saying so
-            // — the one command in the group that did. `use`, `unuse`,
-            // `memory rm` and `memory promote` all refuse the same mistake, and
-            // a script cannot tell a removal from a misspelling when both come
-            // back green.
-            if dry_run {
-                let known = config::servers(paths)?;
-                anyhow::ensure!(
-                    known.iter().any(|s| s.key == *name),
-                    "no server `{name}` in your catalogue."
-                );
-                ctx.say(&report::Action::new(
-                    "mcp-planned",
-                    format!("would remove {name} from your catalogue"),
-                ));
-                return Ok(());
-            }
-            if !config::mcp_remove(paths, name)? {
-                let known = config::servers(paths)?
-                    .into_iter()
-                    .map(|s| s.key)
-                    .collect::<Vec<_>>();
-                anyhow::bail!(
-                    "no server `{name}` in your catalogue.\n  servers: {}",
-                    if known.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                );
-            }
-            ctx.say(
-                &report::Action::new("mcp-removed", format!("removed {name} from your catalogue"))
-                    .data(serde_json::json!({ "server": name, "removed": true })),
-            );
-            Ok(())
-        }
-
         McpCmd::Import {
             harness,
             file,

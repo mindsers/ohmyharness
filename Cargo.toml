@@ -34,6 +34,21 @@ toml_edit = "0.25"
 # links dev-dependencies into the bin target, so the suite went green against a
 # binary `cargo build` could not produce.
 tempfile = "3"
+# `omh settings` at a terminal is a screen rather than a report: your defaults,
+# your servers and every catalogue entry, changed in place. Layout, lists and
+# the terminal's own events; `crossterm` is the only backend compiled in.
+# Pinned below 0.30, which needs rust 1.88 — past this crate's rust-version.
+# For the same reason Cargo.lock holds its `instability` at 0.3.10, the newest
+# that declares 1.85 or older: re-resolve it with
+# `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo update`, not a bare
+# `cargo update`, or the msrv job is the one that finds out.
+# `unstable-rendered-line-info` is `Paragraph::line_count`, which counts the
+# rows a paragraph wraps to with the renderer's own wrapping: a box sized by a
+# count of its own disagreed at every word that filled a row.
+ratatui = { version = "0.29", default-features = false, features = [
+  "crossterm",
+  "unstable-rendered-line-info",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

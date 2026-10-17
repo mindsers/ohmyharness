@@ -60,6 +60,11 @@ pub struct Key {
     pub does: &'static str,
     pub shape: Shape,
     pub secret: Secret,
+    /// What applies when it is not set, in a few words — `auto`, `never
+    /// stopped`. The screen draws it beside an unset key, where `(unset)`
+    /// said nothing about what would happen. Each one is read off the code
+    /// that falls back, not the docs.
+    pub unset: &'static str,
 }
 
 impl Key {
@@ -95,6 +100,7 @@ pub const KEYS: &[Key] = &[
                it short.",
         shape: Shape::Paths,
         secret: Secret::Yes,
+        unset: "nothing carried",
     },
     // A *name*, selecting which captured login gets mounted. The credential
     // itself lives under `paths.creds()` and never passes through here, which
@@ -105,12 +111,14 @@ pub const KEYS: &[Key] = &[
         does: "Which captured login a session is launched with, by name.",
         shape: Shape::Text,
         secret: Secret::No,
+        unset: "the only login captured",
     },
     Key {
         name: "idle_timeout",
         does: "How long a session may sit unused before omh stops it.",
         shape: Shape::Duration,
         secret: Secret::No,
+        unset: "never stopped",
     },
     Key {
         name: "sandbox_memory",
@@ -118,6 +126,7 @@ pub const KEYS: &[Key] = &[
                it (`4g`, `512m`). Unset means the runtime's default.",
         shape: Shape::Text,
         secret: Secret::No,
+        unset: "the runtime's own",
     },
     Key {
         name: "sandbox_cpus",
@@ -125,12 +134,14 @@ pub const KEYS: &[Key] = &[
                (`2`, `1.5`). Unset means the runtime's default.",
         shape: Shape::Text,
         secret: Secret::No,
+        unset: "the runtime's own",
     },
     Key {
         name: "runtime",
         does: "Which runtime builds and runs the sandbox. Unset means `auto`.",
         shape: Shape::Choice(&["auto", "docker", "podman", "sbx"]),
         secret: Secret::No,
+        unset: "auto",
     },
     // A path to a PEM on the host, not a credential: a CA certificate is
     // public by construction. It lands in the committed file because a team on
@@ -151,12 +162,14 @@ pub const KEYS: &[Key] = &[
                for a network that inspects TLS and signs it with its own root.",
         shape: Shape::Path,
         secret: Secret::No,
+        unset: "no extra CA",
     },
     Key {
         name: "persistence",
         does: "How a session's terminal survives detaching. Unset means `dtach`.",
         shape: Shape::Choice(&["dtach", "none"]),
         secret: Secret::No,
+        unset: "dtach",
     },
 ];
 
@@ -312,6 +325,31 @@ mod tests {
     }
 
     use super::*;
+
+    /// Every key says what applies when it is not set, and the answer agrees
+    /// with the rest of what the table says: a choice falls back to one of its
+    /// choices, and a `does` that already says "Unset means `x`" says `x` here.
+    ///
+    /// The screen draws this beside every unset key, where `(unset)` told
+    /// nobody what would happen.
+    #[test]
+    fn every_key_says_what_applies_when_it_is_unset() {
+        for k in KEYS {
+            assert!(!k.unset.trim().is_empty(), "{} says nothing", k.name);
+            if let Shape::Choice(allowed) = k.shape {
+                assert!(
+                    allowed.contains(&k.unset),
+                    "{} falls back to `{}`, which is not one of {allowed:?}",
+                    k.name,
+                    k.unset
+                );
+            }
+            if let Some((_, rest)) = k.does.split_once("Unset means `") {
+                let said = rest.split('`').next().unwrap_or_default();
+                assert_eq!(k.unset, said, "{}: `does` and `unset` disagree", k.name);
+            }
+        }
+    }
 
     /// Every key says what omh reads it for.
     ///

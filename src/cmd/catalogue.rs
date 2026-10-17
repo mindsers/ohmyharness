@@ -332,13 +332,14 @@ pub(crate) fn import_cmd(
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    let cap = adapter::Capability::from_key(capability).with_context(|| {
-        format!(
-            "`{capability}` is not a capability — expected {}",
-            crate::cmd::settings::capability_list()
-        )
-    })?;
-    let paths = Paths::discover(cwd)?;
+    let cap = crate::cmd::settings::capability_from(capability)?;
+    // Hooks land in this repo's `.omh/hooks/`, so they need one. Everything else
+    // lands in `~/.omh`, which is there outside a checkout too — refusing there
+    // was `omh settings`' old defect, one verb over.
+    let paths = match cap {
+        adapter::Capability::Hooks => Paths::discover(cwd)?,
+        _ => Paths::anywhere(cwd)?,
+    };
     let adapter = Adapter::find(&paths.adapters(), harness)?;
     let binding = adapter
         .supports(cap)
@@ -357,7 +358,13 @@ pub(crate) fn import_cmd(
             adapter::expand_host(template, &home, &paths.repo)
         }
     };
-    if !source.exists() {
+    // `try_exists`, not `exists`: the second answers `false` for a directory
+    // omh may not read, and "claude has no skills here" over a `~/.claude`
+    // somebody locked sends them looking for skills that are there.
+    if !source
+        .try_exists()
+        .with_context(|| format!("reading {}", source.display()))?
+    {
         ctx.say(
             &report::Action::new(
                 "import-nothing-there",
@@ -458,13 +465,38 @@ pub(crate) fn import_entries(
         } else {
             name.clone()
         });
-        if to.exists() {
-            considered.push(report::Considered {
-                name: stem,
-                verdict: report::Verdict::Kept,
-                detail: "already in your catalogue".into(),
-            });
-            continue;
+        // Anything standing there, a link to nothing included: `exists()`
+        // answers `false` for a dangling link, and the copy then wrote through
+        // it — to wherever it pointed, outside the catalogue.
+        match std::fs::symlink_metadata(&to) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                considered.push(report::Considered {
+                    name: stem,
+                    verdict: report::Verdict::Skipped,
+                    detail: format!(
+                        "a link stands at {}, and omh will not write through one",
+                        to.display()
+                    ),
+                });
+                continue;
+            }
+            Ok(_) => {
+                considered.push(report::Considered {
+                    name: stem,
+                    verdict: report::Verdict::Kept,
+                    detail: "already in your catalogue".into(),
+                });
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                considered.push(report::Considered {
+                    name: stem,
+                    verdict: report::Verdict::Skipped,
+                    detail: format!("could not look at {}: {e}", to.display()),
+                });
+                continue;
+            }
         }
         // **The flag reaches the copy.** It did not: `dry_run` was never
         // threaded past the dispatcher, so `omh import skills claude
@@ -858,12 +890,7 @@ pub(crate) fn current_list(
     key: &str,
     name: &str,
 ) -> Result<(adapter::Capability, Vec<String>, bool)> {
-    let cap = adapter::Capability::from_key(key).with_context(|| {
-        format!(
-            "`{key}` is not a capability — expected {}",
-            crate::cmd::settings::capability_list()
-        )
-    })?;
+    let cap = crate::cmd::settings::capability_from(key)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let policy = settings::resolve(paths, &manifest)?;
     let file = config::Layer::Shared.file(paths);

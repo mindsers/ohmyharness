@@ -903,6 +903,7 @@ impl Ctx {
             "report/tests.rs",
             "shadow/tests.rs",
             "testsrc.rs",
+            "tui/tests.rs",
         ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let sources = classify(&root);
