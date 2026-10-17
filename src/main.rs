@@ -577,6 +577,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     capability.as_deref(),
                     name.as_deref(),
                     config::Layer::Personal,
+                    ctx,
                 ),
                 Some(SettingsCmd::Rm {
                     capability,

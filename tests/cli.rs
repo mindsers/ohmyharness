@@ -206,6 +206,43 @@ impl Sandbox {
         child.wait_with_output().expect("wait")
     }
 
+    /// Run with these variables set over the sandbox's own — an `$EDITOR`
+    /// that writes, say, where the default one only records.
+    fn omh_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let path = match std::env::var("PATH") {
+            Ok(rest) => format!("{}:{rest}", self.bin.display()),
+            Err(_) => self.bin.display().to_string(),
+        };
+        let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
+        command
+            .args(args)
+            .current_dir(&self.repo)
+            .env("HOME", &self.home)
+            .env("PATH", path)
+            .env("EDITOR", self.bin.join("fake-editor"));
+        for (k, v) in env {
+            command.env(k, v);
+        }
+        command.output().expect("the binary under test must run")
+    }
+
+    /// An `$EDITOR` that records what it was asked to open, as `fake-editor`
+    /// does, and then writes something into it — a person who saved.
+    fn saving_editor(&self) -> String {
+        let editor = self.bin.join("saving-editor");
+        std::fs::write(
+            &editor,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf 'saved\\n' > \"$1\"\n",
+                self.bin.join("editor.log").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        editor.display().to_string()
+    }
+
     /// Run somewhere other than the sandbox repo — outside one, for the
     /// commands whose subject is a file that does not live in a repository.
     fn omh_in(&self, cwd: &Path, args: &[&str]) -> Output {
@@ -6400,8 +6437,12 @@ fn a_new_skill_is_a_directory_and_the_editor_opens_its_skill_md() {
     let sb = sandbox();
     sb.seed_base();
     sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    let saving = sb.saving_editor();
 
-    let out = sb.omh(&["settings", "edit", "skills", "tdd"]);
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "tdd"],
+        &[("EDITOR", &saving)],
+    );
     assert!(
         out.status.success(),
         "{}",
@@ -6416,6 +6457,7 @@ fn a_new_skill_is_a_directory_and_the_editor_opens_its_skill_md() {
         opened.contains(".omh/skills/tdd/SKILL.md"),
         "and the file in it is the one opened: {opened}"
     );
+    assert!(sb.home.join(".omh/skills/tdd/SKILL.md").is_file());
 
     let out = sb.omh(&["settings", "edit", "skills", "review-diff"]);
     assert!(out.status.success());
@@ -6427,6 +6469,169 @@ fn a_new_skill_is_a_directory_and_the_editor_opens_its_skill_md() {
         "an existing skill opens as it is: {}",
         sb.opened_in_the_editor()
     );
+}
+
+/// A new skill nothing was saved into is not left behind.
+///
+/// The directory has to exist before `$EDITOR` can save `SKILL.md` into it,
+/// and an editor quit without saving left it there: an empty directory, drawn
+/// on the screen and counted by `omh info` as a skill, holding nothing any
+/// harness reads. Taken back, and said.
+#[test]
+fn a_new_skill_nothing_was_saved_into_is_not_left_behind() {
+    let sb = sandbox();
+    sb.seed_base();
+    // The sandbox's own editor records what it was asked to open and writes
+    // nothing — somebody who quit without saving.
+    let out = sb.omh(&["settings", "edit", "skills", "fresh"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !sb.home.join(".omh/skills/fresh").exists(),
+        "an empty skill was left behind"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing was saved"),
+        "and it says so: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Editing an entry opens the file it is, and a new one gets its kind's
+/// extension.
+///
+/// A catalogue name is a file with its extension off, and `edit` joined the
+/// name back on without one: `omh settings edit rules house` opened a new,
+/// empty `rules/house` beside `house.md`, after which `rm rules house` refused
+/// because two files answered to it. A new rule, command, subagent or hook was
+/// made with no extension, which nothing loads — rules are read as `.md`, hooks
+/// as `.json`.
+#[test]
+fn editing_an_entry_opens_the_file_it_is_and_a_new_one_has_its_kinds_extension() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&[
+        "rules/house.md",
+        "commands/ship.md",
+        "subagents/critic.md",
+        "hooks/mine.json",
+    ]);
+    for (cap, name, opened) in [
+        ("rules", "house", ".omh/rules/house.md"),
+        ("commands", "ship", ".omh/commands/ship.md"),
+        ("subagents", "critic", ".omh/subagents/critic.md"),
+        ("hooks", "mine", ".omh/hooks/mine.json"),
+        ("rules", "tone", ".omh/rules/tone.md"),
+        ("commands", "deploy", ".omh/commands/deploy.md"),
+        ("subagents", "scout", ".omh/subagents/scout.md"),
+        ("hooks", "fresh", ".omh/hooks/fresh.json"),
+    ] {
+        let out = sb.omh(&["settings", "edit", cap, name]);
+        assert!(
+            out.status.success(),
+            "`omh settings edit {cap} {name}`: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let last = sb.opened_in_the_editor();
+        let last = last.lines().last().unwrap_or_default();
+        assert!(
+            last.ends_with(opened),
+            "`omh settings edit {cap} {name}` opened {last}, not {opened}"
+        );
+    }
+}
+
+/// A server is a record in one file, not a file of its own, so `edit` takes no
+/// name for one.
+///
+/// It joined the name under `mcp.json` and made the parent — so with no server
+/// yet, `omh settings edit mcp linear` made a *directory* called `mcp.json`,
+/// after which nothing could read the servers at all.
+#[test]
+fn settings_edit_refuses_a_name_for_a_server() {
+    let sb = sandbox();
+    sb.seed_base();
+    let out = sb.omh(&["settings", "edit", "mcp", "linear"]);
+    assert!(!out.status.success(), "a server name reached the editor");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("omh settings edit mcp"),
+        "and it says what opens the file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sb.home.join(".omh/mcp.json").is_dir());
+    assert!(sb.opened_in_the_editor().is_empty());
+}
+
+/// An editor that fails fails the edit, saying which one; one written with
+/// arguments is run the way a shell runs it.
+///
+/// `edit` threw `$EDITOR`'s status away, so `EDITOR=false omh settings edit`
+/// exited 0. And `EDITOR='code --wait'` — the commonest way to spell one — was
+/// run as a program called `code --wait`, which does not exist, and the error
+/// said only `No such file or directory`.
+#[test]
+fn an_editor_that_fails_fails_the_edit_and_one_with_arguments_runs() {
+    let sb = sandbox();
+    sb.seed_base();
+    let failing = sb.bin.join("failing-editor");
+    std::fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    std::fs::set_permissions(
+        &failing,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let out = sb.omh_env(
+        &["settings", "edit"],
+        &[("EDITOR", &failing.display().to_string())],
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a failed editor reported success");
+    assert!(
+        said.contains("failing-editor") && said.contains('3'),
+        "{said}"
+    );
+
+    let with_args = format!("{} --wait", sb.bin.join("fake-editor").display());
+    let out = sb.omh_env(&["settings", "edit"], &[("EDITOR", &with_args)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.opened_in_the_editor().contains("--wait"),
+        "{}",
+        sb.opened_in_the_editor()
+    );
+}
+
+/// Any server can be removed, whatever its name.
+///
+/// `mcp add` and `mcp import` take a server's name as it is, and the server
+/// `rm` it replaced did too — so checking the name as a *path* before looking
+/// for the server left `org/x` in the catalogue with no command that could
+/// take it out. No path is made from a server's name.
+#[test]
+fn any_server_can_be_removed_whatever_its_name() {
+    let sb = sandbox();
+    sb.seed_base();
+    for name in ["org/x", ".x"] {
+        assert!(sb
+            .omh(&["settings", "mcp", "add", name, "echo"])
+            .status
+            .success());
+        let out = sb.omh(&["settings", "rm", "mcp", name, "--yes"]);
+        assert!(
+            out.status.success(),
+            "`{name}` could not be removed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let servers = std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap();
+        assert!(!servers.contains(name), "{servers}");
+    }
 }
 
 /// `omh settings` works where the file it edits lives — outside a repo.

@@ -983,47 +983,160 @@ pub(crate) fn edit(
     capability: Option<&str>,
     name: Option<&str>,
     layer: config::Layer,
+    ctx: &out::Ctx,
 ) -> Result<()> {
-    let file = match capability {
-        None => layer.file(paths),
-        Some(key) => {
-            let cap = adapter::Capability::from_key(key).with_context(|| {
-                format!(
-                    "`{key}` is not a capability — expected {}",
-                    capability_list()
-                )
-            })?;
-            let dir = paths.root.join(cap.source());
-            match name {
-                None => dir,
-                Some(name) => {
-                    selection::validate_entry_name(name, cap, &dir)?;
-                    let entry = dir.join(name);
-                    // A skill is mounted as a directory holding `SKILL.md`, so
-                    // a new one is made that shape, and that file is the one
-                    // that opens. Opening the bare name made a file called
-                    // `tdd`, which is not the shape a skill is mounted in.
-                    if cap == adapter::Capability::Skills
-                        && !entry
-                            .try_exists()
-                            .with_context(|| format!("reading {}", entry.display()))?
-                    {
-                        std::fs::create_dir_all(&entry)
-                            .with_context(|| format!("creating {}", entry.display()))?;
-                        entry.join("SKILL.md")
-                    } else {
-                        entry
-                    }
+    if let Edited::NothingSaved(dir) =
+        open_in_editor(&edit_target(paths, capability, name, layer)?)?
+    {
+        ctx.progress(&format!(
+            "nothing was saved into {}, so it was not made",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// What `edit` opens, and the new skill's directory it has to make first.
+pub(crate) struct EditTarget {
+    pub(crate) file: std::path::PathBuf,
+    /// A new skill's directory: made for this edit, and taken back if the
+    /// editor saved nothing into it.
+    new_skill: Option<std::path::PathBuf>,
+}
+
+/// How an edit ended, when the editor did not fail.
+pub(crate) enum Edited {
+    Done,
+    /// A new skill's directory was taken back: the editor saved no `SKILL.md`.
+    NothingSaved(std::path::PathBuf),
+}
+
+/// Where `omh settings edit` opens, worked out before anything is made or run.
+///
+/// **Apart from opening it**, so the screen in `settings_tui` can ask first:
+/// a name refused after the terminal was handed to `$EDITOR` is a refusal
+/// printed behind the screen, where nobody reads it.
+///
+/// An entry that exists opens as the file — or a skill's directory — that
+/// `omh info` lists under its name; a new one is made the shape its kind is
+/// read in. A catalogue name is a file with its extension off, and joining
+/// the bare name back on opened a new, empty `rules/house` beside `house.md`.
+pub(crate) fn edit_target(
+    paths: &Paths,
+    capability: Option<&str>,
+    name: Option<&str>,
+    layer: config::Layer,
+) -> Result<EditTarget> {
+    let Some(key) = capability else {
+        return Ok(EditTarget {
+            file: layer.file(paths),
+            new_skill: None,
+        });
+    };
+    let cap = capability_from(key)?;
+    let dir = paths.root.join(cap.source());
+    let Some(name) = name else {
+        return Ok(EditTarget {
+            file: dir,
+            new_skill: None,
+        });
+    };
+    // A server is a record in one file, so there is no file of its own to
+    // open — and joining a name under `mcp.json` made the parent, which with
+    // no servers yet was a *directory* called `mcp.json`.
+    if cap == adapter::Capability::Mcp {
+        anyhow::bail!(
+            "a server is a record in {}, not a file of its own. To open that file:\n  \
+             omh settings edit mcp",
+            dir.display()
+        );
+    }
+    selection::validate_entry_name(name, cap, &dir)?;
+    if let Lookup::Found(file) = find_entry(cap, name, &dir)? {
+        return Ok(EditTarget {
+            file,
+            new_skill: None,
+        });
+    }
+    let entry = dir.join(name);
+    Ok(match cap {
+        adapter::Capability::Skills => EditTarget {
+            file: entry.join("SKILL.md"),
+            new_skill: Some(entry),
+        },
+        adapter::Capability::Hooks => EditTarget {
+            file: entry.with_extension("json"),
+            new_skill: None,
+        },
+        _ => EditTarget {
+            file: entry.with_extension("md"),
+            new_skill: None,
+        },
+    })
+}
+
+/// `$EDITOR` on a target, the way a shell would run it.
+///
+/// **Through `sh`**, as git runs its editor: `EDITOR='code --wait'` is the
+/// commonest way to spell one, and run as a program it is a program called
+/// `code --wait`, which does not exist. **Its status is the edit's**: thrown
+/// away, `EDITOR=false omh settings edit` exited 0.
+pub(crate) fn open_in_editor(target: &EditTarget) -> Result<Edited> {
+    let made = match &target.new_skill {
+        Some(dir) => {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            Some(dir)
+        }
+        None => None,
+    };
+    if let Some(parent) = target.file.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg("sh")
+        .arg(&target.file)
+        .status()
+        .with_context(|| format!("starting $EDITOR `{editor}`"));
+    // Taken back however the editor ended, if nothing was saved into it: an
+    // empty directory is drawn and counted as a skill no harness can read.
+    // `remove_dir` rather than `_all`, so it can only ever take an empty one —
+    // a directory something else was saved into is somebody's work, and kept.
+    let taken_back = match made {
+        Some(dir)
+            if !target
+                .file
+                .try_exists()
+                .with_context(|| format!("reading {}", target.file.display()))? =>
+        {
+            match std::fs::remove_dir(dir) {
+                Ok(()) => Some(dir.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => None,
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "nothing was saved into {}, and it could not be taken back",
+                            dir.display()
+                        )
+                    })
                 }
             }
         }
+        _ => None,
     };
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    Command::new(editor).arg(&file).status()?;
-    Ok(())
+    let status = status?;
+    anyhow::ensure!(
+        status.success(),
+        "$EDITOR `{editor}` exited with {status}, on {}",
+        target.file.display()
+    );
+    Ok(match taken_back {
+        Some(dir) => Edited::NothingSaved(dir),
+        None => Edited::Done,
+    })
 }
 
 /// Take one entry out of your catalogue, whatever kind it is.
@@ -1047,19 +1160,12 @@ pub(crate) fn rm(
     ctx: &out::Ctx,
 ) -> Result<()> {
     use crate::cmd::harvest::Consent;
-    let cap = adapter::Capability::from_key(key).with_context(|| {
-        format!(
-            "`{key}` is not a capability — expected {}",
-            capability_list()
-        )
-    })?;
-    // The name is checked before anything is joined to it — the same rule and
-    // the same function `edit` and `[use]` use, because this is the same act
-    // with a worse outcome: `../../.ssh` here would be a delete.
+    let cap = capability_from(key)?;
     let source = paths.root.join(cap.source());
-    selection::validate_entry_name(name, cap, &source)?;
-
     let entry = match cap {
+        // Looked up as it is: no path is made from a server's name, and `mcp
+        // add` and `mcp import` take any — so checking it as a path left
+        // `org/x` in the catalogue with no command that could take it out.
         adapter::Capability::Mcp => {
             let known: Vec<String> = config::servers(paths)?.into_iter().map(|s| s.key).collect();
             if !known.iter().any(|k| k == name) {
@@ -1067,7 +1173,16 @@ pub(crate) fn rm(
             }
             None
         }
-        _ => Some(entry_path(cap, name, &source)?),
+        // Checked before anything is joined to it — the same rule and the same
+        // function `edit` and `[use]` use, because this is the same act with a
+        // worse outcome: `../../.ssh` here would be a delete.
+        _ => {
+            selection::validate_entry_name(name, cap, &source)?;
+            match find_entry(cap, name, &source)? {
+                Lookup::Found(path) => Some(path),
+                Lookup::Absent { held } => return Err(no_such_entry(cap, name, &held)),
+            }
+        }
     };
     if cap == adapter::Capability::Hooks && shipped_hooks().iter().any(|h| h == name) {
         anyhow::bail!(
@@ -1103,9 +1218,13 @@ pub(crate) fn rm(
     }
 
     match &entry {
-        None => {
-            config::mcp_remove(paths, name)?;
-        }
+        // Checked rather than assumed: the server was there a moment ago, and
+        // "removed" over a file that changed underneath would be a lie.
+        None => anyhow::ensure!(
+            config::mcp_remove(paths, name)?,
+            "the `{name}` server was not in {} any more — nothing was removed",
+            source.display()
+        ),
         Some(path) if path.is_dir() && !path.is_symlink() => {
             std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?
         }
@@ -1121,23 +1240,28 @@ pub(crate) fn rm(
     Ok(())
 }
 
+/// What a catalogue name answers to in its directory.
+enum Lookup {
+    Found(std::path::PathBuf),
+    /// Nothing does; these are the names that do answer, for the refusal.
+    Absent {
+        held: Vec<String>,
+    },
+}
+
 /// The one file or directory a catalogue name answers to.
 ///
 /// A name is a file with its extension off, so two files can answer to one —
 /// and `rm` choosing between them would be omh deciding which of your files to
-/// delete. Refused, naming both.
-fn entry_path(
-    cap: adapter::Capability,
-    name: &str,
-    dir: &std::path::Path,
-) -> Result<std::path::PathBuf> {
+/// delete, `edit` which of them to open. Refused, naming both.
+fn find_entry(cap: adapter::Capability, name: &str, dir: &std::path::Path) -> Result<Lookup> {
     // **Absent is an empty catalogue; unreadable is not.** A directory omh
     // cannot list is reported, never read as "you have no skills", which would
     // send somebody to look for a typo that is not there.
     let listing = match std::fs::read_dir(dir) {
         Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(no_such_entry(cap, name, &[]));
+            return Ok(Lookup::Absent { held: Vec::new() });
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
     };
@@ -1156,14 +1280,13 @@ fn entry_path(
         0 => {
             held.sort();
             held.dedup();
-            Err(no_such_entry(cap, name, &held))
+            Ok(Lookup::Absent { held })
         }
-        1 => Ok(matches.remove(0)),
+        1 => Ok(Lookup::Found(matches.remove(0))),
         _ => {
             matches.sort();
             anyhow::bail!(
-                "{cap}/{name} is {} files, and omh will not choose which of yours to \
-                 delete:\n  {}",
+                "{cap}/{name} is {} files, and omh will not choose between them:\n  {}",
                 matches.len(),
                 matches
                     .iter()
@@ -1195,6 +1318,17 @@ pub(crate) fn shipped_hooks() -> Vec<String> {
         .iter()
         .map(|f| crate::profile::entry_name(std::ffi::OsStr::new(f.name)))
         .collect()
+}
+
+/// A capability by the name a command line gives it, or the refusal that
+/// lists the ones there are.
+pub(crate) fn capability_from(key: &str) -> Result<adapter::Capability> {
+    adapter::Capability::from_key(key).with_context(|| {
+        format!(
+            "`{key}` is not a capability — expected {}",
+            capability_list()
+        )
+    })
 }
 
 pub(crate) fn capability_list() -> String {
