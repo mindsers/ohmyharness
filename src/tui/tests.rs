@@ -459,7 +459,7 @@ fn help_lists_every_key_under_what_it_is_for() {
     app.key(press('?'));
     let screen = drawn_at(&app, 120, 40);
     for said in [
-        "MOVE", "CHANGE", "TYPING", "LEAVE", "g G", "ctrl-u", "ctrl-a", "a letter",
+        "MOVE", "CHANGE", "TYPING", "LEAVE", "g G", "ctrl-u", "ctrl-a", "letters",
     ] {
         assert!(screen.contains(said), "no `{said}`:\n{screen}");
     }
@@ -683,6 +683,34 @@ fn a_key_typed_in_a_pick_never_reaches_the_page() {
         assert_eq!(app.key(close), Next::Stay);
         assert_eq!(app.modal, None, "{close:?} closes it");
     }
+}
+
+/// A word typed in a pick goes to the option it spells. Each letter jumped
+/// on its own, so `podman` ended on the last letter any option started —
+/// `a`, for `auto` — and `↵` wrote that. Letters build a prefix while some
+/// option starts with it; one that fits none starts again from itself.
+#[test]
+fn a_word_typed_in_a_pick_goes_to_the_option_it_spells() {
+    let mut app = App::new(model(), true);
+    app.key(press('j'));
+    let typed = |app: &mut App, word: &str| {
+        app.key(code(KeyCode::Enter));
+        for c in word.chars() {
+            app.key(press(c));
+        }
+        app.key(code(KeyCode::Enter))
+    };
+    let set = |value: &str| {
+        Next::Run(Act::Set {
+            key: "runtime".into(),
+            value: value.into(),
+        })
+    };
+    assert_eq!(typed(&mut app, "podman"), set("podman"));
+    assert_eq!(typed(&mut app, "do"), set("docker"));
+    assert_eq!(typed(&mut app, "au"), set("auto"));
+    // A letter no option starts is nothing: `z` leaves `podman` where it is.
+    assert_eq!(typed(&mut app, "poz"), set("podman"));
 }
 
 /// A suggestion is picked, or another is typed.

@@ -366,6 +366,8 @@ struct Pick {
     about: Vec<String>,
     /// A line beside each option — where an import reads — or none.
     notes: Vec<String>,
+    /// The letters typed so far, while an option starts with them.
+    typed: String,
     then: Chosen,
 }
 
@@ -869,6 +871,7 @@ impl App {
             about: row.about.clone(),
             notes: Vec::new(),
             options,
+            typed: String::new(),
             then: match typed {
                 true => Chosen::ValueOrTyped {
                     key: row.name.clone(),
@@ -977,6 +980,7 @@ impl App {
                     current: None,
                     fallback: None,
                     about: Vec::new(),
+                    typed: String::new(),
                     then: Chosen::Import {
                         capability: capability.into(),
                     },
@@ -1006,34 +1010,67 @@ impl App {
                 }
             },
             Modal::Pick(mut pick) => {
+                let starts =
+                    |o: &String, with: &str| o.to_lowercase().starts_with(&with.to_lowercase());
+                // A letter some option starts with — the next one after `at`
+                // that does, so one letter again goes on to the next.
+                let next_with = |pick: &Pick, with: &str| {
+                    let after = pick.options.iter().enumerate().cycle().skip(pick.at + 1);
+                    after
+                        .take(pick.options.len())
+                        .find(|(_, o)| starts(o, with))
+                        .map(|(i, _)| i)
+                };
                 match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        pick.at = (pick.at + 1).min(pick.options.len().saturating_sub(1));
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => pick.at = pick.at.saturating_sub(1),
-                    KeyCode::Home | KeyCode::Char('g') => pick.at = 0,
-                    KeyCode::End | KeyCode::Char('G') => {
-                        pick.at = pick.options.len().saturating_sub(1)
-                    }
-                    KeyCode::Enter => return self.chosen(pick),
-                    // Closed by the keys that close everything else, and by
-                    // nothing more: it was taken off the screen with `take`
-                    // and is not put back.
-                    KeyCode::Esc | KeyCode::Char('q') => return Next::Stay,
-                    // A letter goes to the next option it starts. Any other
-                    // key stays here — one that closed the pick went on to the
-                    // page, where `podman`'s `d` unset the row.
+                    // Letters first: a word typed builds a prefix while some
+                    // option starts with it. Each letter jumped on its own, so
+                    // `podman` ended on `auto`, the last letter any option
+                    // started. One that fits none starts again from itself;
+                    // and a letter no option starts is what it is in a list.
                     KeyCode::Char(c) if plain(key) => {
-                        let starts = |o: &String| {
-                            o.chars().next().is_some_and(|f| f.eq_ignore_ascii_case(&c))
-                        };
-                        let after = pick.options.iter().enumerate().cycle().skip(pick.at + 1);
-                        if let Some((i, _)) =
-                            after.take(pick.options.len()).find(|(_, o)| starts(o))
-                        {
+                        let word = format!("{}{c}", pick.typed);
+                        if let Some(i) = pick.options.iter().position(|o| starts(o, &word)) {
                             pick.at = i;
+                            pick.typed = word;
+                        } else if let Some(i) = next_with(&pick, &c.to_string()) {
+                            pick.at = i;
+                            pick.typed = c.to_string();
+                        } else {
+                            pick.typed.clear();
+                            match c {
+                                'j' => {
+                                    pick.at =
+                                        (pick.at + 1).min(pick.options.len().saturating_sub(1))
+                                }
+                                'k' => pick.at = pick.at.saturating_sub(1),
+                                'g' => pick.at = 0,
+                                'G' => pick.at = pick.options.len().saturating_sub(1),
+                                // Closed by the keys that close everything
+                                // else: it was taken off the screen with
+                                // `take` and is not put back.
+                                'q' => return Next::Stay,
+                                // Any other key stays here — one that closed
+                                // the pick went on to the page, where
+                                // `podman`'s `d` unset the row.
+                                _ => {}
+                            }
                         }
                     }
+                    KeyCode::Down => {
+                        pick.typed.clear();
+                        pick.at = (pick.at + 1).min(pick.options.len().saturating_sub(1));
+                    }
+                    KeyCode::Up => {
+                        pick.typed.clear();
+                        pick.at = pick.at.saturating_sub(1);
+                    }
+                    KeyCode::Home => pick.at = 0,
+                    KeyCode::End => pick.at = pick.options.len().saturating_sub(1),
+                    KeyCode::Backspace => {
+                        pick.typed.pop();
+                    }
+                    KeyCode::Enter => return self.chosen(pick),
+                    KeyCode::Esc => return Next::Stay,
                     _ => {}
                 }
                 self.modal = Some(Modal::Pick(pick));
@@ -1926,7 +1963,7 @@ impl App {
                 vec![
                     ("↑↓", "move"),
                     ("↵", "pick"),
-                    ("a letter", "jumps"),
+                    ("letters", "go to what they spell"),
                     ("esc", "close"),
                 ]
             }
@@ -2267,8 +2304,8 @@ impl App {
                     ("ctrl-a  ctrl-e", "to its start, to its end"),
                     ("ctrl-u", "clear what is before the cursor"),
                     (
-                        "a letter",
-                        "in a list to pick from, go to the option it starts",
+                        "letters",
+                        "in a list to pick from, go to the option they spell",
                     ),
                 ],
             ),
