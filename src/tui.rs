@@ -277,8 +277,6 @@ pub struct App {
     pending_undo: Option<Act>,
     /// What undoes the last change that worked, for `u`.
     undo: Option<Act>,
-    /// Every command that worked, as shown — said once the screen closes.
-    ran: Vec<String>,
     /// Where the last draw put things, for a mouse to find them.
     hit: RefCell<Hit>,
 }
@@ -433,17 +431,11 @@ impl App {
             pending: None,
             pending_undo: None,
             undo: None,
-            ran: Vec::new(),
             hit: RefCell::new(Hit::default()),
         }
     }
 
     /// Ask this, as a value is typed, what omh would say about it.
-    /// Every command the screen ran that worked, in order, as it showed them.
-    pub fn ran(&self) -> &[String] {
-        &self.ran
-    }
-
     pub fn with_check(mut self, check: Check) -> Self {
         self.check = Some(check);
         self
@@ -491,10 +483,7 @@ impl App {
         // What undoes it is kept only once it worked; the last change that did
         // is what `u` undoes, and one that did not is not a change.
         match ok {
-            true => {
-                self.undo = self.pending_undo.take();
-                self.ran.push(clean(&said));
-            }
+            true => self.undo = self.pending_undo.take(),
             false => self.pending_undo = None,
         }
         let (out, err) = if ok {

@@ -2211,8 +2211,11 @@ no `i` where nothing imports — and while a box is open, the box's own. `?`
 lists every key. A list longer than its room has a thumb at its edge, and keeps
 the heading of the group you are in at the top.
 
-**When it closes, the screen says what it ran** — each command, as it showed
-it — where scrollback keeps them: to read back, or to paste into a script. A
+**When it closes, the screen says what it ran** — each command as a shell
+runs it, `--yes` on a removal included — where scrollback keeps them: to read
+back, or to paste into a script. A server added on the screen is the one line
+that is not whole: its env values and arguments can be a token, so they are
+held back, and that is said. A
 key nothing reads that was probably meant to be another moves its value there
 on Enter, `omh settings set` then `omh settings unset`.
 

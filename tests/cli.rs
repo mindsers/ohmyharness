@@ -8138,6 +8138,13 @@ fn an_entry_is_removed_on_the_screen_after_it_asks() {
     assert!(status.success(), "{raw}");
     assert!(!sb.home.join(".omh/skills/review-diff").exists());
     assert!(sb.home.join(".omh/skills/keep/SKILL.md").exists());
+    // Said once the screen is gone as a line a script can run: without
+    // `--yes` the removal asks, and off a terminal it refuses.
+    let after = &raw[raw.rfind("\x1b[?1049l").expect("left the screen")..];
+    assert!(
+        after.contains("omh settings rm --yes skills review-diff"),
+        "{after:?}"
+    );
 }
 
 /// A server is added on the screen, its command split the way a shell would.

@@ -51,19 +51,35 @@ pub(crate) fn run(paths: &Paths, color: bool, ctx: &crate::out::Ctx) -> Result<(
         key::describes(name).and_then(|k| key::quarrel(k, value))
     }));
     let mut screen = Screen::open()?;
-    let driven = drive(&mut app, &mut screen.terminal, paths);
+    let mut ran = Vec::new();
+    let driven = drive(&mut app, &mut screen.terminal, paths, &mut ran);
     // The screen gone, what it ran is said where scrollback keeps it: it held
     // the terminal, so nothing it did was left behind — a session's commands,
     // to read back or paste into a script.
     drop(screen);
-    if !app.ran().is_empty() {
-        let mut said = crate::report::Action::new("settings-screen-ran", "the screen ran:");
-        for line in app.ran() {
-            said = said.note(format!("omh {line}"));
-        }
+    if let Some(said) = what_ran(&ran) {
         ctx.say(&said);
     }
     driven
+}
+
+/// The lines [`ran_lines`] made, said once the screen closes — and, where one
+/// held a value back, that it did. `None` for a screen that changed nothing.
+fn what_ran(ran: &[(String, bool)]) -> Option<crate::report::Action> {
+    if ran.is_empty() {
+        return None;
+    }
+    let mut said = crate::report::Action::new("settings-screen-ran", "the screen ran:");
+    for (line, _) in ran {
+        said = said.note(line.clone());
+    }
+    if ran.iter().any(|(_, held)| *held) {
+        said = said.note(
+            "a server's env values and arguments are not shown — type them again to run \
+             that line",
+        );
+    }
+    Some(said)
 }
 
 /// `omh settings` off a terminal: your defaults, and your catalogue as the
@@ -149,7 +165,12 @@ impl Drop for Screen {
     }
 }
 
-fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) -> Result<()> {
+fn drive(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    paths: &Paths,
+    ran: &mut Vec<(String, bool)>,
+) -> Result<()> {
     let exe = std::env::current_exe().context("finding omh")?;
     loop {
         terminal
@@ -184,7 +205,7 @@ fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) 
             }
             Next::Run(act) => {
                 let line = argv(&act);
-                match &act {
+                let worked = match &act {
                     Act::EditDefaults => edit(app, terminal, paths, None, None, &line)?,
                     Act::Edit { capability, name } => edit(
                         app,
@@ -195,6 +216,9 @@ fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) 
                         &line,
                     )?,
                     _ => run_all(app, &exe, &command_lines(&act)),
+                };
+                if worked {
+                    ran.extend(ran_lines(&act));
                 }
                 app.reload(model(paths));
             }
@@ -210,12 +234,12 @@ fn edit(
     capability: Option<&str>,
     name: Option<&str>,
     line: &[String],
-) -> Result<()> {
+) -> Result<bool> {
     let target = match settings::edit_target(paths, capability, name, config::Layer::Personal) {
         Ok(target) => target,
         Err(e) => {
             app.report(shown(line), false, "", &format!("{e:#}"));
-            return Ok(());
+            return Ok(false);
         }
     };
     suspend().context("handing the terminal to $EDITOR")?;
@@ -251,7 +275,7 @@ fn edit(
         warned = after_edit(&model(paths), capability, name).unwrap_or_default();
     }
     app.report(shown(line), ok, &said, &warned);
-    Ok(())
+    Ok(ok)
 }
 
 /// What an edit left, read back from a fresh read of the catalogue: a file
@@ -293,9 +317,39 @@ pub(crate) fn command_lines(act: &Act) -> Vec<Vec<String>> {
     }
 }
 
+/// What the screen ran, as it says it once it closes: each line as a shell
+/// runs it, and whether a value in it is held back.
+///
+/// Not [`shown`], which is the line as a person would type it — no `--yes`,
+/// one status for a move's two lines — and printed in scrollback that read as
+/// a script nothing could run. A server's env values and arguments can be a
+/// token, so that one line is `shown`'s, with them held back: never drawn,
+/// here least of all, where scrollback keeps it.
+fn ran_lines(act: &Act) -> Vec<(String, bool)> {
+    command_lines(act)
+        .iter()
+        .map(|line| {
+            if line.starts_with(&["settings".into(), "mcp".into(), "add".into()]) {
+                return (format!("omh {}", shown(line)), true);
+            }
+            // `--` only where a word after it would read as a flag.
+            let at = line.iter().position(|w| w == "--");
+            let needed = at.is_some_and(|i| line[i + 1..].iter().any(|w| w.starts_with('-')));
+            let words: Vec<String> = line
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| needed || Some(*i) != at)
+                .map(|(_, w)| w.clone())
+                .collect();
+            (format!("omh {}", said(&words)), false)
+        })
+        .collect()
+}
+
 /// Run an act's lines in order, stopping at the first that fails, and say
-/// what they said as one: what ran, joined, and every line's output.
-fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) {
+/// what they said as one: what ran, joined, and every line's output. Answers
+/// whether every line worked.
+fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) -> bool {
     let shown_all = lines
         .iter()
         .map(|l| shown(l))
@@ -312,7 +366,7 @@ fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) {
                         err.push_str(&format!("it ended with {}, and said nothing", done.status));
                     }
                     app.report(shown_all, false, &out, &err);
-                    return;
+                    return false;
                 }
             }
             // On the screen rather than out of it: a child that would not
@@ -321,11 +375,12 @@ fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) {
             Err(e) => {
                 err.push_str(&format!("{e:#}"));
                 app.report(shown_all, false, &out, &err);
-                return;
+                return false;
             }
         }
     }
     app.report(shown_all, true, &out, &err);
+    true
 }
 
 /// The command line an act is, after `omh`.
@@ -1312,6 +1367,92 @@ mod tests {
                 line[1..].join(" ")
             ),
         }
+    }
+
+    /// A shell's reading of a line `said` wrote: words, single quotes, `'\''`.
+    fn unquote(line: &str) -> Vec<String> {
+        let (mut words, mut word, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+        for c in line.chars() {
+            match c {
+                '\'' => {
+                    quoted = !quoted;
+                    any = true;
+                }
+                '\\' if !quoted => {}
+                ' ' if !quoted => {
+                    if any || !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                    any = false;
+                }
+                c => word.push(c),
+            }
+        }
+        if any || !word.is_empty() {
+            words.push(word);
+        }
+        words
+    }
+
+    /// What the screen ran is said once it closes, where scrollback keeps it,
+    /// and each line runs as printed: `omh` on every one — a typo's move was
+    /// `omh … && settings unset …` — and `--yes` on a removal, which in a
+    /// script refused without it. A server's env values and arguments can be a
+    /// token, so they are held back and that is said: never drawn, even here.
+    #[test]
+    fn what_the_screen_ran_runs_as_printed() {
+        let runs = |act: &Act| {
+            for ((text, held), line) in ran_lines(act).into_iter().zip(command_lines(act)) {
+                assert!(!held, "{text}");
+                let words = unquote(&text);
+                assert_eq!(words[0], "omh", "{text}");
+                let mut want = vec!["omh".to_string()];
+                want.extend(line.into_iter().filter(|w| w != "--"));
+                let got: Vec<String> = words.into_iter().filter(|w| w != "--").collect();
+                assert_eq!(got, want, "{text}");
+            }
+        };
+        runs(&Act::Set {
+            key: "carry_in".into(),
+            value: "[\".env\", \"a b\"]".into(),
+        });
+        runs(&Act::Use {
+            capability: "skills".into(),
+            name: "-x".into(),
+        });
+        let remove = Act::Remove {
+            capability: "skills".into(),
+            name: "gone".into(),
+        };
+        runs(&remove);
+        assert!(ran_lines(&remove)[0].0.contains("--yes"));
+        let moved = Act::Move {
+            from: "carry_ins".into(),
+            to: "carry_in".into(),
+            value: "[\".env\"]".into(),
+        };
+        assert_eq!(ran_lines(&moved).len(), 2, "{:?}", ran_lines(&moved));
+        runs(&moved);
+
+        let server = ran_lines(&Act::AddServer {
+            name: "linear".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "--header".into(), "tok-456".into()],
+            env: vec![("LINEAR_TOKEN".into(), "sk-123".into())],
+        });
+        let (text, held) = &server[0];
+        assert!(*held, "{text}");
+        let said = format!("{:?}", what_ran(&server).unwrap());
+        assert!(said.contains("not shown"), "and that is said: {said}");
+        assert!(text.starts_with("omh settings mcp add"), "{text}");
+        assert!(
+            text.contains("LINEAR_TOKEN"),
+            "the name is not the secret: {text}"
+        );
+        assert!(
+            !text.contains("sk-123") && !text.contains("tok-456"),
+            "{text}"
+        );
     }
 
     /// The screen shows a line and runs it, so the line has to be one omh
