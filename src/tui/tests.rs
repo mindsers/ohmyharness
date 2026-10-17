@@ -1569,6 +1569,30 @@ fn what_a_command_printed_says_your_home_as_tilde() {
     assert!(screen.contains("/Users/young/notes"), "{screen}");
 }
 
+/// A page's heading keeps the filter in sight and says when it is cut: at
+/// 130 columns a committed filter was off the end of `Hooks  9  new repos get
+/// all, each where its stack ap`, cut mid-word with nothing to say so.
+#[test]
+fn a_heading_keeps_the_filter_and_says_when_it_is_cut() {
+    let mut model = model();
+    model.sections[1].seeds =
+        Some("new repos get all but the guards, by stack, and a good deal more to say".into());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    app.key(press('/'));
+    for c in "kee".chars() {
+        app.key(press(c));
+    }
+    app.key(code(KeyCode::Enter));
+    let screen = drawn_at(&app, 80, 24);
+    let heading = screen
+        .lines()
+        .find(|l| l.contains("Skills"))
+        .unwrap_or_default();
+    assert!(heading.contains("/ kee"), "{heading}");
+    assert!(heading.contains('…'), "{heading}");
+}
+
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
 /// act the row carries; the row's `●`/`○` and the page's heading say which way
 /// it is now. A row with nothing to flip takes no `space`.

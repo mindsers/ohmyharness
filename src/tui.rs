@@ -1556,9 +1556,8 @@ impl App {
             Span::styled(capitalised(section.title), self.look.title()),
             Span::styled(format!("  {count}"), self.look.dim()),
         ];
-        if let Some(seeds) = &section.seeds {
-            heading.push(Span::styled(format!("   {seeds}"), self.look.dim()));
-        }
+        // The filter before what new repos get: it was off the end of a long
+        // heading, where nothing said it was still on.
         if let Some(filter) = &self.filter {
             heading.push(Span::styled(
                 format!(
@@ -1571,6 +1570,16 @@ impl App {
                     false => self.look.dim(),
                 },
             ));
+        }
+        if let Some(seeds) = &section.seeds {
+            let used: usize = heading.iter().map(Span::width).sum();
+            let room = usize::from(area.width).saturating_sub(used + 3);
+            if room > 1 {
+                heading.push(Span::styled(
+                    format!("   {}", ellipsized(seeds, room)),
+                    self.look.dim(),
+                ));
+            }
         }
         let lines = if head { 2 } else { 0 };
         let [head_area, mut list] =
