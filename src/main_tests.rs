@@ -1361,8 +1361,8 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // + `omh upgrade` above what a second look printed
         // − 2 repeated examples; the summary block became a usage line per entry
         // + `omh settings rm`'s console example; its synopsis line replaced
-        // the server's own `rm`.
-        ("docs/src/content/docs/reference/commands.md", 146),
+        // the server's own `rm`. + the header of the settings screen's drawing.
+        ("docs/src/content/docs/reference/commands.md", 147),
         ("docs/src/content/docs/reference/configuration.md", 47), // + `omh use hooks tdd-guard`
         ("docs/src/content/docs/reference/memory.md", 1),
     ]
@@ -1949,6 +1949,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         ("src/cmd/settings.rs", 13),
+        // The screen's own: `omh import hooks <harness>` where a hook cannot
+        // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
+        // beside a hook omh ships, and `omh <line>` when a child will not start.
+        ("src/cmd/settings_tui.rs", 4),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
@@ -2003,6 +2007,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh s attach` as what rewrites them.
         ("src/ssh.rs", 2),
         ("src/stack.rs", 1),
+        // The screen's header, `omh settings`, and `= omh <line>` above what
+        // the command it ran said.
+        ("src/tui.rs", 2),
         ("src/why.rs", 3),
     ]
     .into_iter()

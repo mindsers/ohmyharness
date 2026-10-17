@@ -1017,34 +1017,46 @@ impl Profile {
                 out.extend(crate::render::parse_layers(&[source])?.into_keys());
                 continue;
             }
-            let entries = std::fs::read_dir(&source)
-                .with_context(|| format!("reading {}", source.display()))?;
-            for entry in entries {
-                // Not `.flatten()`, the rule this codebase follows for every
-                // directory it lists: a `readdir` failing part-way through would
-                // silently shorten the catalogue, and the report built from it
-                // would say an entry is not selected because it was never seen.
-                let entry = entry.with_context(|| format!("reading {}", source.display()))?;
-                let name = entry_name(&entry.file_name());
-                // A name omh mints has to be a name a `[use]` list can hold, or
-                // `init` writes something every later read refuses. `.DS_Store`
-                // is the one that actually happens: Finder creates it in any
-                // directory somebody opens, and it bricked the repo.
-                //
-                // Skipped rather than reported, because it is not an entry that
-                // went missing — it is a file that was never a catalogue entry,
-                // and a launch that named it would be telling the user about
-                // their operating system.
-                if crate::selection::validate_entry_name(&name, cap, &source).is_err() {
-                    continue;
-                }
-                out.push(name);
-            }
+            out.extend(listed(&source, cap)?.into_iter().map(|(name, _)| name));
         }
         out.sort();
         out.dedup();
         Ok(out)
     }
+}
+
+/// One catalogue directory's entries, by name and by where each one is.
+///
+/// `entries`' reading of a directory, lifted out for the screen `omh settings`
+/// draws, which has to open and remove what it lists — so a name it shows is
+/// a name `omh info` shows, and the same files are skipped for the same reason.
+pub fn listed(source: &Path, cap: Capability) -> Result<Vec<(String, PathBuf)>> {
+    let mut out = Vec::new();
+    let entries =
+        std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?;
+    for entry in entries {
+        // Not `.flatten()`, the rule this codebase follows for every
+        // directory it lists: a `readdir` failing part-way through would
+        // silently shorten the catalogue, and the report built from it
+        // would say an entry is not selected because it was never seen.
+        let entry = entry.with_context(|| format!("reading {}", source.display()))?;
+        let name = entry_name(&entry.file_name());
+        // A name omh mints has to be a name a `[use]` list can hold, or
+        // `init` writes something every later read refuses. `.DS_Store`
+        // is the one that actually happens: Finder creates it in any
+        // directory somebody opens, and it bricked the repo.
+        //
+        // Skipped rather than reported, because it is not an entry that
+        // went missing — it is a file that was never a catalogue entry,
+        // and a launch that named it would be telling the user about
+        // their operating system.
+        if crate::selection::validate_entry_name(&name, cap, source).is_err() {
+            continue;
+        }
+        out.push((name, entry.path()));
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// The catalogue name of one directory entry.

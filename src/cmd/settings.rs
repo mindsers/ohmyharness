@@ -998,7 +998,22 @@ pub(crate) fn edit(
                 None => dir,
                 Some(name) => {
                     selection::validate_entry_name(name, cap, &dir)?;
-                    dir.join(name)
+                    let entry = dir.join(name);
+                    // A skill is mounted as a directory holding `SKILL.md`, so
+                    // a new one is made that shape, and that file is the one
+                    // that opens. Opening the bare name made a file called
+                    // `tdd`, which is not the shape a skill is mounted in.
+                    if cap == adapter::Capability::Skills
+                        && !entry
+                            .try_exists()
+                            .with_context(|| format!("reading {}", entry.display()))?
+                    {
+                        std::fs::create_dir_all(&entry)
+                            .with_context(|| format!("creating {}", entry.display()))?;
+                        entry.join("SKILL.md")
+                    } else {
+                        entry
+                    }
                 }
             }
         }
@@ -1174,7 +1189,7 @@ fn no_such_entry(cap: adapter::Capability, name: &str, held: &[String]) -> anyho
 }
 
 /// The hooks omh ships, by catalogue name — the ones `omh upgrade` rewrites.
-fn shipped_hooks() -> Vec<String> {
+pub(crate) fn shipped_hooks() -> Vec<String> {
     crate::bundled::Shipped::Hooks
         .files()
         .iter()

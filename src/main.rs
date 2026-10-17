@@ -49,6 +49,7 @@ mod stack;
 #[cfg(test)]
 mod testsrc;
 mod transcript;
+mod tui;
 mod why;
 
 use adapter::Adapter;
@@ -538,6 +539,10 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Settings { cmd } => {
             let paths = Paths::anywhere(&cwd)?;
             match cmd {
+                // At a terminal it is a screen, and anywhere else the report.
+                None if cmd::settings_tui::wanted(cli.json, cli.dry_run) => {
+                    cmd::settings_tui::run(&paths, !ctx.palette.is_plain())
+                }
                 None => cmd::settings::show_settings(&paths, ctx),
                 Some(SettingsCmd::Set { key, value }) => {
                     cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;

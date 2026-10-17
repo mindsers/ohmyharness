@@ -6389,6 +6389,46 @@ fn the_way_out_the_base_set_prints_is_a_way_out() {
     );
 }
 
+/// A new skill is a directory, and the editor opens the file a harness reads.
+///
+/// A skill is mounted as a directory holding `SKILL.md`, and `edit` opened the
+/// bare name — so `omh settings edit skills tdd` made a *file* called `tdd`,
+/// not the shape a skill is mounted in, which `omh info` still counted as a
+/// skill. An existing skill still opens as the directory it is.
+#[test]
+fn a_new_skill_is_a_directory_and_the_editor_opens_its_skill_md() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+
+    let out = sb.omh(&["settings", "edit", "skills", "tdd"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.home.join(".omh/skills/tdd").is_dir(),
+        "a skill is a directory"
+    );
+    let opened = sb.opened_in_the_editor();
+    assert!(
+        opened.contains(".omh/skills/tdd/SKILL.md"),
+        "and the file in it is the one opened: {opened}"
+    );
+
+    let out = sb.omh(&["settings", "edit", "skills", "review-diff"]);
+    assert!(out.status.success());
+    assert!(
+        sb.opened_in_the_editor()
+            .lines()
+            .last()
+            .is_some_and(|l| l.ends_with(".omh/skills/review-diff")),
+        "an existing skill opens as it is: {}",
+        sb.opened_in_the_editor()
+    );
+}
+
 /// `omh settings` works where the file it edits lives — outside a repo.
 ///
 /// Its own docs open with "**You**, before a repo exists". It refused with a
@@ -6432,6 +6472,500 @@ fn settings_works_outside_a_repository() {
             argv.join(" ")
         );
     }
+}
+
+/// `omh` on a terminal of its own: a pseudo-terminal whose other end this test
+/// holds, so it can type and read what was drawn.
+///
+/// Every other run here gets a pipe or nothing for stdin, which is exactly what
+/// a screen must not open on. This is the one shape that is a terminal.
+struct Tty {
+    child: std::process::Child,
+    keys: std::fs::File,
+    drawn: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    /// Done once the child is gone and its last frame is read — EOF on macOS,
+    /// EIO on Linux — so `finish` joins it rather than guessing how long the
+    /// last frame takes to arrive.
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// A pseudo-terminal: the end this test holds, and the end a child is given.
+fn pty() -> (std::fs::File, std::fs::File) {
+    use std::os::fd::FromRawFd;
+    // `ptsname` answers in a static buffer, so two tests opening a terminal
+    // at once could read each other's name.
+    static NAMING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (master, slave) = unsafe {
+        let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(fd >= 0, "posix_openpt: {}", std::io::Error::last_os_error());
+        assert_eq!(libc::grantpt(fd), 0);
+        assert_eq!(libc::unlockpt(fd), 0);
+        let name = {
+            let _held = NAMING.lock().unwrap();
+            std::ffi::CStr::from_ptr(libc::ptsname(fd))
+                .to_string_lossy()
+                .into_owned()
+        };
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name)
+            .unwrap();
+        // A fresh pseudo-terminal is 0×0, and a screen drawn into that is
+        // a screen of nothing. Set on the slave: macOS refuses it on the
+        // master.
+        let size = libc::winsize {
+            ws_row: 40,
+            ws_col: 120,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            libc::ioctl(
+                std::os::fd::AsRawFd::as_raw_fd(&slave),
+                libc::TIOCSWINSZ as _,
+                &size
+            ),
+            0,
+            "TIOCSWINSZ: {}",
+            std::io::Error::last_os_error()
+        );
+        (std::fs::File::from_raw_fd(fd), slave)
+    };
+    (master, slave)
+}
+
+impl Sandbox {
+    fn omh_on_a_terminal(&self, args: &[&str]) -> Tty {
+        use std::os::unix::process::CommandExt;
+        let (master, slave) = pty();
+        let path = match std::env::var("PATH") {
+            Ok(rest) => format!("{}:{rest}", self.bin.display()),
+            Err(_) => self.bin.display().to_string(),
+        };
+        let child = {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
+            command
+                .args(args)
+                .current_dir(&self.repo)
+                .env("HOME", &self.home)
+                .env("PATH", path)
+                .env("EDITOR", self.bin.join("fake-editor"))
+                .env("TERM", "xterm-256color")
+                .stdin(slave.try_clone().unwrap())
+                .stdout(slave.try_clone().unwrap())
+                .stderr(slave);
+            // Its own session, with this terminal as the controlling one — what
+            // a shell gives a program it starts. Without it `/dev/tty` names
+            // the terminal the *suite* runs in.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            command.spawn().expect("the binary under test must run")
+        };
+        // Drained from the start: a pseudo-terminal's buffer is small, and a
+        // child that fills it stops drawing until somebody reads.
+        let drawn = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut screen = master.try_clone().unwrap();
+        let into = drawn.clone();
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut screen, &mut buf) {
+                    // Linux answers EIO rather than 0 once the child is gone.
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => into.lock().unwrap().extend_from_slice(&buf[..n]),
+                }
+            }
+        });
+        Tty {
+            child,
+            keys: master,
+            drawn,
+            reader: Some(reader),
+        }
+    }
+}
+
+impl Tty {
+    /// Everything drawn so far, escapes and all.
+    fn raw(&self) -> String {
+        String::from_utf8_lossy(&self.drawn.lock().unwrap()).into_owned()
+    }
+
+    /// What the terminal shows **now**, row by row.
+    ///
+    /// Replayed rather than searched: a screen redraws only the cells that
+    /// changed, so moving from `skills/keep` to `skills/review-diff` writes
+    /// `review-diff` and nothing else — the full word never passes through the
+    /// stream. So the bytes are played onto a grid the size this terminal
+    /// was given, honouring the few sequences a screen uses to place text.
+    fn screen(&self) -> String {
+        const ROWS: usize = 40;
+        const COLS: usize = 120;
+        let raw = self.raw();
+        let mut grid = vec![vec![' '; COLS]; ROWS];
+        let (mut row, mut col) = (0usize, 0usize);
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => match chars.next() {
+                    Some('[') => {
+                        let mut params = String::new();
+                        let mut last = ' ';
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                last = c;
+                                break;
+                            }
+                            params.push(c);
+                        }
+                        let private = params.starts_with('?');
+                        let nums: Vec<usize> = params
+                            .trim_start_matches('?')
+                            .split(';')
+                            .map(|n| n.parse().unwrap_or(0))
+                            .collect();
+                        let n = |i: usize, default: usize| {
+                            nums.get(i).copied().filter(|n| *n > 0).unwrap_or(default)
+                        };
+                        match last {
+                            'H' | 'f' => {
+                                row = (n(0, 1) - 1).min(ROWS - 1);
+                                col = (n(1, 1) - 1).min(COLS - 1);
+                            }
+                            'A' => row = row.saturating_sub(n(0, 1)),
+                            'B' => row = (row + n(0, 1)).min(ROWS - 1),
+                            'C' => col = (col + n(0, 1)).min(COLS - 1),
+                            'D' => col = col.saturating_sub(n(0, 1)),
+                            'G' => col = (n(0, 1) - 1).min(COLS - 1),
+                            'd' => row = (n(0, 1) - 1).min(ROWS - 1),
+                            'J' if nums.first() == Some(&2) || nums.first() == Some(&3) => {
+                                grid = vec![vec![' '; COLS]; ROWS];
+                            }
+                            'J' => {
+                                for cell in &mut grid[row][col..] {
+                                    *cell = ' ';
+                                }
+                                for line in &mut grid[row + 1..] {
+                                    *line = vec![' '; COLS];
+                                }
+                            }
+                            'K' => {
+                                for cell in &mut grid[row][col..] {
+                                    *cell = ' ';
+                                }
+                            }
+                            // Entering or leaving the alternate screen: a
+                            // different page, so nothing on this one survives.
+                            'h' | 'l' if private && nums.first() == Some(&1049) => {
+                                grid = vec![vec![' '; COLS]; ROWS];
+                                (row, col) = (0, 0);
+                            }
+                            _ => {}
+                        }
+                    }
+                    // OSC: up to BEL or ST.
+                    Some(']') => {
+                        while let Some(c) = chars.next() {
+                            if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                '\r' => col = 0,
+                '\n' => row = (row + 1).min(ROWS - 1),
+                c if c.is_control() => {}
+                c => {
+                    if col < COLS {
+                        grid[row][col] = c;
+                    }
+                    col += 1;
+                }
+            }
+        }
+        grid.iter()
+            .map(|line| line.iter().collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Wait until `needle` is on the screen, or fail saying what is.
+    fn wait_for(&self, needle: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !self.screen().contains(needle) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "`{needle}` is not on the screen. It shows:\n{}",
+                self.screen()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Type, as a person would: what is sent is bytes on the terminal.
+    fn send(&mut self, keys: &str) {
+        if let Err(e) = std::io::Write::write_all(&mut self.keys, keys.as_bytes()) {
+            panic!(
+                "could not type {keys:?} ({e}) — omh is no longer reading. The screen shows:\n{}",
+                self.screen()
+            );
+        }
+    }
+
+    /// Press one key and wait for the screen to answer it, so the next key
+    /// is sent to the screen this one produced — not raced past it.
+    fn step(&mut self, keys: &str) {
+        let before = self.screen();
+        self.send(keys);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.screen() == before && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Wait for it to exit, and answer how it did and what it drew.
+    fn finish(mut self) -> (std::process::ExitStatus, String) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                if let Some(reader) = self.reader.take() {
+                    reader.join().unwrap();
+                }
+                return (status, self.raw());
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!(
+                    "still running after `q`. The screen shows:\n{}",
+                    self.screen()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// `omh settings` at a terminal is a screen, and looking at it writes nothing.
+///
+/// The report it prints anywhere else is for a pipe; at a terminal the
+/// question is usually "and change it", which a report cannot answer. Leaving
+/// has to hand the terminal back as it was found — the alternate screen exited
+/// — or the shell it returns to is a mess somebody has to `reset`.
+#[test]
+fn settings_at_a_terminal_is_a_screen_and_looking_writes_nothing() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    let before = fingerprint(&sb);
+
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("3");
+    tty.wait_for("review-diff");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+
+    assert!(status.success(), "{status:?}\n{raw}");
+    assert!(
+        raw.contains("\x1b[?1049h"),
+        "it never opened a screen:\n{raw}"
+    );
+    assert!(
+        raw.trim_end().ends_with("\x1b[?1049l")
+            || raw.rfind("\x1b[?1049l") > raw.rfind("\x1b[?1049h"),
+        "and it left the screen it opened:\n{raw}"
+    );
+    assert_eq!(differs(&before, &fingerprint(&sb)), Vec::<String>::new());
+}
+
+/// Typed at a terminal and piped into another program, it is the report.
+///
+/// `omh settings | less` has a person at the keyboard and a pipe for stdout,
+/// and a screen drawn into the pipe is escape sequences in somebody's pager.
+/// Both ends have to be a terminal.
+#[test]
+fn settings_typed_at_a_terminal_into_a_pipe_is_the_report() {
+    let sb = sandbox();
+    sb.seed_base();
+    let (_keys, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("settings")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .stdin(slave)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("waited on a terminal for keys, drawing into a pipe");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let out = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("\x1b[?1049h"), "{said}");
+    assert!(said.contains("idle_timeout"), "{said}");
+}
+
+/// At a terminal, `--json` and `--dry-run` still get the report: both are a
+/// script's flags, and a script is not going to drive a screen.
+#[test]
+fn settings_at_a_terminal_answers_json_with_the_report() {
+    let sb = sandbox();
+    sb.seed_base();
+    for argv in [["--json", "settings"], ["--dry-run", "settings"]] {
+        let tty = sb.omh_on_a_terminal(&argv);
+        let (status, raw) = tty.finish();
+        assert!(status.success(), "{raw}");
+        assert!(
+            !raw.contains("\x1b[?1049h"),
+            "`omh {}` opened a screen",
+            argv.join(" ")
+        );
+        assert!(
+            raw.contains("idle_timeout"),
+            "and printed the report: {raw}"
+        );
+    }
+}
+
+/// A default is set on the screen the way `omh settings set` sets it.
+///
+/// Selected by reading what is drawn rather than by counting keypresses: the
+/// selected row's description appears below the list, so the test moves until
+/// it sees the one it wants.
+#[test]
+fn a_default_is_set_on_the_screen() {
+    let sb = sandbox();
+    sb.seed_base();
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    for _ in 0..12 {
+        if tty.screen().contains("How long a session may sit unused") {
+            break;
+        }
+        tty.step("j");
+    }
+    tty.wait_for("How long a session may sit unused");
+    tty.send("\r");
+    tty.wait_for("idle_timeout =");
+    tty.send("45m\r");
+    tty.wait_for("wrote →");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+
+    let template = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
+    assert!(
+        template.contains("idle_timeout = \"45m\""),
+        "got: {template}"
+    );
+}
+
+/// An entry is removed on the screen, after it asks — in the words of the
+/// preview `omh settings rm --dry-run` gives.
+#[test]
+fn an_entry_is_removed_on_the_screen_after_it_asks() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/keep/SKILL.md"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("3"); // the skills section
+    tty.wait_for("keep");
+    for _ in 0..4 {
+        if tty.screen().contains("skills/review-diff") {
+            break;
+        }
+        tty.step("j");
+    }
+    tty.wait_for("skills/review-diff");
+    tty.send("d");
+    tty.wait_for("would remove");
+    tty.send("y");
+    tty.wait_for("removed");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    assert!(!sb.home.join(".omh/skills/review-diff").exists());
+    assert!(sb.home.join(".omh/skills/keep/SKILL.md").exists());
+}
+
+/// A server is added on the screen, its command split the way a shell would.
+#[test]
+fn a_server_is_added_on_the_screen() {
+    let sb = sandbox();
+    sb.seed_base();
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("4"); // the servers section
+    tty.wait_for("no servers");
+    tty.send("a");
+    tty.wait_for("name");
+    tty.send("linear\r");
+    tty.wait_for("command");
+    tty.send("npx -y mcp-remote 'https://mcp.linear.app/sse'\r");
+    tty.wait_for("env");
+    tty.send("\r");
+    tty.wait_for("wrote →");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+
+    let servers: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(servers["mcpServers"]["linear"]["command"], "npx");
+    assert_eq!(
+        servers["mcpServers"]["linear"]["args"],
+        serde_json::json!(["-y", "mcp-remote", "https://mcp.linear.app/sse"])
+    );
+}
+
+/// `$EDITOR` gets the terminal, and the screen comes back after it.
+#[test]
+fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("3");
+    tty.wait_for("skills/review-diff");
+    tty.send("e");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !sb.opened_in_the_editor().contains("skills/review-diff") {
+        assert!(std::time::Instant::now() < deadline, "{}", tty.screen());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    tty.wait_for("closed");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    // Left before the editor ran, and back after it: a screen still drawn
+    // under `$EDITOR` is two programs painting one terminal.
+    let entered = raw.find("\x1b[?1049h").expect("a screen");
+    let left = raw[entered..]
+        .find("\x1b[?1049l")
+        .map(|i| entered + i)
+        .unwrap_or_else(|| panic!("the screen was never left for the editor:\n{raw}"));
+    assert!(
+        raw[left..].contains("\x1b[?1049h"),
+        "the screen did not come back after the editor:\n{raw}"
+    );
 }
 
 /// A name from your catalogue is refused by **both** doors, and each names the

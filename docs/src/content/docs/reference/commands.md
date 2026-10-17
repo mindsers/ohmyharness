@@ -2070,7 +2070,7 @@ seeds a new repo's `settings.toml` from — read once, at `init`, and never at
 launch.
 
 ```
-omh settings                          your defaults, and what omh reads
+omh settings                          at a terminal, a screen; anywhere else, the report
 omh settings set <key> <value>        → ~/.omh/default.toml
 omh settings unset <key>              remove one of your defaults
 omh settings edit [<capability> [name]]
@@ -2108,6 +2108,65 @@ omh also reads
 **The second list is the useful half**: every key omh reads, which no settings
 file can show.
 
+**At a terminal, `omh settings` is a screen** over the same `~/.omh`: your
+defaults, then one page per kind of catalogue entry — rules, skills, servers,
+commands, subagents, hooks. Piped, redirected, or with `--json` or `--dry-run`,
+it is the report above.
+
+```
+ omh settings  /Users/you/.omh
+┌──────────────────┐┌ skills ──────────────────────────────────────────────────┐
+│1 defaults     1  ││tdd                                                       │
+│2 rules        0  ││                                                          │
+│3 skills       1  ││                                                          │
+│4 servers      2  ││                                                          │
+│5 commands     0  │└──────────────────────────────────────────────────────────┘
+│6 subagents    0  │┌ skills/tdd ──────────────────────────────────────────────┐
+│7 hooks        8  ││write the failing test first                              │
+│                  ││at /Users/you/.omh/skills/tdd                             │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+└──────────────────┘└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│= omh settings rm skills review-diff --yes                                    │
+│removed /Users/you/.omh/skills/review-diff                                    │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ ↑↓ move · ⇥ or 1-7 page · enter/e edit · a new · d remove · i import · q quit
+```
+
+| | |
+|---|---|
+| `↑` `↓` (`j` `k`) | move in the list |
+| `⇥` `⇧⇥` (`h` `l`), `1`–`7` | change page |
+| `enter` | set a default; open a rule, skill, command, subagent or hook in `$EDITOR` |
+| `e` | `$EDITOR` on the entry, or on the file a page lives in |
+| `a` | a new entry, opened in `$EDITOR`; a new server, asked for in three lines |
+| `d` | unset a default; remove an entry or a server, after asking |
+| `i` | import this kind from a harness whose adapter says where it keeps them |
+| `q` `esc` | leave |
+
+**Every change is a command, run as one.** The screen has no write of its
+own: a key becomes the line you would have typed — `omh settings set`,
+`omh settings rm`, `omh settings mcp add`, `omh import` — which omh runs, and
+the screen shows the line above what it said. So its refusals, warnings and
+wording are that command's, and anything you did there you can script.
+Removing previews first, and asks in the preview's words; a hook omh ships is
+refused before the question rather than after it.
+
+**Your catalogue, and nothing of this checkout's.** A hook in a repo's
+`.omh/hooks/` is not on the hooks page, and the screen does not import hooks:
+a hook lands in a repo, so `omh import hooks <harness>` is run in one. A
+server is drawn the way `omh settings mcp ls` prints it: its command, its
+environment by name and its arguments by count, since those are where a token
+goes — and the line shown after adding one hides the same.
+
+**Nothing read is drawn as a control sequence.** A skill's description, a
+hook's `does` and a command's output are drawn with every control character
+as `�`, so text somebody else wrote — an entry `i` just imported — cannot
+drive your terminal.
+
 **Not `omh set`.** `omh set` is this checkout; `omh settings` is what a new one
 starts from. `omh setting` is refused rather than guessed at.
 
@@ -2128,6 +2187,11 @@ verbs above all act on `~/.omh`, and what you have in it is part of what
 **`edit` and `rm` take a name, so they validate one**: `omh settings edit
 skills ../../.ssh/id_rsa` is refused before `$EDITOR` sees it, and the same
 name is refused before `rm` deletes anything.
+
+**A new skill is a directory.** `omh settings edit skills tdd` makes
+`~/.omh/skills/tdd/` and opens the `SKILL.md` in it, because a skill is mounted
+as a directory holding one, and a bare file of that name is not that shape. An
+existing skill opens as the directory it is.
 
 **One `rm` for every kind of entry**, servers included — `omh settings rm mcp
 linear` and `omh settings rm skills review-diff` are the same act. At a

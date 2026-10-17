@@ -26,4 +26,5 @@ pub mod memory;
 pub mod prune;
 pub mod session;
 pub mod settings;
+pub mod settings_tui;
 pub mod upgrade;
