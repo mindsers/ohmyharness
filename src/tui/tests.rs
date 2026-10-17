@@ -900,6 +900,69 @@ fn what_a_command_said_is_marked_and_fades() {
     );
 }
 
+/// The selection is a bar across the row, in colour as without it. In colour
+/// it was a two-cell `▸` and a bold name — the colourless screen had the
+/// stronger cursor — and the `▸` took the place of a row's `!`, so a selected
+/// row hid its warning. Column 0 is the row's state now, never the cursor.
+#[test]
+fn the_selection_is_a_bar_and_keeps_the_rows_mark() {
+    let mut model = model();
+    model.sections[1].rows[0].warning = Some("no SKILL.md in it".into());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let line = |y: u16| {
+        (0..120)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect::<String>()
+    };
+    let y = (0..30)
+        .find(|&y| line(y).contains("keep") && line(y).contains("! "))
+        .unwrap_or_else(|| panic!("the selected row lost its mark:\n{}", drawn(&app)));
+    assert!(!line(y).contains('▸'), "{}", line(y));
+    let name = line(y).find("keep").unwrap();
+    let x = line(y)[..name].chars().count() as u16;
+    for x in x..x + 20 {
+        assert!(
+            buffer[(x, y)].modifier.contains(Modifier::REVERSED),
+            "cell {x} of the selected row is not in the bar:\n{}",
+            line(y)
+        );
+    }
+    // And only that row.
+    let other = (0..30).find(|&y| line(y).contains("review-diff")).unwrap();
+    let x = line(other)[..line(other).find("review-diff").unwrap()]
+        .chars()
+        .count() as u16;
+    assert!(!buffer[(x, other)].modifier.contains(Modifier::REVERSED));
+}
+
+/// The accent is for where you are and what you press. A badge is a fact
+/// about a row — `rust`, `omh` — and in cyan, seven of them on the hooks page
+/// out-shouted the page you were on.
+#[test]
+fn a_badge_is_not_in_the_accent() {
+    let mut model = model();
+    model.sections[1].rows[1].badge = Some("rust".into());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let (x, y) = (0..30u16)
+        .flat_map(|y| (0..117u16).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            (0..4)
+                .map(|i| buffer[(x + i, y)].symbol())
+                .collect::<String>()
+                == "rust"
+        })
+        .expect("the badge is drawn");
+    assert_ne!(buffer[(x, y)].fg, Color::Cyan, "the badge is in the accent");
+}
+
 /// The row an act changed is marked once the page is read again, until the
 /// next key.
 #[test]

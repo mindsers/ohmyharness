@@ -27,7 +27,7 @@ use crate::cmd::harvest::plural;
 use crate::cmd::settings::{self, Edited};
 use crate::profile::Paths;
 use crate::tui::{Act, App, Edit, Import, Model, Next, Page, Row, Section};
-use crate::{base, config, hook, key};
+use crate::{config, hook, key};
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
@@ -416,11 +416,10 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 /// your catalogue's name.
 pub(crate) fn model(paths: &Paths) -> Model {
     let adapters = Adapter::load_dir(&paths.adapters());
-    let manifest = base::Manifest::load_dir(&paths.base());
     let mut sections = vec![defaults(paths, &adapters)];
     for cap in Capability::ALL {
         let mut section = match cap {
-            Capability::Mcp => servers(paths, &manifest),
+            Capability::Mcp => servers(paths),
             _ => entries(paths, cap),
         };
         section.import = match (&adapters, cap) {
@@ -647,7 +646,7 @@ fn distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
-fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
+fn servers(paths: &Paths) -> Section {
     let mut out = section(Page::Servers, "servers");
     let path = config::mcp_path(paths);
     let held = match path.try_exists() {
@@ -662,27 +661,11 @@ fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
             return out;
         }
     };
-    let owned = match manifest {
-        Ok(manifest) => manifest
-            .owns()
-            .get(&Capability::Mcp)
-            .cloned()
-            .unwrap_or_default(),
-        // Unknown is not "none of them": a server drawn without its feature's
-        // name reads as one of yours, and removing `codegraph` takes its hooks
-        // and its rules section too.
-        Err(e) => {
-            out.problem = Some(format!(
-                "could not read omh's base set, so which of these servers are omh's \
-                 own is unknown — a row below may be one: {e:#}"
-            ));
-            Default::default()
-        }
-    };
+    // Which are omh's, asked of the binary, as `rm` and `mcp add` ask it.
     let shipped = match settings::shipped_servers() {
         Ok(shipped) => shipped,
         Err(e) => {
-            out.problem.get_or_insert_with(|| format!("{e:#}"));
+            out.problem = Some(format!("{e:#}"));
             Default::default()
         }
     };
@@ -700,29 +683,48 @@ fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
             ));
         }
         // The names only. A server's environment is where its token goes.
-        if !server.env.is_empty() {
-            about.push(format!(
-                "env   {}",
-                server.env.keys().cloned().collect::<Vec<_>>().join(", ")
-            ));
+        let env = server.env.keys().cloned().collect::<Vec<_>>().join(", ");
+        if !env.is_empty() {
+            about.push(format!("env   {env}"));
         }
         about.push(format!("in    {}", path.display()));
-        let feature = owned.get(&name);
+        let feature = shipped.get(&name);
         if let Some(feature) = feature {
             about.push(format!(
                 "omh's own — the {feature} feature; `omh set {feature} off` switches it off in a repo"
             ));
         }
+        // Names and counts, as the detail says them: never a value.
+        let mut summary = vec![server.command.clone()];
+        if !server.args.is_empty() {
+            summary.push(format!(
+                "{} arg{}",
+                server.args.len(),
+                plural(server.args.len())
+            ));
+        }
+        if !env.is_empty() {
+            summary.push(format!("env {env}"));
+        }
         out.rows.push(Row {
-            badge: feature.map(|_| "omh".to_string()),
-            summary: Some(server.command),
+            summary: Some(summary.join(" · ")),
+            // Grouped as hooks are: yours, the ones you came to change, and
+            // then omh's own.
+            group: Some(
+                match feature {
+                    Some(_) => "omh's own",
+                    None => "yours",
+                }
+                .to_string(),
+            ),
             // Asked of what `rm` asks, so the screen offers what it will do.
-            fixed: shipped.contains_key(&name),
+            fixed: feature.is_some(),
             name,
             about,
             ..Row::default()
         });
     }
+    out.rows.sort_by_key(|r| r.fixed);
     out
 }
 
@@ -1062,6 +1064,40 @@ mod tests {
         let everything = format!("{model:?}");
         assert!(!everything.contains("sk-very-secret"), "{everything}");
         assert!(!everything.contains("sk-arg-secret"), "{everything}");
+    }
+
+    /// Servers are grouped as hooks are, yours first and then omh's own, and
+    /// each says what it runs in names and counts. `memory  omh omh` was the
+    /// badge and then the command, and every server of yours read `npx`.
+    #[test]
+    fn servers_are_yours_first_and_say_what_they_run() {
+        let (_dir, paths) = paths();
+        std::fs::write(
+            config::mcp_path(&paths),
+            r#"{"mcpServers":{"memory":{"command":"omh","args":["memory","serve"]},"linear":{"command":"npx","args":["-y","mcp-remote","--header","Authorization: Bearer sk-arg"],"env":{"LINEAR_TOKEN":"sk-env"}}}}"#,
+        )
+        .unwrap();
+        let model = model(&paths);
+        let servers = page(&model, "servers");
+        let rows: Vec<(&str, Option<&str>, Option<&str>)> = servers
+            .rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.group.as_deref(), r.summary.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "linear",
+                    Some("yours"),
+                    Some("npx · 4 args · env LINEAR_TOKEN")
+                ),
+                ("memory", Some("omh's own"), Some("omh · 2 args")),
+            ]
+        );
+        assert!(servers.rows.iter().all(|r| r.badge.is_none()));
+        let everything = format!("{model:?}");
+        assert!(!everything.contains("sk-arg") && !everything.contains("sk-env"));
     }
 
     /// **Could not look is not none.** A catalogue directory omh cannot read
@@ -1423,8 +1459,8 @@ mod tests {
     }
 
     /// **Could not look is not none**, on every page that reads a file: a
-    /// defaults file, a servers file, the base set and the adapters that will
-    /// not read are said, never drawn as nothing set or nothing to import.
+    /// defaults file, a servers file and the adapters that will not read are
+    /// said, never drawn as nothing set or nothing to import.
     #[test]
     fn every_read_the_screen_makes_is_said_when_it_fails() {
         let (_dir, broken) = paths();
@@ -1438,8 +1474,7 @@ mod tests {
             page(&read, "defaults").problem.is_some(),
             "a defaults file that will not parse"
         );
-        // By name: in this fixture the base set is absent too, which says a
-        // problem of its own on the same page.
+        // By name, the file that would not parse.
         assert!(
             page(&read, "servers")
                 .problem
@@ -1459,14 +1494,11 @@ mod tests {
         write(&unsure.adapters().join("claude.toml"), "name = [unclosed\n");
         let read = model(&unsure);
         let servers = page(&read, "servers");
-        assert!(
-            servers
-                .problem
-                .as_deref()
-                .is_some_and(|p| p.contains("unknown")),
-            "an unreadable base set leaves which servers are omh's unknown: {servers:?}"
-        );
+        // Which servers are omh's is asked of the binary, as `rm` asks it, so
+        // an unreadable base set under `~/.omh` leaves it known.
+        assert_eq!(servers.problem, None, "{servers:?}");
         assert_eq!(servers.rows.len(), 1, "and the server is still listed");
+        assert_eq!(servers.rows[0].group.as_deref(), Some("omh's own"));
         for title in ["skills", "rules", "servers"] {
             match &page(&read, title).import {
                 Import::Not(why) => assert!(why.contains("adapters"), "{title}: {why}"),

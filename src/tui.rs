@@ -1350,13 +1350,16 @@ impl App {
         width: usize,
     ) -> Line<'static> {
         let changed = self.changed.as_deref() == Some(row.name.as_str());
-        // The row an act changed is the one selected after it, so ✓ outranks
-        // the selection's `▸`, or it would never be seen.
-        let mark = match (changed, selected, row.warning.is_some()) {
-            (true, _, _) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
-            (false, true, _) => Span::styled("▸ ", self.look.accent()),
-            (false, false, true) => Span::styled("! ", self.look.tone(Tone::Warn)),
-            (false, false, false) => Span::raw("  "),
+        // Column 0 is the row's state; where the cursor is, the bar says.
+        let mark = match (changed, row.warning.is_some()) {
+            (true, _) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
+            (false, true) => Span::styled("! ", self.look.tone(Tone::Warn)),
+            (false, false) => Span::raw("  "),
+        };
+        // Inside the bar nothing is dim: reversed, dim reads as a gap in it.
+        let dim = match selected {
+            true => Style::default(),
+            false => self.look.dim(),
         };
         let name = Span::styled(
             pad(&ellipsized(&row.name, name_width), name_width),
@@ -1370,7 +1373,7 @@ impl App {
             let badge = row.badge.as_deref().unwrap_or_default();
             spans.push(Span::styled(
                 pad(&ellipsized(badge, badge_width - 1), badge_width),
-                self.look.accent(),
+                dim,
             ));
         }
         let used: usize = spans.iter().map(Span::width).sum();
@@ -1391,9 +1394,9 @@ impl App {
                     Some(f) => format!("default: {f}"),
                     None => "not set".to_string(),
                 },
-                self.look.dim(),
+                dim,
             ),
-            (_, None, _) => (row.summary.clone().unwrap_or_default(), self.look.dim()),
+            (_, None, _) => (row.summary.clone().unwrap_or_default(), dim),
         };
         spans.push(Span::styled(ellipsized(&text, room), style));
         Line::from(spans)
@@ -1417,7 +1420,7 @@ impl App {
                         .clone()
                         .map(|b| format!("  {b}"))
                         .unwrap_or_default(),
-                    self.look.accent(),
+                    self.look.dim(),
                 ),
             ]),
             Line::default(),
@@ -2039,7 +2042,7 @@ fn masked_env(text: &[char]) -> String {
     // The current word's content has taken its `=`: what follows is a value.
     let mut value = false;
     let mut chars = text.iter().copied();
-    let mut draw = |out: &mut String, c: char, value: &mut bool, content: bool| {
+    let draw = |out: &mut String, c: char, value: &mut bool, content: bool| {
         out.push(if *value { '•' } else { c });
         if content && c == '=' {
             *value = true;
@@ -2140,11 +2143,10 @@ impl Look {
         self.accent().add_modifier(Modifier::BOLD)
     }
 
+    /// The cursor: a bar across the row, the same with colour as without —
+    /// reversed reads on a light theme as on a dark one.
     fn selected(&self) -> Style {
-        match self.color {
-            true => Style::default(),
-            false => Style::default().add_modifier(Modifier::REVERSED),
-        }
+        Style::default().add_modifier(Modifier::REVERSED)
     }
 
     fn tone(&self, tone: Tone) -> Style {
