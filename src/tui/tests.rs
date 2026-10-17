@@ -1614,7 +1614,36 @@ fn three_columns_from_120_with_the_list_given_the_room() {
     assert_eq!(rules(110).len(), 1, "stacked below 120: {:?}", rules(110));
     let wide = rules(120);
     assert_eq!(wide.len(), 2, "{wide:?}");
-    assert!(wide[1] - wide[0] >= 58, "the list is {} wide", wide[1] - wide[0]);
+    assert!(
+        wide[1] - wide[0] >= 58,
+        "the list is {} wide",
+        wide[1] - wide[0]
+    );
+}
+
+/// The stacked detail says the value first and its prose last, and says
+/// when it is cut: at 80×24 the git-notice detail ended mid-prose and its
+/// `now` and `one of` lines — the answer — never showed.
+#[test]
+fn the_stacked_detail_says_the_value_first_and_when_it_is_cut() {
+    let mut model = model();
+    model.sections[0].rows[1].about = (0..12)
+        .map(|i| format!("a line of prose about the runtime, number {i}"))
+        .collect();
+    let mut app = App::new(model, true);
+    app.key(press('j'));
+    let screen = drawn_at(&app, 80, 24);
+    let below = &screen[screen.find('├').expect("stacked")..];
+    assert!(below.contains("auto · default"), "the value:\n{screen}");
+    assert!(
+        below.contains("auto · docker · podman"),
+        "the choices:\n{screen}"
+    );
+    // Not `↓` alone, which the footer's `↑↓ move` holds.
+    assert!(below.contains("↓ more"), "and that it is cut:\n{screen}");
+    // Where it fits, nothing says it is cut.
+    let screen = drawn_at(&app, 80, 60);
+    assert!(!screen.contains("↓ more"), "{screen}");
 }
 
 /// `space` flips whether the repos `omh init` sets up after get a row, by the

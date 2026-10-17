@@ -1441,10 +1441,7 @@ impl App {
             )),
             rule,
         );
-        f.render_widget(
-            Paragraph::new(self.detail_text()).wrap(Wrap { trim: false }),
-            detail_area.inner(Margin::new(1, 0)),
-        );
+        self.draw_detail(f, detail_area.inner(Margin::new(1, 0)));
         Some(rule.y)
     }
 
@@ -1877,19 +1874,31 @@ impl App {
             Some(capability) => format!("{capability}/{}", row.name),
             None => row.name.clone(),
         };
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(title, self.look.title()),
-                Span::styled(
-                    row.badge
-                        .clone()
-                        .map(|b| format!("  {b}"))
-                        .unwrap_or_default(),
-                    self.look.dim(),
-                ),
-            ]),
-            Line::default(),
+        let defaults = section.page == Page::Defaults;
+        let mut head = vec![
+            Span::styled(title, self.look.title()),
+            Span::styled(
+                row.badge
+                    .clone()
+                    .map(|b| format!("  {b}"))
+                    .unwrap_or_default(),
+                self.look.dim(),
+            ),
         ];
+        // A default's value on its title line: stacked, the detail is cut
+        // from the bottom, and the value at the bottom was what went.
+        if defaults {
+            head.extend(match (&row.value, &row.fallback) {
+                (Some(v), _) => vec![Span::raw("  "), Span::styled(v.clone(), self.look.title())],
+                (None, Some(f)) => vec![
+                    Span::raw("  "),
+                    Span::raw(f.clone()),
+                    Span::styled(" · default", self.look.dim()),
+                ],
+                (None, None) => vec![Span::styled("  unset", self.look.dim())],
+            });
+        }
+        let mut lines = vec![Line::from(head), Line::default()];
         if let Some(w) = &row.warning {
             for (i, line) in w.lines().enumerate() {
                 lines.push(Line::from(Span::styled(
@@ -1898,7 +1907,28 @@ impl App {
                 )));
             }
         }
-        lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
+        if defaults {
+            if let Edit::Choice(options) = &row.edit {
+                if !options.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("one of  ", self.look.dim()),
+                        Span::raw(options.join(" · ")),
+                    ]));
+                }
+            }
+            if let Edit::Text { hint } = &row.edit {
+                if !hint.is_empty() {
+                    lines.push(Line::from(Span::styled(hint.clone(), self.look.dim())));
+                }
+            }
+            // The prose last, where a cut costs least.
+            if !row.about.is_empty() {
+                lines.push(Line::default());
+                lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
+            }
+        } else {
+            lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
+        }
         if let Some(on) = row.seeded {
             lines.push(Line::from(vec![
                 Span::styled("new repos  ", self.look.dim()),
@@ -1909,41 +1939,28 @@ impl App {
                 Span::styled("  — space changes it", self.look.dim()),
             ]));
         }
-        if section.page == Page::Defaults {
-            lines.push(Line::default());
-            lines.push(Line::from(match (&row.value, &row.fallback) {
-                (Some(v), _) => vec![
-                    Span::styled("now     ", self.look.dim()),
-                    Span::styled(v.clone(), self.look.title()),
-                ],
-                (None, Some(f)) => vec![
-                    Span::styled("now     ", self.look.dim()),
-                    Span::raw(f.clone()),
-                    Span::styled(" · default", self.look.dim()),
-                ],
-                (None, None) => vec![Span::styled("unset", self.look.dim())],
-            }));
-            if let Edit::Choice(options) = &row.edit {
-                if !options.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("one of  ", self.look.dim()),
-                        Span::raw(options.join(" · ")),
-                    ]));
-                }
-            }
-            if let Edit::Text { hint } = &row.edit {
-                lines.push(Line::from(Span::styled(hint.clone(), self.look.dim())));
-            }
-        }
         // The keys are the footer's, which follows the row: a second list of
         // them here spent two rows of a stacked screen saying it again.
         Text::from(lines)
     }
 
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
+        let paragraph = Paragraph::new(self.detail_text()).wrap(Wrap { trim: false });
+        // Cut, it says so: the detail ended mid-prose with nothing to say
+        // there was more.
+        let cut = paragraph.line_count(area.width) > usize::from(area.height);
+        if !cut || area.height < 2 {
+            return f.render_widget(paragraph, area);
+        }
+        let [text, cue] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+        f.render_widget(paragraph, text);
         f.render_widget(
-            Paragraph::new(self.detail_text()).wrap(Wrap { trim: false }),
-            area,
+            Paragraph::new(Span::styled(
+                "↓ more, in a taller terminal",
+                self.look.dim(),
+            )),
+            cue,
         );
     }
 
