@@ -4964,6 +4964,47 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     );
 }
 
+/// Your defaults are said as your defaults: `unset` said "removed … from the
+/// personal layer", a word for a file `config.rs` calls a template; `mcp ls`
+/// called omh's own servers "your catalogue"; and a feature given neither on
+/// nor off pointed at `omh set`, the repo's verb, from `omh settings set`.
+#[test]
+fn your_defaults_are_said_as_yours_and_omhs_own_as_omhs() {
+    let sb = sandbox();
+    sb.seed_base();
+    let run = |argv: &[&str]| {
+        let out = sb.omh(argv);
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    run(&["settings", "set", "idle_timeout", "45m"]);
+    let said = run(&["settings", "unset", "idle_timeout"]);
+    assert!(said.contains("from your defaults"), "{said}");
+    assert!(!said.contains("personal"), "{said}");
+
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},"linear":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+    let said = run(&["settings", "mcp", "ls"]);
+    let line = |name: &str| {
+        said.lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("codegraph").contains("omh's own"), "{said}");
+    assert!(line("linear").contains("your catalogue"), "{said}");
+
+    let said = run(&["settings", "set", "codegraph", "maybe"]);
+    assert!(said.contains("omh settings set codegraph off"), "{said}");
+}
+
 /// A removal says what goes with it before it asks, and that it cannot be
 /// undone: a server's env — by name, never by value — the files in a skill's
 /// directory, and of a link, that only the link goes. `d y` on a server took

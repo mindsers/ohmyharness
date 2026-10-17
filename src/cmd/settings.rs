@@ -361,7 +361,10 @@ pub(crate) fn feature_forget(
             ctx.say(
                 &report::Action::new(
                     "feature-forget-planned",
-                    format!("would drop the {feature} switch from the {layer} layer"),
+                    format!(
+                        "would drop the {feature} switch from {}",
+                        layer_said(*layer)
+                    ),
                 )
                 .data(serde_json::json!({ "feature": feature, "layer": layer.to_string() })),
             );
@@ -725,14 +728,29 @@ pub(crate) fn an_entry_is_not_a_feature(
 /// switch and `omh set codegraph true` reads as somebody guessing at a
 /// serialisation. Refused rather than accepted-and-normalised, because the
 /// refusal is where the two words get taught.
-pub(crate) fn on_or_off(feature: &str, value: &str) -> Result<bool> {
+pub(crate) fn on_or_off(feature: &str, value: &str, reach: &Reach) -> Result<bool> {
+    // The verb it was typed as: `omh settings set` pointed at `omh set`,
+    // the repo's, which switches something else.
+    let verb = match reach.is_your_defaults() {
+        true => "omh settings set",
+        false => "omh set",
+    };
     match value {
         "on" => Ok(true),
         "off" => Ok(false),
         other => anyhow::bail!(
             "`{feature}` is one of omh's features, so it is on or off — \
-             `{other}` is neither.\n  omh set {feature} off"
+             `{other}` is neither.\n  {verb} {feature} off"
         ),
+    }
+}
+
+/// A layer as somebody reading the line knows it: your defaults are not a
+/// layer of a repo's, and "the personal layer" was a word for a template.
+fn layer_said(layer: config::Layer) -> String {
+    match layer {
+        config::Layer::Personal => "your defaults".to_string(),
+        other => format!("the {other} layer"),
     }
 }
 
@@ -968,7 +986,8 @@ pub(crate) fn unset(
                 &report::Action::new(
                     "setting-removal-planned",
                     format!(
-                        "would drop {what} from the {layer} layer ({})",
+                        "would drop {what} from {} ({})",
+                        layer_said(*layer),
                         tracked(*layer)
                     ),
                 )
@@ -989,9 +1008,9 @@ pub(crate) fn unset(
                     "setting-absent"
                 },
                 if removed {
-                    format!("removed {what} from the {layer} layer")
+                    format!("removed {what} from {}", layer_said(*layer))
                 } else {
-                    format!("{what} was not set in the {layer} layer")
+                    format!("{what} was not set in {}", layer_said(*layer))
                 },
             )
             .data(serde_json::json!({
