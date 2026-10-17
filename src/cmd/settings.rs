@@ -1332,6 +1332,17 @@ pub(crate) fn rm(
         None => format!("the `{name}` server from {}", source.display()),
     };
 
+    // The list new repos are seeded from would go on naming it, and `omh init`
+    // would say it is missing in every repo after. Said before the question.
+    if config::selection_in(paths, config::Layer::Personal, cap)?
+        .is_some_and(|listed| listed.iter().any(|n| n == name))
+    {
+        ctx.warn(&format!(
+            "[use] in your defaults names {cap}/{name}, so the repos `omh init` sets up \
+             after would be told it is missing. To take it out of the list:\n  \
+             omh settings unuse {cap} {name}"
+        ));
+    }
     if dry_run {
         ctx.say(
             &report::Action::new("catalogue-entry-planned", format!("would remove {what}")).data(
@@ -1469,6 +1480,17 @@ pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, Str
                 .filter(|e| e.kind.capability() == adapter::Capability::Mcp)
                 .map(|e| (e.name, e.feature)),
         );
+    }
+    Ok(out)
+}
+
+/// omh's features, from the manifests in the binary — what `[omh]` switches.
+pub(crate) fn shipped_features() -> Result<std::collections::BTreeSet<String>> {
+    let mut out = std::collections::BTreeSet::new();
+    for file in crate::bundled::Shipped::Base.files() {
+        let manifest: base::Manifest = toml::from_str(file.contents)
+            .with_context(|| format!("reading omh's own base/{}", file.name))?;
+        out.extend(manifest.entries.into_iter().map(|e| e.feature));
     }
     Ok(out)
 }

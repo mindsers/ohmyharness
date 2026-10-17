@@ -2074,6 +2074,11 @@ omh settings                          at a terminal, a screen; anywhere else, th
 omh settings set <key> <value> [--anyway]
                                       → ~/.omh/default.toml
 omh settings unset <key>              remove one of your defaults
+omh settings set <feature> on|off     switch one of omh's features, for new repos
+omh settings use <capability> <name>  have new repos take an entry of your catalogue
+omh settings unuse <capability> <name>
+                                      have new repos leave one out
+omh settings use <capability> --all   have new repos take every entry of a kind again
 omh settings edit [<capability> [name]]
                                       $EDITOR on your defaults, or on one entry
 omh settings rm <capability> <name> [--yes]
@@ -2158,6 +2163,7 @@ pages are one line along the top.
 | `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |
 | `d` | unset a default; remove an entry or a server, after asking |
 | `i` | import this kind from a harness whose adapter says where it keeps them |
+| `space` | whether the repos `omh init` sets up after get the entry: `●` they do, `○` they do not |
 | `/` | filter the page by name, description or value; `esc` takes it off |
 | `?` | every key, on the screen |
 | `q` `esc` `ctrl-d` `ctrl-c` | leave |
@@ -2222,6 +2228,20 @@ ships can be opened, and the screen says what `omh upgrade` does to an edit:
 puts its own back and keeps yours as `<name>.json.yours`. A link to nothing is
 refused before any editor runs — opened, an editor writes through it, out of
 the catalogue — and the refusal names the `rm` that takes it out.
+
+**What a new repo gets is said and changed here.** Each entry is marked `●`
+or `○`, and each page's heading says how many: *new repos get all* while a kind
+has no list — every entry, including one you add later — or *new repos get 1 of
+4* once it has one. `space` changes an entry, running `omh settings use` or
+`unuse`, which write `[use]` in `~/.omh/default.toml`; on a server omh owns it
+runs `omh settings set <feature> on|off`, since a feature is switched whole. The
+first `unuse` on a kind with no list writes the rest as its list, and says so —
+an entry added after it is not seeded until you `use` it — and
+`omh settings use <capability> --all` takes the list out again. Your defaults
+list omh's features too, under their own heading, and `[use]` is marked when it
+names an entry your catalogue does not have, as `omh init` would warn. A repo
+that exists keeps its own: `omh use`, `omh unuse` and `omh set <feature> off`
+there.
 
 **Not `omh set`.** `omh set` is this checkout; `omh settings` is what a new one
 starts from. `omh setting` is refused rather than guessed at.

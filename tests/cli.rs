@@ -4824,6 +4824,31 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     );
 }
 
+/// Removing an entry your defaults' `[use]` names says so before it goes:
+/// the list would go on naming it, and every repo `omh init` sets up after
+/// would be told it is missing. The preview says it, so the screen's
+/// question does.
+#[test]
+fn rm_says_when_new_repos_are_seeded_with_the_entry() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md", "skills/other/SKILL.md"]);
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "[use]\nskills = [\"tdd\"]\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["--dry-run", "settings", "rm", "skills", "tdd"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("omh settings unuse skills tdd"), "{said}");
+    let out = sb.omh(&["--dry-run", "settings", "rm", "skills", "other"]);
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("unuse"),
+        "an entry the list does not name is not warned about"
+    );
+}
+
 /// `omh set` and `omh settings` are one letter apart and never confused.
 ///
 /// clap can be told to accept unambiguous prefixes. It is not, and this is

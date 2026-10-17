@@ -251,6 +251,8 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
     match act {
         Act::Set { key, value } => s(&["settings", "set", "--", key, value]),
         Act::SetAnyway { key, value } => s(&["settings", "set", "--anyway", "--", key, value]),
+        Act::Use { capability, name } => s(&["settings", "use", "--", capability, name]),
+        Act::Unuse { capability, name } => s(&["settings", "unuse", "--", capability, name]),
         Act::Unset { key } => s(&["settings", "unset", "--", key]),
         Act::EditDefaults => s(&["settings", "edit"]),
         Act::Edit { capability, name } => {
@@ -441,12 +443,110 @@ pub(crate) fn model(paths: &Paths) -> Model {
             (Err(e), _) => Import::Not(format!("could not read the adapters: {e:#}")),
         };
         section.about = belongs(cap, &section.import);
+        seeds(paths, cap, &mut section);
         sections.push(section);
     }
     Model {
         root: tilde(&paths.root, dirs::home_dir().as_deref()),
         sections,
     }
+}
+
+/// Whether the repos `omh init` sets up after get each row, and what flips
+/// it — and how many the page's new repos get.
+///
+/// An entry of yours is `[use]` in your defaults: no list is every entry, and
+/// `omh settings use`/`unuse` change one. A server omh owns is its feature's,
+/// switched by `omh settings set <feature> on|off`. "All" is said only while a
+/// kind has no list — a list holding every entry is not the same fact, since
+/// an entry added after it is not seeded.
+fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
+    let list = match config::selection_in(paths, config::Layer::Personal, cap) {
+        Ok(list) => list,
+        Err(e) => {
+            section.problem.get_or_insert_with(|| format!("{e:#}"));
+            return;
+        }
+    };
+    let owned = settings::shipped_servers().unwrap_or_default();
+    let switched = feature_switches(paths);
+    for row in &mut section.rows {
+        match (cap, owned.get(&row.name)) {
+            (Capability::Mcp, Some(feature)) => {
+                let on = switched.get(feature).copied().unwrap_or(true);
+                row.seeded = Some(on);
+                row.toggle = Some(Act::Set {
+                    key: feature.clone(),
+                    value: if on { "off" } else { "on" }.into(),
+                });
+            }
+            _ => {
+                let on = list.as_ref().is_none_or(|l| l.contains(&row.name));
+                row.seeded = Some(on);
+                let (capability, name) = (cap.key().to_string(), row.name.clone());
+                row.toggle = Some(match on {
+                    true => Act::Unuse { capability, name },
+                    false => Act::Use { capability, name },
+                });
+            }
+        }
+    }
+    let total = section.rows.len();
+    let got = section
+        .rows
+        .iter()
+        .filter(|r| r.seeded == Some(true))
+        .count();
+    let qualified = |said: String| match cap {
+        // A shipped hook runs only where its stack does.
+        Capability::Hooks => format!("{said}, each where its stack applies"),
+        _ => said,
+    };
+    section.seeds = (total > 0).then(|| match (&list, got == total) {
+        (None, true) => qualified("new repos get all".into()),
+        _ => qualified(format!("new repos get {got} of {total}")),
+    });
+}
+
+/// The entries `[use]` in your defaults names and your catalogue does not
+/// have — what `omh init` would warn about, said before it does.
+fn names_nothing(paths: &Paths) -> Option<String> {
+    let mut missing = Vec::new();
+    for cap in Capability::ALL {
+        let Ok(Some(listed)) = config::selection_in(paths, config::Layer::Personal, cap) else {
+            continue;
+        };
+        let held =
+            crate::cmd::catalogue::catalogue_names_unfiltered(paths, cap).unwrap_or_default();
+        missing.extend(
+            listed
+                .into_iter()
+                .filter(|n| !held.contains(n))
+                .map(|n| format!("{}/{n}", cap.key())),
+        );
+    }
+    (!missing.is_empty()).then(|| {
+        format!(
+            "names {}, which your catalogue does not have — `omh init` will warn",
+            missing.join(", ")
+        )
+    })
+}
+
+/// How your defaults switch omh's features for new repos: `[omh]` in
+/// `default.toml`, by name. A feature not there is on.
+fn feature_switches(paths: &Paths) -> std::collections::BTreeMap<String, bool> {
+    let Ok(doc) = config::read_doc(&config::Layer::Personal.file(paths)) else {
+        return Default::default();
+    };
+    doc.get(config::OMH)
+        .and_then(|t| t.as_table_like())
+        .map(|t| {
+            t.iter()
+                .filter_map(|(k, v)| v.as_bool().map(|b| (k.to_string(), b)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What belongs on a page, for one with nothing on it yet: what the kind is,
@@ -517,6 +617,7 @@ fn section(page: Page, title: &'static str) -> Section {
         problem: None,
         import: Import::From(Vec::new()),
         about: Vec::new(),
+        seeds: None,
     }
 }
 
@@ -592,9 +693,30 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             ..Row::default()
         });
     }
+    // omh's features, switched for the repos `omh init` sets up after, under a
+    // heading of their own — where `[omh]` was one table row to open the file
+    // for.
+    let switched = feature_switches(paths);
+    for feature in settings::shipped_features().unwrap_or_default() {
+        out.rows.push(Row {
+            value: switched
+                .get(&feature)
+                .map(|on| if *on { "on" } else { "off" }.to_string()),
+            fallback: Some("on".into()),
+            about: vec![format!(
+                "one of omh's features — its servers, hooks and rules section, on or off \
+                     together, for the repos `omh init` sets up after. A repo that exists \
+                     keeps its own: `omh set {feature} off` there."
+            )],
+            edit: Edit::Choice(vec!["on".into(), "off".into()]),
+            group: Some("features".into()),
+            name: feature,
+            ..Row::default()
+        });
+    }
     let doc = config::read_doc(&file);
     for (name, value) in &mine {
-        if key::describes(name).is_some() {
+        if key::describes(name).is_some() || *name == format!("[{}]", config::OMH) {
             continue;
         }
         let table = name.starts_with('[');
@@ -603,10 +725,21 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             true => Row {
                 name: name.clone(),
                 value: Some(table_summary(&doc, name)),
-                about: vec![
-                    format!("a table in {}", within(paths, &file)),
-                    "e opens the file to change it".into(),
-                ],
+                warning: (*name == format!("[{}]", config::USE))
+                    .then(|| names_nothing(paths))
+                    .flatten(),
+                about: match *name == format!("[{}]", config::USE) {
+                    true => vec![
+                        "what `omh init` gives a new repo from your catalogue — a kind not \
+                         listed takes every entry. space on an entry's page changes it."
+                            .into(),
+                        format!("file  {}", within(paths, &file)),
+                    ],
+                    false => vec![
+                        format!("a table in {}", within(paths, &file)),
+                        "e opens the file to change it".into(),
+                    ],
+                },
                 ..Row::default()
             },
             false => Row {
@@ -1019,6 +1152,17 @@ mod tests {
                 "`{value}` did not arrive as the value"
             );
         }
+        // What new repos take: `settings use` and `unuse`, by kind and name.
+        assert!(matches!(
+            parsed(&Act::Use { capability: "skills".into(), name: "-x".into() }),
+            Cmd::Settings { cmd: Some(SettingsCmd::Use { capability, name: Some(name), all: false }) }
+                if capability == "skills" && name == "-x"
+        ));
+        assert!(matches!(
+            parsed(&Act::Unuse { capability: "hooks".into(), name: "rust-test".into() }),
+            Cmd::Settings { cmd: Some(SettingsCmd::Unuse { capability, name }) }
+                if capability == "hooks" && name == "rust-test"
+        ));
         // Anyway is `--anyway`, and a plain set is not.
         assert!(matches!(
             parsed(&Act::SetAnyway { key: "persistence".into(), value: "tmux".into() }),
@@ -1279,6 +1423,119 @@ mod tests {
         let warning = row("persistence").warning.unwrap_or_default();
         assert!(warning.contains("dtach"), "{warning:?}");
         assert_eq!(row("runtime").warning, None);
+    }
+
+    /// Every entry says whether the repos `omh init` sets up after get it, and
+    /// carries the act that flips it: `[use]` in your defaults for an entry of
+    /// yours, the feature's switch for a server omh owns. The page says how
+    /// many — "all" while the kind has no list, which is a different fact
+    /// from every entry being on one.
+    #[test]
+    fn every_entry_says_whether_new_repos_get_it() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("skills/tdd/SKILL.md"),
+            "---\ndescription: x\n---\n",
+        );
+        write(
+            &paths.root.join("skills/review-diff/SKILL.md"),
+            "---\ndescription: y\n---\n",
+        );
+        write(&paths.root.join("rules/house.md"), "# house\n");
+        write(
+            &config::mcp_path(&paths),
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},"linear":{"command":"npx"}}}"#,
+        );
+        write(
+            &paths.root.join("default.toml"),
+            "[use]\nskills = [\"tdd\"]\n\n[omh]\ncodegraph = false\n",
+        );
+        let model = model(&paths);
+        let row = |title: &str, name: &str| {
+            page(&model, title)
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {title}/{name}"))
+                .clone()
+        };
+        let skill = row("skills", "tdd");
+        assert_eq!(skill.seeded, Some(true));
+        assert_eq!(
+            skill.toggle,
+            Some(Act::Unuse {
+                capability: "skills".into(),
+                name: "tdd".into()
+            })
+        );
+        let skill = row("skills", "review-diff");
+        assert_eq!(skill.seeded, Some(false));
+        assert_eq!(
+            skill.toggle,
+            Some(Act::Use {
+                capability: "skills".into(),
+                name: "review-diff".into()
+            })
+        );
+        assert_eq!(
+            page(&model, "skills").seeds.as_deref(),
+            Some("new repos get 1 of 2")
+        );
+        // A kind with no list: every entry, said as "all".
+        assert_eq!(row("rules", "house").seeded, Some(true));
+        assert_eq!(
+            page(&model, "rules").seeds.as_deref(),
+            Some("new repos get all")
+        );
+        // A server omh owns is its feature's, switched — not listed.
+        let own = row("servers", "codegraph");
+        assert_eq!(own.seeded, Some(false));
+        assert_eq!(
+            own.toggle,
+            Some(Act::Set {
+                key: "codegraph".into(),
+                value: "on".into()
+            })
+        );
+        assert_eq!(row("servers", "linear").seeded, Some(true));
+        // Your defaults list the features, switched for new repos, under their
+        // own heading — not as an `[omh]` table.
+        let defaults = page(&model, "defaults");
+        let feature = defaults
+            .rows
+            .iter()
+            .find(|r| r.name == "codegraph")
+            .unwrap();
+        assert_eq!(feature.value.as_deref(), Some("off"));
+        assert_eq!(feature.group.as_deref(), Some("features"));
+        assert_eq!(feature.edit, Edit::Choice(vec!["on".into(), "off".into()]));
+        assert!(defaults.rows.iter().all(|r| r.name != "[omh]"));
+    }
+
+    /// `[use]` naming an entry your catalogue does not have is marked, as
+    /// `omh init` would warn about it — after an `rm`, say.
+    #[test]
+    fn a_use_list_naming_nothing_is_marked() {
+        let (_dir, paths) = paths();
+        write(&paths.root.join("skills/tdd/SKILL.md"), "x");
+        write(
+            &paths.root.join("default.toml"),
+            "[use]\nskills = [\"tdd\", \"gone\"]\n",
+        );
+        let model = model(&paths);
+        let row = page(&model, "defaults")
+            .rows
+            .iter()
+            .find(|r| r.name == "[use]")
+            .unwrap()
+            .clone();
+        let warning = row.warning.unwrap_or_default();
+        assert!(warning.contains("skills/gone"), "{warning:?}");
+        assert!(
+            row.about.iter().any(|l| l.contains("omh init")),
+            "{:?}",
+            row.about
+        );
     }
 
     /// **Could not look is not none.** A catalogue directory omh cannot read

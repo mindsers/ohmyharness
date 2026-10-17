@@ -1362,8 +1362,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // − 2 repeated examples; the summary block became a usage line per entry
         // + `omh settings rm`'s console example; its synopsis line replaced
         // the server's own `rm`. + the header of the settings screen's drawing,
-        // + the command its status line names.
-        ("docs/src/content/docs/reference/commands.md", 148),
+        // + the command its status line names. + `omh settings set <feature>`,
+        // `use`, `unuse` and `use --all` in the synopsis.
+        ("docs/src/content/docs/reference/commands.md", 152),
         // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
         // the `--anyway` line it prints, and the run with it.
         ("docs/src/content/docs/reference/configuration.md", 50),
@@ -1971,8 +1972,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // <feature> off` under the server refusal and the part-of-a-feature
         // refusal, and `omh init` in both answers a switch in your defaults
         // gives. + `omh settings use`/`unuse` where `settings set` is given an
-        // entry of your catalogue.
-        ("src/cmd/settings.rs", 27),
+        // entry of your catalogue. + `omh init` and `omh settings unuse` where
+        // rm takes an entry your defaults' `[use]` names.
+        ("src/cmd/settings.rs", 29),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
@@ -1980,8 +1982,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh auth <harness> -n <name>` in the account's hint, and
         // `omh set <feature> off` beside a server a feature owns. +
         // `omh auth <harness>` where no login is captured, and `omh upgrade`
-        // after an edit to a hook omh ships.
-        ("src/cmd/settings_tui.rs", 9),
+        // after an edit to a hook omh ships. + `omh init` and `omh set
+        // <feature> off` in a feature row's about, and `omh init` in the
+        // `[use]` row's about and its warning.
+        ("src/cmd/settings_tui.rs", 13),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
@@ -2039,7 +2043,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // The screen's header, `omh settings`; `$ omh <line>` beside what the
         // command it ran said; and `omh settings edit <capability> <name>` in
         // the box that names a new entry.
-        ("src/tui.rs", 3),
+        // + `omh init` in help's line for space.
+        ("src/tui.rs", 4),
         ("src/why.rs", 3),
     ]
     .into_iter()

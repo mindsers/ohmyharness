@@ -56,6 +56,8 @@ pub struct Section {
     pub import: Import,
     /// What belongs on the page, said where an empty one has room for it.
     pub about: Vec<String>,
+    /// How much of the page new repos get: "new repos get all", "… 1 of 4".
+    pub seeds: Option<String>,
 }
 
 /// Which kind of page, by what each key does on it.
@@ -118,6 +120,12 @@ pub struct Row {
     /// the command refuses to remove, so the screen does not offer to. `d`
     /// still asks the command, and its refusal says what to do instead.
     pub fixed: bool,
+    /// Whether the repos `omh init` sets up after get it, where that is a
+    /// question: an entry of your catalogue, a server omh owns.
+    pub seeded: Option<bool>,
+    /// What flips that — the command, worked out by the caller, so the screen
+    /// keeps no rule about `[use]` or features of its own.
+    pub toggle: Option<Act>,
 }
 
 /// How `enter` sets a default.
@@ -171,6 +179,16 @@ pub enum Act {
         capability: String,
         harness: String,
     },
+    /// Have the repos `omh init` sets up after take an entry.
+    Use {
+        capability: String,
+        name: String,
+    },
+    /// Have them leave one out.
+    Unuse {
+        capability: String,
+        name: String,
+    },
 }
 
 impl Act {
@@ -181,6 +199,7 @@ impl Act {
                 Some(key.clone())
             }
             Act::Edit { name, .. } => name.clone(),
+            Act::Use { name, .. } | Act::Unuse { name, .. } => Some(name.clone()),
             Act::AddServer { name, .. } => Some(name.clone()),
             Act::EditDefaults | Act::Remove { .. } | Act::Import { .. } => None,
         }
@@ -579,6 +598,12 @@ impl App {
                 self.rows[self.at] = 0;
             }
             KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            // Whether new repos get the row: the act it carries, the caller's.
+            KeyCode::Char(' ') => {
+                if let Some(act) = self.row().and_then(|r| r.toggle.clone()) {
+                    return Next::Run(act);
+                }
+            }
             _ => {}
         }
         Next::Stay
@@ -1309,6 +1334,9 @@ impl App {
             Span::styled(capitalised(section.title), self.look.title()),
             Span::styled(format!("  {count}"), self.look.dim()),
         ];
+        if let Some(seeds) = &section.seeds {
+            heading.push(Span::styled(format!("   {seeds}"), self.look.dim()));
+        }
         if let Some(filter) = &self.filter {
             heading.push(Span::styled(
                 format!(
@@ -1417,7 +1445,7 @@ impl App {
         for (i, &r) in shown.iter().enumerate() {
             let row = &section.rows[r];
             if row.group.as_deref() != group {
-                if group.is_some() {
+                if !items.is_empty() {
                     items.push(ListItem::new(""));
                     index.push(None);
                 }
@@ -1539,7 +1567,16 @@ impl App {
                 false => Style::default(),
             },
         );
-        let mut spans = vec![mark, name, Span::raw("  ")];
+        // Whether new repos get it, where that is a question on this page.
+        let seeds = match (row.seeded, section.rows.iter().any(|r| r.seeded.is_some())) {
+            (Some(true), _) => Some(Span::styled("● ", self.look.accent())),
+            (Some(false), _) => Some(Span::styled("○ ", dim)),
+            (None, true) => Some(Span::raw("  ")),
+            (None, false) => None,
+        };
+        let mut spans = vec![mark];
+        spans.extend(seeds);
+        spans.extend([name, Span::raw("  ")]);
         if badge_width > 0 {
             let badge = row.badge.as_deref().unwrap_or_default();
             spans.push(Span::styled(
@@ -1618,6 +1655,16 @@ impl App {
             }
         }
         lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
+        if let Some(on) = row.seeded {
+            lines.push(Line::from(vec![
+                Span::styled("new repos  ", self.look.dim()),
+                Span::raw(match on {
+                    true => "get it",
+                    false => "do not get it",
+                }),
+                Span::styled("  — space changes it", self.look.dim()),
+            ]));
+        }
         if section.page == Page::Defaults {
             lines.push(Line::default());
             lines.push(Line::from(match (&row.value, &row.fallback) {
@@ -1789,6 +1836,9 @@ impl App {
                     if row.is_some_and(|r| !r.fixed) {
                         keys.push(("d", "remove"));
                     }
+                    if row.is_some_and(|r| r.toggle.is_some()) {
+                        keys.push(("space", "new repos"));
+                    }
                     keys.push(("a", "add"));
                     if importable {
                         keys.push(("i", "import"));
@@ -1800,6 +1850,9 @@ impl App {
                         keys.push(("↵", "edit"));
                         if !row.fixed {
                             keys.push(("d", "remove"));
+                        }
+                        if row.toggle.is_some() {
+                            keys.push(("space", "new repos"));
                         }
                     }
                     keys.push(("a", "new"));
@@ -2034,6 +2087,7 @@ impl App {
                     ("a", "a new entry, or a new server"),
                     ("d", "unset a default · remove an entry, after asking"),
                     ("i", "import from a harness"),
+                    ("space", "whether the repos `omh init` sets up after get it"),
                     ("/", "filter the list — esc takes it off"),
                 ],
             ),
