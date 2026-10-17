@@ -1891,7 +1891,7 @@ Change a setting, or switch one of omh's features. **Which file it lands in
 follows from the key**, not from a flag you have to remember.
 
 ```
-omh set <key> <value> [--local|--save]
+omh set <key> <value> [--local|--save] [--anyway]
 omh set account <harness>:<name>      an account for one harness alone
 omh set <feature> on|off
 omh unset <key> [--local|--save]
@@ -2071,7 +2071,8 @@ launch.
 
 ```
 omh settings                          at a terminal, a screen; anywhere else, the report
-omh settings set <key> <value>        → ~/.omh/default.toml
+omh settings set <key> <value> [--anyway]
+                                      → ~/.omh/default.toml
 omh settings unset <key>              remove one of your defaults
 omh settings edit [<capability> [name]]
                                       $EDITOR on your defaults, or on one entry

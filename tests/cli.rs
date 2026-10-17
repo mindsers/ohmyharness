@@ -3192,7 +3192,11 @@ fn resuming_as_another_harness_records_it_only_if_it_launched() {
     // assertion below passes whichever side of the launch the write sits on,
     // which is a test that cannot fail for its own reason. Deleting the shim
     // would work only on a machine with no docker of its own.
-    assert!(sb.omh(&["set", "runtime", "bogus"]).status.success());
+    // `--anyway`, since a runtime omh does not know is refused at the write.
+    assert!(sb
+        .omh(&["set", "--anyway", "runtime", "bogus"])
+        .status
+        .success());
     let failed = sb.omh(&["s01", "resume", "opencode"]);
     assert!(!failed.status.success(), "the launch failed");
     assert_eq!(
@@ -9730,32 +9734,94 @@ fn down_no_longer_takes_all() {
     );
 }
 
-/// A value the key cannot take is written, and said so.
+/// A value omh cannot read is refused, and `--anyway` writes it.
 ///
-/// `persistence` accepts `dtach` or `none`; anything else parses at *launch*,
-/// which is minutes later and in a different command. Written either way, for
-/// the same reason an unknown key is — a settings file is hand-editable and a
-/// value a newer omh will accept must not be refused by this one — but the
-/// typo is named where it was typed.
+/// It was written and named: "a value a newer omh will accept must not be
+/// refused by this one". The cost was the other way round — `persistence =
+/// tmux` written with exit 0 surfaced at the *launch*, minutes later and in
+/// another command, and the screen marked it ✓. A value only a newer omh reads
+/// is the rare case, and `--anyway` is there for it; the typo is the common
+/// one, and is stopped where it was typed. Both commands, since both are one
+/// `set`.
 #[test]
-fn a_value_the_key_cannot_take_is_written_and_named() {
+fn a_value_omh_cannot_read_is_refused_unless_anyway() {
     let sb = sandbox();
+    sb.git_init();
+    let settings =
+        || std::fs::read_to_string(sb.repo.join(".omh/settings.toml")).unwrap_or_default();
+    let defaults =
+        || std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
 
+    for (argv, held) in [
+        (
+            vec!["set", "persistence", "tmux"],
+            &settings as &dyn Fn() -> String,
+        ),
+        (vec!["settings", "set", "persistence", "tmux"], &defaults),
+        (
+            vec!["settings", "set", "idle_timeout", "forever"],
+            &defaults,
+        ),
+        (vec!["settings", "set", "carry_in", ".env"], &defaults),
+    ] {
+        let wrong = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&wrong.stderr).to_string();
+        assert!(!wrong.status.success(), "`omh {}` wrote it", argv.join(" "));
+        assert!(said.contains("--anyway"), "and says how to anyway: {said}");
+        let key = argv[argv.len() - 2];
+        assert!(
+            !held().contains(key),
+            "`omh {}` left {key} behind",
+            argv.join(" ")
+        );
+    }
     let wrong = sb.omh(&["set", "persistence", "tmux"]);
     let said = String::from_utf8_lossy(&wrong.stderr).to_string();
-    assert!(wrong.status.success(), "still written: {said}");
     assert!(
         said.contains("tmux") && said.contains("dtach"),
         "the value it cannot take, and the ones it can: {said}"
     );
 
+    let anyway = sb.omh(&["settings", "set", "--anyway", "persistence", "tmux"]);
+    let said = String::from_utf8_lossy(&anyway.stderr).to_string();
+    assert!(anyway.status.success(), "{said}");
+    assert!(said.contains("dtach"), "still named: {said}");
+    assert!(defaults().contains("persistence = \"tmux\""));
+
     // One it can take says nothing — a warning on every write is no warning.
     let right = sb.omh(&["set", "persistence", "dtach"]);
+    assert!(right.status.success());
     let quiet = String::from_utf8_lossy(&right.stderr).to_string();
     assert!(
         !quiet.contains("dtach, none"),
         "a value that fits is not lectured about: {quiet}"
     );
+    let list = sb.omh(&["settings", "set", "carry_in", "[\".env\"]"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+}
+
+/// `unset` on a table says it is one: `omh settings unset '[use]'` answered
+/// "`[use]` was not set" while it sat in the file, and the screen's `d` was
+/// the way to type it.
+#[test]
+fn unset_on_a_table_says_it_is_one() {
+    let sb = sandbox();
+    let file = sb.home.join(".omh/default.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "[use]\nskills = [\"tdd\"]\n").unwrap();
+    let out = sb.omh(&["settings", "unset", "[use]"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("is a table") && said.contains("omh settings edit"),
+        "{said}"
+    );
+    assert!(!said.contains("was not set"), "{said}");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("[use]"));
 }
 
 /// Committing a key that carries a secret says which key, not just which layer.
@@ -14788,8 +14854,8 @@ fn a_dry_run_launch_writes_nothing() {
     );
 }
 
-/// A duration omh cannot read is quarrelled with when it is written, not only
-/// when it is next launched.
+/// A duration omh cannot read is refused when it is written, not found when it
+/// is next launched.
 ///
 /// `Shape::Duration` had no validator at all, so `idle_timeout` accepted any
 /// string. The value then sat in a layer until the next launch, where
@@ -14797,42 +14863,38 @@ fn a_dry_run_launch_writes_nothing() {
 /// session starting up — the one moment nobody is reading, and minutes or days
 /// after the typo was made.
 ///
-/// A warning rather than a refusal, which is the standing policy for this
-/// command and is written down where the warning is raised: a value a newer omh
-/// will accept must not be refused by this one. So the assertion is that omh
-/// *says something naming the key*, and that the write still happens.
+/// It was then warned about and written, the policy being that a value a newer
+/// omh accepts must not be refused by this one. It is refused now, unless
+/// `--anyway` — see `a_value_omh_cannot_read_is_refused_unless_anyway`. So the
+/// assertion is that omh *names the key*, writes nothing, and writes it given
+/// `--anyway`.
 #[test]
 fn writing_an_unreadable_duration_says_so_at_the_time() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_base();
+    let stored = || std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
 
     for bad in ["half an hour", "94368760191893771d"] {
         let out = sb.omh(&["settings", "set", "idle_timeout", bad]);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!out.status.success(), "`{bad}` was written: {said}");
+        assert!(said.contains("idle_timeout"), "named: {said}");
+        // Read back, because "refused" is a claim about the file and a
+        // non-zero status is not one.
         assert!(
-            out.status.success(),
-            "`omh settings set idle_timeout {bad}` is warned about, not refused: {}",
-            String::from_utf8_lossy(&out.stderr)
+            !stored().contains(bad),
+            "`{bad}` was refused and written anyway"
         );
-        let said = format!(
-            "{:?}\n{}{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
+
+        let out = sb.omh(&["settings", "set", "--anyway", "idle_timeout", bad]);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("idle_timeout"), "and still named: {said}");
         assert!(
-            said.contains("idle_timeout"),
-            "`{bad}` was stored with nothing said, so the first anyone hears of \
-             it is a line printed while a session is starting: {said}"
-        );
-        // Read back, because "warned, not refused" is a claim about the file
-        // and a zero exit status is not one. Withholding the write while
-        // warning would be the refusal this policy rejects, wearing a warning.
-        let stored = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
-        assert!(
-            stored.contains(bad),
-            "`{bad}` was warned about and not written — a warning is not a \
-             refusal: {stored:?}"
+            stored().contains(bad),
+            "--anyway wrote nothing: {:?}",
+            stored()
         );
     }
 
@@ -15404,6 +15466,13 @@ const EXERCISES: &[Exercise] = &[
         expect: Expect::Ok,
         runtime: false,
     },
+    // A value omh cannot read: refused bare, so this is the run that writes.
+    Exercise {
+        argv: &["settings", "set", "--anyway", "persistence", "tmux"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
     Exercise {
         argv: &["settings", "unset", "idle_timeout"],
         needs: Needs::Repo,
@@ -15493,6 +15562,12 @@ const EXERCISES: &[Exercise] = &[
     },
     Exercise {
         argv: &["set", "idle_timeout", "30m", "--save"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["set", "--anyway", "persistence", "tmux"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: false,

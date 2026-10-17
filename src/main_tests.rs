@@ -1364,7 +1364,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // the server's own `rm`. + the header of the settings screen's drawing,
         // + the command its status line names.
         ("docs/src/content/docs/reference/commands.md", 148),
-        ("docs/src/content/docs/reference/configuration.md", 47), // + `omh use hooks tdd-guard`
+        // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
+        // the `--anyway` line it prints, and the run with it.
+        ("docs/src/content/docs/reference/configuration.md", 50),
         ("docs/src/content/docs/reference/memory.md", 1),
     ]
     .into_iter()
@@ -1958,8 +1960,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // + `omh settings edit mcp`, in the refusal of a name for a server.
         // + `omh set <feature> off` and `omh init`, in the refusal for a
         // server omh ships. + `omh settings rm <capability> <name>`, in the
-        // refusal to edit a link to nothing.
-        ("src/cmd/settings.rs", 17),
+        // refusal to edit a link to nothing. + the `--anyway` line for each of
+        // `set` and `settings set`, under a value omh cannot read. +
+        // `omh settings edit`, where unset is given a table.
+        ("src/cmd/settings.rs", 20),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start

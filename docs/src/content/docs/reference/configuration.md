@@ -324,6 +324,23 @@ omh: and the committed file is COMMITTED — `carry_ins` went into a file git ca
 A test fails the build if a key omh's own code reads is missing from the table,
 which is what stops omh's own keys ever taking that path.
 
+**A value omh cannot read is refused**, where it was typed rather than at the
+next launch, minutes later and in another command. `--anyway` writes it — for
+a value only a newer omh takes — and still names it:
+
+```console
+$ omh set persistence tmux
+omh: `persistence` does not take `tmux` — only dtach, none. Nothing was written. For a value only a newer omh reads:
+  omh set --anyway persistence <value>
+
+$ omh set --anyway persistence tmux
+omh: `persistence` does not take `tmux` — only dtach, none — written anyway
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+```
+
+`omh settings set` is the same `set`, for your defaults. A list key takes a
+list: `carry_in .env` is refused, and `carry_in '[".env"]'` is the spelling.
+
 **Asking for the committed file still says what that means**, and names the key
 when the key is one that reaches a credential:
 
