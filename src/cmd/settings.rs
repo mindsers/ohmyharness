@@ -33,11 +33,22 @@ pub(crate) fn settings_report(paths: &Paths) -> Result<report::Settings> {
                 key: k.name.to_string(),
                 does: k.does.to_string(),
                 value: mine.get(k.name).cloned(),
+                warning: None,
             })
             .collect(),
         // `[use]`, `[unuse]` and `[omh]` seed a new repo, so they are neither a
         // default nor unread. `config::values` renders a table as `[name]`.
-        tables: mine.keys().filter(|k| seeding_table(k)).cloned().collect(),
+        // `[omh]` is said as the features it switches, not as a table.
+        tables: mine
+            .iter()
+            .filter(|(k, _)| seeding_table(k) && *k != &format!("[{}]", config::OMH))
+            .map(|(k, v)| report::SeededTable {
+                key: k.clone(),
+                value: v.clone(),
+                warning: None,
+            })
+            .collect(),
+        features: Vec::new(),
         unread: mine
             .iter()
             .filter(|(k, _)| key::describes(k).is_none() && !seeding_table(k))

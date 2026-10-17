@@ -98,7 +98,32 @@ pub(crate) fn show(paths: &Paths, ctx: &crate::out::Ctx) -> Result<()> {
         .iter()
         .filter_map(|u| key::nearest(&u.key).map(|k| (u.key.clone(), k.to_string())))
         .collect();
-    said.catalogue = model(paths)
+    let model = model(paths);
+    // Your defaults as the screen's first page says them: what it marks on
+    // each, the features and their switch, what a table holds.
+    if let Some(defaults) = model.sections.iter().find(|s| s.page == Page::Defaults) {
+        let row = |name: &str| defaults.rows.iter().find(|r| r.name == name);
+        for k in &mut said.known {
+            k.warning = row(&k.key).and_then(|r| r.warning.clone());
+        }
+        for t in &mut said.tables {
+            if let Some(r) = row(&t.key) {
+                t.value = r.value.clone().unwrap_or_default();
+                t.warning = r.warning.clone();
+            }
+        }
+        said.features = defaults
+            .rows
+            .iter()
+            .filter(|r| r.group.as_deref() == Some("features"))
+            .map(|r| crate::report::FeatureSwitch {
+                feature: r.name.clone(),
+                on: r.value.as_deref().or(r.fallback.as_deref()) == Some("on"),
+                set: r.value.is_some(),
+            })
+            .collect();
+    }
+    said.catalogue = model
         .sections
         .into_iter()
         .filter(|s| s.page != Page::Defaults)

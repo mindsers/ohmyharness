@@ -2045,6 +2045,26 @@ pub struct Known {
     pub does: String,
     /// Your default, if you have one.
     pub value: Option<String>,
+    /// What the screen marks on it: a value omh cannot read, an account a
+    /// launch cannot choose.
+    pub warning: Option<String>,
+}
+
+/// A table of your defaults that seeds a new repo, with what it holds.
+#[derive(Debug, Clone)]
+pub struct SeededTable {
+    pub key: String,
+    pub value: String,
+    pub warning: Option<String>,
+}
+
+/// One of omh's features, as your defaults switch it for new repos.
+#[derive(Debug, Clone)]
+pub struct FeatureSwitch {
+    pub feature: String,
+    pub on: bool,
+    /// Switched in your defaults, rather than on because nothing says.
+    pub set: bool,
 }
 
 /// What `omh settings` shows: your defaults, against everything omh reads.
@@ -2056,11 +2076,14 @@ pub struct Known {
 pub struct Settings {
     pub file: String,
     pub known: Vec<Known>,
-    /// Tables in your file that `omh init` copies into a new repo — `[use]`
-    /// and `[omh]`. Shown separately because they are neither a default you
-    /// set nor something read by nothing, and reporting them as the latter was
-    /// exactly backwards.
-    pub tables: Vec<String>,
+    /// Tables in your file that seed a new repo — `[use]`, `[unuse]` — with
+    /// what each holds. Shown separately because they are neither a default
+    /// you set nor something read by nothing, and reporting them as the latter
+    /// was exactly backwards.
+    pub tables: Vec<SeededTable>,
+    /// omh's features, and whether new repos get each: `[omh]`'s answer,
+    /// which was printed as a bare name.
+    pub features: Vec<FeatureSwitch>,
     /// Keys in your file that omh reads nothing from. Named rather than
     /// hidden: a typo looks exactly like a setting that took.
     pub unread: Vec<Setting>,
@@ -2099,10 +2122,14 @@ impl Report for Settings {
         } else {
             let mut t = Table::new();
             for k in set {
-                t = t.row(vec![
+                let mut row = vec![
                     Cell::styled(&k.key, out::NAME),
                     Cell::plain(k.value.as_deref().unwrap_or_default()),
-                ]);
+                ];
+                if let Some(w) = &k.warning {
+                    row.push(Cell::styled(format!("! {w}"), out::WARN));
+                }
+                t = t.row(row);
             }
             s.push_str(&t.render(p));
         }
@@ -2114,7 +2141,30 @@ impl Report for Settings {
             for k in unset {
                 t = t.row(vec![
                     Cell::styled(&k.key, out::NAME),
-                    Cell::styled(&k.does, out::DIM),
+                    match &k.warning {
+                        Some(w) => Cell::styled(format!("! {w}"), out::WARN),
+                        None => Cell::styled(&k.does, out::DIM),
+                    },
+                ]);
+            }
+            s.push_str(&t.render(p));
+        }
+
+        if !self.features.is_empty() {
+            s.push('\n');
+            s.push_str(&format!(
+                "{}\n",
+                p.paint(out::HEAD, "omh's features, for new repos")
+            ));
+            let mut t = Table::new();
+            for f in &self.features {
+                let on = if f.on { "on" } else { "off" };
+                t = t.row(vec![
+                    Cell::styled(&f.feature, out::NAME),
+                    match f.set {
+                        true => Cell::plain(on),
+                        false => Cell::styled(format!("{on} (default)"), out::DIM),
+                    },
                 ]);
             }
             s.push_str(&t.render(p));
@@ -2127,10 +2177,18 @@ impl Report for Settings {
                 p.paint(out::HEAD, "also seeded into a new repo")
             ));
             let mut t = Table::new();
-            for name in &self.tables {
-                t = t.row(vec![Cell::styled(name, out::NAME)]);
+            for table in &self.tables {
+                t = t.row(vec![
+                    Cell::styled(&table.key, out::NAME),
+                    Cell::plain(&table.value),
+                ]);
             }
             s.push_str(&t.render(p));
+            for table in &self.tables {
+                if let Some(w) = &table.warning {
+                    s.push_str(&format!("    ! {w}\n"));
+                }
+            }
         }
 
         if !self.unread.is_empty() {
@@ -2194,8 +2252,18 @@ impl Report for Settings {
                 "key": k.key,
                 "does": k.does,
                 "value": k.value,
+                "warning": k.warning,
             })).collect::<Vec<_>>(),
-            "tables": self.tables,
+            "tables": self.tables.iter().map(|t| json!({
+                "key": t.key,
+                "value": t.value,
+                "warning": t.warning,
+            })).collect::<Vec<_>>(),
+            "features": self.features.iter().map(|f| json!({
+                "feature": f.feature,
+                "on": f.on,
+                "set": f.set,
+            })).collect::<Vec<_>>(),
             "unread": self.unread.iter().map(|u| json!({
                 "key": u.key,
                 "value": u.value,

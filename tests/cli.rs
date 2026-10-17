@@ -7576,6 +7576,76 @@ fn the_report_lists_the_catalogue_and_what_is_wrong_in_it() {
     );
 }
 
+/// The report says of your defaults what the screen says: a value omh cannot
+/// read, marked; omh's features and whether each is on; and what `[use]`
+/// holds, with what is wrong in it. It printed `[omh]` and `[use]` as bare
+/// names, no features at all, and a value the screen marks `!` as if it took.
+#[test]
+fn the_report_says_of_your_defaults_what_the_screen_says() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md"]);
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "persistence = \"tmux\"\n\n[omh]\ncodegraph = false\n\n[use]\nskills = [\"tdd\", \"gone\"]\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["settings"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = |what: &str| {
+        said.lines()
+            .find(|l| l.contains(what))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        line("persistence").contains("does not take `tmux`"),
+        "{said}"
+    );
+    assert!(said.contains("omh's features"), "{said}");
+    assert!(line("codegraph").contains("off"), "{said}");
+    assert!(line("git-notice").contains("on"), "{said}");
+    assert!(
+        line("[use]").contains("skills = [\"tdd\", \"gone\"]"),
+        "{said}"
+    );
+    assert!(said.contains("skills/gone"), "{said}");
+
+    let out = sb.omh(&["--json", "settings"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let known = doc["known"].as_array().unwrap();
+    let persistence = known.iter().find(|k| k["key"] == "persistence").unwrap();
+    assert!(
+        persistence["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("tmux")),
+        "{doc}"
+    );
+    let features = doc["features"].as_array().unwrap();
+    let codegraph = features
+        .iter()
+        .find(|f| f["feature"] == "codegraph")
+        .unwrap();
+    assert_eq!(codegraph["on"], false, "{doc}");
+    let tables = doc["tables"].as_array().unwrap();
+    let used = tables.iter().find(|t| t["key"] == "[use]").unwrap();
+    assert!(
+        used["value"].as_str().is_some_and(|v| v.contains("tdd")),
+        "{doc}"
+    );
+    assert!(
+        used["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("skills/gone")),
+        "{doc}"
+    );
+}
+
 /// A kind spelled one letter off is named: `omh settings rm skill tdd` was
 /// told what the kinds are and left to find the one it meant.
 #[test]
@@ -8663,9 +8733,19 @@ fn settings_shows_the_tables_it_seeds_as_seeded() {
         .nth(1)
         .unwrap_or_else(|| panic!("no seeded section: {said}"));
     assert!(
-        seeded.contains("[omh]") && seeded.contains("[use]"),
+        seeded.contains("[use]"),
         "the tables the template propagates are named as such: {said}"
     );
+    // `[omh]` is said as what it switches: the features, each on or off.
+    let features = said
+        .split("omh's features")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no features: {said}"));
+    let codegraph = features
+        .lines()
+        .find(|l| l.contains("codegraph"))
+        .unwrap_or_default();
+    assert!(codegraph.contains("off"), "{said}");
     assert!(
         !said.contains("read by nothing"),
         "and not reported as read by nothing, which is the opposite: {said}"
