@@ -83,7 +83,7 @@ Five things were wrong, none findable from the documentation.
 
 - **For one repository:** `omh set codegraph off`. Nothing is uninstalled, and
   the next repository gets it back.
-- **For every repository:** `omh settings mcp rm codegraph` takes the server out
+- **For every repository:** `omh settings rm mcp codegraph` takes the server out
   of your catalogue.
 
 Switching the hooks off means switching off the graph. The server, its four

@@ -792,7 +792,7 @@ mod tests {
             "the alternatives are missing:\n{out}"
         );
         assert!(
-            out.contains("omh settings mcp rm codegraph"),
+            out.contains("omh settings rm mcp codegraph"),
             "no way out:\n{out}"
         );
     }

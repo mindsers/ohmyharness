@@ -803,7 +803,7 @@ fn nothing_still_offers_a_verb_that_was_retired() {
     // was: the JSON guard went on invoking a line that no longer parsed,
     // and passed, because its empty stdout read as nothing to say.
     const ON_PURPOSE: &str = "types the retired verb on purpose";
-    let gone: [String; 23] = [
+    let gone: [String; 25] = [
         // `attach` became a session verb in 2026.08.
         //
         // **No trailing character.** The first version of this needle had a
@@ -904,6 +904,11 @@ fn nothing_still_offers_a_verb_that_was_retired() {
         format!("{:?}, {:?}", "commit", "--force"), // types the retired verb on purpose
         format!("{:?}, {:?}", "claude", "--force"), // types the retired verb on purpose
         format!("{:?}, {:?}", "claude", "--file"), // types the retired verb on purpose
+        // The server's own `rm`, folded into the one `omh settings rm` that
+        // takes every kind of catalogue entry. Scoped to `mcp`, because `rm`
+        // is a live verb under `s` and `memory`.
+        format!("omh settings mcp {}", "rm"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "mcp", "rm"),   // types the retired verb on purpose
     ];
     let mut found = Vec::new();
     let mut read = Vec::new();
@@ -1355,7 +1360,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // then `omh s` and `omh s01 rm` in the landed-branch block
         // + `omh upgrade` above what a second look printed
         // − 2 repeated examples; the summary block became a usage line per entry
-        ("docs/src/content/docs/reference/commands.md", 145),
+        // + `omh settings rm`'s console example; its synopsis line replaced
+        // the server's own `rm`.
+        ("docs/src/content/docs/reference/commands.md", 146),
         ("docs/src/content/docs/reference/configuration.md", 47), // + `omh use hooks tdd-guard`
         ("docs/src/content/docs/reference/memory.md", 1),
     ]
@@ -1713,8 +1720,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
                 // a shorter command parses more easily, so a stop that
                 // earns nothing is a stop that can only hide.
                 // A stop can only shorten, and a shorter command is
-                // strictly likelier to parse — `omh settings mcp rm —
-                // codegraph` would be checked as `omh settings mcp rm` and
+                // strictly likelier to parse — `omh settings rm mcp —
+                // codegraph` would be checked as `omh settings rm mcp` and
                 // tolerated as a missing argument. The em dash is here
                 // because the manifest separates a command from its
                 // explanation with one, and it is omh's most-used
@@ -1914,7 +1921,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("base/2026.08.toml", 19),
         ("src/auth.rs", 7),
         ("src/base.rs", 3),
-        ("src/cli.rs", 24), // + the retired --force and --file sentences
+        ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
@@ -1939,7 +1946,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // + the `omh s` pointer when rm names no session, and the `omh <id> rm`
         // in the reason `leftovers` gives for naming nothing.
         ("src/cmd/session.rs", 15),
-        ("src/cmd/settings.rs", 10),
+        // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
+        // refusal for a hook omh ships, and `--yes` in the consent refusal.
+        ("src/cmd/settings.rs", 13),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather

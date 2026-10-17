@@ -935,7 +935,7 @@ pub struct Own {
 ///
 /// - **switched off here**, by `[omh]`. Nothing is uninstalled.
 /// - **removed**, by taking its server out of your profile. `remove` promises
-///   that `omh settings mcp rm codegraph` takes the hooks and the rules section
+///   that `omh settings rm mcp codegraph` takes the hooks and the rules section
 ///   with it, and that command only edits `mcp.json` — so the promise is kept
 ///   here or nowhere. Before generation the hooks were files and removing the
 ///   server left four of them behind; generating them unconditionally would
@@ -1404,7 +1404,7 @@ mod tests {
         }
     }
 
-    /// `omh settings mcp rm codegraph` has to take the hooks and the rules
+    /// `omh settings rm mcp codegraph` has to take the hooks and the rules
     /// section with it. Before generation the four hooks were files and
     /// removing the server left them behind, nudging the agent toward
     /// something that was gone; generation would have reintroduced exactly

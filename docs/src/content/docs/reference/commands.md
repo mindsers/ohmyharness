@@ -36,7 +36,7 @@ yours in the table, then follow it to its entry.
 | **Configure** | |
 | [`omh set` · `omh unset`](#omh-set--omh-unset) | Change a setting in this repo, or switch one of omh's features. |
 | [`omh use` · `omh unuse`](#omh-use--omh-unuse) | Choose which catalogue entries this repo takes. |
-| [`omh settings`](#omh-settings) | Your defaults for new repos, and your MCP servers. |
+| [`omh settings`](#omh-settings) | Your defaults for new repos, and your catalogue. |
 | [`omh import`](#omh-import-capability-harness) | Bring a setup you already have into omh. |
 | [`omh eject`](#omh-eject-harness---to-dir) | Write the config out as ordinary files, and step aside. |
 | **Memory** | |
@@ -60,7 +60,7 @@ file is left alone.
 
 | Previews | Refuses `--dry-run` |
 |---|---|
-| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset` and `mcp` verbs, `memory rm` | `init`, `auth`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
+| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `rm` and `mcp` verbs, `memory rm` | `init`, `auth`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
 
 <details>
 <summary>Why a command refuses the flag rather than guessing, or ignoring it</summary>
@@ -108,7 +108,7 @@ A flag learned on one command is true on the next, or it is not there.
 |---|---|
 | `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
 | `--to <dir>` | Write here: `omh eject`. |
-| `--yes` `-y` | *Yes, I have read the warning — answer the prompt in advance.* `omh sNN rm`, for runs with nobody to ask. It does not force the removal, only the answer. |
+| `--yes` `-y` | *Yes, I have read the warning — answer the prompt in advance.* `omh sNN rm` and `omh settings rm`, for runs with nobody to ask. It does not force the removal, only the answer. |
 | `--all` | Every one, not the one named: `omh use --all`. Session verbs have no `--all` — for `sync` and `down`, naming no session already means every session. |
 | `--session <id>` `-s` | The session to act on. `omh s01 <verb>` says the same — see [`omh sessions`](#omh-sessions---s). |
 | `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
@@ -2075,15 +2075,17 @@ omh settings set <key> <value>        → ~/.omh/default.toml
 omh settings unset <key>              remove one of your defaults
 omh settings edit [<capability> [name]]
                                       $EDITOR on your defaults, or on one entry
+omh settings rm <capability> <name> [--yes]
+                                      take one entry out of your catalogue
 
 omh settings mcp ls
 omh settings mcp add <name> <cmd> [args…] [--env K=V]
-omh settings mcp rm <name>
 omh settings mcp import <harness> [--from <path>] [--replace]
 ```
 
 | | |
 |---|---|
+| `--yes` `-y` | remove without asking. Off a terminal there is nobody to ask, so `rm` refuses without it |
 | `--env K=V` | an environment variable the server runs with. Repeat for several |
 | `--from <path>` | read this file instead of where the adapter says the harness keeps its servers |
 | `--replace` | overwrite a catalogue entry of the same name that differs. Without it yours is kept and the difference reported |
@@ -2119,12 +2121,27 @@ is committed. It already has a home — `omh settings mcp add <name> <command>
 live in your catalogue; a repo overrides a server's environment without
 redeclaring it. See [Configuration](/reference/configuration/).
 
-**Your catalogue is `omh info`.** This command is your *defaults* — the four
+**Your catalogue is `omh info`.** This command is your *defaults* — the five
 verbs above all act on `~/.omh`, and what you have in it is part of what
 `omh info` means by *what you have here*.
 
-**`edit` takes a name, so it validates one**: `omh settings edit skills
-../../.ssh/id_rsa` is refused before `$EDITOR` sees it.
+**`edit` and `rm` take a name, so they validate one**: `omh settings edit
+skills ../../.ssh/id_rsa` is refused before `$EDITOR` sees it, and the same
+name is refused before `rm` deletes anything.
+
+**One `rm` for every kind of entry**, servers included — `omh settings rm mcp
+linear` and `omh settings rm skills review-diff` are the same act. At a
+terminal it asks; anywhere else it needs `--yes`. A name two files answer to
+(`house.md` and `house.txt`) is refused rather than guessed at, and so is a
+hook omh ships: `omh upgrade` would put it back, so the refusal names
+`omh unuse hooks <name>`, which stops a repo running it.
+
+```console
+$ omh settings rm skills review-diff
+remove /Users/you/.omh/skills/review-diff? (y/N)
+  > y
+removed /Users/you/.omh/skills/review-diff
+```
 
 <details>
 <summary>Why <code>omh setting</code> is refused, why the key list lives in the binary, and why <code>edit</code> draws no fence past the name</summary>

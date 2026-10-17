@@ -291,8 +291,8 @@ omh set <key> <value>             a setting, or a feature on|off — this repo
 omh unset <key>                   drop it, or hand the feature back to omh
 omh use|unuse <capability> <name>
                                   omh use skills tdd · omh use --all
-omh settings [set|unset|edit|mcp] …
-                                  you: your defaults, and your MCP servers
+omh settings [set|unset|edit|rm|mcp] …
+                                  you: your defaults, and your catalogue
 
 omh info [--repo]                 this machine · --repo, this checkout
 omh why <thing>                   who put this here, and on what grounds

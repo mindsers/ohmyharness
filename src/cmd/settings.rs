@@ -1011,6 +1011,177 @@ pub(crate) fn edit(
     Ok(())
 }
 
+/// Take one entry out of your catalogue, whatever kind it is.
+///
+/// **One verb, and one rule for asking.** A server used to have its own `rm`
+/// under `omh settings mcp`, which removed without a word, and nothing removed
+/// anything else. Now a person at a terminal is asked, and anything else must
+/// say `--yes` — the rule `omh sNN rm` already follows, through the same
+/// `Consent`. A preview removes nothing, so it asks nothing.
+///
+/// **A hook omh ships is refused.** `install_bundled` rewrites every one of
+/// them on each `omh upgrade`, so removing one is a deletion that undoes itself
+/// a release later. What somebody wants from it is a repo that does not run
+/// the hook, and `unuse` is that.
+pub(crate) fn rm(
+    paths: &Paths,
+    key: &str,
+    name: &str,
+    consent: crate::cmd::harvest::Consent,
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    use crate::cmd::harvest::Consent;
+    let cap = adapter::Capability::from_key(key).with_context(|| {
+        format!(
+            "`{key}` is not a capability — expected {}",
+            capability_list()
+        )
+    })?;
+    // The name is checked before anything is joined to it — the same rule and
+    // the same function `edit` and `[use]` use, because this is the same act
+    // with a worse outcome: `../../.ssh` here would be a delete.
+    let source = paths.root.join(cap.source());
+    selection::validate_entry_name(name, cap, &source)?;
+
+    let entry = match cap {
+        adapter::Capability::Mcp => {
+            let known: Vec<String> = config::servers(paths)?.into_iter().map(|s| s.key).collect();
+            if !known.iter().any(|k| k == name) {
+                return Err(no_such_entry(cap, name, &known));
+            }
+            None
+        }
+        _ => Some(entry_path(cap, name, &source)?),
+    };
+    if cap == adapter::Capability::Hooks && shipped_hooks().iter().any(|h| h == name) {
+        anyhow::bail!(
+            "omh ships hooks/{name}, and `omh upgrade` would put it back. To stop a \
+             repo running it:\n  omh unuse hooks {name}"
+        );
+    }
+    let what = match &entry {
+        Some(path) => path.display().to_string(),
+        None => format!("the `{name}` server from {}", source.display()),
+    };
+
+    if dry_run {
+        ctx.say(
+            &report::Action::new("catalogue-entry-planned", format!("would remove {what}")).data(
+                serde_json::json!({ "capability": cap.to_string(), "name": name, "removed": false }),
+            ),
+        );
+        return Ok(());
+    }
+    if consent != Consent::Given {
+        let agreed = consent == Consent::MayAsk
+            && crate::ask::confirm(
+                &format!("remove {what}?"),
+                &mut std::io::stdin().lock(),
+                &mut std::io::stderr(),
+            )?;
+        anyhow::ensure!(
+            agreed,
+            "left {what} where it is. To remove it without being asked:\n  \
+             omh settings rm {cap} {name} --yes"
+        );
+    }
+
+    match &entry {
+        None => {
+            config::mcp_remove(paths, name)?;
+        }
+        Some(path) if path.is_dir() && !path.is_symlink() => {
+            std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?
+        }
+        Some(path) => {
+            std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?
+        }
+    }
+    ctx.say(
+        &report::Action::new("catalogue-entry-removed", format!("removed {what}")).data(
+            serde_json::json!({ "capability": cap.to_string(), "name": name, "removed": true }),
+        ),
+    );
+    Ok(())
+}
+
+/// The one file or directory a catalogue name answers to.
+///
+/// A name is a file with its extension off, so two files can answer to one —
+/// and `rm` choosing between them would be omh deciding which of your files to
+/// delete. Refused, naming both.
+fn entry_path(
+    cap: adapter::Capability,
+    name: &str,
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    // **Absent is an empty catalogue; unreadable is not.** A directory omh
+    // cannot list is reported, never read as "you have no skills", which would
+    // send somebody to look for a typo that is not there.
+    let listing = match std::fs::read_dir(dir) {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(no_such_entry(cap, name, &[]));
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut held = Vec::new();
+    let mut matches = Vec::new();
+    for entry in listing {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let entry_name = crate::profile::entry_name(&entry.file_name());
+        if entry_name == name {
+            matches.push(entry.path());
+        } else if selection::validate_entry_name(&entry_name, cap, dir).is_ok() {
+            held.push(entry_name);
+        }
+    }
+    match matches.len() {
+        0 => {
+            held.sort();
+            held.dedup();
+            Err(no_such_entry(cap, name, &held))
+        }
+        1 => Ok(matches.remove(0)),
+        _ => {
+            matches.sort();
+            anyhow::bail!(
+                "{cap}/{name} is {} files, and omh will not choose which of yours to \
+                 delete:\n  {}",
+                matches.len(),
+                matches
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            )
+        }
+    }
+}
+
+/// The refusal for a name nothing in the catalogue answers to, in the words
+/// `omh use` gives the same mistake.
+fn no_such_entry(cap: adapter::Capability, name: &str, held: &[String]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "your catalogue has no {cap} called `{name}`.\n  {cap}: {}",
+        if held.is_empty() {
+            "(none)".to_string()
+        } else {
+            held.join(", ")
+        }
+    )
+}
+
+/// The hooks omh ships, by catalogue name — the ones `omh upgrade` rewrites.
+fn shipped_hooks() -> Vec<String> {
+    crate::bundled::Shipped::Hooks
+        .files()
+        .iter()
+        .map(|f| crate::profile::entry_name(std::ffi::OsStr::new(f.name)))
+        .collect()
+}
+
 pub(crate) fn capability_list() -> String {
     adapter::Capability::ALL
         .iter()

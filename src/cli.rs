@@ -465,11 +465,6 @@ pub(crate) enum McpCmd {
         #[arg(long = "env", value_parser = parse_env)]
         env: Vec<(String, String)>,
     },
-    /// Remove a server from your catalogue.
-    Rm {
-        /// Which server, as `omh settings mcp ls` names it.
-        name: String,
-    },
     /// Import servers you already configured in an installed harness.
     Import {
         /// Which installed harness to read servers out of.
@@ -668,8 +663,9 @@ pub(crate) enum SessionsCmd {
 /// env and must not be committable by accident. Two commands, so neither has
 /// to be told which it meant.
 ///
-/// The four verbs are the ones that act on `~/.omh`: two that write a default,
-/// one that opens the file, and the MCP catalogue. Listing the catalogue is
+/// The five verbs are the ones that act on `~/.omh`: two that write a default,
+/// one that opens the file or an entry, one that removes an entry, and the MCP
+/// catalogue. Listing the catalogue is
 /// not among them — that is `omh info`, which is where the machine is
 /// described.
 #[derive(Subcommand)]
@@ -693,6 +689,21 @@ pub(crate) enum SettingsCmd {
         capability: Option<String>,
         /// Which entry. Without it, the capability's directory.
         name: Option<String>,
+    },
+    /// Take one entry out of your catalogue — a skill, a rule, a server.
+    ///
+    /// One verb for every kind, servers included: a server is a record in
+    /// `mcp.json` rather than a file of its own, and that is omh's business,
+    /// not something the person removing it should have to know.
+    Rm {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: String,
+        /// Which entry, as `omh info` names it.
+        name: String,
+        /// Remove it without asking. Off a terminal there is nobody to ask, so
+        /// this is the only way past. The same flag as `omh sNN rm --yes`.
+        #[arg(long = "yes", short = 'y')]
+        yes: bool,
     },
     /// MCP servers — your catalogue's, and what they run with.
     Mcp {
@@ -871,6 +882,13 @@ pub(crate) const RETIRED: &[Retired] = &[
         at: At::Flag(&[("import", &["mcp"])]),
         said: "`--file` is `--from` now, as it is on `omh import`:\n  omh settings mcp import claude --from <path>",
     },
+    // Folded into the one `rm` that takes every kind of catalogue entry.
+    // Under `mcp` only: `rm` is a live verb under `s` and `memory`.
+    Retired {
+        spellings: &["rm"], // types the retired verb on purpose
+        at: At::Under(&["mcp"]),
+        said: "a server is removed like any other catalogue entry now:\n  omh settings rm mcp <name>",
+    },
 ];
 
 /// One retired spelling, and where it was retired *from*.
@@ -1026,6 +1044,7 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
             None
             | Some(SettingsCmd::Set { .. })
             | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Rm { .. })
             | Some(SettingsCmd::Mcp { .. }) => true,
         },
         Cmd::Memory { cmd } => match cmd {
@@ -1100,6 +1119,7 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
             None
             | Some(SettingsCmd::Set { .. })
             | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Rm { .. })
             | Some(SettingsCmd::Mcp { .. }) => true,
         },
         Cmd::Memory { cmd } => match cmd {

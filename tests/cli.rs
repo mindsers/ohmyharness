@@ -5454,7 +5454,8 @@ fn a_dry_run_writes_nothing() {
         vec!["settings", "set", "idle_timeout", "45m"],
         vec!["settings", "unset", "idle_timeout"],
         vec!["settings", "mcp", "add", "srv", "echo"],
-        vec!["settings", "mcp", "rm", "srv0"],
+        vec!["settings", "rm", "mcp", "srv0", "--yes"],
+        vec!["settings", "rm", "skills", "review-diff", "--yes"],
         vec!["memory", "rm", "proj"],
     ];
 
@@ -5964,7 +5965,7 @@ fn remember_without_source_writes_the_default_its_help_names() {
 
 /// A name nothing answers to is refused, whichever command you typed.
 ///
-/// `omh settings mcp rm nope` exited **0** and said *"nope is not in your
+/// Removing a server called `nope` exited **0** and said *"nope is not in your
 /// catalogue"* — a typo reported as success, which is the one thing every
 /// sibling already refuses to do. `use`, `unuse`, `memory rm` and
 /// `memory promote` all exit 1 on the same mistake, and one of them carries a
@@ -5981,7 +5982,8 @@ fn a_name_nothing_answers_to_is_refused_whichever_command_you_typed() {
     sb.catalogue(&["skills/real/SKILL.md"]);
 
     for argv in [
-        vec!["settings", "mcp", "rm", "nope"],
+        vec!["settings", "rm", "mcp", "nope", "--yes"],
+        vec!["settings", "rm", "skills", "nope", "--yes"],
         vec!["unuse", "skills", "nope"],
         vec!["use", "skills", "nope"],
         vec!["memory", "rm", "nope"],
@@ -5998,6 +6000,239 @@ fn a_name_nothing_answers_to_is_refused_whichever_command_you_typed() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+/// One `rm` for everything in your catalogue, and it takes exactly the entry
+/// it was named.
+///
+/// Until this, only a server could be removed — under `omh settings mcp`,
+/// without asking — and nothing removed a skill, a rule or a command: that was
+/// `rm -rf` under `~/.omh` by hand, in a
+/// directory mounted into every sandbox. Asserted as a difference between two
+/// fingerprints, so an `rm` that took a neighbour too is as red as one that
+/// took nothing.
+#[test]
+fn settings_rm_takes_the_named_entry_of_any_kind_and_nothing_else() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&[
+        "skills/review-diff/SKILL.md",
+        "skills/review-diff/scripts/run.sh",
+        "skills/review/SKILL.md",
+        "rules/house.md",
+        "commands/ship.md",
+        "subagents/critic.md",
+    ]);
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "github", "echo"])
+        .status
+        .success());
+
+    for (argv, took) in [
+        (
+            ["settings", "rm", "skills", "review-diff", "--yes"],
+            vec![
+                "removed .omh/skills/review-diff/",
+                "removed .omh/skills/review-diff/SKILL.md",
+                "removed .omh/skills/review-diff/scripts/",
+                "removed .omh/skills/review-diff/scripts/run.sh",
+            ],
+        ),
+        (
+            ["settings", "rm", "rules", "house", "--yes"],
+            vec!["removed .omh/rules/house.md"],
+        ),
+        (
+            ["settings", "rm", "commands", "ship", "--yes"],
+            vec!["removed .omh/commands/ship.md"],
+        ),
+        (
+            ["settings", "rm", "subagents", "critic", "--yes"],
+            vec!["removed .omh/subagents/critic.md"],
+        ),
+        (
+            ["settings", "rm", "mcp", "linear", "--yes"],
+            vec!["rewrote .omh/mcp.json"],
+        ),
+    ] {
+        let before = fingerprint(&sb);
+        let out = sb.omh(&argv);
+        assert!(
+            out.status.success(),
+            "`omh {}` failed: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let changed: Vec<String> = differs(&before, &fingerprint(&sb))
+            .into_iter()
+            .map(|d| d.replace(&format!("{}/", sb.home.display()), ""))
+            .collect();
+        assert_eq!(
+            changed,
+            took,
+            "`omh {}` must take that entry and only that entry",
+            argv.join(" ")
+        );
+    }
+
+    // The server went, and the one beside it in the same file did not.
+    let servers = std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap();
+    assert!(!servers.contains("linear"), "{servers}");
+    assert!(servers.contains("github"), "{servers}");
+}
+
+/// Off a terminal, `rm` refuses without `--yes` — for every kind, servers too.
+///
+/// One rule for asking, the one `omh sNN rm` and `omh prune` already follow:
+/// a person at a terminal is asked, and a script must say so. Piped rather
+/// than null stdin, because a pipe that answers `y` is exactly the shape a
+/// guard has to refuse — see `omh_with_stdin`.
+#[test]
+fn settings_rm_off_a_terminal_refuses_without_yes_whatever_the_kind() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+
+    for argv in [
+        ["settings", "rm", "skills", "review-diff"],
+        ["settings", "rm", "mcp", "linear"],
+    ] {
+        let before = fingerprint(&sb);
+        let out = sb.omh_with_stdin(&argv, "y\n");
+        assert!(
+            !out.status.success(),
+            "`omh {}` removed something with nobody asked",
+            argv.join(" ")
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("--yes"),
+            "and says what would let it: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(differs(&before, &fingerprint(&sb)), Vec::<String>::new());
+    }
+}
+
+/// A hook omh ships is refused: `omh upgrade` would only put it back.
+///
+/// The shipped hooks are managed — `install_bundled` rewrites every one of them
+/// on each upgrade — so removing one is a deletion that undoes itself at the
+/// next release, after the person who made it has stopped thinking about it.
+/// What they wanted is for a repo not to run it, and that is `unuse`.
+#[test]
+fn settings_rm_refuses_a_hook_omh_ships_and_takes_one_of_yours() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["hooks"]);
+    std::fs::write(
+        sb.home.join(".omh/hooks/mine.json"),
+        r#"{"on":"stop","run":"true","does":"mine"}"#,
+    )
+    .unwrap();
+
+    let out = sb.omh(&["settings", "rm", "hooks", "rust-test", "--yes"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "removed a hook omh ships");
+    assert!(said.contains("omh upgrade"), "and says why: {said}");
+    assert!(
+        said.contains("omh unuse hooks rust-test"),
+        "and what to do: {said}"
+    );
+    assert!(sb.home.join(".omh/hooks/rust-test.json").exists());
+
+    let out = sb.omh(&["settings", "rm", "hooks", "mine", "--yes"]);
+    assert!(
+        out.status.success(),
+        "a hook of yours is yours to remove: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sb.home.join(".omh/hooks/mine.json").exists());
+}
+
+/// A name that answers to two files is refused rather than guessed at.
+///
+/// A catalogue name is a file with its extension off, so `house.md` and
+/// `house.txt` are both `rules/house`. Removing either would be omh choosing
+/// which of your files to delete; removing both would be deleting one nobody
+/// named.
+#[test]
+fn settings_rm_refuses_a_name_two_files_answer_to() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["rules/house.md", "rules/house.txt"]);
+
+    let out = sb.omh(&["settings", "rm", "rules", "house", "--yes"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "chose a file to delete");
+    assert!(
+        said.contains("house.md") && said.contains("house.txt"),
+        "and names both: {said}"
+    );
+    assert!(sb.home.join(".omh/rules/house.md").exists());
+    assert!(sb.home.join(".omh/rules/house.txt").exists());
+}
+
+/// A name that is a path is refused as one, and nothing is deleted.
+///
+/// Two guards, either enough on its own: the name is refused before anything
+/// is joined to it, and the path that is removed is only ever one the
+/// catalogue directory listed. The wording pins the first; the files on disk
+/// pin both.
+#[test]
+fn settings_rm_refuses_a_name_that_is_a_path() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::write(sb.home.join("precious"), "x").unwrap();
+
+    for name in ["../../precious", "..", "review-diff/SKILL.md"] {
+        let out = sb.omh(&["settings", "rm", "skills", name, "--yes"]);
+        assert!(!out.status.success(), "`{name}` reached a delete");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("never a path"),
+            "`{name}` is refused as a path, not looked up as a name: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(sb.home.join("precious").exists());
+    assert!(sb.home.join(".omh/skills/review-diff/SKILL.md").exists());
+}
+
+/// The server's own `rm` is retired by name, and points at the one `rm`.
+#[test]
+fn the_server_rm_answers_to_the_one_rm() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "linear", "echo"])
+        .status
+        .success());
+
+    let out = sb.omh(&["settings", "mcp", "rm", "linear"]); // types the retired verb on purpose
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty(), "ran something before refusing");
+    assert!(
+        said.contains("omh settings rm mcp") && !said.contains("unrecognized subcommand"),
+        "names the replacement, not clap's complaint: {said}"
+    );
+    assert!(std::fs::read_to_string(sb.home.join(".omh/mcp.json"))
+        .unwrap()
+        .contains("linear"));
 }
 
 /// A name this repo cannot use is not a name your catalogue lacks.
@@ -6897,7 +7132,7 @@ fn what_config_held_answers_to_settings() {
         "what `mcp add` wrote is what `mcp ls` reads: {}",
         String::from_utf8_lossy(&listed.stdout)
     );
-    let removed = sb.omh(&["settings", "mcp", "rm", "srv1"]);
+    let removed = sb.omh(&["settings", "rm", "mcp", "srv1", "--yes"]);
     assert!(removed.status.success());
     assert!(
         !String::from_utf8_lossy(&sb.omh(&["settings", "mcp", "ls"]).stdout).contains("srv1"),
@@ -7096,7 +7331,7 @@ fn a_retired_spelling_somewhere_other_than_the_verb_gets_claps_own_refusal() {
             "unexpected argument",
         ),
         (
-            vec!["settings", "mcp", "rm", "x", "--force"],
+            vec!["settings", "rm", "mcp", "x", "--force"],
             "unexpected argument",
         ),
         (vec!["memory", "rm", "x", "--force"], "unexpected argument"),
@@ -13681,8 +13916,24 @@ const EXERCISES: &[Exercise] = &[
         expect: Expect::Ok,
         runtime: false,
     },
+    // The one `rm`, for a server and for an entry. Off a terminal it refuses
+    // without `--yes`, and the stdin here is null, so that refusal is a real
+    // run of the bare spelling; the preview needs no consent, since it removes
+    // nothing.
     Exercise {
-        argv: &["settings", "mcp", "rm", "demo"],
+        argv: &["settings", "rm", "mcp", "demo", "--yes"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "rm", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["--yes"]),
+        runtime: false,
+    },
+    Exercise {
+        argv: &["--dry-run", "settings", "rm", "skills", "review-diff"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: false,

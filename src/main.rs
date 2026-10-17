@@ -573,6 +573,21 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     name.as_deref(),
                     config::Layer::Personal,
                 ),
+                Some(SettingsCmd::Rm {
+                    capability,
+                    name,
+                    yes,
+                }) => cmd::settings::rm(
+                    &paths,
+                    capability,
+                    name,
+                    cmd::harvest::Consent::read(
+                        cmd::harvest::Forced(*yes),
+                        cmd::harvest::Interactive::of_stdin(),
+                    ),
+                    cli.dry_run,
+                    ctx,
+                ),
                 Some(SettingsCmd::Mcp { cmd }) => cmd::mcp::mcp(&paths, cmd, cli.dry_run, ctx),
             }
         }
