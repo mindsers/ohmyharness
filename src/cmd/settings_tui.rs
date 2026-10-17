@@ -13,10 +13,20 @@
 //! speaks through `out::Ctx`, which prints, and printing onto a screen the
 //! terminal is drawing is a screen torn in half. A child's output is captured;
 //! the screen decides where it goes.
+//!
+//! **One exception, `$EDITOR`**, which is run here through the same steps
+//! `omh settings edit` takes — [`settings::edit_target`] and
+//! [`settings::open_in_editor`] — rather than by a child. The editor has to
+//! be handed the terminal, so a child's refusal would be printed onto it, and
+//! the screen drawn back afterwards would cover the one line that said why.
+//! Worked out here, the target is refused while the screen is still up to say
+//! so.
 
 use crate::adapter::{Adapter, Capability};
+use crate::cmd::harvest::plural;
+use crate::cmd::settings::{self, Edited};
 use crate::profile::Paths;
-use crate::tui::{Act, App, Model, Next, Row, Section};
+use crate::tui::{Act, App, Import, Model, Next, Page, Row, Section};
 use crate::{base, config, hook, key};
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
@@ -36,75 +46,139 @@ pub(crate) fn wanted(json: bool, dry_run: bool) -> bool {
 
 pub(crate) fn run(paths: &Paths, color: bool) -> Result<()> {
     let mut app = App::new(model(paths), color);
-    let mut terminal = ratatui::try_init().context("opening the screen")?;
-    let outcome = (|| -> Result<()> {
-        loop {
-            terminal.draw(|f| app.draw(f))?;
-            // A resize, a focus change, a paste: none is a key, and the next
-            // draw is the whole answer to each.
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            match app.key(key) {
-                Next::Stay => {}
-                Next::Quit => return Ok(()),
-                Next::Preview(act) => {
-                    let mut line = vec!["--dry-run".to_string()];
-                    line.extend(argv(&act));
-                    let out = omh(&line)?;
-                    if out.status.success() {
-                        app.confirm(lines(&out.stdout), act);
-                    } else {
-                        // The line that refused is the preview, so that is the
-                        // one shown — not the removal nobody ran.
-                        report(&mut app, &line, &out);
-                    }
-                }
-                Next::Run(act) if hands_over_the_terminal(&act) => {
-                    // `$EDITOR` is a program with a screen of its own, so it
-                    // gets the terminal whole, and this one is put back after.
-                    suspend()?;
-                    let line = argv(&act);
-                    let status = std::process::Command::new(std::env::current_exe()?)
-                        .args(&line)
-                        .status();
-                    resume(&mut terminal)?;
-                    match status {
-                        Ok(status) => app.report(
-                            shown(&line),
-                            status.success(),
-                            if status.success() {
-                                "editor closed"
-                            } else {
-                                ""
-                            },
-                            if status.success() {
-                                ""
-                            } else {
-                                "the editor did not exit cleanly"
-                            },
-                        ),
-                        Err(e) => app.report(shown(&line), false, "", &format!("{e}")),
-                    }
-                    app.reload(model(paths));
-                }
-                Next::Run(act) => {
-                    let line = argv(&act);
-                    let out = omh(&line)?;
-                    report(&mut app, &line, &out);
-                    app.reload(model(paths));
-                }
+    let mut screen = Screen::open()?;
+    drive(&mut app, &mut screen.terminal, paths)
+}
+
+/// The terminal while the screen has it, given back however this ends.
+///
+/// A guard rather than a `restore()` after the loop, because the loop is not
+/// the only way out: `try_init` turns raw mode on *before* it enters the
+/// alternate screen and asks the terminal its size, so a failure in either
+/// returned with raw mode on, and the shell somebody came back to needed
+/// `reset`. ratatui's panic hook covers a panic; this covers every `?`.
+struct Screen {
+    terminal: ratatui::DefaultTerminal,
+}
+
+impl Screen {
+    fn open() -> Result<Self> {
+        match ratatui::try_init() {
+            Ok(terminal) => Ok(Self { terminal }),
+            Err(e) => {
+                ratatui::restore();
+                Err(e).context("opening the screen")
             }
         }
-    })();
-    ratatui::restore();
-    outcome
+    }
+}
+
+impl Drop for Screen {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) -> Result<()> {
+    let exe = std::env::current_exe().context("finding omh")?;
+    loop {
+        terminal.draw(|f| app.draw(f))?;
+        // A resize, a focus change, a paste: none is a key, and the next draw
+        // is the whole answer to each.
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match app.key(key) {
+            Next::Stay => {}
+            Next::Quit => return Ok(()),
+            Next::Preview(act) => {
+                let mut line = vec!["--dry-run".to_string()];
+                line.extend(argv(&act));
+                match omh(&exe, &line) {
+                    Ok(out) if out.status.success() => {
+                        app.confirm(lines(&out.stdout), lines(&out.stderr), act);
+                    }
+                    // The line that refused is the preview, so that is the one
+                    // shown — not the removal nobody ran.
+                    Ok(out) => report(app, &line, &out),
+                    Err(e) => app.report(shown(&line), false, "", &format!("{e:#}")),
+                }
+            }
+            Next::Run(act) => {
+                let line = argv(&act);
+                match &act {
+                    Act::EditDefaults => edit(app, terminal, paths, None, None, &line)?,
+                    Act::Edit { capability, name } => edit(
+                        app,
+                        terminal,
+                        paths,
+                        Some(capability),
+                        name.as_deref(),
+                        &line,
+                    )?,
+                    _ => match omh(&exe, &line) {
+                        Ok(out) => report(app, &line, &out),
+                        // On the screen rather than out of it: a child that
+                        // would not start is one failed act, and leaving took
+                        // every unsaved thing on the screen with it.
+                        Err(e) => app.report(shown(&line), false, "", &format!("{e:#}")),
+                    },
+                }
+                app.reload(model(paths));
+            }
+        }
+    }
+}
+
+/// `$EDITOR`, given the terminal whole, through `omh settings edit`'s own steps.
+fn edit(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    paths: &Paths,
+    capability: Option<&str>,
+    name: Option<&str>,
+    line: &[String],
+) -> Result<()> {
+    let target = match settings::edit_target(paths, capability, name, config::Layer::Personal) {
+        Ok(target) => target,
+        Err(e) => {
+            app.report(shown(line), false, "", &format!("{e:#}"));
+            return Ok(());
+        }
+    };
+    suspend()?;
+    let edited = settings::open_in_editor(&target);
+    // If the screen cannot come back, what the editor did still reaches the
+    // person, in the error that ends the screen.
+    resume(terminal).with_context(|| match &edited {
+        Ok(_) => format!("after `omh {}`, which worked", shown(line)),
+        Err(e) => format!("after `omh {}`, which failed: {e:#}", shown(line)),
+    })?;
+    match edited {
+        Ok(Edited::Done) => app.report(shown(line), true, "editor closed", ""),
+        Ok(Edited::NothingSaved(dir)) => app.report(
+            shown(line),
+            true,
+            &format!(
+                "editor closed — nothing was saved into {}, so it was not made",
+                dir.display()
+            ),
+            "",
+        ),
+        Err(e) => app.report(shown(line), false, "", &format!("{e:#}")),
+    }
+    Ok(())
 }
 
 /// The command line an act is, after `omh`.
+///
+/// Flags first, then `--`, then what the act names: a value like `-x` — or
+/// `--help`, which clap answers by printing help and exiting 0 — would
+/// otherwise be read as a flag, and the screen would report the help text
+/// in green over a setting it never wrote.
 ///
 /// Guarded by `every_act_is_a_line_omh_accepts_and_means_what_it_says`, which
 /// parses each one back through the real grammar: a line here that clap read
@@ -113,17 +187,17 @@ pub(crate) fn run(paths: &Paths, color: bool) -> Result<()> {
 pub(crate) fn argv(act: &Act) -> Vec<String> {
     let s = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
     match act {
-        Act::Set { key, value } => s(&["settings", "set", key, value]),
-        Act::Unset { key } => s(&["settings", "unset", key]),
+        Act::Set { key, value } => s(&["settings", "set", "--", key, value]),
+        Act::Unset { key } => s(&["settings", "unset", "--", key]),
         Act::EditDefaults => s(&["settings", "edit"]),
         Act::Edit { capability, name } => {
-            let mut line = s(&["settings", "edit", capability]);
+            let mut line = s(&["settings", "edit", "--", capability]);
             line.extend(name.clone());
             line
         }
         // `--yes` because the screen has already asked, in the words of this
         // same line's preview.
-        Act::Remove { capability, name } => s(&["settings", "rm", capability, name, "--yes"]),
+        Act::Remove { capability, name } => s(&["settings", "rm", "--yes", "--", capability, name]),
         Act::AddServer {
             name,
             command,
@@ -131,32 +205,29 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
             env,
         } => {
             // `--env` first: the server's arguments run to the end of the line,
-            // so anything after them is one of them. And `--` before them, so
-            // an argument that looks like a flag is still an argument.
+            // so anything after them is one of them. And everything after
+            // `--`, so a name, a command or an argument that looks like a flag
+            // is still what it was.
             let mut line = s(&["settings", "mcp", "add"]);
             for (k, v) in env {
                 line.push("--env".into());
                 line.push(format!("{k}={v}"));
             }
+            line.push("--".into());
             line.push(name.clone());
             line.push(command.clone());
-            line.push("--".into());
             line.extend(args.iter().cloned());
             line
         }
         Act::Import {
             capability,
             harness,
-        } if capability == "mcp" => s(&["settings", "mcp", "import", harness]),
+        } if capability == "mcp" => s(&["settings", "mcp", "import", "--", harness]),
         Act::Import {
             capability,
             harness,
-        } => s(&["import", capability, harness]),
+        } => s(&["import", "--", capability, harness]),
     }
-}
-
-fn hands_over_the_terminal(act: &Act) -> bool {
-    matches!(act, Act::EditDefaults | Act::Edit { .. })
 }
 
 /// Run one line through this binary, its output captured.
@@ -164,22 +235,26 @@ fn hands_over_the_terminal(act: &Act) -> bool {
 /// Plain, because the screen paints; and with nothing on stdin, because
 /// nothing here will answer a question — a command that would ask refuses
 /// instead, which is what `--yes` on `rm` is for.
-fn omh(line: &[String]) -> Result<std::process::Output> {
-    std::process::Command::new(std::env::current_exe().context("finding omh")?)
+fn omh(exe: &std::path::Path, line: &[String]) -> Result<std::process::Output> {
+    std::process::Command::new(exe)
         .args(["--color", "never"])
         .args(line)
         .stdin(std::process::Stdio::null())
         .output()
-        .with_context(|| format!("running omh {}", line.join(" ")))
+        // The line as drawn, not as run: this error is drawn too, and the line
+        // that runs carries the values `shown` hides.
+        .with_context(|| format!("running omh {}", shown(line)))
 }
 
 fn report(app: &mut App, line: &[String], out: &std::process::Output) {
-    app.report(
-        shown(line),
-        out.status.success(),
-        &String::from_utf8_lossy(&out.stdout),
-        &String::from_utf8_lossy(&out.stderr),
-    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // A child killed by a signal says nothing, and "failed" alone would leave
+    // nobody anywhere to look.
+    if !out.status.success() && stdout.trim().is_empty() && stderr.trim().is_empty() {
+        stderr = format!("it ended with {}, and said nothing", out.status);
+    }
+    app.report(shown(line), out.status.success(), &stdout, &stderr);
 }
 
 fn lines(bytes: &[u8]) -> Vec<String> {
@@ -196,27 +271,38 @@ fn lines(bytes: &[u8]) -> Vec<String> {
 /// It stays on the screen where anybody looking can read it, and those are
 /// where a server's token goes — the same reason the servers page names
 /// variables and counts arguments. What runs still carries both.
+///
+/// The `--` that keeps a value like `-x` from reading as a flag is left out
+/// when nothing after it begins with `-`: the line is the same line without
+/// it, and easier to read.
 fn shown(line: &[String]) -> String {
-    let (head, args) = match line.iter().position(|w| w == "--") {
+    let split = line.iter().position(|w| w == "--");
+    let (flags, named) = match split {
         Some(at) => (&line[..at], &line[at + 1..]),
         None => (line, &line[line.len()..]),
     };
-    let mut hidden = Vec::with_capacity(head.len());
+    let mut hidden = Vec::with_capacity(line.len());
     let mut after_env = false;
-    for word in head {
+    for word in flags {
         hidden.push(match word.split_once('=') {
             Some((k, _)) if after_env => format!("{k}=…"),
             _ => word.clone(),
         });
         after_env = word == "--env";
     }
-    match args.len() {
+    // A server's own arguments are whatever follows its name and command.
+    let adding_a_server = line.starts_with(&["settings".into(), "mcp".into(), "add".into()]);
+    let (named, counted) = match adding_a_server {
+        true => named.split_at(named.len().min(2)),
+        false => (named, &named[named.len()..]),
+    };
+    if split.is_some() && named.iter().any(|w| w.starts_with('-')) {
+        hidden.push("--".into());
+    }
+    hidden.extend(named.iter().cloned());
+    match counted.len() {
         0 => said(&hidden),
-        n => format!(
-            "{} -- … ({n} argument{})",
-            said(&hidden),
-            if n == 1 { "" } else { "s" }
-        ),
+        n => format!("{} … ({n} argument{})", said(&hidden), plural(n)),
     }
 }
 
@@ -271,27 +357,23 @@ pub(crate) fn model(paths: &Paths) -> Model {
             Capability::Mcp => servers(paths, &manifest),
             _ => entries(paths, cap),
         };
-        match (&adapters, cap) {
+        section.import = match (&adapters, cap) {
             // A hook binds to one project's commands and lands in that repo,
             // so importing one is not something your catalogue can take.
-            (_, Capability::Hooks) => {
-                section.no_import = Some(
-                    "a hook lands in a repo, not in your catalogue — in one, \
-                     `omh import hooks <harness>`"
-                        .into(),
-                );
-            }
-            (Ok(adapters), _) => {
-                section.importers = adapters
+            (_, Capability::Hooks) => Import::Not(
+                "a hook lands in a repo, not in your catalogue — in one, \
+                 `omh import hooks <harness>`"
+                    .into(),
+            ),
+            (Ok(adapters), _) => Import::From(
+                adapters
                     .iter()
                     .filter(|a| a.supports(cap).is_some_and(|b| b.import.is_some()))
                     .map(|a| a.name.to_string())
-                    .collect();
-            }
-            (Err(e), _) => {
-                section.no_import = Some(format!("could not read the adapters: {e:#}"));
-            }
-        }
+                    .collect(),
+            ),
+            (Err(e), _) => Import::Not(format!("could not read the adapters: {e:#}")),
+        };
         sections.push(section);
     }
     Model {
@@ -300,21 +382,21 @@ pub(crate) fn model(paths: &Paths) -> Model {
     }
 }
 
-fn section(capability: Option<&'static str>, title: &'static str) -> Section {
+fn section(page: Page, title: &'static str) -> Section {
     Section {
         title,
-        capability,
+        page,
         rows: Vec::new(),
         problem: None,
-        importers: Vec::new(),
-        no_import: None,
+        import: Import::From(Vec::new()),
     }
 }
 
 /// Every key omh reads, set or not — the half no settings file can show — and
 /// anything else the file holds, named for what it is.
 fn defaults(paths: &Paths) -> Section {
-    let mut out = section(None, "defaults");
+    let mut out = section(Page::Defaults, "defaults");
+    out.import = Import::Not("your defaults are typed, not imported".into());
     let file = config::Layer::Personal.file(paths);
     let mine = match config::values(paths, config::Layer::Personal) {
         Ok(mine) => mine,
@@ -353,7 +435,7 @@ fn defaults(paths: &Paths) -> Section {
 }
 
 fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
-    let mut out = section(Some("mcp"), "servers");
+    let mut out = section(Page::Servers, "servers");
     let path = config::mcp_path(paths);
     let held = match path.try_exists() {
         Ok(false) => return out,
@@ -373,22 +455,28 @@ fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
             .get(&Capability::Mcp)
             .cloned()
             .unwrap_or_default(),
+        // Unknown is not "none of them": a server drawn without its feature's
+        // name reads as one of yours, and removing `codegraph` takes its hooks
+        // and its rules section too.
         Err(e) => {
-            out.problem = Some(format!("could not read omh's base set: {e:#}"));
+            out.problem = Some(format!(
+                "could not read omh's base set, so which of these servers are omh's \
+                 own is unknown — a row below may be one: {e:#}"
+            ));
             Default::default()
         }
     };
     for (name, server) in held {
-        // The command and a count, as `omh settings mcp ls` shows it, and not
-        // the arguments themselves: `--header "Authorization: Bearer …"` is
-        // how a remote server is reached, and this is drawn for anybody
-        // looking at the screen. `e` opens the file, for somebody who meant to.
+        // The command, as `omh settings mcp ls` prints it, and the arguments
+        // only counted: `--header "Authorization: Bearer …"` is how a remote
+        // server is reached, and this is drawn for anybody looking at the
+        // screen. `e` opens the file, for somebody who meant to read them.
         let mut about = vec![format!("runs  {}", server.command)];
         if !server.args.is_empty() {
             about.push(format!(
                 "with  {} argument{} — e opens the file to read them",
                 server.args.len(),
-                if server.args.len() == 1 { "" } else { "s" }
+                plural(server.args.len())
             ));
         }
         // The names only. A server's environment is where its token goes.
@@ -413,15 +501,7 @@ fn servers(paths: &Paths, manifest: &Result<base::Manifest>) -> Section {
 }
 
 fn entries(paths: &Paths, cap: Capability) -> Section {
-    let (key, title) = match cap {
-        Capability::Rules => ("rules", "rules"),
-        Capability::Skills => ("skills", "skills"),
-        Capability::Commands => ("commands", "commands"),
-        Capability::Subagents => ("subagents", "subagents"),
-        Capability::Hooks => ("hooks", "hooks"),
-        Capability::Mcp => ("mcp", "servers"),
-    };
-    let mut out = section(Some(key), title);
+    let mut out = section(Page::Entries(cap.key()), cap.key());
     let dir = paths.root.join(cap.source());
     // Absent is a kind you have none of; every other failure is said.
     match dir.try_exists() {
@@ -439,7 +519,7 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
             return out;
         }
     };
-    let shipped = crate::cmd::settings::shipped_hooks();
+    let shipped = settings::shipped_hooks();
     for (name, path) in listed {
         let shipped = cap == Capability::Hooks && shipped.contains(&name);
         let mut about = describe(cap, &path);
@@ -466,7 +546,9 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
 ///
 /// A file that will not read says so, in place of a description: the row is
 /// still there and still removable, and an empty description would read as
-/// an entry with nothing to say rather than one omh could not open.
+/// an entry with nothing to say rather than one omh could not open. So does a
+/// skill with no `SKILL.md` — half made, or half removed — which looks like
+/// any other skill and is one nothing loads.
 fn describe(cap: Capability, path: &std::path::Path) -> Vec<String> {
     let file = match cap {
         Capability::Skills if path.is_dir() => path.join("SKILL.md"),
@@ -477,6 +559,9 @@ fn describe(cap: Capability, path: &std::path::Path) -> Vec<String> {
     }
     let raw = match std::fs::read_to_string(&file) {
         Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && cap == Capability::Skills => {
+            return vec!["no SKILL.md in it — nothing will load this skill".into()];
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => return vec![format!("could not read {}: {e}", file.display())],
     };
@@ -538,6 +623,17 @@ mod tests {
             parsed(&Act::Set { key: "runtime".into(), value: "".into() }),
             Cmd::Settings { cmd: Some(SettingsCmd::Set { value, .. }) } if value.is_empty()
         ));
+        // A value that looks like a flag is still the value — `--help` worst
+        // of all, which clap answers with help and exit 0.
+        for value in ["-x", "--help", "--"] {
+            assert!(
+                matches!(
+                    parsed(&Act::Set { key: "runtime".into(), value: value.into() }),
+                    Cmd::Settings { cmd: Some(SettingsCmd::Set { value: v, .. }) } if v == value
+                ),
+                "`{value}` did not arrive as the value"
+            );
+        }
         assert!(matches!(
             parsed(&Act::Unset { key: "runtime".into() }),
             Cmd::Settings { cmd: Some(SettingsCmd::Unset { key }) } if key == "runtime"
@@ -726,7 +822,167 @@ mod tests {
         assert!(!row("[use]").settable);
     }
 
-    /// The line shown for a new server names its environment and hides the
+    fn write(path: &std::path::Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// Every page names a kind a command accepts, and the servers page is the
+    /// servers page.
+    ///
+    /// The screen builds every act from a page's capability, so a key spelled
+    /// here that `from_key` does not know is a page whose every action is
+    /// refused — and the servers page, read as an entries page, offers
+    /// `settings edit mcp <name>`.
+    #[test]
+    fn every_page_names_a_kind_omh_accepts() {
+        let (_dir, paths) = paths();
+        let model = model(&paths);
+        for section in &model.sections {
+            if let Some(key) = section.page.capability() {
+                assert!(
+                    Capability::from_key(key).is_some(),
+                    "{}: `{key}` is not a capability",
+                    section.title
+                );
+            }
+        }
+        assert_eq!(page(&model, "servers").page, Page::Servers);
+        assert_eq!(page(&model, "defaults").page, Page::Defaults);
+        assert_eq!(
+            model
+                .sections
+                .iter()
+                .filter(|s| matches!(s.page, Page::Entries(_)))
+                .count(),
+            Capability::ALL.len() - 1
+        );
+    }
+
+    /// The hooks page imports nothing, and says where hooks are imported.
+    ///
+    /// `omh import hooks` writes into the repo's `.omh/hooks/`, and this screen
+    /// is your catalogue alone.
+    #[test]
+    fn the_hooks_page_imports_nothing_and_says_where_to() {
+        let (_dir, paths) = paths();
+        let model = model(&paths);
+        match &page(&model, "hooks").import {
+            Import::Not(why) => assert!(why.contains("omh import hooks"), "{why}"),
+            Import::From(h) => panic!("the hooks page offers an import from {h:?}"),
+        }
+    }
+
+    /// **Could not look is not none**, on every page that reads a file: a
+    /// defaults file, a servers file, the base set and the adapters that will
+    /// not read are said, never drawn as nothing set or nothing to import.
+    #[test]
+    fn every_read_the_screen_makes_is_said_when_it_fails() {
+        let (_dir, broken) = paths();
+        write(
+            &config::Layer::Personal.file(&broken),
+            "idle_timeout = [unclosed\n",
+        );
+        write(&config::mcp_path(&broken), "{ not json");
+        let read = model(&broken);
+        assert!(
+            page(&read, "defaults").problem.is_some(),
+            "a defaults file that will not parse"
+        );
+        assert!(
+            page(&read, "servers").problem.is_some(),
+            "a servers file that will not parse"
+        );
+        assert!(page(&read, "servers").rows.is_empty());
+
+        let (_dir2, unsure) = paths();
+        write(
+            &config::mcp_path(&unsure),
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
+        );
+        write(&unsure.base().join("2026.08.toml"), "[[entry]\n");
+        write(&unsure.adapters().join("claude.toml"), "name = [unclosed\n");
+        let read = model(&unsure);
+        let servers = page(&read, "servers");
+        assert!(
+            servers
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("unknown")),
+            "an unreadable base set leaves which servers are omh's unknown: {servers:?}"
+        );
+        assert_eq!(servers.rows.len(), 1, "and the server is still listed");
+        for title in ["skills", "rules", "servers"] {
+            match &page(&read, title).import {
+                Import::Not(why) => assert!(why.contains("adapters"), "{title}: {why}"),
+                Import::From(h) => panic!("{title} offers an import from {h:?} it could not read"),
+            }
+        }
+    }
+
+    /// A skill with no `SKILL.md` says so, rather than looking like any other.
+    #[test]
+    fn a_skill_with_no_skill_md_says_nothing_will_load_it() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(paths.root.join("skills/half")).unwrap();
+        let model = model(&paths);
+        let row = &page(&model, "skills").rows[0];
+        assert!(
+            row.about.iter().any(|l| l.contains("no SKILL.md")),
+            "{row:?}"
+        );
+    }
+
+    fn drawn(app: &App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .chunks(120)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A child that fails saying nothing — killed by a signal, say — is
+    /// reported with how it ended, not as a bare "failed".
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_fails_saying_nothing_is_reported_with_how_it_ended() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut app = App::new(Model::default(), false);
+        let out = std::process::Output {
+            status: std::process::ExitStatus::from_raw(9),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        report(&mut app, &argv(&Act::Unset { key: "k".into() }), &out);
+        let screen = drawn(&app);
+        assert!(screen.contains("signal"), "{screen}");
+    }
+
+    /// A child that will not start is an error on the screen, and the line it
+    /// names is the line as drawn — never one carrying the values `shown`
+    /// hides.
+    #[test]
+    fn a_child_that_will_not_start_names_the_line_as_drawn() {
+        let add = Act::AddServer {
+            name: "linear".into(),
+            command: "npx".into(),
+            args: vec!["Authorization: Bearer sk-arg-secret".into()],
+            env: vec![("LINEAR_TOKEN".into(), "sk-very-secret".into())],
+        };
+        let e = omh(std::path::Path::new("/nonexistent/omh"), &argv(&add))
+            .expect_err("there is no omh there");
+        let said = format!("{e:#}");
+        assert!(said.contains("running omh settings mcp add"), "{said}");
+        assert!(!said.contains("sk-very-secret"), "{said}");
+        assert!(!said.contains("sk-arg-secret"), "{said}");
+    }
+
+    /// The line shown for a new server names its environment and hides the    /// The line shown for a new server names its environment and hides the
     /// values, and counts its arguments rather than drawing them: it stays on
     /// the screen where anybody looking can read it, and those are where a
     /// token goes.
@@ -760,7 +1016,15 @@ mod tests {
             key: "carry_in".into(),
             value: "[\".env\"]".into(),
         };
-        assert_eq!(said(&argv(&act)), r#"settings set carry_in '[".env"]'"#);
+        assert_eq!(shown(&argv(&act)), r#"settings set carry_in '[".env"]'"#);
+        // The `--` is kept where it is the difference.
+        assert_eq!(
+            shown(&argv(&Act::Set {
+                key: "k".into(),
+                value: "-x".into()
+            })),
+            "settings set -- k -x"
+        );
         for value in ["it's", "", "a b", "$HOME", "x\\y"] {
             let line = argv(&Act::Set {
                 key: "k".into(),

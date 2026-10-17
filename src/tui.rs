@@ -32,17 +32,48 @@ pub struct Model {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
     pub title: &'static str,
-    /// The capability a command names it by, or `None` for your defaults.
-    pub capability: Option<&'static str>,
+    pub page: Page,
     pub rows: Vec<Row>,
     /// The read that failed, when one did. **Could not look is not none**: a
     /// section omh could not read says so, rather than drawing an empty list
     /// that reads as "you have no skills".
     pub problem: Option<String>,
-    /// The harnesses `i` can import this kind from.
-    pub importers: Vec<String>,
-    /// Why `i` does nothing here, when it does nothing.
-    pub no_import: Option<String>,
+    pub import: Import,
+}
+
+/// Which kind of page, by what each key does on it.
+///
+/// Three kinds, so three values: an `Option<&str>` spelled them `None`,
+/// `Some("mcp")` and `Some(_)`, and whether a key meant the right thing on the
+/// servers page hung on which arm of each match came first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    /// Your defaults: `enter` sets, `d` unsets.
+    Defaults,
+    /// Your servers — records in one file, so `e` opens the file.
+    Servers,
+    /// One kind of entry, by the capability a command names it with.
+    Entries(&'static str),
+}
+
+impl Page {
+    /// What a command line calls this page's kind, if it is a kind.
+    pub fn capability(self) -> Option<&'static str> {
+        match self {
+            Page::Defaults => None,
+            Page::Servers => Some("mcp"),
+            Page::Entries(capability) => Some(capability),
+        }
+    }
+}
+
+/// What `i` does on a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Import {
+    /// Pick one of these harnesses to import from.
+    From(Vec<String>),
+    /// Nothing, for this reason.
+    Not(String),
 }
 
 /// One default, one server, or one entry.
@@ -51,7 +82,8 @@ pub struct Row {
     pub name: String,
     /// Shown beside the name: a default's value, a server's command.
     pub value: Option<String>,
-    /// Who it is: `omh's`, `shipped`, `nothing reads this`.
+    /// Who it is or what it is not: `shipped with omh`, `omh's — the codegraph
+    /// feature`, `nothing omh reads`, `a table`.
     pub note: Option<String>,
     /// What it is, below the list when it is selected.
     pub about: Vec<String>,
@@ -121,8 +153,8 @@ pub struct App {
     rows: Vec<usize>,
     modal: Option<Modal>,
     status: Vec<(Tone, String)>,
-    /// The command line the last act was, so what the screen did is
-    /// something you can read, and type next time.
+    /// The command line the last act was, so what the screen did is something
+    /// you can read — and, but for the values it hides, type next time.
     said: Option<String>,
     look: Look,
 }
@@ -132,6 +164,9 @@ enum Modal {
     Input(Input),
     Confirm {
         lines: Vec<String>,
+        /// What the preview said on stderr: said before the question, not
+        /// dropped because it was not the answer.
+        warnings: Vec<String>,
         act: Act,
     },
     Pick {
@@ -169,6 +204,17 @@ enum Then {
         command: String,
         args: Vec<String>,
     },
+}
+
+/// No modifier but Shift: a letter as it was typed.
+///
+/// crossterm reports Ctrl-D as `d` held with CONTROL, so a page that matched
+/// the letter alone unset a default on Ctrl-D — the key a hand reaches for to
+/// leave a terminal program.
+fn plain(key: KeyEvent) -> bool {
+    !key.modifiers.intersects(
+        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META,
+    )
 }
 
 impl App {
@@ -210,20 +256,25 @@ impl App {
     /// wrote to stderr — warnings when it worked, the refusal when it did not.
     pub fn report(&mut self, said: String, ok: bool, stdout: &str, stderr: &str) {
         self.said = Some(clean(&said));
-        self.status = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| (if ok { Tone::Ok } else { Tone::Info }, clean(l)))
-            .chain(
-                stderr
-                    .lines()
+        let (out, err) = if ok {
+            (Tone::Ok, Tone::Warn)
+        } else {
+            (Tone::Info, Tone::Bad)
+        };
+        self.status = [(stdout, out), (stderr, err)]
+            .into_iter()
+            .flat_map(|(text, tone)| {
+                text.lines()
                     .filter(|l| !l.trim().is_empty())
-                    .map(|l| (if ok { Tone::Warn } else { Tone::Bad }, clean(l))),
-            )
+                    .map(move |l| (tone, clean(l)))
+            })
             .collect();
         if self.status.is_empty() {
-            self.status
-                .push((if ok { Tone::Ok } else { Tone::Bad }, "done".to_string()));
+            self.status.push(if ok {
+                (Tone::Ok, "done".to_string())
+            } else {
+                (Tone::Bad, "failed, and said nothing".to_string())
+            });
         }
     }
 
@@ -233,10 +284,14 @@ impl App {
         self.status = vec![(Tone::Info, clean(&line.into()))];
     }
 
-    /// Ask before running `act`, showing what its preview said it would do.
-    pub fn confirm(&mut self, lines: Vec<String>, act: Act) {
-        let lines = lines.iter().map(|l| clean(l)).collect();
-        self.modal = Some(Modal::Confirm { lines, act });
+    /// Ask before running `act`, showing what its preview said it would do,
+    /// and any warning it gave on the way.
+    pub fn confirm(&mut self, lines: Vec<String>, warnings: Vec<String>, act: Act) {
+        self.modal = Some(Modal::Confirm {
+            lines: lines.iter().map(|l| clean(l)).collect(),
+            warnings: warnings.iter().map(|l| clean(l)).collect(),
+            act,
+        });
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Next {
@@ -245,7 +300,15 @@ impl App {
         }
         match self.modal.take() {
             Some(modal) => self.key_in_modal(modal, key),
-            None => self.key_on_page(key),
+            None if plain(key) => self.key_on_page(key),
+            // Ctrl-D leaves, as it leaves a shell; every other held letter is
+            // not the letter.
+            None if key.code == KeyCode::Char('d')
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                Next::Quit
+            }
+            None => Next::Stay,
         }
     }
 
@@ -288,8 +351,8 @@ impl App {
         let Some(section) = self.section() else {
             return Next::Stay;
         };
-        match section.capability {
-            None => {
+        match section.page {
+            Page::Defaults => {
                 let Some(row) = self.row() else {
                     return Next::Stay;
                 };
@@ -311,8 +374,8 @@ impl App {
                 }));
                 Next::Stay
             }
-            Some("mcp") => Next::Stay,
-            Some(_) => self.edit(),
+            Page::Servers => Next::Stay,
+            Page::Entries(_) => self.edit(),
         }
     }
 
@@ -320,14 +383,14 @@ impl App {
         let Some(section) = self.section() else {
             return Next::Stay;
         };
-        match section.capability {
-            None => Next::Run(Act::EditDefaults),
+        match section.page {
+            Page::Defaults => Next::Run(Act::EditDefaults),
             // A server is a record in one file, so the file is what opens.
-            Some("mcp") => Next::Run(Act::Edit {
+            Page::Servers => Next::Run(Act::Edit {
                 capability: "mcp".into(),
                 name: None,
             }),
-            Some(capability) => Next::Run(Act::Edit {
+            Page::Entries(capability) => Next::Run(Act::Edit {
                 capability: capability.into(),
                 name: self.row().map(|r| r.name.clone()),
             }),
@@ -338,33 +401,27 @@ impl App {
         let Some(section) = self.section() else {
             return;
         };
-        match section.capability {
-            None => self.note("every key omh reads is listed — enter sets one"),
-            Some("mcp") => {
-                self.modal = Some(Modal::Input(Input::new(
-                    "new server",
-                    "name: ",
-                    Then::ServerName,
-                )));
+        let (title, then) = match section.page {
+            Page::Defaults => {
+                self.note("every key omh reads is listed — enter sets one");
+                return;
             }
-            Some(capability) => {
-                let title = format!("new entry in {}", section.title);
-                self.modal = Some(Modal::Input(Input::new(
-                    &title,
-                    "name: ",
-                    Then::NewEntry {
-                        capability: capability.into(),
-                    },
-                )));
-            }
-        }
+            Page::Servers => ("new server".to_string(), Then::ServerName),
+            Page::Entries(capability) => (
+                format!("new entry in {}", section.title),
+                Then::NewEntry {
+                    capability: capability.into(),
+                },
+            ),
+        };
+        self.modal = Some(Modal::Input(Input::new(&title, "name: ", then)));
     }
 
     fn remove(&mut self) -> Next {
         let (Some(section), Some(row)) = (self.section(), self.row()) else {
             return Next::Stay;
         };
-        match section.capability {
+        match section.page.capability() {
             None if row.value.is_none() => {
                 let line = format!("{} is not set — there is nothing to unset", row.name);
                 self.note(line);
@@ -384,31 +441,29 @@ impl App {
         let Some(section) = self.section() else {
             return;
         };
-        let Some(capability) = section.capability else {
-            self.note("your defaults are typed, not imported");
-            return;
+        let line = match (section.page.capability(), &section.import) {
+            (Some(capability), Import::From(harnesses)) if !harnesses.is_empty() => {
+                self.modal = Some(Modal::Pick {
+                    capability: capability.into(),
+                    harnesses: harnesses.clone(),
+                    at: 0,
+                });
+                return;
+            }
+            (_, Import::Not(why)) => why.clone(),
+            (None, Import::From(_)) => "your defaults are typed, not imported".to_string(),
+            (Some(_), Import::From(_)) => format!(
+                "no installed harness keeps {} where omh can read them",
+                section.title
+            ),
         };
-        if section.importers.is_empty() {
-            let line = section.no_import.clone().unwrap_or_else(|| {
-                format!(
-                    "no installed harness keeps {} where omh can read them",
-                    section.title
-                )
-            });
-            self.note(line);
-            return;
-        }
-        self.modal = Some(Modal::Pick {
-            capability: capability.into(),
-            harnesses: section.importers.clone(),
-            at: 0,
-        });
+        self.note(line);
     }
 
     fn key_in_modal(&mut self, modal: Modal, key: KeyEvent) -> Next {
         match modal {
             Modal::Confirm { act, .. } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => Next::Run(act),
+                KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => Next::Run(act),
                 // Anything else keeps it, the rule `ask::confirm` follows: one
                 // way to say yes, and everything else is not it.
                 _ => {
@@ -420,33 +475,32 @@ impl App {
                 capability,
                 harnesses,
                 at,
-            } => match key.code {
-                KeyCode::Down | KeyCode::Char('j') => {
-                    let at = (at + 1).min(harnesses.len().saturating_sub(1));
-                    self.modal = Some(Modal::Pick {
-                        capability,
-                        harnesses,
-                        at,
-                    });
-                    Next::Stay
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.modal = Some(Modal::Pick {
-                        capability,
-                        harnesses,
-                        at: at.saturating_sub(1),
-                    });
-                    Next::Stay
-                }
-                KeyCode::Enter => match harnesses.get(at) {
-                    Some(harness) => Next::Run(Act::Import {
-                        capability,
-                        harness: harness.clone(),
-                    }),
-                    None => Next::Stay,
-                },
-                _ => Next::Stay,
-            },
+            } => {
+                let at = match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        (at + 1).min(harnesses.len().saturating_sub(1))
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => at.saturating_sub(1),
+                    KeyCode::Enter => {
+                        return match harnesses.get(at) {
+                            Some(harness) => Next::Run(Act::Import {
+                                capability,
+                                harness: harness.clone(),
+                            }),
+                            None => Next::Stay,
+                        }
+                    }
+                    // Any other key closes the pick: it was taken off the
+                    // screen with `take` and is not put back.
+                    _ => return Next::Stay,
+                };
+                self.modal = Some(Modal::Pick {
+                    capability,
+                    harnesses,
+                    at,
+                });
+                Next::Stay
+            }
             Modal::Input(mut input) => match key.code {
                 KeyCode::Esc => Next::Stay,
                 KeyCode::Enter => self.submit(input),
@@ -459,63 +513,54 @@ impl App {
         }
     }
 
+    /// The same question again, saying what was wrong with the answer.
+    fn refuse(&mut self, mut input: Input, error: impl Into<String>) -> Next {
+        input.error = Some(error.into());
+        self.modal = Some(Modal::Input(input));
+        Next::Stay
+    }
+
+    /// The next question, with the answers so far in what it becomes.
+    fn ask(&mut self, title: String, label: &str, then: Then) -> Next {
+        self.modal = Some(Modal::Input(Input::new(&title, label, then)));
+        Next::Stay
+    }
+
     /// A line was entered. Either it is an act, the next question, or the
     /// same question again with what was wrong with the answer.
-    fn submit(&mut self, mut input: Input) -> Next {
+    fn submit(&mut self, input: Input) -> Next {
         let line: String = input.text.iter().collect();
-        let refuse = |mut input: Input, error: String, app: &mut Self| {
-            input.error = Some(error);
-            app.modal = Some(Modal::Input(input));
-            Next::Stay
-        };
-        match std::mem::replace(&mut input.then, Then::ServerName) {
+        let name = line.trim().to_string();
+        match input.then.clone() {
             Then::Value { key } => Next::Run(Act::Set { key, value: line }),
-            Then::NewEntry { capability } => {
-                let name = line.trim().to_string();
-                if name.is_empty() {
-                    input.then = Then::NewEntry { capability };
-                    return refuse(input, "a name, first".into(), self);
-                }
-                Next::Run(Act::Edit {
-                    capability,
-                    name: Some(name),
-                })
+            Then::NewEntry { .. } | Then::ServerName if name.is_empty() => {
+                self.refuse(input, "a name, first")
             }
-            Then::ServerName => {
-                let name = line.trim().to_string();
-                if name.is_empty() {
-                    return refuse(input, "a name, first".into(), self);
-                }
-                self.modal = Some(Modal::Input(Input::new(
-                    &format!("new server {name}"),
-                    "command and arguments: ",
-                    Then::ServerCommand { name },
-                )));
-                Next::Stay
-            }
+            Then::NewEntry { capability } => Next::Run(Act::Edit {
+                capability,
+                name: Some(name),
+            }),
+            Then::ServerName => self.ask(
+                format!("new server {name}"),
+                "command and arguments: ",
+                Then::ServerCommand { name },
+            ),
             Then::ServerCommand { name } => match words(&line) {
                 Ok(words) if !words.is_empty() => {
                     let mut words = words.into_iter();
                     let command = words.next().unwrap_or_default();
-                    self.modal = Some(Modal::Input(Input::new(
-                        &format!("new server {name}"),
+                    self.ask(
+                        format!("new server {name}"),
                         "env (KEY=VALUE …), or nothing: ",
                         Then::ServerEnv {
                             name,
                             command,
                             args: words.collect(),
                         },
-                    )));
-                    Next::Stay
+                    )
                 }
-                Ok(_) => {
-                    input.then = Then::ServerCommand { name };
-                    refuse(input, "the program to run, first".into(), self)
-                }
-                Err(e) => {
-                    input.then = Then::ServerCommand { name };
-                    refuse(input, e, self)
-                }
+                Ok(_) => self.refuse(input, "the program to run, first"),
+                Err(e) => self.refuse(input, e),
             },
             Then::ServerEnv {
                 name,
@@ -528,14 +573,7 @@ impl App {
                     args,
                     env,
                 }),
-                Err(e) => {
-                    input.then = Then::ServerEnv {
-                        name,
-                        command,
-                        args,
-                    };
-                    refuse(input, e, self)
-                }
+                Err(e) => self.refuse(input, e),
             },
         }
     }
@@ -554,13 +592,20 @@ impl App {
     }
 
     pub fn draw(&self, f: &mut Frame) {
+        let area = f.area();
+        let status_lines = self.status_lines();
+        // As tall as what it says, up to a third of the screen: a refusal's
+        // reason and its next step come after its first line, and a box that
+        // cut there kept the part nobody needed.
+        let status_height = (rows_needed(&status_lines, area.width.saturating_sub(2)) + 2)
+            .clamp(3, (area.height / 3).max(3));
         let [head, body, status, foot] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
-            Constraint::Length(5),
+            Constraint::Length(status_height),
             Constraint::Length(1),
         ])
-        .areas(f.area());
+        .areas(area);
 
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -574,7 +619,12 @@ impl App {
             Layout::horizontal([Constraint::Length(20), Constraint::Fill(1)]).areas(body);
         self.draw_pages(f, pages);
         self.draw_page(f, page);
-        self.draw_status(f, status);
+        f.render_widget(
+            Paragraph::new(Text::from(status_lines))
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered()),
+            status,
+        );
         f.render_widget(
             Paragraph::new(Span::styled(self.hints(), self.look.dim())),
             foot,
@@ -582,7 +632,9 @@ impl App {
 
         match &self.modal {
             Some(Modal::Input(input)) => self.draw_input(f, input),
-            Some(Modal::Confirm { lines, .. }) => self.draw_confirm(f, lines),
+            Some(Modal::Confirm {
+                lines, warnings, ..
+            }) => self.draw_confirm(f, lines, warnings),
             Some(Modal::Pick { harnesses, at, .. }) => self.draw_pick(f, harnesses, *at),
             None => {}
         }
@@ -595,9 +647,9 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let count = match s.capability {
-                    None => s.rows.iter().filter(|r| r.value.is_some()).count(),
-                    Some(_) => s.rows.len(),
+                let count = match s.page {
+                    Page::Defaults => s.rows.iter().filter(|r| r.value.is_some()).count(),
+                    Page::Servers | Page::Entries(_) => s.rows.len(),
                 };
                 let mark = if s.problem.is_some() {
                     "!".to_string()
@@ -625,12 +677,16 @@ impl App {
             Layout::vertical([Constraint::Fill(1), Constraint::Length(7)]).areas(area);
 
         let block = Block::bordered().title(format!(" {} ", section.title));
-        // Above what was found, never instead of it: one entry that would not
-        // read is no reason to hide the ones that did.
+        // Above what was found, never instead of it — the servers page with
+        // omh's base set unreadable has both — and as tall as it needs, up to
+        // half the list: a failed read says *where* first and *why* last.
         let list = match &section.problem {
             Some(problem) => {
+                let lines = [Line::raw(problem.clone())];
+                let height = (rows_needed(&lines, list.width.saturating_sub(2)) + 2)
+                    .clamp(3, (list.height / 2).max(3));
                 let [said, rest] =
-                    Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(list);
+                    Layout::vertical([Constraint::Length(height), Constraint::Fill(1)]).areas(list);
                 f.render_widget(
                     Paragraph::new(Span::styled(problem.clone(), self.look.bad()))
                         .wrap(Wrap { trim: false })
@@ -645,12 +701,12 @@ impl App {
             None => list,
         };
         if section.rows.is_empty() {
-            let empty = match section.capability {
-                Some(_) => format!(
+            let empty = match section.page {
+                Page::Defaults => "nothing omh reads".to_string(),
+                Page::Servers | Page::Entries(_) => format!(
                     "no {} in your catalogue — a adds one, i imports some",
                     section.title
                 ),
-                None => "nothing omh reads".to_string(),
             };
             f.render_widget(
                 Paragraph::new(Span::styled(empty, self.look.dim())).block(block),
@@ -670,7 +726,7 @@ impl App {
                     let mut spans = vec![Span::raw(format!("{:<width$}  ", r.name))];
                     match &r.value {
                         Some(v) => spans.push(Span::styled(v.clone(), self.look.value())),
-                        None if section.capability.is_none() => {
+                        None if section.page == Page::Defaults => {
                             spans.push(Span::styled("(unset)", self.look.dim()));
                         }
                         None => {}
@@ -692,7 +748,7 @@ impl App {
         }
 
         if let Some(row) = self.row() {
-            let title = match section.capability {
+            let title = match section.page.capability() {
                 Some(capability) => format!(" {capability}/{} ", row.name),
                 None => format!(" {} ", row.name),
             };
@@ -706,33 +762,23 @@ impl App {
         }
     }
 
-    fn draw_status(&self, f: &mut Frame, area: Rect) {
-        let mut lines = Vec::new();
-        if let Some(said) = &self.said {
-            lines.push(Line::from(Span::styled(
-                format!("= omh {said}"),
-                self.look.dim(),
-            )));
-        }
-        for (tone, line) in &self.status {
-            lines.push(Line::from(Span::styled(
-                line.clone(),
-                self.look.tone(*tone),
-            )));
-        }
-        f.render_widget(
-            Paragraph::new(Text::from(lines))
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered()),
-            area,
-        );
+    fn status_lines(&self) -> Vec<Line<'static>> {
+        let said = self
+            .said
+            .iter()
+            .map(|said| Line::from(Span::styled(format!("= omh {said}"), self.look.dim())));
+        let status = self
+            .status
+            .iter()
+            .map(|(tone, line)| Line::from(Span::styled(line.clone(), self.look.tone(*tone))));
+        said.chain(status).collect()
     }
 
     fn hints(&self) -> String {
-        let page = match self.section().and_then(|s| s.capability) {
-            None => "enter set · d unset · e edit the file",
-            Some("mcp") => "a add · d remove · i import · e edit the file",
-            Some(_) => "enter/e edit · a new · d remove · i import",
+        let page = match self.section().map(|s| s.page) {
+            None | Some(Page::Defaults) => "enter set · d unset · e edit the file",
+            Some(Page::Servers) => "a add · d remove · i import · e edit the file",
+            Some(Page::Entries(_)) => "enter/e edit · a new · d remove · i import",
         };
         format!(
             " ↑↓ move · ⇥ or 1-{} page · {page} · q quit",
@@ -769,14 +815,19 @@ impl App {
         f.set_cursor_position((x.min(area.right().saturating_sub(2)), area.y + 1));
     }
 
-    fn draw_confirm(&self, f: &mut Frame, said: &[String]) {
-        let area = centered(f.area(), 80, said.len() as u16 + 4);
-        f.render_widget(Clear, area);
+    fn draw_confirm(&self, f: &mut Frame, said: &[String], warnings: &[String]) {
         let mut lines: Vec<Line> = said.iter().map(|l| Line::raw(l.clone())).collect();
+        lines.extend(
+            warnings
+                .iter()
+                .map(|l| Line::from(Span::styled(l.clone(), self.look.tone(Tone::Warn)))),
+        );
         lines.push(Line::from(Span::styled(
             "y to go ahead · any other key keeps it",
             self.look.dim(),
         )));
+        let area = centered(f.area(), 80, lines.len() as u16 + 3);
+        f.render_widget(Clear, area);
         f.render_widget(
             Paragraph::new(Text::from(lines))
                 .wrap(Wrap { trim: false })
@@ -798,6 +849,40 @@ impl App {
             &mut state,
         );
     }
+}
+
+/// How many rows these lines take once wrapped to `width` — at least one each.
+///
+/// Counted by words, as `Wrap` breaks them: a path that does not fit beside
+/// the word before it starts a row of its own, so dividing the width into the
+/// length undercounts by exactly the rows that held the reason.
+fn rows_needed(lines: &[Line], width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    let rows = |line: &Line| {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let (mut rows, mut used) = (1usize, 0usize);
+        for word in text.split(' ') {
+            let w = Span::raw(word).width();
+            let need = if used == 0 { w } else { used + 1 + w };
+            if need <= width {
+                used = need;
+            } else if w <= width {
+                rows += 1;
+                used = w;
+            } else {
+                // Longer than a row: broken across as many as it takes.
+                rows += usize::from(used > 0) + (w - 1) / width;
+                used = w % width;
+            }
+        }
+        rows
+    };
+    lines
+        .iter()
+        .map(rows)
+        .sum::<usize>()
+        .try_into()
+        .unwrap_or(u16::MAX)
 }
 
 impl Input {
@@ -822,7 +907,7 @@ impl Input {
                 self.text.drain(..self.cursor);
                 self.cursor = 0;
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Char(c) if plain(key) => {
                 self.text.insert(self.cursor, c);
                 self.cursor += 1;
             }
@@ -852,43 +937,30 @@ impl Input {
 /// will be handed.
 pub fn words(line: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
+    // `None` between words; `Some("")` once `''` has begun one.
+    let mut word: Option<String> = None;
     let mut quote: Option<char> = None;
     let mut chars = line.chars();
     while let Some(c) = chars.next() {
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
             (Some('"'), '\\') | (None, '\\') => match chars.next() {
-                Some(next) => {
-                    word.push(next);
-                    in_word = true;
-                }
+                Some(next) => word.get_or_insert_default().push(next),
                 None => return Err("a `\\` with nothing after it".into()),
             },
-            (Some(_), c) => word.push(c),
+            (Some(_), c) => word.get_or_insert_default().push(c),
             (None, '\'' | '"') => {
                 quote = Some(c);
-                in_word = true;
+                word.get_or_insert_default();
             }
-            (None, c) if c.is_whitespace() => {
-                if in_word {
-                    out.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            (None, c) => {
-                word.push(c);
-                in_word = true;
-            }
+            (None, c) if c.is_whitespace() => out.extend(word.take()),
+            (None, c) => word.get_or_insert_default().push(c),
         }
     }
     if let Some(q) = quote {
         return Err(format!("a {q} that is never closed"));
     }
-    if in_word {
-        out.push(word);
-    }
+    out.extend(word);
     Ok(out)
 }
 
@@ -911,8 +983,10 @@ fn cleaned(mut model: Model) -> Model {
     model.root = clean(&model.root);
     for section in &mut model.sections {
         section.problem = section.problem.as_deref().map(clean);
-        section.no_import = section.no_import.as_deref().map(clean);
-        section.importers = section.importers.iter().map(|h| clean(h)).collect();
+        section.import = match &section.import {
+            Import::From(harnesses) => Import::From(harnesses.iter().map(|h| clean(h)).collect()),
+            Import::Not(why) => Import::Not(clean(why)),
+        };
         for row in &mut section.rows {
             // The name too, though an act is built from it: a name that had
             // to be cleaned is one no command will find, and a removal that
@@ -1022,7 +1096,7 @@ mod tests {
             sections: vec![
                 Section {
                     title: "defaults",
-                    capability: None,
+                    page: Page::Defaults,
                     rows: vec![
                         Row {
                             name: "idle_timeout".into(),
@@ -1043,12 +1117,11 @@ mod tests {
                         },
                     ],
                     problem: None,
-                    importers: vec![],
-                    no_import: None,
+                    import: Import::Not("your defaults are typed, not imported".into()),
                 },
                 Section {
                     title: "skills",
-                    capability: Some("skills"),
+                    page: Page::Entries("skills"),
                     rows: vec![
                         Row {
                             name: "keep".into(),
@@ -1060,24 +1133,21 @@ mod tests {
                         },
                     ],
                     problem: None,
-                    importers: vec!["claude".into(), "codex".into()],
-                    no_import: None,
+                    import: Import::From(vec!["claude".into(), "codex".into()]),
                 },
                 Section {
                     title: "servers",
-                    capability: Some("mcp"),
+                    page: Page::Servers,
                     rows: vec![],
                     problem: None,
-                    importers: vec![],
-                    no_import: None,
+                    import: Import::From(vec![]),
                 },
                 Section {
                     title: "hooks",
-                    capability: Some("hooks"),
+                    page: Page::Entries("hooks"),
                     rows: vec![],
                     problem: Some("could not read ~/.omh/hooks: permission denied".into()),
-                    importers: vec![],
-                    no_import: Some("a hook lands in a repo".into()),
+                    import: Import::Not("a hook lands in a repo".into()),
                 },
             ],
         }
@@ -1124,6 +1194,171 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn with(c: char, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), modifiers)
+    }
+
+    /// A letter held with Ctrl or Alt is not that letter.
+    ///
+    /// crossterm reports Ctrl-D as `d` with CONTROL, and the page matched the
+    /// letter alone: Ctrl-D — what a hand does to leave a terminal program —
+    /// unset the selected default on the spot, and Ctrl-E opened `$EDITOR`.
+    /// Ctrl-D leaves; every other held letter does nothing.
+    #[test]
+    fn a_letter_held_with_ctrl_or_alt_is_not_that_letter() {
+        for page in 0..model().sections.len() {
+            for c in "adeijkhlgGq123".chars() {
+                for held in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                    let mut app = App::new(model(), true);
+                    app.at = page;
+                    let before = (app.at, app.rows.clone());
+                    let next = app.key(with(c, held));
+                    if c == 'd' && held == KeyModifiers::CONTROL {
+                        assert_eq!(next, Next::Quit, "Ctrl-D leaves");
+                        continue;
+                    }
+                    assert_eq!(next, Next::Stay, "{held:?}-{c} on page {page}");
+                    assert_eq!((app.at, app.rows.clone()), before, "{held:?}-{c} moved");
+                    assert_eq!(app.modal, None, "{held:?}-{c} opened a question");
+                }
+            }
+        }
+    }
+
+    /// Only a plain `y` says yes — not Ctrl-Y, not Alt-Y.
+    #[test]
+    fn only_a_plain_y_says_yes() {
+        let act = Act::Remove {
+            capability: "skills".into(),
+            name: "keep".into(),
+        };
+        for held in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let mut app = App::new(model(), true);
+            app.confirm(vec!["would remove it".into()], vec![], act.clone());
+            assert_eq!(app.key(with('y', held)), Next::Stay);
+        }
+    }
+
+    /// Ctrl-C leaves from anywhere: a page, a question, a pick, a line half
+    /// typed.
+    #[test]
+    fn ctrl_c_leaves_from_anywhere() {
+        let ctrl_c = with('c', KeyModifiers::CONTROL);
+        let mut app = App::new(model(), true);
+        assert_eq!(app.key(ctrl_c), Next::Quit);
+        app.key(code(KeyCode::Enter));
+        assert_eq!(app.key(ctrl_c), Next::Quit, "in a line");
+        app.confirm(vec![], vec![], Act::EditDefaults);
+        assert_eq!(app.key(ctrl_c), Next::Quit, "in a question");
+        app.key(press('2'));
+        app.key(press('i'));
+        assert_eq!(app.key(ctrl_c), Next::Quit, "in a pick");
+    }
+
+    /// The line edits the way a shell's does, and no key in it can panic.
+    ///
+    /// The cursor is an index into the characters, so a Backspace that took
+    /// the character without moving the cursor back left it past the end, and
+    /// the next character typed panicked — in raw mode, with the terminal
+    /// still the screen's.
+    #[test]
+    fn the_line_edits_the_way_a_shells_does() {
+        let mut app = App::new(model(), true);
+        app.key(press('j')); // `runtime`, which is unset: the line starts empty
+        app.key(code(KeyCode::Enter));
+        let ctrl = |c| with(c, KeyModifiers::CONTROL);
+        for key in [
+            press('a'),
+            press('b'),
+            press('c'),
+            code(KeyCode::Left),
+            code(KeyCode::Backspace), // a|c
+            code(KeyCode::Delete),    // a|
+            code(KeyCode::Home),
+            press('x'), // x|a
+            code(KeyCode::End),
+            press('y'), // xay|
+            ctrl('a'),
+            code(KeyCode::Right), // x|ay
+            ctrl('e'),
+            code(KeyCode::Right), // still at the end
+            code(KeyCode::Delete),
+            press('z'), // xayz|
+            code(KeyCode::Home),
+            code(KeyCode::Backspace),
+            code(KeyCode::Left),
+            press('-'), // -|xayz
+        ] {
+            assert_eq!(app.key(key), Next::Stay, "{key:?}");
+        }
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Next::Run(Act::Set {
+                key: "runtime".into(),
+                value: "-xayz".into()
+            })
+        );
+
+        app.key(code(KeyCode::Enter));
+        for key in [press('a'), press('b'), ctrl('u')] {
+            app.key(key);
+        }
+        assert_eq!(
+            app.key(code(KeyCode::Enter)),
+            Next::Run(Act::Set {
+                key: "runtime".into(),
+                value: String::new()
+            }),
+            "Ctrl-U takes the line before the cursor"
+        );
+    }
+
+    fn drawn_at(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The reason is the part that has to fit.
+    ///
+    /// A read that failed says *where* first and *why* last — a path, then the
+    /// OS error — and a box one line tall, on an 80-column terminal, drew the
+    /// path and cut the reason. The status box did the same to a refusal's
+    /// next step. Both are as tall as what they say, up to a share of the
+    /// screen.
+    #[test]
+    fn what_a_box_says_is_drawn_whole_on_a_small_terminal() {
+        let mut long = model();
+        long.sections[3].problem = Some(
+            "reading /Users/somebody-with-a-long-name/.omh/hooks/of-the-catalogue: \
+             Permission denied (os error 13)"
+                .into(),
+        );
+        let mut app = App::new(long, true);
+        app.key(press('4'));
+        let screen = drawn_at(&app, 80, 24);
+        assert!(screen.contains("(os error 13)"), "{screen}");
+
+        app.report(
+            "settings rm hooks rust-test --yes".into(),
+            false,
+            "",
+            "omh: omh ships hooks/rust-test, and `omh upgrade` would put it back. \
+             To stop a repo running it:\n  omh unuse hooks rust-test\n  because of a line",
+        );
+        let screen = drawn_at(&app, 80, 24);
+        assert!(screen.contains("omh unuse hooks rust-test"), "{screen}");
+        assert!(screen.contains("because of a line"), "{screen}");
     }
 
     #[test]
@@ -1191,6 +1426,7 @@ mod tests {
         for no in ['n', 'Y'] {
             app.confirm(
                 vec!["would remove ~/.omh/skills/review-diff".into()],
+                vec![],
                 act.clone(),
             );
             assert!(drawn(&app).contains("would remove ~/.omh/skills/review-diff"));
@@ -1201,7 +1437,7 @@ mod tests {
                 assert!(drawn(&app).contains("kept"));
             }
         }
-        app.confirm(vec![], act.clone());
+        app.confirm(vec![], vec![], act.clone());
         assert_eq!(
             app.key(code(KeyCode::Enter)),
             Next::Stay,
@@ -1359,7 +1595,7 @@ mod tests {
             drawn(&app)
         );
 
-        app.confirm(vec![evil.into()], Act::EditDefaults);
+        app.confirm(vec![evil.into()], vec![], Act::EditDefaults);
         terminal.draw(|f| app.draw(f)).unwrap();
         for cell in terminal.backend().buffer().content() {
             assert!(!cell.symbol().chars().any(char::is_control));
