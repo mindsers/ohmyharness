@@ -4740,27 +4740,40 @@ fn settings_switches_a_feature_for_the_repos_init_sets_up_after() {
     assert!(!held().contains("graph-first"));
 }
 
-/// What new repos take from your catalogue is changed from your defaults, as
-/// `omh use` and `omh unuse` change it for a repo: `[use]` in `default.toml`,
-/// which `omh init` seeds a repo's list from.
+/// What new repos take from your catalogue is changed from your defaults:
+/// `[use]` and `[unuse]` in `default.toml`, which `omh init` resolves into a
+/// repo's lists.
 ///
-/// **No list is every entry**, so the first `unuse` writes the rest as one —
-/// and from then on an entry you add to your catalogue is not seeded. That is
-/// said, with the way back: `--all` takes the list out, so the kind follows
-/// the whole catalogue again.
+/// **No list is every entry, and leaving one out keeps it that way.** `unuse`
+/// once wrote the rest of the kind as a list, so an entry added to your
+/// catalogue after was never seeded, and `use` after `unuse` did not put the
+/// file back. Now it names the one left out, and `use` takes it back off. A
+/// guard is never seeded unless named, so using one is the case that writes a
+/// list — said, with the way back.
 #[test]
 fn settings_use_and_unuse_change_what_new_repos_take() {
     let sb = sandbox();
     sb.seed_base();
     sb.catalogue(&["skills/tdd/SKILL.md", "skills/review-diff/SKILL.md"]);
+    let hook = |name: &str, body: &str| {
+        let at = sb.home.join(".omh/hooks").join(format!("{name}.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    };
+    hook("mine", r#"{"on":"turn-end","run":"make check"}"#);
+    hook("other", r#"{"on":"turn-end","run":"make lint"}"#);
+    hook(
+        "my-guard",
+        r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+    );
     let doc = || {
         std::fs::read_to_string(sb.home.join(".omh/default.toml"))
             .unwrap_or_default()
             .parse::<toml::Table>()
             .unwrap_or_default()
     };
-    let skills = || {
-        doc().get("use").and_then(|u| u.get("skills")).map(|v| {
+    let list = |table: &str, kind: &str| {
+        doc().get(table).and_then(|u| u.get(kind)).map(|v| {
             v.as_array()
                 .unwrap()
                 .iter()
@@ -4782,42 +4795,73 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
 
     let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
     assert!(ok, "{said}");
-    assert!(
-        said.contains("already take all your skills"),
-        "already taken, as all of them are: {said}"
-    );
-    assert_eq!(skills(), None, "and nothing written");
+    assert!(said.contains("already take skills/tdd"), "{said}");
+    assert!(doc().is_empty(), "and nothing written: {:?}", doc());
 
     let (ok, said) = run(&["settings", "unuse", "skills", "tdd"]);
     assert!(ok, "{said}");
-    assert_eq!(skills(), Some(vec!["review-diff".to_string()]));
-    assert!(
-        said.contains("omh settings use skills --all"),
-        "the freeze is said, with the way back: {said}"
-    );
+    assert_eq!(list("unuse", "skills"), Some(vec!["tdd".to_string()]));
+    assert_eq!(list("use", "skills"), None, "no list: {:?}", doc());
+    assert!(!said.contains("--all"), "nothing frozen to undo: {said}");
+    let (ok, said) = run(&["settings", "unuse", "skills", "tdd"]);
+    assert!(ok && said.contains("left out already"), "{said}");
 
+    // Undone exactly: the file is what it was.
     let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
     assert!(ok, "{said}");
-    assert_eq!(
-        skills(),
-        Some(vec!["review-diff".to_string(), "tdd".to_string()])
-    );
+    assert!(doc().is_empty(), "{:?}", doc());
 
     let (ok, said) = run(&["settings", "use", "skills", "nope"]);
     assert!(!ok && said.contains("nope"), "{said}");
     let (ok, said) = run(&["settings", "unuse", "skills", "nope"]);
     assert!(!ok && said.contains("nope"), "{said}");
 
+    // A guard: not seeded unless named, which only a list can do.
+    let (ok, said) = run(&["settings", "unuse", "hooks", "my-guard"]);
+    assert!(ok && said.contains("a guard"), "{said}");
+    assert!(doc().is_empty(), "{:?}", doc());
+    // A file of yours named as one of omh's own is its feature's, and a list
+    // naming it would be refused in every repo it reached.
+    hook("graph-first", r#"{"on":"turn-end","run":"true"}"#);
+    run(&["settings", "unuse", "hooks", "other"]);
+    let (ok, said) = run(&["settings", "use", "hooks", "my-guard"]);
+    assert!(ok, "{said}");
+    let hooks = list("use", "hooks").expect("a list now");
+    assert_eq!(hooks, ["mine", "my-guard"]);
+    assert_eq!(
+        list("unuse", "hooks"),
+        None,
+        "a list is the whole answer, so what was left out goes with it: {:?}",
+        doc()
+    );
+    std::fs::remove_file(sb.home.join(".omh/hooks/graph-first.json")).unwrap();
+    assert!(
+        said.contains("omh settings use hooks --all"),
+        "the list is said, with the way back: {said}"
+    );
+    // On a list, leaving out takes off the list.
+    let (ok, said) = run(&["settings", "unuse", "hooks", "mine"]);
+    assert!(ok, "{said}");
+    assert_eq!(list("use", "hooks"), Some(vec!["my-guard".to_string()]));
+    assert_eq!(list("unuse", "hooks"), None);
+    let (ok, said) = run(&["settings", "unuse", "hooks", "mine"]);
+    assert!(
+        ok && said.contains("already leave out hooks/mine"),
+        "{said}"
+    );
+
+    run(&["settings", "unuse", "skills", "review-diff"]);
+    let (ok, said) = run(&["settings", "use", "hooks", "--all"]);
+    assert!(ok && said.contains("take all your hooks again"), "{said}");
+    assert_eq!(list("use", "hooks"), None, "{:?}", doc());
+    assert_eq!(
+        list("unuse", "skills"),
+        Some(vec!["review-diff".to_string()]),
+        "--all is one kind's"
+    );
     let (ok, said) = run(&["settings", "use", "skills", "--all"]);
-    assert!(ok, "{said}");
-    assert_eq!(skills(), None, "the whole catalogue again: {:?}", doc());
-    assert!(said.contains("take all your skills again"), "{said}");
-    // A kind of one, left out, has an empty list — said as one.
-    sb.catalogue(&["rules/house.md"]);
-    let (ok, said) = run(&["settings", "unuse", "rules", "house"]);
-    assert!(ok, "{said}");
-    assert!(said.contains("its list is empty now"), "{said}");
-    assert!(!said.contains("other 0"), "{said}");
+    assert!(ok && said.contains("take all your skills again"), "{said}");
+    assert!(doc().is_empty(), "{:?}", doc());
 
     // omh's own are switched, not listed.
     let (ok, said) = run(&["settings", "unuse", "hooks", "graph-first"]);
@@ -4932,6 +4976,66 @@ fn init_seeds_the_repo_from_your_template_and_says_so() {
         !seeded.contains("rubbish"),
         "a key omh reads nothing from is not propagated into every repo you \
          ever start: {seeded}"
+    );
+}
+
+/// A new repo's lists are what your defaults come to, and a guard is in one
+/// only where somebody named it.
+///
+/// `init` copied the template's `[use]` as it stood, so a kind it did not list
+/// had no list in the repo — every hook, the guards among them, which refuse
+/// the agent's edits. The screen drew them as not taken. Ignored because
+/// `init` builds an image; `a_new_repo_gets_your_lists_your_exclusions_and_no_guard_unnamed`
+/// covers the rule without one.
+#[test]
+#[ignore]
+fn init_seeds_no_guard_nobody_named() {
+    let sb = real_sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md", "skills/review-diff/SKILL.md"]);
+    let hook = |name: &str, body: &str| {
+        let at = sb.home.join(".omh/hooks").join(format!("{name}.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    };
+    hook("mine", r#"{"on":"turn-end","run":"make check"}"#);
+    hook("other", r#"{"on":"turn-end","run":"make lint"}"#);
+    hook(
+        "my-guard",
+        r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+    );
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "[use]\nskills = [\"tdd\"]\n\n[unuse]\nhooks = [\"other\"]\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let seeded: toml::Table = sb.settings().parse().unwrap();
+    let list = |kind: &str| -> Option<Vec<String>> {
+        seeded.get("use")?.get(kind).map(|v| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap().to_string())
+                .collect()
+        })
+    };
+    assert_eq!(list("skills"), Some(vec!["tdd".to_string()]), "{seeded}");
+    assert_eq!(
+        list("hooks"),
+        Some(vec!["mine".to_string()]),
+        "every hook but the one left out, and no guard: {seeded}"
+    );
+    assert!(
+        !seeded.contains_key("unuse"),
+        "a repo has lists, not exclusions: {seeded}"
     );
 }
 

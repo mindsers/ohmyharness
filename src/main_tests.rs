@@ -1983,8 +1983,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh auth <harness>` where no login is captured, and `omh upgrade`
         // after an edit to a hook omh ships. + `omh init` and `omh set
         // <feature> off` in a feature row's about, and `omh init` in the
-        // `[use]` row's about and its warning.
-        ("src/cmd/settings_tui.rs", 12),
+        // `[use]` row's about and its warning. + `omh init` in the `[unuse]`
+        // row's about, and `omh settings set <feature>` on a hook of yours
+        // named as one of omh's own. + `omh init` refusing, twice, in a
+        // list's warning — a kind that is not one, a value that is not a list.
+        ("src/cmd/settings_tui.rs", 16),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
@@ -5085,6 +5088,103 @@ fn write_if_absent_reports_only_a_write_it_made() {
     );
 }
 
+/// What a new repo gets, from your defaults, as `omh init` writes it: `[use]`'s
+/// list where it has one — guards it names included — and otherwise every
+/// entry but the guards and what `[unuse]` leaves out.
+///
+/// `init` copied a template's `[use]` as it stood, so a kind it did not list
+/// had no list in the repo, which is every entry — guards too, which refuse the
+/// agent's edits. A guard is seeded only where somebody named it.
+#[test]
+fn a_new_repo_gets_your_lists_your_exclusions_and_no_guard_unnamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(paths.repo.join(".git")).unwrap();
+    let hook = |name: &str, body: &str| {
+        let at = paths.root.join("hooks").join(format!("{name}.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    };
+    hook("mine", r#"{"on":"turn-end","run":"make check"}"#);
+    hook("other", r#"{"on":"turn-end","run":"make lint"}"#);
+    hook(
+        "my-guard",
+        r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+    );
+    for skill in ["tdd", "review-diff"] {
+        let at = paths.root.join("skills").join(skill).join("SKILL.md");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, "---\nname: x\ndescription: y\n---\n").unwrap();
+    }
+    cmd::init::install_bundled(&paths.base(), bundled::Shipped::Base, &out::Ctx::plain()).unwrap();
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "[use]\nskills = [\"tdd\"]\n\n[unuse]\nhooks = [\"mine\"]\n",
+    )
+    .unwrap();
+    let lists = cmd::catalogue::new_repo_lists(&paths).unwrap();
+    let of = |cap| lists.get(&cap).cloned().unwrap_or_default();
+    assert_eq!(of(adapter::Capability::Skills), ["tdd"], "a list is a list");
+    assert_eq!(
+        of(adapter::Capability::Hooks),
+        ["other"],
+        "every hook but the one left out, and never a guard nobody named"
+    );
+    // A guard named in a list is seeded: somebody chose it.
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "[use]\nhooks = [\"my-guard\", \"mine\"]\n",
+    )
+    .unwrap();
+    let lists = cmd::catalogue::new_repo_lists(&paths).unwrap();
+    assert_eq!(
+        lists
+            .get(&adapter::Capability::Hooks)
+            .cloned()
+            .unwrap_or_default(),
+        ["my-guard", "mine"]
+    );
+}
+
+/// A selection in your defaults omh cannot read is refused before `init`
+/// writes anything, by name.
+///
+/// The template's `[use]` was copied into the repo, where the launcher read
+/// it. Resolved into lists instead, a kind that is not one — `skill` for
+/// `skills` — was nobody's to read, and a value that is not a list failed
+/// `init` after it had already written half a repo.
+#[test]
+fn a_selection_your_defaults_cannot_mean_is_refused_before_init_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let refused = |template: &str| {
+        std::fs::write(config::Layer::Personal.file(&paths), template).unwrap();
+        format!(
+            "{:#}",
+            cmd::init::seed_settings(&paths).expect_err(template)
+        )
+    };
+    let said = refused("[use]\nskill = [\"tdd\"]\n");
+    assert!(
+        said.contains("[use] skill") && said.contains("`skills`"),
+        "{said}"
+    );
+    let said = refused("[unuse]\nhooks = \"mine\"\n");
+    assert!(
+        said.contains("[unuse] hooks") && said.contains("not a list"),
+        "{said}"
+    );
+    let said = refused("[use]\nskills = [1]\n");
+    assert!(said.contains("[use] skills"), "{said}");
+}
+
 /// The template hands on what omh reads, and refuses what it must not.
 ///
 /// `init` builds an image, so the end-to-end half of this runs only where a
@@ -5104,7 +5204,8 @@ fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
     std::fs::write(
         &template,
         "idle_timeout = \"45m\"\nrubbish = \"ignored\"\n\n\
-         [use]\nskills = [\"tdd\"]\n\n[omh]\ncodegraph = false\n",
+         [use]\nskills = [\"tdd\"]\n\n[unuse]\nhooks = [\"lint\"]\n\n\
+         [omh]\ncodegraph = false\n",
     )
     .unwrap();
     let (body, took) = cmd::init::seed_settings(&paths).unwrap();
@@ -5115,9 +5216,12 @@ fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
         "and one it does not is left behind rather than propagated into \
          every repo you ever start: {body}"
     );
+    // The selection travels as what it comes to: `init` writes every kind's
+    // list from it once the file is there (`new_repo_lists`). Copied as it
+    // stood, a kind it did not list was every entry in the repo, guards too.
     assert!(
-        body.contains("[use]") && body.contains("tdd"),
-        "the selection travels: {body}"
+        !body.contains("[use]") && !body.contains("[unuse]"),
+        "the selection is not copied as it stood: {body}"
     );
     // Parsed, not grepped. The old assertion was satisfied by the
     // commented-out `# [omh]` placeholder the header appends when no

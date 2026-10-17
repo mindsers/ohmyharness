@@ -2235,12 +2235,15 @@ the catalogue — and the refusal names the `rm` that takes it out.
 or `○`, and each page's heading says how many: *new repos get all* while a kind
 has no list — every entry, including one you add later — or *new repos get 1 of
 4* once it has one. `space` changes an entry, running `omh settings use` or
-`unuse`, which write `[use]` in `~/.omh/default.toml`. A feature of omh's is
+`unuse`, which write `~/.omh/default.toml`. A feature of omh's is
 switched in one place, its row on your defaults page —
 `omh settings set <feature> on|off` — whole, with its server, hooks and rules.
-The first `unuse` on a kind with no list writes the rest as its list, and says so —
-an entry added after it is not seeded until you `use` it — and
-`omh settings use <capability> --all` takes the list out again. Your defaults
+On a kind with no list, `unuse` names the entry in `[unuse]` and the kind goes
+on following the rest of your catalogue — *new repos get all but 1* — and `use`
+takes it back off. A guard is the exception: it refuses the agent's edits, so it
+is never seeded unless a list names it, and `use` on one writes the kind as a
+list, and says so. `omh settings use <capability> --all` takes a kind's list and
+its exclusions out again. Your defaults
 list omh's features too, under their own heading, and `[use]` is marked when it
 names an entry your catalogue does not have, as `omh init` would warn. A repo
 that exists keeps its own: `omh use`, `omh unuse` and `omh set <feature> off`
@@ -2249,8 +2252,9 @@ there.
 **Not `omh set`.** `omh set` is this checkout; `omh settings` is what a new one
 starts from. `omh setting` is refused rather than guessed at.
 
-**Keys omh reads, plus `[use]` and `[omh]`, are seeded**; anything else in the
-file is refused by name rather than left behind. `[mcp.<name>.env]` is
+**Keys omh reads and `[omh]` are seeded, and `[use]` and `[unuse]` come to a
+new repo's lists**; anything else in the file is refused by name rather than
+left behind, and so is a kind in those lists that is not one. `[mcp.<name>.env]` is
 **refused**: a server's environment can be a token and the file `init` writes
 is committed. It already has a home — `omh settings mcp add <name> <command>
 --env KEY=value` puts it on the server in `~/.omh/mcp.json`, where servers live.

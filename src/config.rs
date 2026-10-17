@@ -535,6 +535,12 @@ pub const USE: &str = "use";
 pub const TEMPLATE: &str = "default.toml";
 
 pub const OMH: &str = "omh";
+/// What new repos leave out, by kind — in your defaults **only**. `omh init`
+/// resolves it into a new repo's expanded `[use]` list, so neither a repo's
+/// settings nor a launch ever reads it: a kind your defaults leave one entry
+/// out of still follows the rest of your catalogue, where a `[use]` list of
+/// what remained would have frozen it.
+pub const UNUSE: &str = "unuse";
 /// The resolution `init` records: which provides applied here.
 pub const PROVISION: &str = "provision";
 
@@ -713,56 +719,93 @@ pub fn forget_feature(paths: &Paths, layer: Layer, feature: &str) -> Result<bool
     Ok(true)
 }
 
-/// Take a capability's list out of `[use]` in one layer, so what it seeds
-/// follows the whole catalogue again. Answers whether there was one.
-pub fn forget_selection(
+/// Take a capability's list out of `table` — `[use]` or `[unuse]` — in one
+/// layer. Answers whether there was one. A table left empty goes with it,
+/// rather than sitting in the file as `[use]` with nothing under it.
+pub fn forget_list(
     paths: &Paths,
     layer: Layer,
+    table: &str,
     cap: crate::adapter::Capability,
 ) -> Result<bool> {
     let path = layer.file(paths);
     let mut doc = read_doc(&path)?;
-    let Some(table) = doc
-        .get_mut(USE)
+    let Some(held) = doc
+        .get_mut(table)
         .and_then(toml_edit::Item::as_table_like_mut)
     else {
         return Ok(false);
     };
-    if table.remove(&cap.to_string()).is_none() {
+    if held.remove(&cap.to_string()).is_none() {
         return Ok(false);
+    }
+    if held.is_empty() {
+        doc.remove(table);
     }
     std::fs::write(&path, doc.to_string())
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(true)
 }
 
-/// The list `[use]` in one layer holds for a capability: `None` when there is
-/// none, which is every entry.
-pub fn selection_in(
+/// The list `table` — `[use]` or `[unuse]` — holds for a capability in one
+/// layer: `None` when it holds none.
+pub fn list_in(
     paths: &Paths,
     layer: Layer,
+    table: &str,
     cap: crate::adapter::Capability,
 ) -> Result<Option<Vec<String>>> {
     let path = layer.file(paths);
     let doc = read_doc(&path)?;
-    let Some(item) = doc.get(USE).and_then(|t| t.get(cap.to_string())) else {
+    let Some(item) = doc.get(table).and_then(|t| t.get(cap.to_string())) else {
         return Ok(None);
     };
     let Some(array) = item.as_array() else {
-        anyhow::bail!("[use] {cap} in {} is not a list", path.display());
+        anyhow::bail!("[{table}] {cap} in {} is not a list", path.display());
     };
     array
         .iter()
         .map(|v| {
             v.as_str().map(str::to_string).with_context(|| {
                 format!(
-                    "[use] {cap} in {} holds a name that is not text",
+                    "[{table}] {cap} in {} holds a name that is not text",
                     path.display()
                 )
             })
         })
         .collect::<Result<Vec<_>>>()
         .map(Some)
+}
+
+/// `[table] kind` naming no kind, said with the one it was likely meant as —
+/// `skill` for `skills`.
+pub fn not_a_kind(table: &str, kind: &str) -> String {
+    let near = crate::adapter::Capability::ALL
+        .iter()
+        .map(|c| c.key())
+        .find(|k| k.strip_suffix('s') == Some(kind));
+    match near {
+        Some(k) => format!("[{table}] {kind}, which is not a kind — did you mean `{k}`?"),
+        None => format!("[{table}] {kind}, which is not a kind"),
+    }
+}
+
+/// Write one capability's list into `table` — `[use]` or `[unuse]` — in one
+/// layer, leaving every other key as it was.
+pub fn write_list(
+    paths: &Paths,
+    layer: Layer,
+    table: &str,
+    cap: crate::adapter::Capability,
+    names: &[String],
+) -> Result<Written> {
+    write_table(paths, layer, table, |t| {
+        let mut array = toml_edit::Array::new();
+        for name in names {
+            array.push(name.as_str());
+        }
+        t[&cap.to_string()] = toml_edit::value(array);
+    })
 }
 
 /// The repo layers a write to `table.key` has to reach.

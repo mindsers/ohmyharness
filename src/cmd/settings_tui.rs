@@ -455,68 +455,133 @@ pub(crate) fn model(paths: &Paths) -> Model {
 /// Whether the repos `omh init` sets up after get each row, and what flips
 /// it — and how many the page's new repos get.
 ///
-/// An entry of yours is `[use]` in your defaults: no list is every entry, and
-/// `omh settings use`/`unuse` change one. (omh's own servers are not rows:
+/// An entry of yours is taken by `[use]`'s list where the kind has one, and
+/// otherwise unless `[unuse]` leaves it out or it is a guard nobody named;
+/// `omh settings use`/`unuse` change one. (omh's own are not toggled here:
 /// they are its features', on your defaults page.) "All" is said only while a
 /// kind has no list — a list holding every entry is not the same fact, since
 /// an entry added after it is not seeded.
 fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
-    let list = match config::selection_in(paths, config::Layer::Personal, cap) {
-        Ok(list) => list,
+    // The answer `omh init` writes, asked of the same function: the two
+    // drifting is how a guard was drawn as seeded.
+    let now = match crate::cmd::catalogue::new_repo_takes(paths, cap, false) {
+        Ok(now) => now,
+        Err(e) => {
+            section.problem.get_or_insert_with(|| format!("{e:#}"));
+            return;
+        }
+    };
+    // A file of yours named as one of omh's own is its feature's: `use`
+    // refuses the name, so the row takes no `space` and is not counted.
+    let owned = match settings::shipped_owned(cap) {
+        Ok(owned) => owned,
         Err(e) => {
             section.problem.get_or_insert_with(|| format!("{e:#}"));
             return;
         }
     };
     for row in &mut section.rows {
-        let on = list.as_ref().is_none_or(|l| l.contains(&row.name));
+        if let Some(feature) = owned.get(&row.name) {
+            row.about.push(format!(
+                "omh's — part of the `{feature}` feature, switched whole on your \
+                 defaults page: omh settings set {feature} on|off"
+            ));
+            continue;
+        }
+        let on = now.takes.contains(&row.name);
         row.seeded = Some(on);
+        if !on && !now.listed && now.guards.contains(&row.name) {
+            row.about.push(
+                "a guard: it refuses the agent's edits, so new repos get it only if you \
+                 use it"
+                    .into(),
+            );
+        }
         let (capability, name) = (cap.key().to_string(), row.name.clone());
         row.toggle = Some(match on {
             true => Act::Unuse { capability, name },
             false => Act::Use { capability, name },
         });
     }
-    let total = section.rows.len();
+    let total = section.rows.iter().filter(|r| r.seeded.is_some()).count();
     let got = section
         .rows
         .iter()
         .filter(|r| r.seeded == Some(true))
         .count();
-    let qualified = |said: String| match cap {
-        // A shipped hook runs only where its stack does.
-        Capability::Hooks => format!("{said}, each where its stack applies"),
-        _ => said,
+    // Guards not taken are not "left out": nobody ever turns one on for you.
+    let guards = section
+        .rows
+        .iter()
+        .filter(|r| now.guards.contains(&r.name) && r.seeded == Some(false))
+        .count();
+    let left = total - got - guards;
+    let mut said = match (now.listed, total - got, left, guards) {
+        (true, ..) => format!("new repos get {got} of {total}"),
+        (false, 0, ..) => "new repos get all".to_string(),
+        (false, _, 0, _) => "new repos get all but the guards".to_string(),
+        (false, _, n, 0) => format!("new repos get all but {n}"),
+        (false, _, n, _) => format!("new repos get all but {n}, and no guards"),
     };
-    section.seeds = (total > 0).then(|| match (&list, got == total) {
-        (None, true) => qualified("new repos get all".into()),
-        _ => qualified(format!("new repos get {got} of {total}")),
-    });
+    if cap == Capability::Hooks {
+        // A shipped hook runs only where its stack does.
+        said.push_str(", by stack");
+    }
+    section.seeds = (total > 0).then_some(said);
 }
 
-/// The entries `[use]` in your defaults names and your catalogue does not
-/// have — what `omh init` would warn about, said before it does.
-fn names_nothing(paths: &Paths) -> Option<String> {
-    let mut missing = Vec::new();
+/// What one of your defaults' lists — `[use]` or `[unuse]` — names that it
+/// cannot mean, each with what `omh init` does about it: a kind that is not one
+/// is refused, a name `[use]` lists that your catalogue does not have is warned
+/// about, and one `[unuse]` leaves out is nothing to leave out. `[use] skill =
+/// …` meant every skill, silently.
+fn names_nothing(paths: &Paths, table: &str) -> Option<String> {
+    let mut wrong = Vec::new();
+    let doc = config::read_doc(&config::Layer::Personal.file(paths)).ok()?;
+    let held = doc.get(table).and_then(|t| t.as_table_like())?;
+    for (kind, _) in held.iter() {
+        if Capability::from_key(kind).is_none() {
+            wrong.push(format!(
+                "{} — `omh init` refuses it",
+                config::not_a_kind(table, kind)
+            ));
+        }
+    }
     for cap in Capability::ALL {
-        let Ok(Some(listed)) = config::selection_in(paths, config::Layer::Personal, cap) else {
-            continue;
+        let listed = match config::list_in(paths, config::Layer::Personal, table, cap) {
+            Ok(Some(listed)) => listed,
+            Ok(None) => continue,
+            Err(e) => {
+                wrong.push(format!("{e:#} — `omh init` refuses it"));
+                continue;
+            }
         };
-        let held =
-            crate::cmd::catalogue::catalogue_names_unfiltered(paths, cap).unwrap_or_default();
-        missing.extend(
+        // The catalogue as the kind's page reads it: what is on disk, whether
+        // or not `~/.omh/base` can be read.
+        let catalogue = match crate::profile::Profile::resolve(paths).entries(cap) {
+            Ok(names) => names,
+            Err(e) => {
+                wrong.push(format!("could not check [{table}] {cap}: {e:#}"));
+                continue;
+            }
+        };
+        let then = match table {
+            config::USE => "`omh init` will warn",
+            _ => "it leaves out nothing",
+        };
+        wrong.extend(
             listed
                 .into_iter()
-                .filter(|n| !held.contains(n))
-                .map(|n| format!("{}/{n}", cap.key())),
+                .filter(|n| !catalogue.contains(n))
+                .map(|n| {
+                    format!(
+                        "[{table}] {}/{n}, which your catalogue does not have — {then}",
+                        cap.key()
+                    )
+                }),
         );
     }
-    (!missing.is_empty()).then(|| {
-        format!(
-            "names {}, which your catalogue does not have — `omh init` will warn",
-            missing.join(", ")
-        )
-    })
+    (!wrong.is_empty()).then(|| format!("names {}", wrong.join("; ")))
 }
 
 /// How your defaults switch omh's features for new repos: `[omh]` in
@@ -712,17 +777,26 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             true => Row {
                 name: name.clone(),
                 value: Some(table_summary(&doc, name)),
-                warning: (*name == format!("[{}]", config::USE))
-                    .then(|| names_nothing(paths))
+                warning: [config::USE, config::UNUSE]
+                    .iter()
+                    .any(|t| *name == format!("[{t}]"))
+                    .then(|| names_nothing(paths, name.trim_matches(['[', ']'])))
                     .flatten(),
-                about: match *name == format!("[{}]", config::USE) {
-                    true => vec![
-                        "what `omh init` gives a new repo from your catalogue — a kind not \
-                         listed takes every entry. space on an entry's page changes it."
+                about: match name.trim_matches(['[', ']']) {
+                    config::USE => vec![
+                        "what `omh init` gives a new repo from your catalogue, where a kind \
+                         is listed. space on an entry's page changes it."
                             .into(),
                         format!("file  {}", within(paths, &file)),
                     ],
-                    false => vec![
+                    config::UNUSE => vec![
+                        "what `omh init` leaves out of a new repo, of a kind with no list — \
+                         it takes the rest, and one you add later. space on an entry's page \
+                         changes it."
+                            .into(),
+                        format!("file  {}", within(paths, &file)),
+                    ],
+                    _ => vec![
                         format!("a table in {}", within(paths, &file)),
                         "e opens the file to change it".into(),
                     ],
@@ -1485,6 +1559,115 @@ mod tests {
         assert!(defaults.rows.iter().all(|r| r.name != "[omh]"));
     }
 
+    /// The marks are what `omh init` would write, asked of the same function:
+    /// a guard is not taken unless a list names it, and what `[unuse]` leaves
+    /// out is not taken, while the rest of the kind still follows the
+    /// catalogue. A guard was drawn ● here and seeded by nobody, until a
+    /// `space` on another hook wrote it into a list.
+    #[test]
+    fn a_guard_and_what_you_left_out_are_not_marked_taken() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("hooks/mine.json"),
+            r#"{"on":"turn-end","run":"make check"}"#,
+        );
+        write(
+            &paths.root.join("hooks/other.json"),
+            r#"{"on":"turn-end","run":"make lint"}"#,
+        );
+        write(
+            &paths.root.join("hooks/my-guard.json"),
+            r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+        );
+        let marks = |paths: &Paths| {
+            let model = model(paths);
+            let hooks = page(&model, "hooks").clone();
+            let of = |name: &str| {
+                hooks
+                    .rows
+                    .iter()
+                    .find(|r| r.name == name)
+                    .unwrap_or_else(|| panic!("no hooks/{name}"))
+                    .clone()
+            };
+            (of("mine"), of("other"), of("my-guard"), hooks.seeds.clone())
+        };
+        let (mine, _, guard, seeds) = marks(&paths);
+        assert_eq!(mine.seeded, Some(true));
+        assert_eq!(guard.seeded, Some(false), "nobody named it");
+        assert_eq!(
+            guard.toggle,
+            Some(Act::Use {
+                capability: "hooks".into(),
+                name: "my-guard".into()
+            })
+        );
+        assert!(
+            guard.about.iter().any(|l| l.contains("a guard")),
+            "{:?}",
+            guard.about
+        );
+        assert_eq!(
+            seeds.as_deref(),
+            Some("new repos get all but the guards, by stack")
+        );
+
+        // A file of yours named as one of omh's own is its feature's, switched
+        // on your defaults page: `use` refuses it, so `space` does not offer it.
+        write(
+            &paths.root.join("hooks/graph-first.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let drawn = model(&paths);
+        let owned = page(&drawn, "hooks")
+            .rows
+            .iter()
+            .find(|r| r.name == "graph-first")
+            .unwrap()
+            .clone();
+        assert_eq!((owned.seeded, owned.toggle), (None, None));
+        assert!(
+            owned
+                .about
+                .iter()
+                .any(|l| l.contains("omh settings set codegraph")),
+            "{:?}",
+            owned.about
+        );
+        std::fs::remove_file(paths.root.join("hooks/graph-first.json")).unwrap();
+        // Owned is per kind: `memory` is omh's server, and a hook of yours.
+        write(
+            &paths.root.join("hooks/memory.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let again = model(&paths);
+        let yours = page(&again, "hooks")
+            .rows
+            .iter()
+            .find(|r| r.name == "memory")
+            .unwrap()
+            .clone();
+        assert_eq!(yours.seeded, Some(true));
+        std::fs::remove_file(paths.root.join("hooks/memory.json")).unwrap();
+
+        write(
+            &paths.root.join("default.toml"),
+            "[unuse]\nhooks = [\"other\"]\n",
+        );
+        let (mine, other, guard, seeds) = marks(&paths);
+        assert_eq!(
+            mine.seeded,
+            Some(true),
+            "the rest still follows the catalogue"
+        );
+        assert_eq!(other.seeded, Some(false));
+        assert_eq!(guard.seeded, Some(false));
+        assert_eq!(
+            seeds.as_deref(),
+            Some("new repos get all but 1, and no guards, by stack")
+        );
+    }
+
     /// `[use]` naming an entry your catalogue does not have is marked, as
     /// `omh init` would warn about it — after an `rm`, say.
     #[test]
@@ -1508,6 +1691,51 @@ mod tests {
             row.about.iter().any(|l| l.contains("omh init")),
             "{:?}",
             row.about
+        );
+    }
+
+    /// Each list says what is wrong with it, and what `omh init` does about
+    /// it: warns of a name your catalogue does not have in `[use]`, refuses a
+    /// kind that is not one — and of `[unuse]` naming nothing, says nothing,
+    /// since leaving out nothing is harmless. Both rows carried one warning,
+    /// both tables' together, ending "`omh init` will warn" for all of it.
+    #[test]
+    fn each_list_says_what_init_does_with_what_it_cannot_mean() {
+        let (_dir, paths) = paths();
+        write(&paths.root.join("skills/tdd/SKILL.md"), "x");
+        write(
+            &paths.root.join("default.toml"),
+            "[use]\nskills = [\"tdd\", \"gone\"]\nskill = [\"x\"]\n\n\
+             [unuse]\nrules = [\"gone\"]\n",
+        );
+        let model = model(&paths);
+        let warning = |name: &str| {
+            page(&model, "defaults")
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .warning
+                .clone()
+                .unwrap_or_default()
+        };
+        let used = warning("[use]");
+        assert!(
+            used.contains("skills/gone") && used.contains("will warn"),
+            "{used}"
+        );
+        assert!(
+            used.contains("[use] skill,") && used.contains("refuses"),
+            "{used}"
+        );
+        assert!(!used.contains("skills/tdd"), "tdd is there: {used}");
+        assert!(!used.contains("rules/gone"), "{used}");
+        let unused = warning("[unuse]");
+        assert!(unused.contains("rules/gone"), "{unused}");
+        assert!(unused.contains("leaves out nothing"), "{unused}");
+        assert!(
+            !unused.contains("will warn") && !unused.contains("skills/gone"),
+            "{unused}"
         );
     }
 

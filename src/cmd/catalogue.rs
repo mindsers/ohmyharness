@@ -1108,10 +1108,77 @@ pub(crate) fn catalogue_names_unfiltered(
         .collect())
 }
 
-/// What the repos `omh init` sets up after take of one kind: `[use]` in your
-/// defaults, `None` for a kind with no list — every entry.
-fn seeded(paths: &Paths, cap: adapter::Capability) -> Result<Option<Vec<String>>> {
-    config::selection_in(paths, config::Layer::Personal, cap)
+/// What a new repo gets of one kind, from your defaults.
+///
+/// **One answer, read by `omh init` and by the settings screen**, because the
+/// two drifting is how a guard was drawn as seeded and then written into a
+/// list. `[use]`'s list where your defaults have one, exactly — a guard it
+/// names included, since somebody chose it. Otherwise every entry of the kind
+/// but the guards, which refuse the agent's edits and are never turned on for
+/// you, and but what `[unuse]` leaves out.
+pub(crate) struct NewRepo {
+    /// The kind has a `[use]` list: an entry added later is not taken.
+    pub(crate) listed: bool,
+    pub(crate) takes: Vec<String>,
+    /// What `[unuse]` leaves out, where there is no list.
+    pub(crate) left_out: Vec<String>,
+    /// The catalogue's guards — only ever hooks.
+    pub(crate) guards: BTreeSet<String>,
+}
+
+/// [`NewRepo`] for one kind. `in_repo` narrows hooks to this checkout's
+/// stacks, as `omh init` needs; the screen, which has no repo, asks unnarrowed.
+pub(crate) fn new_repo_takes(
+    paths: &Paths,
+    cap: adapter::Capability,
+    in_repo: bool,
+) -> Result<NewRepo> {
+    let guards = match cap {
+        adapter::Capability::Hooks => guard_hooks(paths)?,
+        _ => BTreeSet::new(),
+    };
+    let layer = config::Layer::Personal;
+    if let Some(takes) = config::list_in(paths, layer, config::USE, cap)? {
+        return Ok(NewRepo {
+            listed: true,
+            takes,
+            left_out: Vec::new(),
+            guards,
+        });
+    }
+    let left_out = config::list_in(paths, layer, config::UNUSE, cap)?.unwrap_or_default();
+    let every = match in_repo {
+        true => catalogue_names(paths, cap)?,
+        // What omh owns asked of the binary, as the screen asks it for servers:
+        // an unread `~/.omh/base` cannot make every page a failure.
+        false => {
+            let owned = crate::cmd::settings::shipped_owned(cap)?;
+            Profile::resolve(paths)
+                .entries(cap)?
+                .into_iter()
+                .filter(|n| !owned.contains_key(n))
+                .collect()
+        }
+    };
+    Ok(NewRepo {
+        listed: false,
+        takes: every
+            .into_iter()
+            .filter(|n| !guards.contains(n) && !left_out.contains(n))
+            .collect(),
+        left_out,
+        guards,
+    })
+}
+
+/// Every kind's list, as `omh init` writes it into a new repo.
+pub(crate) fn new_repo_lists(
+    paths: &Paths,
+) -> Result<std::collections::BTreeMap<adapter::Capability, Vec<String>>> {
+    adapter::Capability::ALL
+        .into_iter()
+        .map(|cap| Ok((cap, new_repo_takes(paths, cap, true)?.takes)))
+        .collect()
 }
 
 /// omh's own are a feature's, switched whole and never listed — the refusal
@@ -1138,20 +1205,23 @@ pub(crate) fn defaults_use(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let cap = crate::cmd::settings::capability_from(key)?;
-    let file = config::Layer::Personal.file(paths);
+    let layer = config::Layer::Personal;
+    let file = layer.file(paths);
     if all {
-        let had = seeded(paths, cap)?.is_some();
-        if had && !dry_run {
-            config::forget_selection(paths, config::Layer::Personal, cap)?;
+        let now = new_repo_takes(paths, cap, false)?;
+        let changed = now.listed || !now.left_out.is_empty();
+        if changed && !dry_run {
+            config::forget_list(paths, layer, config::USE, cap)?;
+            config::forget_list(paths, layer, config::UNUSE, cap)?;
         }
-        let said = match (had, dry_run) {
+        let said = match (changed, dry_run) {
             (false, _) => format!("new repos already take all your {cap}"),
             (true, true) => format!("new repos would take all your {cap} again"),
             (true, false) => format!("new repos take all your {cap} again"),
         };
         ctx.say(
             &report::Action::new("defaults-use-all", said)
-                .data(serde_json::json!({ "capability": cap.to_string(), "changed": had })),
+                .data(serde_json::json!({ "capability": cap.to_string(), "changed": changed })),
         );
         return Ok(());
     }
@@ -1166,36 +1236,74 @@ pub(crate) fn defaults_use(
     if !available.iter().any(|n| n == name) {
         return Err(crate::cmd::settings::no_such_entry(cap, name, &available));
     }
-    let (said, list) = match seeded(paths, cap)? {
-        None => (
-            format!("new repos already take all your {cap}, {cap}/{name} among them"),
-            None,
-        ),
-        Some(names) if names.iter().any(|n| n == name) => {
-            (format!("new repos already take {cap}/{name}"), None)
+    let now = new_repo_takes(paths, cap, false)?;
+    if now.takes.iter().any(|n| n == name) {
+        ctx.say(
+            &report::Action::new("defaults-used", format!("new repos already take {cap}/{name}"))
+                .data(serde_json::json!({ "capability": cap.to_string(), "name": name, "changed": false })),
+        );
+        return Ok(());
+    }
+    let mut action = report::Action::new(
+        "defaults-used",
+        match dry_run {
+            true => format!("new repos would take {cap}/{name}"),
+            false => format!("new repos take {cap}/{name}"),
+        },
+    )
+    .data(serde_json::json!({ "capability": cap.to_string(), "name": name, "changed": true }));
+    let wrote = match (now.listed, now.left_out.iter().any(|n| n == name)) {
+        // A list: it is added to the list.
+        (true, _) => {
+            let mut list = now.takes;
+            list.push(name.to_string());
+            (!dry_run)
+                .then(|| config::write_list(paths, layer, config::USE, cap, &list))
+                .transpose()?
         }
-        Some(mut names) => {
-            names.push(name.to_string());
-            (
-                match dry_run {
-                    true => format!("new repos would take {cap}/{name}"),
-                    false => format!("new repos take {cap}/{name}"),
-                },
-                Some(names),
-            )
+        // Left out: it is no longer left out.
+        (false, true) => {
+            let rest: Vec<String> = now.left_out.into_iter().filter(|n| n != name).collect();
+            match (dry_run, rest.is_empty()) {
+                (true, _) => None,
+                (false, true) => {
+                    config::forget_list(paths, layer, config::UNUSE, cap)?;
+                    None
+                }
+                (false, false) => {
+                    Some(config::write_list(paths, layer, config::UNUSE, cap, &rest)?)
+                }
+            }
+        }
+        // Neither, and not taken: a guard, which only a list can name. The
+        // one case that writes what new repos take as a list, so it says so.
+        (false, false) => {
+            let mut list = now.takes;
+            list.push(name.to_string());
+            action = action.note(format!(
+                "a guard is never seeded unless named, so {cap} is a list now — {}. One you \
+                 add is not taken until you use it; to follow the catalogue again:\n  \
+                 omh settings use {cap} --all",
+                list.join(", ")
+            ));
+            match dry_run {
+                true => None,
+                // A list is the whole answer for the kind, so what `[unuse]`
+                // left out of it goes, rather than sit there read by nobody.
+                false => {
+                    config::forget_list(paths, layer, config::UNUSE, cap)?;
+                    Some(config::write_list(paths, layer, config::USE, cap, &list)?)
+                }
+            }
         }
     };
-    let mut action = report::Action::new("defaults-used", said).data(serde_json::json!({
-        "capability": cap.to_string(),
-        "name": name,
-        "changed": list.is_some(),
-    }));
-    if let (Some(list), false) = (list, dry_run) {
-        let w = config::write_selection(
-            paths,
-            config::Layer::Personal,
-            &BTreeMap::from([(cap, list)]),
-        )?;
+    if let Some(w) = wrote.or_else(|| {
+        (!dry_run).then(|| config::Written {
+            path: file.clone(),
+            layer,
+            committed: false,
+        })
+    }) {
         action = action.note(format!("wrote → {} (seeds new repos)", w.path.display()));
     }
     ctx.say(&action);
@@ -1203,9 +1311,8 @@ pub(crate) fn defaults_use(
 }
 
 /// `omh settings unuse`: have the repos `omh init` sets up after leave an
-/// entry out. On a kind with no list that writes the rest as one — and an
-/// entry added to the catalogue after it is not seeded, so that is said, with
-/// the way back.
+/// entry out — off a `[use]` list where the kind has one, and otherwise into
+/// `[unuse]`, so the kind goes on following the rest of your catalogue.
 pub(crate) fn defaults_unuse(
     paths: &Paths,
     key: &str,
@@ -1214,23 +1321,28 @@ pub(crate) fn defaults_unuse(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let cap = crate::cmd::settings::capability_from(key)?;
-    selection::validate_entry_name(name, cap, &config::Layer::Personal.file(paths))?;
+    let layer = config::Layer::Personal;
+    selection::validate_entry_name(name, cap, &layer.file(paths))?;
     refuse_a_name_omh_owns(paths, cap, name)?;
-    let (mut names, froze) = match seeded(paths, cap)? {
-        Some(names) => (names, false),
-        None => (catalogue_names_unfiltered(paths, cap)?, true),
-    };
-    if !names.iter().any(|n| n == name) {
-        anyhow::bail!(
-            "{cap}/{name} is not what new repos take — they take {}",
-            if names.is_empty() {
-                format!("no {cap}")
-            } else {
-                names.join(", ")
-            }
+    let now = new_repo_takes(paths, cap, false)?;
+    if !now.takes.iter().any(|n| n == name) {
+        let available = catalogue_names_unfiltered(paths, cap)?;
+        if !available.iter().any(|n| n == name) {
+            return Err(crate::cmd::settings::no_such_entry(cap, name, &available));
+        }
+        let why = if now.listed {
+            " — your list does not name it"
+        } else if now.guards.contains(name) {
+            " — a guard, never seeded unless named"
+        } else {
+            " — it is left out already"
+        };
+        ctx.say(
+            &report::Action::new("defaults-unused", format!("new repos already leave out {cap}/{name}{why}"))
+                .data(serde_json::json!({ "capability": cap.to_string(), "name": name, "changed": false })),
         );
+        return Ok(());
     }
-    names.retain(|n| n != name);
     let mut action = report::Action::new(
         "defaults-unused",
         match dry_run {
@@ -1238,28 +1350,19 @@ pub(crate) fn defaults_unuse(
             false => format!("new repos leave out {cap}/{name}"),
         },
     )
-    .data(serde_json::json!({
-        "capability": cap.to_string(),
-        "name": name,
-        "froze_selection": froze,
-    }));
-    if froze {
-        let rest = match names.len() {
-            0 => "its list is empty now".to_string(),
-            n => format!("the other {n} are its list now"),
-        };
-        action = action.note(format!(
-            "{cap} followed your whole catalogue: {rest}, and one you add is not seeded \
-             until you use it. To follow the whole catalogue again:\n  \
-             omh settings use {cap} --all"
-        ));
-    }
+    .data(serde_json::json!({ "capability": cap.to_string(), "name": name, "changed": true }));
     if !dry_run {
-        let w = config::write_selection(
-            paths,
-            config::Layer::Personal,
-            &BTreeMap::from([(cap, names)]),
-        )?;
+        let w = match now.listed {
+            true => {
+                let list: Vec<String> = now.takes.into_iter().filter(|n| n != name).collect();
+                config::write_list(paths, layer, config::USE, cap, &list)?
+            }
+            false => {
+                let mut left = now.left_out;
+                left.push(name.to_string());
+                config::write_list(paths, layer, config::UNUSE, cap, &left)?
+            }
+        };
         action = action.note(format!("wrote → {} (seeds new repos)", w.path.display()));
     }
     ctx.say(&action);

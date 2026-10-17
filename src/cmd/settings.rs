@@ -35,25 +35,12 @@ pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
                 value: mine.get(k.name).cloned(),
             })
             .collect(),
-        // `[use]` and `[omh]` are seeded, so they are neither a default nor
-        // unread. `config::values` renders a table as `[name]`.
-        tables: mine
-            .keys()
-            .filter(|k| {
-                *k == &format!("[{}]", config::USE)
-                    || *k == &format!("[{}]", config::OMH)
-                    || *k == "[account]"
-            })
-            .cloned()
-            .collect(),
+        // `[use]`, `[unuse]` and `[omh]` seed a new repo, so they are neither a
+        // default nor unread. `config::values` renders a table as `[name]`.
+        tables: mine.keys().filter(|k| seeding_table(k)).cloned().collect(),
         unread: mine
             .iter()
-            .filter(|(k, _)| {
-                key::describes(k).is_none()
-                    && *k != &format!("[{}]", config::USE)
-                    && *k != &format!("[{}]", config::OMH)
-                    && *k != "[account]"
-            })
+            .filter(|(k, _)| key::describes(k).is_none() && !seeding_table(k))
             .map(|(k, v)| report::Setting {
                 key: k.clone(),
                 value: v.clone(),
@@ -62,6 +49,14 @@ pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
             .collect(),
     });
     Ok(())
+}
+
+/// A table of your defaults that seeds a new repo, as `config::values` names
+/// it: `[use]`, `[unuse]`, `[omh]`, `[account]`.
+pub(crate) fn seeding_table(name: &str) -> bool {
+    [config::USE, config::UNUSE, config::OMH, "account"]
+        .iter()
+        .any(|t| name == format!("[{t}]"))
 }
 
 /// What is effective in this checkout, and which file decided it.
@@ -1334,7 +1329,7 @@ pub(crate) fn rm(
 
     // The list new repos are seeded from would go on naming it, and `omh init`
     // would say it is missing in every repo after. Said before the question.
-    if config::selection_in(paths, config::Layer::Personal, cap)?
+    if config::list_in(paths, config::Layer::Personal, config::USE, cap)?
         .is_some_and(|listed| listed.iter().any(|n| n == name))
     {
         ctx.warn(&format!(
@@ -1464,11 +1459,18 @@ pub(crate) fn no_such_entry(
 }
 
 /// The servers omh ships, by name, each with the feature it is part of.
+pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, String>> {
+    shipped_owned(adapter::Capability::Mcp)
+}
+
+/// What omh ships of one kind, by name, each with the feature it is part of.
 ///
 /// From the manifests in the binary, as [`shipped_hooks`] is from its hooks,
 /// rather than `~/.omh/base`: what omh owns is not a file that a stray or
 /// unreadable copy could make removable.
-pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, String>> {
+pub(crate) fn shipped_owned(
+    cap: adapter::Capability,
+) -> Result<std::collections::BTreeMap<String, String>> {
     let mut out = std::collections::BTreeMap::new();
     for file in crate::bundled::Shipped::Base.files() {
         let manifest: base::Manifest = toml::from_str(file.contents)
@@ -1477,7 +1479,7 @@ pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, Str
             manifest
                 .entries
                 .into_iter()
-                .filter(|e| e.kind.capability() == adapter::Capability::Mcp)
+                .filter(|e| e.kind.capability() == cap)
                 .map(|e| (e.name, e.feature)),
         );
     }

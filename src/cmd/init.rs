@@ -239,10 +239,13 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
     // A template that *does* name `carry_in` still travels: the loop above
     // takes it, because then somebody did choose it.
 
-    // `[use]` and `[omh]` travel too: which entries a project takes and which
-    // of omh's features it runs with are exactly the answers you do not want to
-    // retype per repo.
-    for table in [config::USE, config::OMH] {
+    // `[omh]` travels as it is: which of omh's features a project runs with is
+    // exactly the answer you do not want to retype per repo. `[use]` and
+    // `[unuse]` travel too, but as what they come to — `init` writes every
+    // kind's list from them (`catalogue::new_repo_lists`) once the file is
+    // there. Copied as they stood, a kind `[use]` did not list had no list in
+    // the repo, which is every entry: guards too.
+    for table in [config::USE, config::UNUSE, config::OMH] {
         let Some(item) = doc.get(table) else { continue };
         let Some(t) = item.as_table_like() else {
             continue;
@@ -250,7 +253,9 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
         if t.iter().next().is_none() {
             continue;
         }
-        out.insert(table, item.clone());
+        if table == config::OMH {
+            out.insert(table, item.clone());
+        }
         took.push(format!("[{table}]"));
     }
 
@@ -337,6 +342,32 @@ pub(crate) fn refuse_what_cannot_be_seeded(
         }
     }
 
+    // `[use]` and `[unuse]` are not copied but resolved into a new repo's
+    // lists, after `init` has written most of it — so what they cannot mean is
+    // refused here, before anything is. A kind that is not one was read by
+    // nobody, and said by nobody.
+    for table in [config::USE, config::UNUSE] {
+        let Some(held) = doc.get(table).and_then(toml_edit::Item::as_table_like) else {
+            continue;
+        };
+        for (kind, item) in held.iter() {
+            anyhow::ensure!(
+                adapter::Capability::from_key(kind).is_some(),
+                "{}: {}",
+                at.display(),
+                config::not_a_kind(table, kind)
+            );
+            let names = item
+                .as_array()
+                .with_context(|| format!("{}: [{table}] {kind} is not a list", at.display()))?;
+            anyhow::ensure!(
+                names.iter().all(|n| n.as_str().is_some()),
+                "{}: [{table}] {kind} holds a name that is not text",
+                at.display()
+            );
+        }
+    }
+
     // Anything else omh does not read. Named, because a table nobody seeds and
     // nobody warns about is a setting you believe is in force.
     for (name, item) in doc.iter() {
@@ -344,13 +375,15 @@ pub(crate) fn refuse_what_cannot_be_seeded(
             continue;
         }
         anyhow::ensure!(
-            name == config::USE || name == config::OMH,
+            [config::USE, config::UNUSE, config::OMH].contains(&name),
             "{}: `[{name}]` is read by nobody and is not seeded into a repo. \
              This file holds settings at the top level, `[{}]` for omh's own \
-             features, and `[{}]` for what a project takes from your catalogue.",
+             features, and `[{}]` and `[{}]` for what a new repo takes from \
+             your catalogue and leaves out.",
             at.display(),
             config::OMH,
-            config::USE
+            config::USE,
+            config::UNUSE
         );
     }
     Ok(())
@@ -523,7 +556,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // by an interrupted first run that re-runs, nor by anything else. `init`
     // writes it once; `omh use --all` is how you ask for a resync.
     if !crate::cmd::mcp::repo_has_selection(&paths)? {
-        let lists = crate::cmd::catalogue::catalogue_lists(&paths)?;
+        // What your defaults say a new repo takes — their lists, their
+        // exclusions, and never a guard nobody named.
+        let lists = crate::cmd::catalogue::new_repo_lists(&paths)?;
         config::write_selection(&paths, config::Layer::Shared, &lists)?;
     } else {
         // A curated list is not resynced — and a hook **this run just wrote**
