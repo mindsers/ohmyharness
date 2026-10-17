@@ -720,7 +720,7 @@ fn feature_switches(paths: &Paths) -> std::collections::BTreeMap<String, bool> {
 }
 
 /// Where an import reads, as the pick says it: the adapter's path on this
-/// host — the checkout omh was started in, for `$REPO` — and whether there is
+/// host — from where omh was started, for `$REPO` — and whether there is
 /// anything there. The bare list of harness names said neither.
 fn import_from(paths: &Paths, template: &str) -> String {
     let home = dirs::home_dir();
@@ -729,10 +729,10 @@ fn import_from(paths: &Paths, template: &str) -> String {
         home.as_deref().unwrap_or(std::path::Path::new("~")),
         &paths.repo,
     );
-    let shown = tilde(&at, home.as_deref());
+    // `$REPO` is where omh was started, so it is said from there: `./`.
     let shown = match template.contains("$REPO") {
-        true => format!("{shown}, in the checkout omh was started in"),
-        false => shown,
+        true => format!("{}, where omh was started", template.replace("$REPO", ".")),
+        false => tilde(&at, home.as_deref()),
     };
     match at.try_exists() {
         Ok(true) => shown,
@@ -1953,8 +1953,8 @@ mod tests {
     }
 
     /// An import says where each harness reads: the adapter's path on this
-    /// host, and for a server Claude Code keeps per project, that it is the
-    /// checkout omh was started in.
+    /// host, and for a server Claude Code keeps per project, that it is read
+    /// from where omh was started.
     #[test]
     fn an_import_says_where_each_harness_reads() {
         let (_dir, paths) = paths();
@@ -1975,7 +1975,7 @@ mod tests {
         );
         let servers = from("servers", "claude");
         assert!(
-            servers.contains(".mcp.json") && servers.contains("the checkout omh was started in"),
+            servers.contains("./.mcp.json") && servers.contains("where omh was started"),
             "{servers}"
         );
         // The checkout here has none, and says so rather than looking empty.
