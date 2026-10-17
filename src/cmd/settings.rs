@@ -212,6 +212,14 @@ pub(crate) struct Reach {
     why: Why,
 }
 
+impl Reach {
+    /// Your defaults alone — what `omh settings` writes, which seeds a repo
+    /// and decides nothing in one that exists.
+    pub(crate) fn is_your_defaults(&self) -> bool {
+        self.layers == [config::Layer::Personal]
+    }
+}
+
 /// What sent a write to its layers.
 ///
 /// The COMMITTED warning reads this. It fires on a committed write, which was
@@ -393,10 +401,14 @@ pub(crate) fn feature_forget(
             } else {
                 "feature-unset"
             },
-            if dropped.is_empty() {
-                format!("{feature} was not switched here")
-            } else {
-                format!("this checkout no longer switches {feature}")
+            match (dropped.is_empty(), reach.is_your_defaults()) {
+                (true, false) => format!("{feature} was not switched here"),
+                (false, false) => format!("this checkout no longer switches {feature}"),
+                (true, true) => format!("your defaults do not switch {feature}"),
+                (false, true) => format!(
+                    "your defaults no longer switch {feature} — the repos `omh init` sets \
+                     up after take omh's own"
+                ),
             },
         )
         .data(serde_json::json!({
@@ -408,8 +420,11 @@ pub(crate) fn feature_forget(
         return Err(e).with_context(|| format!("the {layer} layer still switches `{feature}`"));
     }
     // What is still deciding, if anything. `config::policy` cannot answer —
-    // it skips tables by design, so `[omh]` is invisible to it — and the
-    // personal layer is one no repo command writes but every read consults.
+    // it skips tables by design, so `[omh]` is invisible to it. Your defaults
+    // decide nothing in a repo, so there is nothing to say after them.
+    if reach.is_your_defaults() {
+        return Ok(());
+    }
     say_what_still_switches(paths, feature, ctx)
 }
 
@@ -650,7 +665,7 @@ pub(crate) fn no_legacy_write_over_a_name_omh_owns(
             "`{name}` is one of omh's features, not a setting — a bare key of \
              that name is read by nothing.\n  omh set {name} off"
         ),
-        Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(name, &feature)),
+        Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(name, &feature, true)),
         Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(name, cap)),
         Names::ASetting | Names::Neither => Ok(()),
     }
@@ -672,10 +687,18 @@ pub(crate) fn a_catalogue_entry_is_not_a_setting(
 /// The grouping, said where somebody has just guessed at it.
 ///
 /// Kept beside `names` so the two orders stay visible together.
-pub(crate) fn an_entry_is_not_a_feature(name: &str, feature: &str) -> anyhow::Error {
+pub(crate) fn an_entry_is_not_a_feature(
+    name: &str,
+    feature: &str,
+    defaults: bool,
+) -> anyhow::Error {
+    let switch = match defaults {
+        true => format!("omh settings set {feature} off"),
+        false => format!("omh set {feature} off"),
+    };
     anyhow::anyhow!(
         "`{name}` is part of the `{feature}` feature, not a feature itself. \
-         A feature is all or nothing.\n  omh set {feature} off"
+         A feature is all or nothing.\n  {switch}"
     )
 }
 
@@ -1291,9 +1314,8 @@ pub(crate) fn rm(
                 "the `{name}` server is omh's own — the {feature} feature, which is \
                  switched off whole rather than taken apart. In a repo:\n  \
                  omh set {feature} off\n\
-                 and for every repo `omh init` sets up after, `[omh] {feature} = false` \
-                 in {}",
-                config::Layer::Personal.file(paths).display()
+                 and for every repo `omh init` sets up after:\n  \
+                 omh settings set {feature} off"
             );
         }
     }
@@ -1503,7 +1525,11 @@ pub(crate) fn feature_switch(
         // The entry-name case is the interesting error: it is how somebody
         // discovers the grouping without reading the manifest.
         if let Some(entry) = manifest.entry(feature) {
-            return Err(an_entry_is_not_a_feature(feature, &entry.feature));
+            return Err(an_entry_is_not_a_feature(
+                feature,
+                &entry.feature,
+                reach.is_your_defaults(),
+            ));
         }
         anyhow::bail!(
             "`{feature}` is not one of omh's features ({}). \
@@ -1545,16 +1571,23 @@ pub(crate) fn feature_switch(
         written.push(config::write_feature(paths, *layer, feature, on)?);
     }
     let wrote = crate::cmd::catalogue::written_paths(&written);
+    let state = if on { "on" } else { "off" };
     let mut action = report::Action::new(
         if on { "feature-on" } else { "feature-off" },
-        format!("{feature} is {} here", if on { "on" } else { "off" }),
+        match reach.is_your_defaults() {
+            true => format!(
+                "{feature} is {state} for every repo `omh init` sets up after — a repo \
+                 that exists keeps its own"
+            ),
+            false => format!("{feature} is {state} here"),
+        },
     )
     .data(serde_json::json!({
         "feature": feature,
         "on": on,
         "paths": wrote,
     }));
-    if !on {
+    if !on && !reach.is_your_defaults() {
         action = action.note("nothing was uninstalled; the next repo gets it back");
     }
     for w in &written {

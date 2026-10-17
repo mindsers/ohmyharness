@@ -4681,48 +4681,63 @@ fn settings_set_does_not_warn_about_a_file_git_does_not_carry() {
     );
 }
 
-/// One of omh's features is not a cross-project default.
+/// One of omh's features, switched in your defaults, seeds the repos `omh init`
+/// sets up after — in `[omh]`, never as a bare key.
 ///
-/// A feature is a fact about a checkout — `[omh]` is read from the personal
-/// layer, so writing one there would switch it for every project you open,
-/// which is not a decision this command should make easy to reach by accident.
+/// It was refused: `[omh]` was once read from the personal layer, so a switch
+/// there changed every project you opened. It seeds a new repo now and decides
+/// nothing after (`a_feature_switched_in_the_template_does_not_switch_this_repo`),
+/// and refusing it left a file to edit by hand as the one way to say "never the
+/// code graph" for every repo to come. The guard's own defect stays guarded:
+/// `omh settings set codegraph off` once wrote a bare `codegraph = "off"`,
+/// warned that nothing reads it, and left the feature on.
 #[test]
-fn settings_refuses_a_feature_name() {
+fn settings_switches_a_feature_for_the_repos_init_sets_up_after() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_base();
+    let held = || std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
+    let doc = || held().parse::<toml::Table>().unwrap_or_default();
 
-    // **Both verbs.** The guard was written for four doors and four commands
-    // were routed through it; two of those commands were retired, and the
-    // test went with them — leaving `unset` alone behind, where deleting the
-    // guard call outright passed the whole suite.
-    for argv in [
-        vec!["settings", "set", "codegraph", "off"],
-        vec!["settings", "unset", "codegraph"],
-    ] {
-        let out = sb.omh(&argv);
-        let said = format!(
-            "{:?}\n{}{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            !out.status.success(),
-            "`omh {}`: a feature is not a default",
-            argv.join(" ")
-        );
-        assert!(
-            said.contains("omh set codegraph"),
-            "and it names the spelling that works: {said}"
-        );
-    }
+    let out = sb.omh(&["settings", "set", "codegraph", "off"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
-        !std::fs::read_to_string(sb.home.join(".omh/default.toml"))
-            .unwrap_or_default()
-            .contains("codegraph"),
-        "and neither verb left the bare key behind"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(
+        doc().get("omh").and_then(|t| t.get("codegraph")),
+        Some(&toml::Value::Boolean(false)),
+        "{}",
+        held()
+    );
+    assert!(doc().get("codegraph").is_none(), "a bare key: {}", held());
+    assert!(
+        said.contains("omh init") && said.contains("keeps its own"),
+        "it says which repos it reaches: {said}"
+    );
+
+    let out = sb.omh(&["settings", "set", "codegraph", "on"]);
+    assert!(out.status.success());
+    assert_eq!(
+        doc().get("omh").and_then(|t| t.get("codegraph")),
+        Some(&toml::Value::Boolean(true))
+    );
+    let out = sb.omh(&["settings", "unset", "codegraph"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!held().contains("codegraph"), "handed back: {}", held());
+
+    // A part of a feature is not one, and says which it belongs to.
+    let out = sb.omh(&["settings", "set", "graph-first", "off"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(said.contains("omh settings set codegraph off"), "{said}");
+    assert!(!held().contains("graph-first"));
 }
 
 /// `omh set` and `omh settings` are one letter apart and never confused.

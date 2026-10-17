@@ -1921,10 +1921,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
     // out is loud; a file appearing is loud; a shape quietly leaving one
     // file while another gains lines is loud, and no floor can see that.
     let expected: std::collections::BTreeMap<String, usize> = [
-        // Each `remove` says `omh set <feature> off`, and `omh init` for the
-        // every-new-repo route — which was `omh settings rm mcp <server>`
-        // until omh's own servers could no longer be removed.
-        ("base/2026.08.toml", 19),
+        // Each `remove` says `omh set <feature> off`, and `omh settings set
+        // <feature> off` with the `omh init` it seeds for the every-new-repo
+        // route — which was `omh settings rm mcp <server>` until omh's own
+        // servers could no longer be removed.
+        ("base/2026.08.toml", 27),
         ("src/auth.rs", 7),
         ("src/base.rs", 3),
         ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences
@@ -1946,8 +1947,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // this scan is for.
         ("src/cmd/inspect.rs", 5),
         // `mcp add`'s refusals: `omh set <feature> off` and `omh upgrade` for
-        // a server omh ships, and the `--replace` line for one of yours.
-        ("src/cmd/mcp.rs", 3),
+        // a server omh ships, and the `--replace` line for one of yours. +
+        // `omh settings set <feature> off` and its `omh init`, for new repos.
+        ("src/cmd/mcp.rs", 5),
         ("src/cmd/memory.rs", 1),
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
@@ -1962,8 +1964,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // server omh ships. + `omh settings rm <capability> <name>`, in the
         // refusal to edit a link to nothing. + the `--anyway` line for each of
         // `set` and `settings set`, under a value omh cannot read. +
-        // `omh settings edit`, where unset is given a table.
-        ("src/cmd/settings.rs", 20),
+        // `omh settings edit`, where unset is given a table. + `omh settings set
+        // <feature> off` under the server refusal and the part-of-a-feature
+        // refusal, and `omh init` in both answers a switch in your defaults
+        // gives.
+        ("src/cmd/settings.rs", 24),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start

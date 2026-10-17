@@ -545,6 +545,18 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 }
                 None => cmd::settings::show_settings(&paths, ctx),
                 Some(SettingsCmd::Set { key, value, anyway }) => {
+                    // One of omh's features: switched in `[omh]`, for the repos
+                    // `init` seeds — never written as a bare key nothing reads.
+                    if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
+                        return cmd::settings::feature_switch(
+                            &paths,
+                            key,
+                            cmd::settings::on_or_off(key, value)?,
+                            cmd::settings::Reach::named(config::Layer::Personal),
+                            cli.dry_run,
+                            ctx,
+                        );
+                    }
                     cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
                     // Both doors, for the reason the guard above exists: a
                     // check on one spelling of a write is a check somebody
@@ -563,6 +575,15 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     )
                 }
                 Some(SettingsCmd::Unset { key }) => {
+                    if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
+                        return cmd::settings::feature_forget(
+                            &paths,
+                            key,
+                            cmd::settings::Reach::named(config::Layer::Personal),
+                            cli.dry_run,
+                            ctx,
+                        );
+                    }
                     cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
                     cmd::settings::unset(
                         &paths,
@@ -616,9 +637,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     cli.dry_run,
                     ctx,
                 ),
-                cmd::settings::Names::AnEntryOf(feature) => {
-                    Err(cmd::settings::an_entry_is_not_a_feature(key, &feature))
-                }
+                cmd::settings::Names::AnEntryOf(feature) => Err(
+                    cmd::settings::an_entry_is_not_a_feature(key, &feature, false),
+                ),
                 cmd::settings::Names::ACatalogueEntry(cap) => {
                     Err(cmd::settings::a_catalogue_entry_is_not_a_setting(key, cap))
                 }
@@ -647,9 +668,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     cli.dry_run,
                     ctx,
                 ),
-                cmd::settings::Names::AnEntryOf(feature) => {
-                    Err(cmd::settings::an_entry_is_not_a_feature(key, &feature))
-                }
+                cmd::settings::Names::AnEntryOf(feature) => Err(
+                    cmd::settings::an_entry_is_not_a_feature(key, &feature, false),
+                ),
                 cmd::settings::Names::ACatalogueEntry(cap) => {
                     Err(cmd::settings::a_catalogue_entry_is_not_a_setting(key, cap))
                 }

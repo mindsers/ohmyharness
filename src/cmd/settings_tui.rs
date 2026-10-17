@@ -765,7 +765,7 @@ fn servers(paths: &Paths) -> Section {
         let feature = shipped.get(&name);
         if let Some(feature) = feature {
             about.push(format!(
-                "omh's own — the {feature} feature; `omh set {feature} off` switches it off in a repo"
+                "omh's own — the {feature} feature; `omh settings set {feature} off` switches it off for new repos"
             ));
         }
         // Names and counts, as the detail says them: never a value.

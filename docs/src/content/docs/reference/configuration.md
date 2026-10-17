@@ -630,7 +630,7 @@ There are three ways to take a feature away, at different reaches:
 |---|---|---|
 | switch it off in this repo | `omh set codegraph off` | this repo — the server, its hooks and its rules section together |
 | hand the decision back to omh's own default | `omh unset codegraph` | this repo |
-| switch it off in every repo `init` sets up after | `omh settings edit`, and `[omh] codegraph = false` in it | every new repo |
+| switch it off in every repo `init` sets up after | `omh settings set codegraph off` | every new repo |
 
 **Feature names only.** `graph-first = false` is refused, naming the feature it
 belongs to — keeping the graph while dropping one of the things that make it

@@ -83,9 +83,10 @@ Five things were wrong, none findable from the documentation.
 
 - **For one repository:** `omh set codegraph off`. Nothing is uninstalled, and
   the next repository gets it back.
-- **For every new repository:** `[omh] codegraph = false` in
-  `~/.omh/default.toml` (`omh settings edit`), which `omh init` seeds a repo
-  from. The server is omh's own, so `omh settings rm` refuses it.
+- **For every new repository:** `omh settings set codegraph off`, which writes
+  `[omh] codegraph = false` in `~/.omh/default.toml` — what `omh init` seeds a
+  repo from. A repo that exists keeps its own. The server is omh's own, so
+  `omh settings rm` refuses it.
 
 Switching the hooks off means switching off the graph. The server, its four
 hooks and its section of the rules are one feature, `codegraph`, removed and
