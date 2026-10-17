@@ -2036,7 +2036,17 @@ impl App {
     /// page's, then moving — the order they are dropped in from the right.
     fn keys(&self, width: u16) -> Line<'static> {
         let page: Vec<(&str, &str)> = match &self.modal {
-            Some(Modal::Input(_)) => vec![("↵", "done"), ("esc", "cancel"), ("ctrl-u", "clear")],
+            // What `↵` will do, as it stands: it said `save` while it wrote
+            // anyway, and while it opened $EDITOR.
+            Some(Modal::Input(input)) => vec![
+                match (&input.then, input.forcing) {
+                    (_, true) => ("↵", "write anyway"),
+                    (Then::NewEntry { .. }, false) => ("↵", "open in $EDITOR"),
+                    (Then::Value { .. }, false) => ("↵", "save"),
+                },
+                ("esc", "cancel"),
+                ("ctrl-u", "clear"),
+            ],
             Some(Modal::Pick(_)) => {
                 vec![
                     ("↑↓", "move"),
@@ -2065,7 +2075,12 @@ impl App {
                 keys
             }
         };
-        let right = self.chips(&[("?", "help"), ("q", "quit")]);
+        // Where a line is typed into, `?` and `q` are letters, not keys.
+        let typing = matches!(self.modal, Some(Modal::Input(_)) | Some(Modal::Form(_)));
+        let right = match typing {
+            true => Line::default(),
+            false => self.chips(&[("?", "help"), ("q", "quit")]),
+        };
         let room = usize::from(width).saturating_sub(right.width() + 2);
         let mut take = page.len();
         let mut left = self.chips(&page[..take]);
@@ -2217,11 +2232,20 @@ impl App {
             }
             _ => None,
         };
-        if let Some((tone, w)) = warning {
-            lines.push(Line::from(Span::styled(clean(&w), self.look.tone(tone))));
-        }
-        lines.push(Line::default());
-        lines.push(self.chips(&[("↵", "save"), ("esc", "cancel")]));
+        // Two lines kept for what omh says about the value, there or not, so
+        // the box holds still as it comes and goes: it moved from row 9 to 7
+        // to 8. The keys are the footer's, said once.
+        let room = usize::from(f.area().width.saturating_sub(2).clamp(1, 64)).saturating_sub(4);
+        let mut said: Vec<Line> = match warning {
+            Some((tone, w)) => wrapped(&clean(&w), room.max(12))
+                .into_iter()
+                .take(2)
+                .map(|l| Line::from(Span::styled(l, self.look.tone(tone))))
+                .collect(),
+            None => Vec::new(),
+        };
+        said.resize(2, Line::default());
+        lines.extend(said);
         let area = self.popup(f, &input.title, Text::from(lines), Popup::Typing);
         let above = Paragraph::new(Text::from(before))
             .wrap(Wrap { trim: false })

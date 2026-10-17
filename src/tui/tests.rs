@@ -814,6 +814,53 @@ fn a_value_is_checked_as_it_is_typed() {
     );
 }
 
+/// A box's keys are the footer's, once, and `↵` says what it will do: the
+/// box said `↵ save` while the footer said `↵ done`; after a refusal `↵`
+/// writes anyway, and in the new-entry box it opens `$EDITOR` — both still
+/// said `save`.
+#[test]
+fn a_box_says_its_keys_once_and_what_enter_does() {
+    let check: Check = Box::new(|key, value| {
+        (key == "idle_timeout" && value == "soon").then(|| "not a duration".to_string())
+    });
+    let mut app = App::new(model(), true).with_check(check);
+    let footer = |app: &App| {
+        drawn_at(app, 120, 30)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+    app.key(code(KeyCode::Enter));
+    let screen = drawn_at(&app, 120, 30);
+    let boxed: Vec<&str> = screen
+        .lines()
+        .filter(|l| l.contains('│') && l.contains("idle_timeout"))
+        .collect();
+    assert!(
+        screen.matches("↵ save").count() == 1,
+        "said twice:\n{screen}"
+    );
+    assert!(footer(&app).contains("↵ save"), "{}", footer(&app));
+    // `?` and `q` type, here: not offered as keys that leave.
+    assert!(!footer(&app).contains("q quit"), "{}", footer(&app));
+    assert!(!boxed.is_empty());
+    app.key(with('u', KeyModifiers::CONTROL));
+    for c in "soon".chars() {
+        app.key(press(c));
+    }
+    app.key(code(KeyCode::Enter));
+    assert!(footer(&app).contains("↵ write anyway"), "{}", footer(&app));
+    app.key(code(KeyCode::Esc));
+    app.key(press('2'));
+    app.key(press('a'));
+    assert!(
+        footer(&app).contains("↵ open in $EDITOR"),
+        "{}",
+        footer(&app)
+    );
+}
+
 /// A box being typed into holds its width: it grew from 58 to 76 columns
 /// and re-centred the moment a warning appeared, under the cursor. Behind any
 /// box the screen is dim, and the one that removes is not coloured like help.
@@ -845,7 +892,8 @@ fn a_popup_holds_still_and_says_what_kind_it_is() {
     let buffer = frame(&app);
     assert!(drawn(&app).contains("not a duration"));
     let after = corners(&buffer);
-    assert_eq!((before.0, before.1), (after.0, after.1), "the box moved");
+    // Its top too: it moved from row 9 to 7 to 8 as the warning came and went.
+    assert_eq!(before, after, "the box moved");
     // Behind it, dim: the rail's first page is outside every box.
     let (x, y) = (0..30u16)
         .flat_map(|y| (0..20u16).map(move |x| (x, y)))
