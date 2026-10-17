@@ -246,7 +246,22 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                 )),
             }
         }
-        Shape::Text | Shape::Paths => None,
+        // A list, as the file holds one: `.env` alone was written as a string,
+        // which the launch's reader refuses as not a list of strings.
+        Shape::Paths => {
+            let listed = toml::from_str::<toml::Table>(&format!("v = {value}"))
+                .ok()
+                .and_then(|t| t.get("v").cloned())
+                .is_some_and(|v| v.as_array().is_some_and(|a| a.iter().all(|p| p.is_str())));
+            (!listed).then(|| {
+                format!(
+                    "`{}` takes a list of paths, as `[\".env\", \".env.local\"]` — `{}` is not one",
+                    key.name,
+                    value.trim()
+                )
+            })
+        }
+        Shape::Text => None,
     }
 }
 

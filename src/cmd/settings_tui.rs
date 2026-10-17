@@ -250,6 +250,7 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
     let s = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
     match act {
         Act::Set { key, value } => s(&["settings", "set", "--", key, value]),
+        Act::SetAnyway { key, value } => s(&["settings", "set", "--anyway", "--", key, value]),
         Act::Unset { key } => s(&["settings", "unset", "--", key]),
         Act::EditDefaults => s(&["settings", "edit"]),
         Act::Edit { capability, name } => {
@@ -574,9 +575,16 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             }
             (_, shape) => Edit::Text { hint: hint(shape) },
         };
+        // A value omh cannot read, marked as long as it is in the file — not
+        // only while it is being typed.
+        let value = mine.get(k.name).cloned();
+        let warning = value
+            .as_deref()
+            .and_then(|v| key::quarrel(k, v))
+            .or(warning);
         out.rows.push(Row {
             name: k.name.to_string(),
-            value: mine.get(k.name).cloned(),
+            value,
             fallback: Some(fallback),
             warning,
             about: vec![k.does.to_string()],
@@ -993,7 +1001,7 @@ mod tests {
         };
         assert!(matches!(
             parsed(&set),
-            Cmd::Settings { cmd: Some(SettingsCmd::Set { key, value }) }
+            Cmd::Settings { cmd: Some(SettingsCmd::Set { key, value, .. }) }
                 if key == "carry_in" && value == "[\".env\", \"a b\"]"
         ));
         assert!(matches!(
@@ -1011,6 +1019,18 @@ mod tests {
                 "`{value}` did not arrive as the value"
             );
         }
+        // Anyway is `--anyway`, and a plain set is not.
+        assert!(matches!(
+            parsed(&Act::SetAnyway { key: "persistence".into(), value: "tmux".into() }),
+            Cmd::Settings { cmd: Some(SettingsCmd::Set { key, value, anyway: true }) }
+                if key == "persistence" && value == "tmux"
+        ));
+        assert!(matches!(
+            parsed(&set),
+            Cmd::Settings {
+                cmd: Some(SettingsCmd::Set { anyway: false, .. })
+            }
+        ));
         assert!(matches!(
             parsed(&Act::Unset { key: "runtime".into() }),
             Cmd::Settings { cmd: Some(SettingsCmd::Unset { key }) } if key == "runtime"
@@ -1235,6 +1255,30 @@ mod tests {
         let home = paths.root.parent().unwrap();
         assert_eq!(tilde(&paths.root, Some(home)), "~/.omh");
         assert_eq!(tilde(&paths.root, None), root);
+    }
+
+    /// A value in the file that omh cannot read is marked on its row, the way
+    /// a key nothing reads is — not only when it is typed. Written `--anyway`,
+    /// or by hand, `persistence = "tmux"` read as any other value.
+    #[test]
+    fn a_stored_value_omh_cannot_read_is_marked() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("default.toml"),
+            "persistence = \"tmux\"\nruntime = \"docker\"\n",
+        );
+        let model = model(&paths);
+        let row = |n: &str| {
+            page(&model, "defaults")
+                .rows
+                .iter()
+                .find(|r| r.name == n)
+                .unwrap()
+                .clone()
+        };
+        let warning = row("persistence").warning.unwrap_or_default();
+        assert!(warning.contains("dtach"), "{warning:?}");
+        assert_eq!(row("runtime").warning, None);
     }
 
     /// **Could not look is not none.** A catalogue directory omh cannot read

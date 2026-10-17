@@ -728,6 +728,7 @@ pub(crate) fn set(
     key: &str,
     value: &str,
     reach: Reach,
+    anyway: bool,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -739,12 +740,26 @@ pub(crate) fn set(
         None => ctx.warn(&format!(
             "nothing in omh reads `{key}` — it is written, and it will sit there"
         )),
-        // Written either way, for the same reason: a value a newer omh will
-        // accept must not be refused by this one. But `persistence = tmux`
-        // otherwise surfaces at the next launch, in a different command,
-        // minutes later.
+        // Refused, unless `--anyway`. It was written either way, so that a
+        // value a newer omh accepts is not refused by this one — and the cost
+        // was `persistence = tmux` written with exit 0 and found at the next
+        // launch, in another command, minutes later. The newer value is the
+        // rare case and has `--anyway`; the typo is the common one, stopped
+        // where it was typed.
         Some(k) => {
             if let Some(quarrel) = key::quarrel(k, value) {
+                if !anyway {
+                    let again = match reach.layers.as_slice() {
+                        [config::Layer::Personal] => {
+                            format!("omh settings set --anyway {key} <value>")
+                        }
+                        _ => format!("omh set --anyway {key} <value>"),
+                    };
+                    anyhow::bail!(
+                        "{quarrel}. Nothing was written. For a value only a newer omh \
+                         reads:\n  {again}"
+                    );
+                }
                 ctx.warn(&format!("{quarrel} — written anyway"));
             }
         }
@@ -874,6 +889,18 @@ pub(crate) fn unset(
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
+    // A table, as the screen and the report spell one: the file's to hold.
+    // Taken for a key, `[use]` was "not set" while it sat in the file.
+    if key.starts_with('[') && key.ends_with(']') {
+        let edit = match reach.layers.as_slice() {
+            [config::Layer::Personal] => ":\n  omh settings edit".to_string(),
+            _ => " — .omh/settings.toml".to_string(),
+        };
+        anyhow::bail!(
+            "`{key}` is a table, not a setting: unset takes one key. To change what it \
+             holds, edit the file it is in{edit}"
+        );
+    }
     let reach = reach.for_removal();
     // `account codex` reads as codex's account in every sentence below.
     let what = match harness {

@@ -367,6 +367,10 @@ pub(crate) enum Cmd {
         /// Write the gitignored file, whatever the key is.
         #[arg(long)]
         local: bool,
+        /// Write a value omh cannot read — one only a newer omh takes.
+        /// Without it, such a value is refused and named.
+        #[arg(long)]
+        anyway: bool,
     },
     /// Drop a setting, or hand one of omh's features back to its default.
     ///
@@ -682,6 +686,10 @@ pub(crate) enum SettingsCmd {
         key: String,
         /// What to set it to.
         value: String,
+        /// Write a value omh cannot read — one only a newer omh takes.
+        /// Without it, such a value is refused and named.
+        #[arg(long)]
+        anyway: bool,
     },
     /// Drop one of your defaults, letting omh's own take over again.
     Unset {

@@ -141,6 +141,12 @@ pub enum Act {
         key: String,
         value: String,
     },
+    /// A value omh cannot read, written anyway: `set` refuses one without
+    /// `--anyway`, for a value only a newer omh reads.
+    SetAnyway {
+        key: String,
+        value: String,
+    },
     Unset {
         key: String,
     },
@@ -171,7 +177,9 @@ impl Act {
     /// The row this act changes, when it leaves one to point at.
     fn subject(&self) -> Option<String> {
         match self {
-            Act::Set { key, .. } | Act::Unset { key } => Some(key.clone()),
+            Act::Set { key, .. } | Act::SetAnyway { key, .. } | Act::Unset { key } => {
+                Some(key.clone())
+            }
             Act::Edit { name, .. } => name.clone(),
             Act::AddServer { name, .. } => Some(name.clone()),
             Act::EditDefaults | Act::Remove { .. } | Act::Import { .. } => None,
@@ -283,6 +291,9 @@ struct Input {
     label: String,
     line: Typed,
     error: Option<String>,
+    /// Enter was pressed on a value the check flags: the next writes it
+    /// anyway. Typing again starts over.
+    forcing: bool,
     then: Then,
 }
 
@@ -686,6 +697,7 @@ impl App {
                 text: current,
             },
             error: None,
+            forcing: false,
             then: Then::Value {
                 key: row.name.clone(),
             },
@@ -762,6 +774,7 @@ impl App {
                     label: "name: ".into(),
                     line: Typed::default(),
                     error: None,
+                    forcing: false,
                     then: Then::NewEntry {
                         capability: capability.into(),
                     },
@@ -879,6 +892,7 @@ impl App {
                 _ => {
                     input.line.edit(key);
                     input.error = None;
+                    input.forcing = false;
                     self.modal = Some(Modal::Input(input));
                     Next::Stay
                 }
@@ -994,7 +1008,25 @@ impl App {
     fn submit(&mut self, mut input: Input) -> Next {
         let line: String = input.line.text.iter().collect();
         match input.then.clone() {
-            Then::Value { key } => Next::Run(Act::Set { key, value: line }),
+            Then::Value { key } => {
+                let flagged = self.check.as_ref().and_then(|check| check(&key, &line));
+                match (flagged, input.forcing) {
+                    (None, _) => Next::Run(Act::Set { key, value: line }),
+                    (Some(_), true) => Next::Run(Act::SetAnyway { key, value: line }),
+                    // `set` would refuse it: said here, and one more Enter is
+                    // `--anyway`.
+                    (Some(_), false) => {
+                        input.forcing = true;
+                        input.error = Some(
+                            "omh cannot read this — ↵ again writes it anyway, for a value \
+                             only a newer omh takes"
+                                .into(),
+                        );
+                        self.modal = Some(Modal::Input(input));
+                        Next::Stay
+                    }
+                }
+            }
             Then::NewEntry { capability } => {
                 let name = line.trim().to_string();
                 if name.is_empty() {

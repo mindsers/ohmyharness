@@ -772,6 +772,42 @@ fn a_popup_holds_still_and_says_what_kind_it_is() {
     assert_ne!(frame(&app)[(x, y)].fg, Color::Yellow);
 }
 
+/// A value the check flags takes Enter twice: `set` refuses it, so the first
+/// Enter says so and stays, and the second writes it with `--anyway` — for a
+/// value only a newer omh reads. Typing again starts over.
+#[test]
+fn a_flagged_value_takes_enter_twice() {
+    let check: Check = Box::new(|key, value| {
+        (key == "idle_timeout" && value.starts_with("soon")).then(|| "not a duration".to_string())
+    });
+    let mut app = App::new(model(), true).with_check(check);
+    app.key(code(KeyCode::Enter));
+    app.key(with('u', KeyModifiers::CONTROL));
+    for c in "soon".chars() {
+        app.key(press(c));
+    }
+    assert_eq!(app.key(code(KeyCode::Enter)), Next::Stay, "written at once");
+    assert!(matches!(app.modal, Some(Modal::Input(_))));
+    assert!(
+        drawn(&app).contains("again writes it anyway"),
+        "{}",
+        drawn(&app)
+    );
+    app.key(press('!'));
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Stay,
+        "typing again starts over"
+    );
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Run(Act::SetAnyway {
+            key: "idle_timeout".into(),
+            value: "soon!".into()
+        })
+    );
+}
+
 #[test]
 fn enter_on_a_default_asks_for_its_value_starting_from_the_current_one() {
     let mut app = App::new(model(), true);

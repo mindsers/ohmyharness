@@ -544,7 +544,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     cmd::settings_tui::run(&paths, !ctx.palette.is_plain())
                 }
                 None => cmd::settings::show_settings(&paths, ctx),
-                Some(SettingsCmd::Set { key, value }) => {
+                Some(SettingsCmd::Set { key, value, anyway }) => {
                     cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
                     // Both doors, for the reason the guard above exists: a
                     // check on one spelling of a write is a check somebody
@@ -557,6 +557,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                         key,
                         value,
                         cmd::settings::Reach::named(config::Layer::Personal),
+                        *anyway,
                         cli.dry_run,
                         ctx,
                     )
@@ -603,6 +604,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             value,
             save,
             local,
+            anyway,
         } => {
             let paths = Paths::discover(&cwd)?;
             match cmd::settings::names(&paths, key, ctx) {
@@ -625,7 +627,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                         cmd::settings::check_account(&paths, value, ctx)?;
                     }
                     let reached = cmd::settings::reach(&paths, key, *local, *save)?;
-                    cmd::settings::set(&paths, key, value, reached, cli.dry_run, ctx)
+                    cmd::settings::set(&paths, key, value, reached, *anyway, cli.dry_run, ctx)
                 }
             }
         }
