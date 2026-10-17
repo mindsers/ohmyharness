@@ -337,6 +337,9 @@ enum Modal {
 struct Typed {
     text: Vec<char>,
     cursor: usize,
+    /// The whole line is what was there, selected: a letter replaces it, as
+    /// in any field that comes filled in — `45m` then `1h` made `45m1h`.
+    selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,6 +878,7 @@ impl App {
             label: format!("{} = ", row.name),
             line: Typed {
                 cursor: current.len(),
+                selected: !current.is_empty(),
                 text: current,
             },
             error: None,
@@ -2257,7 +2261,13 @@ impl App {
         let typed: String = input.line.text.iter().collect();
         lines.push(Line::from(vec![
             Span::styled(input.label.clone(), self.look.title()),
-            Span::raw(typed.clone()),
+            match input.line.selected {
+                true => Span::styled(
+                    typed.clone(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ),
+                false => Span::raw(typed.clone()),
+            },
         ]));
         // What omh would say about the value as it stands, before it is
         // written rather than after.
@@ -2583,6 +2593,19 @@ impl Typed {
     /// The editing keys a shell's line has, and no more.
     fn edit(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Selected, a letter or a deletion takes the whole of it; any other
+        // key keeps it, and is the one that moves into it.
+        if std::mem::take(&mut self.selected) {
+            let replaces = matches!(key.code, KeyCode::Char(_) if plain(key))
+                || matches!(key.code, KeyCode::Backspace | KeyCode::Delete);
+            if replaces {
+                self.text.clear();
+                self.cursor = 0;
+                if !matches!(key.code, KeyCode::Char(_)) {
+                    return;
+                }
+            }
+        }
         match key.code {
             KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = self.text.len(),

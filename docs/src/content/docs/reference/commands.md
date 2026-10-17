@@ -2169,6 +2169,7 @@ pages are one line along the top.
 | `↓` `↑` (`j` `k`), `home` `end` (`g` `G`) | move in the list |
 | `⇥` `⇧⇥` or `→` `←` (`l` `h`), `1`–`7` | change page |
 | letters, in a list to pick from | go to the option they spell — `pod` is `podman`; `esc` or `q` closes it, and no other key does |
+| typing, in a box that opens filled in | replaces what was there, which opens selected; `←` `→` or `home` `end` move into it instead |
 | `enter` | set a default — picked from its choices where it has them, typed where it does not; open a rule, skill, command, subagent or hook in `$EDITOR` |
 | `e` | `$EDITOR` on the entry, or on the file a page lives in |
 | `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |

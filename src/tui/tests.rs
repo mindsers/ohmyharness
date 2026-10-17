@@ -1776,6 +1776,59 @@ fn a_source_with_nothing_in_it_is_not_offered() {
     assert!(drawn(&app).contains("nothing to import"), "{}", drawn(&app));
 }
 
+/// A value already there is selected when the box opens: a letter replaces
+/// it, as in any field that comes filled in. `j j ↵ 1h` made `45m1h`. A
+/// movement key keeps it, to change it rather than replace it.
+#[test]
+fn a_value_already_there_is_replaced_by_typing() {
+    let mut app = App::new(model(), true);
+    app.key(code(KeyCode::Enter));
+    // Drawn as selected.
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let at = (0..30u16)
+        .flat_map(|y| (0..118u16).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            buffer[(x, y)].symbol() == "3"
+                && buffer[(x + 1, y)].symbol() == "0"
+                && buffer[(x + 2, y)].symbol() == "m"
+                && buffer[(x.saturating_sub(2), y)].symbol() == "="
+        })
+        .expect("the value in the box");
+    assert!(
+        buffer[at].modifier.contains(Modifier::REVERSED),
+        "not drawn selected"
+    );
+    assert_eq!(
+        typed(&mut app, "1h"),
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "1h".into()
+        })
+    );
+    app.key(code(KeyCode::Enter));
+    app.key(code(KeyCode::End));
+    assert_eq!(
+        typed(&mut app, "s"),
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "30ms".into()
+        }),
+        "moved into it, typing goes on after it"
+    );
+    app.key(code(KeyCode::Enter));
+    app.key(code(KeyCode::Backspace));
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "".into()
+        }),
+        "backspace takes the whole of it"
+    );
+}
+
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
 /// act the row carries; the row's `●`/`○` and the page's heading say which way
 /// it is now. A row with nothing to flip takes no `space`.
