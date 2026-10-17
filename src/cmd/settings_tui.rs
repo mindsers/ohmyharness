@@ -450,24 +450,33 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
         }
     };
     for k in key::KEYS {
+        let mut warning = None;
         let edit = match (k.name, &k.shape) {
             (_, key::Shape::Choice(allowed)) => {
                 Edit::Choice(allowed.iter().map(|a| a.to_string()).collect())
             }
             // The logins omh has captured, offered by name — and still a line
             // to type into, for `codex:work`, one harness's own.
-            ("account", _) => match logins(paths, adapters) {
-                Ok(names) if !names.is_empty() => Edit::Suggest(names),
-                _ => Edit::Text {
+            ("account", _) => {
+                let typed = Edit::Text {
                     hint: "a login's name, as `omh auth <harness> -n <name>` captured it".into(),
-                },
-            },
+                };
+                match logins(paths, adapters) {
+                    Ok(names) if names.is_empty() => typed,
+                    Ok(names) => Edit::Suggest(names),
+                    Err(e) => {
+                        warning = Some(format!("could not list the logins: {e:#}"));
+                        typed
+                    }
+                }
+            }
             (_, shape) => Edit::Text { hint: hint(shape) },
         };
         out.rows.push(Row {
             name: k.name.to_string(),
             value: mine.get(k.name).cloned(),
             fallback: Some(k.unset.to_string()),
+            warning,
             about: vec![k.does.to_string()],
             edit,
             ..Row::default()
@@ -511,8 +520,9 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
 
 /// Every login captured for any harness, by name.
 fn logins(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Result<Vec<String>> {
-    let Ok(adapters) = adapters else {
-        anyhow::bail!("could not read the adapters");
+    let adapters = match adapters {
+        Ok(adapters) => adapters,
+        Err(e) => anyhow::bail!("could not read the adapters: {e:#}"),
     };
     let mut names = std::collections::BTreeSet::new();
     for adapter in adapters {
@@ -1054,6 +1064,60 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The shipped adapters, where `Paths::adapters()` looks.
+    fn seed_adapters(paths: &Paths) {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+        std::fs::create_dir_all(paths.adapters()).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), paths.adapters().join(entry.file_name())).unwrap();
+        }
+    }
+
+    /// `account` offers the logins captured, by name — what `omh auth`
+    /// leaves behind, the file claude's adapter names as proof.
+    #[test]
+    fn account_offers_the_logins_captured() {
+        let (_dir, paths) = paths();
+        seed_adapters(&paths);
+        let token = paths.creds("claude").join("work/.claude/.credentials.json");
+        std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+        // Not `{}`, which `auth` reads as a placeholder and not a login.
+        std::fs::write(&token, r#"{"token":"seeded"}"#).unwrap();
+        let model = model(&paths);
+        let row = page(&model, "defaults")
+            .rows
+            .iter()
+            .find(|r| r.name == "account")
+            .unwrap();
+        assert_eq!(row.edit, Edit::Suggest(vec!["work".into()]));
+        assert_eq!(row.warning, None);
+    }
+
+    /// Logins omh could not list are said on the row, not taken for none:
+    /// the row is still typed into, and says why it offers nothing.
+    #[test]
+    fn logins_omh_could_not_list_are_said() {
+        let (_dir, paths) = paths();
+        seed_adapters(&paths);
+        // A file where the harness's directory of logins goes: NotADirectory,
+        // which is not a kind of absence.
+        std::fs::create_dir_all(paths.root.join("creds")).unwrap();
+        std::fs::write(paths.creds("claude"), "").unwrap();
+        let model = model(&paths);
+        let row = page(&model, "defaults")
+            .rows
+            .iter()
+            .find(|r| r.name == "account")
+            .unwrap();
+        assert!(matches!(row.edit, Edit::Text { .. }), "{:?}", row.edit);
+        let warning = row.warning.as_deref().unwrap_or_default();
+        assert!(
+            warning.contains("could not list the logins") && warning.contains("creds/claude"),
+            "{warning:?}"
+        );
     }
 
     /// Hooks are yours first and then omh's, each saying when it runs and

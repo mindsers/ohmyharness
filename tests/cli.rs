@@ -7477,10 +7477,10 @@ fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
         .find("\x1b[?1049l")
         .map(|i| entered + i)
         .unwrap_or_else(|| panic!("the screen was never left for the editor:\n{raw}"));
-    assert!(
-        raw[left..].contains("\x1b[?1049h"),
-        "the screen did not come back after the editor:\n{raw}"
-    );
+    let back = raw[left..]
+        .find("\x1b[?1049h")
+        .map(|i| left + i)
+        .unwrap_or_else(|| panic!("the screen did not come back after the editor:\n{raw}"));
     // And the mouse given back each time the terminal is: before `$EDITOR`
     // has it, and before the shell does at the end. Left captured, every
     // click and scroll after is an escape sequence typed at a prompt.
@@ -7493,6 +7493,10 @@ fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
     assert!(
         raw[..left].rfind(release) > raw[..left].rfind(capture),
         "the mouse was still captured when the editor got the terminal"
+    );
+    assert!(
+        raw[back..].contains(capture),
+        "the mouse was not taken back with the screen after the editor"
     );
     let last_leave = raw.rfind("\x1b[?1049l").expect("left at the end");
     assert!(

@@ -2099,10 +2099,13 @@ your defaults /Users/you/.omh/default.toml
   idle_timeout  45m
 
 omh also reads
-  carry_in     Untracked files a session needs — a worktree holds tracked files only. The one path by which a secret reaches the agent, so keep it short.
-  account      Which captured login a session is launched with, by name.
-  runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
-  persistence  How a session's terminal survives detaching. Unset means `dtach`.
+  carry_in        Untracked files a session needs — a worktree holds tracked files only. The one path by which a secret reaches the agent, so keep it short.
+  account         Which captured login a session is launched with, by name.
+  sandbox_memory  How much memory a session's sandbox may use, as the runtime spells it (`4g`, `512m`). Unset means the runtime's default.
+  sandbox_cpus    How many CPUs a session's sandbox may use, as the runtime spells it (`2`, `1.5`). Unset means the runtime's default.
+  runtime         Which runtime builds and runs the sandbox. Unset means `auto`.
+  ca_cert         A CA certificate the sandbox must trust, as a path to a PEM — for a network that inspects TLS and signs it with its own root.
+  persistence     How a session's terminal survives detaching. Unset means `dtach`.
 ```
 
 **The second list is the useful half**: every key omh reads, which no settings
@@ -2113,47 +2116,72 @@ defaults, then one page per kind of catalogue entry — rules, skills, servers,
 commands, subagents, hooks. Piped, redirected, or with `--json` or `--dry-run`,
 it is the report above.
 
+From 100 columns it is three: the pages, the list, and what the selected row
+is. From 70, what the row is sits under the list, as below; narrower, the
+pages are one line along the top.
+
 ```
  omh settings  /Users/you/.omh
-┌──────────────────┐┌ skills ──────────────────────────────────────────────────┐
-│1 defaults     1  ││tdd                                                       │
-│2 rules        0  ││                                                          │
-│3 skills       1  ││                                                          │
-│4 servers      2  ││                                                          │
-│5 commands     0  ││                                                          │
-│6 subagents    0  │└──────────────────────────────────────────────────────────┘
-│7 hooks        8  │┌ skills/tdd ──────────────────────────────────────────────┐
-│                  ││write the failing test first                              │
-│                  ││at /Users/you/.omh/skills/tdd                             │
-│                  ││                                                          │
-│                  ││                                                          │
-│                  ││                                                          │
-└──────────────────┘└──────────────────────────────────────────────────────────┘
-┌──────────────────────────────────────────────────────────────────────────────┐
-│= omh settings rm --yes skills review-diff                                    │
-│removed /Users/you/.omh/skills/review-diff                                    │
-└──────────────────────────────────────────────────────────────────────────────┘
- ↑↓ move · ⇥ or 1-7 page · enter/e edit · a new · d remove · i import · q quit
+▌ Defaults        │ Defaults  8
+  Rules         1 │
+  Skills        2 │   carry_in        default: nothing carried
+  Servers       1 │   account         default: the only login captured
+  Commands      0 │ ✓ idle_timeout    45m
+  Subagents     0 │   sandbox_memory  default: the runtime's own
+  Hooks         0 │   sandbox_cpus    default: the runtime's own
+                  │   runtime         default: auto
+                  │   ca_cert         default: no extra CA
+                  │   persistence     default: dtach
+                  │
+                  │─────────────────────────────────────────────────────────────
+                  │ idle_timeout
+                  │
+                  │ How long a session may sit unused before omh stops it.
+                  │
+                  │ now     45m
+                  │ a duration: 90s, 30m, 2h, 1d
+                  │
+                  │ ↵ set  d unset
+ ✓ wrote → /Users/you/.omh/default.toml (seeds new repos)
+   $ omh settings set idle_timeout 45m
+ ↑↓ move  ⇥ page  ↵ set  d unset  e edit the file  / filter       ? help  q quit
 ```
 
 | | |
 |---|---|
-| `↓` `↑` (`j` `k`) | move in the list |
+| `↓` `↑` (`j` `k`), `home` `end` (`g` `G`) | move in the list |
 | `⇥` `⇧⇥` or `→` `←` (`l` `h`), `1`–`7` | change page |
-| `enter` | set a default; open a rule, skill, command, subagent or hook in `$EDITOR` |
+| `enter` | set a default — picked from its choices where it has them, typed where it does not; open a rule, skill, command, subagent or hook in `$EDITOR` |
 | `e` | `$EDITOR` on the entry, or on the file a page lives in |
-| `a` | a new entry, opened in `$EDITOR`; a new server, asked for in three lines |
+| `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |
 | `d` | unset a default; remove an entry or a server, after asking |
 | `i` | import this kind from a harness whose adapter says where it keeps them |
+| `/` | filter the page by name, description or value; `esc` takes it off |
+| `?` | every key, on the screen |
 | `q` `esc` `ctrl-d` `ctrl-c` | leave |
 
-A letter held with Ctrl or Alt is not that letter: Ctrl-D leaves, and no other
-held key does anything — Ctrl-D does not unset the default under the cursor.
+**A letter held with Ctrl or Alt is not that letter**: Ctrl-D leaves, as it
+leaves a shell, and does not unset the default under the cursor. In a line
+being typed, Ctrl-A, Ctrl-E and Ctrl-U go to its start, go to its end, and
+clear what is before the cursor.
+
+**The mouse selects a row, opens it with a second click, scrolls the list and
+changes page.** The screen holds the mouse while it is drawn, and gives it back
+before `$EDITOR` runs and when it ends — so selecting text to copy takes the
+key your terminal uses to get past a program's mouse: Shift in most, Option in
+iTerm2.
+
+**A row says what it is**: a default, its value or, unset, what applies
+instead; an entry, its description; a hook, when it runs and what it does,
+yours under their own heading before the ones omh ships. A key nothing reads
+names the key it was probably meant to be, and a skill with no `SKILL.md` or a
+link to nothing is marked on its row.
 
 **Every change is a command, run as one.** The screen has no write of its
 own: a key becomes the line you would have typed — `omh settings set`,
 `omh settings rm`, `omh settings mcp add`, `omh import` — which omh runs, and
-the screen shows the line above what it said. So its refusals, warnings and
+the screen shows what it said marked ✓, `!` or ✗, with the line on the right,
+and marks the row it changed until the next key. So its refusals, warnings and
 wording are that command's, and anything you did there you can script.
 Removing previews first, and asks in the preview's words, with the preview's
 warnings; a hook omh ships is refused before the question rather than after
@@ -2199,14 +2227,18 @@ name is refused before `rm` deletes anything.
 **An entry opens as the file it is, and a new one is made the shape its kind
 is read in.** `omh settings edit rules house` opens `house.md`, the file
 `omh info` lists as `house`. A new rule, command or subagent is made `.md`, a
-new hook `.json`, and a new skill a directory with its `SKILL.md` opened — a
-skill is mounted as a directory holding one. A new skill nothing was saved into
-is taken back rather than left as an empty directory. An existing skill opens
-as the directory it is. A server has no file of its own, so `omh settings edit
-mcp` takes no name and opens `mcp.json`.
+new hook `.json`, and a new skill a directory — a skill is mounted as a
+directory holding a `SKILL.md`, and that file is what opens, for a new skill as
+for one you have. A new skill nothing was saved into is taken back rather than
+left as an empty directory. A name is a name whole:
+`omh settings edit rules v1.2` opens `v1.2.md`. A server has no file of its
+own, so `omh settings edit mcp` takes no name and opens `mcp.json`.
 
-**`$EDITOR` runs as a shell would run it**, so `EDITOR='code --wait'` works, and
-its status is the command's: an editor that fails fails the edit, naming it.
+**`$EDITOR` runs as a shell would run it**, as git runs it:
+`EDITOR='code --wait'` works, a path with a space in it is quoted inside the
+value, and an empty `EDITOR` is no editor set, which is `vi`. Its status is the
+command's: an editor that fails fails the edit, naming it, and one `sh` cannot
+find is said in words, since `sh`'s own are behind the screen.
 
 **One `rm` for every kind of entry**, servers included — `omh settings rm mcp
 linear` and `omh settings rm skills review-diff` are the same act. At a

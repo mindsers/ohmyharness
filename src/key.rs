@@ -126,7 +126,7 @@ pub const KEYS: &[Key] = &[
                it (`4g`, `512m`). Unset means the runtime's default.",
         shape: Shape::Text,
         secret: Secret::No,
-        unset: "the runtime's default",
+        unset: "the runtime's own",
     },
     Key {
         name: "sandbox_cpus",
@@ -134,7 +134,7 @@ pub const KEYS: &[Key] = &[
                (`2`, `1.5`). Unset means the runtime's default.",
         shape: Shape::Text,
         secret: Secret::No,
-        unset: "the runtime's default",
+        unset: "the runtime's own",
     },
     Key {
         name: "runtime",

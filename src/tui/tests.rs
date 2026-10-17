@@ -241,6 +241,32 @@ fn every_layout_shows_the_row_its_detail_and_the_keys() {
     );
 }
 
+/// The columns start on one line: the first page, the list's heading, and —
+/// where it is beside the list — the detail's title. Each began a line lower
+/// than the heading, and looked like a list that had slipped.
+#[test]
+fn the_columns_start_level() {
+    for width in [120, 80] {
+        let mut app = App::new(model(), true);
+        app.key(press('2'));
+        let screen = drawn_at(&app, width, 24);
+        let heading = screen
+            .lines()
+            .find(|l| l.contains("Skills  2"))
+            .unwrap_or_else(|| panic!("no heading at {width}:\n{screen}"));
+        assert!(
+            heading.contains("Defaults"),
+            "{width}: the pages begin below the heading:\n{screen}"
+        );
+        if width >= 100 {
+            assert!(
+                heading.contains("skills/keep"),
+                "{width}: the detail begins below the heading:\n{screen}"
+            );
+        }
+    }
+}
+
 /// An unset default says what applies instead; a table says what it holds.
 #[test]
 fn a_default_says_what_it_is_and_what_applies_when_unset() {
@@ -625,9 +651,12 @@ fn the_row_an_act_changed_is_marked_until_the_next_key() {
     assert!(matches!(app.key(code(KeyCode::Enter)), Next::Run(_)));
     app.reload(model());
     assert_eq!(app.changed.as_deref(), Some("runtime"));
-    assert!(drawn(&app).contains("✓ runtime") || drawn(&app).contains("▸ runtime"));
+    // Selected as well — the selection follows it — and the mark is still ✓:
+    // `▸` there said nothing about what changed.
+    assert!(drawn(&app).contains("✓ runtime"), "{}", drawn(&app));
     app.key(press('k'));
     assert_eq!(app.changed, None);
+    assert!(!drawn(&app).contains("✓ runtime"), "{}", drawn(&app));
 }
 
 /// A click selects; a click on what is selected opens it; the wheel moves; a
@@ -663,6 +692,15 @@ fn a_mouse_selects_opens_scrolls_and_pages() {
     );
     app.mouse(event(MouseEventKind::ScrollUp, list.x, list.y));
     assert_eq!(app.row().map(|r| r.name.as_str()), Some("keep"));
+    app.mouse(event(MouseEventKind::ScrollDown, list.x, list.y));
+    assert_eq!(app.row().map(|r| r.name.as_str()), Some("review-diff"));
+    // Under a popup the mouse does nothing: what it would land on is behind
+    // the popup, where it cannot be seen.
+    app.key(press('?'));
+    app.mouse(event(MouseEventKind::ScrollUp, list.x, list.y));
+    app.mouse(click(pages.x + 2, pages.y));
+    assert_eq!(app.at, 1, "still the second page");
+    assert_eq!(app.row().map(|r| r.name.as_str()), Some("review-diff"));
 }
 
 /// No colour means no colour on any cell — bold and dim stay, and the

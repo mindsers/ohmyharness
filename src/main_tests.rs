@@ -1361,8 +1361,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // + `omh upgrade` above what a second look printed
         // − 2 repeated examples; the summary block became a usage line per entry
         // + `omh settings rm`'s console example; its synopsis line replaced
-        // the server's own `rm`. + the header of the settings screen's drawing.
-        ("docs/src/content/docs/reference/commands.md", 147),
+        // the server's own `rm`. + the header of the settings screen's drawing,
+        // + the command its status line names.
+        ("docs/src/content/docs/reference/commands.md", 148),
         ("docs/src/content/docs/reference/configuration.md", 47), // + `omh use hooks tdd-guard`
         ("docs/src/content/docs/reference/memory.md", 1),
     ]

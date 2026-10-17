@@ -987,7 +987,8 @@ impl App {
                 self.draw_rule(f, a);
                 self.draw_list(f, list);
                 self.draw_rule(f, b);
-                self.draw_detail(f, detail.inner(Margin::new(1, 1)));
+                // Level with the list's heading, as the pages are.
+                self.draw_detail(f, detail.inner(Margin::new(1, 0)));
             }
             Width::Medium => {
                 let [pages, a, rest] = Layout::horizontal([
@@ -1074,12 +1075,10 @@ impl App {
     }
 
     fn draw_pages(&self, f: &mut Frame, area: Rect) {
-        self.hit.borrow_mut().pages = Rect {
-            y: area.y + 1,
-            height: area.height.saturating_sub(1),
-            ..area
-        };
-        let mut lines = vec![Line::default()];
+        // Level with the list's own heading, so the two columns start on one
+        // line.
+        self.hit.borrow_mut().pages = area;
+        let mut lines = Vec::new();
         for (i, s) in self.model.sections.iter().enumerate() {
             let here = i == self.at;
             let mark = match here {
@@ -1282,9 +1281,11 @@ impl App {
         width: usize,
     ) -> Line<'static> {
         let changed = self.changed.as_deref() == Some(row.name.as_str());
-        let mark = match (selected, changed, row.warning.is_some()) {
-            (true, _, _) => Span::styled("▸ ", self.look.accent()),
-            (false, true, _) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
+        // The row an act changed is the one selected after it, so ✓ outranks
+        // the selection's `▸`, or it would never be seen.
+        let mark = match (changed, selected, row.warning.is_some()) {
+            (true, _, _) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
+            (false, true, _) => Span::styled("▸ ", self.look.accent()),
             (false, false, true) => Span::styled("! ", self.look.tone(Tone::Warn)),
             (false, false, false) => Span::raw("  "),
         };

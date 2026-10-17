@@ -976,7 +976,7 @@ pub(crate) fn unset(
 /// traversal. Same rule and same function as `[use]` uses, because it is the
 /// same act — a name being minted.
 /// Takes the `Paths` its caller resolved, for the reason `mcp` does: the file
-/// it opens is `~/.omh/default.toml` or a directory under `~/.omh`, and
+/// it opens is `~/.omh/default.toml` or a file under `~/.omh`, and
 /// `Paths::discover` made both unreachable outside a checkout.
 pub(crate) fn edit(
     paths: &Paths,
@@ -1028,8 +1028,8 @@ pub(crate) enum Edited {
 /// a name refused after the terminal was handed to `$EDITOR` is a refusal
 /// printed behind the screen, where nobody reads it.
 ///
-/// An entry that exists opens as the file — or a skill's directory — that
-/// `omh info` lists under its name; a new one is made the shape its kind is
+/// An entry that exists opens as the file `omh info` lists under its name —
+/// a skill, as its `SKILL.md` — and a new one is made the shape its kind is
 /// read in. A catalogue name is a file with its extension off, and joining
 /// the bare name back on opened a new, empty `rules/house` beside `house.md`.
 pub(crate) fn edit_target(
