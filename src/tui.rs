@@ -620,18 +620,21 @@ impl App {
                 .find(|r| r.name == key)
                 .and_then(|r| r.value.clone())
         };
+        // What was there goes back as it was, readable or not: one written
+        // `--anyway` put back with a plain `set` was refused.
+        let put_back = |key: &str, value: String| {
+            let key = key.to_string();
+            match self.check.as_ref().and_then(|c| c(&key, &value)) {
+                Some(_) => Act::SetAnyway { key, value },
+                None => Act::Set { key, value },
+            }
+        };
         match act {
             Act::Set { key, .. } | Act::SetAnyway { key, .. } => Some(match had(key) {
-                Some(value) => Act::Set {
-                    key: key.clone(),
-                    value,
-                },
+                Some(value) => put_back(key, value),
                 None => Act::Unset { key: key.clone() },
             }),
-            Act::Unset { key } => had(key).map(|value| Act::Set {
-                key: key.clone(),
-                value,
-            }),
+            Act::Unset { key } => had(key).map(|value| put_back(key, value)),
             // The caller's, beside the flip it worked out: the opposite verb
             // is not always the way back.
             Act::Use { .. } | Act::Unuse { .. } => self

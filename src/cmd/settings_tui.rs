@@ -406,6 +406,11 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
         Act::Set { key, value } => s(&["settings", "set", "--", key, value]),
         Act::SetAnyway { key, value } => s(&["settings", "set", "--anyway", "--", key, value]),
         // The first of its two lines; `command_lines` adds the unset after it.
+        // A move undone writes the typo back, a key nothing reads, which `set`
+        // refuses without `--anyway`.
+        Act::Move { to, value, .. } if key::describes(to).is_none() => {
+            s(&["settings", "set", "--anyway", "--", to, value])
+        }
         Act::Move { to, value, .. } => s(&["settings", "set", "--", to, value]),
         Act::Use { capability, name } => s(&["settings", "use", "--", capability, name]),
         Act::Unuse { capability, name } => s(&["settings", "unuse", "--", capability, name]),
@@ -1409,6 +1414,42 @@ mod tests {
         assert!(refusal("idle_timeout", "soon").is_some());
         let unread = refusal("my_new_key", "1").unwrap_or_default();
         assert!(unread.contains("nothing in omh reads"), "{unread:?}");
+    }
+
+    /// A move undone writes the typo back, which is a key nothing reads — so
+    /// that line is `--anyway`, since `set` refuses such a key now. The move
+    /// itself is not: the key it meant is read, and a value it cannot read is
+    /// said rather than written.
+    #[test]
+    fn a_move_undone_writes_the_typo_back_anyway() {
+        let first = |act: &Act| {
+            let mut argv = vec!["omh".to_string()];
+            argv.extend(command_lines(act).remove(0));
+            Cli::try_parse_from(&argv).unwrap().cmd
+        };
+        let value = "[\".env\"]".to_string();
+        let forward = Act::Move {
+            from: "carry_ins".into(),
+            to: "carry_in".into(),
+            value: value.clone(),
+        };
+        let back = Act::Move {
+            from: "carry_in".into(),
+            to: "carry_ins".into(),
+            value,
+        };
+        assert!(matches!(
+            first(&forward),
+            Cmd::Settings {
+                cmd: Some(SettingsCmd::Set { anyway: false, .. })
+            }
+        ));
+        assert!(matches!(
+            first(&back),
+            Cmd::Settings {
+                cmd: Some(SettingsCmd::Set { anyway: true, .. })
+            }
+        ));
     }
 
     /// A shell's reading of a line `said` wrote: words, single quotes, `'\''`.

@@ -1607,6 +1607,31 @@ fn a_servers_page_omh_could_not_read_takes_no_add() {
     }
 }
 
+/// Undoing puts back what was there even where omh cannot read it: a value
+/// written `--anyway` was put back with a plain `set`, which refused it, so
+/// `u` after changing it did nothing but fail.
+#[test]
+fn u_puts_back_a_value_written_anyway() {
+    let check: Check = Box::new(|key, value| {
+        (key == "idle_timeout" && value == "forever").then(|| "not a duration".to_string())
+    });
+    let mut model = model();
+    model.sections[0].rows[0].value = Some("forever".into());
+    let mut app = App::new(model, true).with_check(check);
+    app.key(code(KeyCode::Enter));
+    app.key(with('u', KeyModifiers::CONTROL));
+    let set = typed(&mut app, "2h");
+    assert!(matches!(set, Next::Run(Act::Set { .. })), "{set:?}");
+    app.report("settings set idle_timeout 2h".into(), true, "wrote", "");
+    assert_eq!(
+        app.key(press('u')),
+        Next::Run(Act::SetAnyway {
+            key: "idle_timeout".into(),
+            value: "forever".into()
+        })
+    );
+}
+
 /// `space` is undone by what the caller says undoes it, not by the opposite
 /// verb: `use` on a guard of a kind with no list writes the kind as a list,
 /// and `unuse` after it left the list standing — the rest of the kind frozen,
