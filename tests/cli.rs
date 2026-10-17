@@ -6742,6 +6742,18 @@ fn pty() -> (std::fs::File, std::fs::File) {
 
 impl Sandbox {
     fn omh_on_a_terminal(&self, args: &[&str]) -> Tty {
+        self.omh_on_a_terminal_with(args, &[], true)
+    }
+
+    /// `omh_on_a_terminal`, with variables set over the sandbox's own, and with
+    /// stdin either the terminal or nothing at all — `omh settings < file` has
+    /// a terminal to draw on and none to read keys from.
+    fn omh_on_a_terminal_with(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin_is_the_terminal: bool,
+    ) -> Tty {
         use std::os::unix::process::CommandExt;
         let (master, slave) = pty();
         let path = match std::env::var("PATH") {
@@ -6757,15 +6769,23 @@ impl Sandbox {
                 .env("PATH", path)
                 .env("EDITOR", self.bin.join("fake-editor"))
                 .env("TERM", "xterm-256color")
-                .stdin(slave.try_clone().unwrap())
                 .stdout(slave.try_clone().unwrap())
-                .stderr(slave);
+                .stderr(slave.try_clone().unwrap());
+            for (k, v) in env {
+                command.env(k, v);
+            }
+            if stdin_is_the_terminal {
+                command.stdin(slave);
+            } else {
+                command.stdin(std::process::Stdio::null());
+            }
             // Its own session, with this terminal as the controlling one — what
             // a shell gives a program it starts. Without it `/dev/tty` names
-            // the terminal the *suite* runs in.
+            // the terminal the *suite* runs in. Taken through stdout, which is
+            // the terminal whatever stdin is.
             unsafe {
                 command.pre_exec(|| {
-                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    if libc::setsid() < 0 || libc::ioctl(1, libc::TIOCSCTTY as _, 0) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -6925,15 +6945,41 @@ impl Tty {
         }
     }
 
+    /// Wait until nothing has been drawn for a moment: a frame arrives in
+    /// several writes, and a snapshot taken between two of them is half a
+    /// frame.
+    fn settle(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut seen = self.drawn.lock().unwrap().len();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            let now = self.drawn.lock().unwrap().len();
+            if now == seen || std::time::Instant::now() > deadline {
+                return;
+            }
+            seen = now;
+        }
+    }
+
     /// Press one key and wait for the screen to answer it, so the next key
     /// is sent to the screen this one produced — not raced past it.
+    ///
+    /// The snapshot is taken once the screen has settled: taken mid-frame,
+    /// the rest of the *previous* frame read as the answer, and every later
+    /// key in a loop went one frame behind.
     fn step(&mut self, keys: &str) {
+        self.settle();
         let before = self.screen();
         self.send(keys);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.screen() == before && std::time::Instant::now() < deadline {
+        while self.screen() == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{keys:?} changed nothing on the screen:\n{before}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        self.settle();
     }
 
     /// Wait for it to exit, and answer how it did and what it drew.
@@ -7090,7 +7136,7 @@ fn an_entry_is_removed_on_the_screen_after_it_asks() {
     let mut tty = sb.omh_on_a_terminal(&["settings"]);
     tty.wait_for("idle_timeout");
     tty.send("3"); // the skills section
-    tty.wait_for("keep");
+    tty.wait_for("skills/keep");
     for _ in 0..4 {
         if tty.screen().contains("skills/review-diff") {
             break;
@@ -7119,11 +7165,11 @@ fn a_server_is_added_on_the_screen() {
     tty.send("4"); // the servers section
     tty.wait_for("no servers");
     tty.send("a");
-    tty.wait_for("name");
+    tty.wait_for("name:");
     tty.send("linear\r");
-    tty.wait_for("command");
+    tty.wait_for("command and arguments:");
     tty.send("npx -y mcp-remote 'https://mcp.linear.app/sse'\r");
-    tty.wait_for("env");
+    tty.wait_for("env (KEY=VALUE");
     tty.send("\r");
     tty.wait_for("wrote →");
     tty.send("q");
@@ -7171,6 +7217,187 @@ fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
         raw[left..].contains("\x1b[?1049h"),
         "the screen did not come back after the editor:\n{raw}"
     );
+}
+
+/// A rule opens as the file it is, from the screen as from the command.
+///
+/// The screen's rows carry a name without its extension, and editing joined
+/// it back on bare: `enter` on `rules/house` opened a new, empty
+/// `rules/house` beside `house.md`.
+#[test]
+fn a_rule_opens_from_the_screen_as_the_file_it_is() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["rules/house.md"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("2");
+    tty.wait_for("rules/house");
+    tty.send("\r");
+    tty.wait_for("closed");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    let opened = sb.opened_in_the_editor();
+    assert!(
+        opened.trim_end().ends_with(".omh/rules/house.md"),
+        "{opened}"
+    );
+    assert!(!sb.home.join(".omh/rules/house").exists());
+}
+
+/// An editor that fails is said on the screen, in the editor's words.
+///
+/// It was said as "the editor did not exit cleanly" whatever had happened —
+/// and when omh refused before any editor ran, the refusal itself was
+/// printed behind the screen.
+#[test]
+fn an_editor_that_fails_is_said_on_the_screen() {
+    let sb = sandbox();
+    sb.seed_base();
+    let failing = sb.bin.join("failing-editor");
+    std::fs::write(&failing, "#!/bin/sh\nexit 3\n").unwrap();
+    std::fs::set_permissions(
+        &failing,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let failing = failing.display().to_string();
+    let mut tty = sb.omh_on_a_terminal_with(&["settings"], &[("EDITOR", &failing)], true);
+    tty.wait_for("idle_timeout");
+    tty.send("e");
+    tty.wait_for("exited with");
+    tty.wait_for("failing-editor");
+    // And a name refused before any editor runs is refused on the screen.
+    tty.send("3a");
+    tty.wait_for("name:");
+    tty.send("team/review\r");
+    tty.wait_for("never a path");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+}
+
+/// A removal omh refuses asks nothing: the refusal is the answer.
+///
+/// The preview is what asks, so a hook omh ships is refused before the
+/// question; a `y` typed after it removes nothing.
+#[test]
+fn a_removal_omh_refuses_asks_nothing() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.seed_catalogue(&["hooks"]);
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    tty.send("7");
+    tty.wait_for("hooks/config-guard");
+    tty.send("d");
+    tty.wait_for("omh ships hooks/config-guard");
+    assert!(!tty.screen().contains("sure?"), "{}", tty.screen());
+    tty.send("y");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    assert!(sb.home.join(".omh/hooks/config-guard.json").exists());
+}
+
+/// With a terminal to draw on and none to read keys from, it is the report.
+///
+/// `omh settings < answers` would have opened a screen waiting on a file for
+/// keys it will never send.
+#[test]
+fn settings_with_stdin_off_a_terminal_is_the_report() {
+    let sb = sandbox();
+    sb.seed_base();
+    let tty = sb.omh_on_a_terminal_with(&["settings"], &[], false);
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    assert!(!raw.contains("\x1b[?1049h"), "it opened a screen: {raw}");
+    assert!(raw.contains("idle_timeout"), "{raw}");
+}
+
+/// `omh settings rm` at a terminal asks, and only a yes removes.
+///
+/// Every other run here gives the command a pipe or nothing, so the question
+/// itself was never asked by any test — taking it out stayed green.
+#[test]
+fn settings_rm_at_a_terminal_asks_and_only_a_yes_removes() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/keep/SKILL.md"]);
+    for (answer, removed) in [("n", false), ("\r", false), ("y", true)] {
+        let mut tty = sb.omh_on_a_terminal(&["settings", "rm", "skills", "keep"]);
+        tty.wait_for("(y/N)");
+        tty.send(answer);
+        if answer != "\r" {
+            tty.send("\r");
+        }
+        let (status, raw) = tty.finish();
+        assert_eq!(status.success(), removed, "answering {answer:?}: {raw}");
+        assert_eq!(
+            !sb.home.join(".omh/skills/keep").exists(),
+            removed,
+            "answering {answer:?}"
+        );
+    }
+}
+
+/// A catalogue directory omh cannot read is said, by `rm` and by `import`,
+/// and never as an empty one.
+///
+/// `rm`'s "your catalogue has no skills called…" and `import`'s "claude has no
+/// skills here" are both true of an empty directory and false of one omh could
+/// not open — and each sends somebody looking for a typo that is not there.
+#[cfg(unix)]
+#[test]
+fn a_directory_omh_cannot_read_is_said_never_read_as_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads through 0o000, so nothing would be tested
+    }
+    let sb = sandbox();
+    sb.seed_base();
+    sb.seed_adapters();
+    sb.catalogue(&["skills/keep/SKILL.md"]);
+    sb.theirs(".claude/skills/tdd/SKILL.md", "---\nname: tdd\n---\n");
+
+    for (locked, argv, absent) in [
+        (
+            sb.home.join(".omh/skills"),
+            vec!["settings", "rm", "skills", "keep", "--yes"],
+            "has no skills called",
+        ),
+        (
+            sb.home.join(".claude"),
+            vec!["import", "skills", "claude"],
+            "has no skills here",
+        ),
+    ] {
+        let was = std::fs::metadata(&locked).unwrap().permissions().mode();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = sb.omh(&argv);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(was)).unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success(),
+            "`omh {}` succeeded: {said}",
+            argv.join(" ")
+        );
+        assert!(
+            !said.contains(absent),
+            "`omh {}` read an unreadable directory as an empty one: {said}",
+            argv.join(" ")
+        );
+        assert!(
+            said.contains("ermission denied"),
+            "`omh {}` did not say why: {said}",
+            argv.join(" ")
+        );
+    }
 }
 
 /// A name from your catalogue is refused by **both** doors, and each names the

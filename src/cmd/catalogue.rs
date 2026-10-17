@@ -363,7 +363,13 @@ pub(crate) fn import_cmd(
             adapter::expand_host(template, &home, &paths.repo)
         }
     };
-    if !source.exists() {
+    // `try_exists`, not `exists`: the second answers `false` for a directory
+    // omh may not read, and "claude has no skills here" over a `~/.claude`
+    // somebody locked sends them looking for skills that are there.
+    if !source
+        .try_exists()
+        .with_context(|| format!("reading {}", source.display()))?
+    {
         ctx.say(
             &report::Action::new(
                 "import-nothing-there",
