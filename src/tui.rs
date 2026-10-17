@@ -1738,10 +1738,12 @@ impl App {
         width: usize,
     ) -> Line<'static> {
         let changed = self.changed.as_deref() == Some(row.name.as_str());
-        // Column 0 is the row's state; where the cursor is, the bar says.
-        let mark = match (changed, row.warning.is_some()) {
-            (true, _) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
-            (false, true) => Span::styled("! ", self.look.tone(Tone::Warn)),
+        // Column 0 is the row's state; where the cursor is, the bar says. What
+        // is wrong with it outranks a change just made to it: `space` on a
+        // skill with no SKILL.md answered with a green ✓ over the `!`.
+        let mark = match (row.warning.is_some(), changed) {
+            (true, _) => Span::styled("! ", self.look.tone(Tone::Warn)),
+            (false, true) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
             (false, false) => Span::raw("  "),
         };
         // Inside the bar nothing is dim: reversed, dim reads as a gap in it.
@@ -1797,6 +1799,14 @@ impl App {
             (_, None, _) => (row.summary.clone().unwrap_or_default(), dim),
         };
         spans.push(Span::styled(ellipsized(&text, room), style));
+        // Inside the bar, one tone: reversed, every colour along it was a
+        // stripe — green, cyan, yellow — and the glyphs already say what each
+        // colour did, as they do under `NO_COLOR`.
+        if selected {
+            for span in &mut spans {
+                span.style = span.style.fg(Color::Reset).bg(Color::Reset);
+            }
+        }
         Line::from(spans)
     }
 

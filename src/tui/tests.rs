@@ -632,7 +632,10 @@ fn a_default_says_what_it_is_and_what_applies_when_unset() {
     };
     assert!(line(&screen, "runtime").contains("auto"), "{screen}");
     assert!(!screen.contains("default:"), "{screen}");
-    assert!(line(&screen, "[use]").contains("skills = [\"tdd\"]"), "{screen}");
+    assert!(
+        line(&screen, "[use]").contains("skills = [\"tdd\"]"),
+        "{screen}"
+    );
     assert!(!screen.contains("(unset)"), "{screen}");
     app.key(press('j'));
     let screen = drawn(&app);
@@ -1499,6 +1502,55 @@ fn a_heading_after_rows_has_room_above_it() {
     let at = lines.iter().position(|l| l.contains("FEATURES")).unwrap();
     let above = lines[at - 1].split('│').nth(1).unwrap_or_default();
     assert!(above.trim().is_empty(), "{screen}");
+}
+
+/// A row's `!` outranks the `✓` of a change just made: `space` seeded a
+/// skill with no `SKILL.md`, and the row answered with a green `✓` over the
+/// warning. And inside the bar no span keeps its colour — the glyphs carry
+/// the meaning, as under `NO_COLOR` — where a warned row's bar ran green,
+/// cyan, reverse and yellow along its length.
+#[test]
+fn a_warning_outranks_a_change_and_the_bar_is_one_tone() {
+    let mut model = model();
+    let toggle = Act::Use {
+        capability: "skills".into(),
+        name: "keep".into(),
+    };
+    model.sections[1].rows[0].seeded = Some(false);
+    model.sections[1].rows[0].toggle = Some(toggle.clone());
+    model.sections[1].rows[0].warning = Some("no SKILL.md in it".into());
+    let mut app = App::new(model.clone(), true);
+    app.key(press('2'));
+    assert_eq!(app.key(press(' ')), Next::Run(toggle));
+    app.report(
+        "settings use -- skills keep".into(),
+        true,
+        "new repos take skills/keep",
+        "",
+    );
+    // As the driver does after every act.
+    app.reload(model);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let y = (0..30u16)
+        .find(|&y| {
+            (0..120u16)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .contains("no SKILL.md in it")
+        })
+        .expect("the row");
+    let line: String = (0..120u16)
+        .map(|x| buffer[(x, y)].symbol().to_string())
+        .collect();
+    let row = &line[line.find('│').unwrap() + '│'.len_utf8()..];
+    assert!(row.trim_start().starts_with('!'), "{line}");
+    let x0 = line[..line.find('│').unwrap()].chars().count() as u16 + 1;
+    let colours: std::collections::BTreeSet<String> = (x0..x0 + 50)
+        .map(|x| format!("{:?}", buffer[(x, y)].fg))
+        .collect();
+    assert!(colours.len() <= 1, "the bar runs {colours:?}: {line}");
 }
 
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
