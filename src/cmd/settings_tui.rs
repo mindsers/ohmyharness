@@ -66,6 +66,42 @@ pub(crate) fn run(paths: &Paths, color: bool, ctx: &crate::out::Ctx) -> Result<(
     driven
 }
 
+/// `omh settings` off a terminal: your defaults, and your catalogue as the
+/// screen reads it — each page's count, what new repos get, and every entry
+/// that is wrong — so a broken entry is not visible only on a terminal.
+pub(crate) fn show(paths: &Paths, ctx: &crate::out::Ctx) -> Result<()> {
+    let mut said = settings::settings_report(paths)?;
+    said.meant = said
+        .unread
+        .iter()
+        .filter_map(|u| nearest_key(&u.key).map(|k| (u.key.clone(), k.to_string())))
+        .collect();
+    said.catalogue = model(paths)
+        .sections
+        .into_iter()
+        .filter(|s| s.page != Page::Defaults)
+        .map(|s| crate::report::CataloguePage {
+            kind: s.title.to_string(),
+            count: match (&s.problem, s.rows.is_empty()) {
+                (Some(_), true) => None,
+                _ => Some(s.rows.len()),
+            },
+            seeds: s.seeds,
+            problem: s.problem,
+            warnings: s
+                .rows
+                .into_iter()
+                .filter_map(|r| {
+                    r.warning
+                        .map(|w| (r.name, w.lines().next().unwrap_or_default().to_string()))
+                })
+                .collect(),
+        })
+        .collect();
+    ctx.say(&said);
+    Ok(())
+}
+
 /// The terminal while the screen has it, given back however this ends.
 ///
 /// A guard rather than a `restore()` after the loop, because the loop is not

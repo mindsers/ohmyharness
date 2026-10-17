@@ -7386,6 +7386,75 @@ fn help_never_names_the_parser() {
     }
 }
 
+/// The report says what the screen says: each page of your catalogue with
+/// its count and every entry that is wrong, and the key a typo meant. It
+/// printed your defaults alone, so a link to nothing and a skill no harness
+/// loads were visible only on a terminal.
+#[test]
+fn the_report_lists_the_catalogue_and_what_is_wrong_in_it() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md", "skills/half-made/notes.txt"]);
+    std::os::unix::fs::symlink("/nowhere/gone", sb.home.join(".omh/skills/gone")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "carry_ins = [\".env\"]\n",
+    )
+    .unwrap();
+    // A file where the rules directory goes: a page omh cannot read.
+    std::fs::write(sb.home.join(".omh/rules"), "").unwrap();
+
+    let out = sb.omh(&["settings"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("your catalogue"), "{said}");
+    let skills = said
+        .lines()
+        .find(|l| l.trim_start().starts_with("skills"))
+        .unwrap_or_default();
+    assert!(skills.contains('3'), "{said}");
+    for wrong in ["half-made", "no SKILL.md", "gone", "a link to nothing"] {
+        assert!(said.contains(wrong), "`{wrong}`:\n{said}");
+    }
+    assert!(said.contains("did you mean `carry_in`"), "{said}");
+
+    let out = sb.omh(&["--json", "settings"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let skills = doc["catalogue"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "skills")
+        .unwrap();
+    assert_eq!(skills["count"], 3);
+    let names: Vec<&str> = skills["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["gone", "half-made"]);
+    assert_eq!(doc["unread"][0]["meant"], "carry_in");
+    // Could not look is not none: no count, and the reason.
+    let rules = doc["catalogue"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "rules")
+        .unwrap();
+    assert!(rules["count"].is_null(), "{rules}");
+    assert!(
+        rules["problem"]
+            .as_str()
+            .is_some_and(|p| p.contains("rules")),
+        "{rules}"
+    );
+}
+
 /// A kind spelled one letter off is named: `omh settings rm skill tdd` was
 /// told what the kinds are and left to find the one it meant.
 #[test]

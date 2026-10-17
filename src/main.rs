@@ -543,7 +543,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 None if cmd::settings_tui::wanted(cli.json, cli.dry_run) => {
                     cmd::settings_tui::run(&paths, !ctx.palette.is_plain(), ctx)
                 }
-                None => cmd::settings::show_settings(&paths, ctx),
+                None => cmd::settings_tui::show(&paths, ctx),
                 Some(SettingsCmd::Set { key, value, anyway }) => {
                     // One of omh's features: switched in `[omh]`, for the repos
                     // `init` seeds — never written as a bare key nothing reads.

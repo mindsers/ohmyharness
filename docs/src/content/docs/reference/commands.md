@@ -2112,10 +2112,21 @@ omh also reads
   runtime         Which runtime builds and runs the sandbox. Unset means `auto`.
   ca_cert         A CA certificate the sandbox must trust, as a path to a PEM — for a network that inspects TLS and signs it with its own root.
   persistence     How a session's terminal survives detaching. Unset means `dtach`.
+
+your catalogue
+  rules        0
+  skills       1  new repos get all
+  servers      0
+  commands     0
+  subagents    0
+  hooks        0
 ```
 
 **The second list is the useful half**: every key omh reads, which no settings
-file can show.
+file can show. Then your catalogue, page by page, as the screen has it: how
+many, what new repos get, and every entry that is wrong — a link to nothing, a
+skill no harness loads — and, beside a key nothing reads, the one it probably
+meant. `--json` carries the same.
 
 **At a terminal, `omh settings` is a screen** over the same `~/.omh`: your
 defaults, then one page per kind of catalogue entry — rules, skills, servers,

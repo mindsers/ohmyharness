@@ -19,13 +19,13 @@ use std::process::Command;
 /// The unset half is the useful half. `key::KEYS` is a table in the binary, so
 /// a settings file cannot show it, and until this existed the only way to
 /// learn a key's name was to already know it.
-pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
+pub(crate) fn settings_report(paths: &Paths) -> Result<report::Settings> {
     // Read straight from the file, not through `config::policy` — that
     // resolves a repo, and the template is not one of the layers it resolves
     // through. Asking it would report your template as empty.
     let mine = config::values(paths, config::Layer::Personal)?;
 
-    ctx.say(&report::Settings {
+    Ok(report::Settings {
         file: config::Layer::Personal.file(paths).display().to_string(),
         known: key::KEYS
             .iter()
@@ -47,8 +47,9 @@ pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
                 whose: None,
             })
             .collect(),
-    });
-    Ok(())
+        meant: Default::default(),
+        catalogue: Vec::new(),
+    })
 }
 
 /// A table of your defaults that seeds a new repo, as `config::values` names
