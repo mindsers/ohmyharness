@@ -1084,6 +1084,21 @@ pub(crate) fn edit_target(
             Lookup::Absent { .. } => None,
         }
     };
+    // A link to nothing opened as the link is an editor writing through it,
+    // wherever it points — and out of the catalogue. Taken out, not edited.
+    if let Some(link) = found.as_ref().filter(|f| f.is_symlink()) {
+        let to = std::fs::read_link(link).with_context(|| format!("reading {}", link.display()))?;
+        if !link
+            .try_exists()
+            .with_context(|| format!("following {}", link.display()))?
+        {
+            anyhow::bail!(
+                "{cap}/{name} is a link to nothing — {}. To take the link out:\n  \
+                 omh settings rm {cap} {name}",
+                to.display()
+            );
+        }
+    }
     Ok(match (cap, found) {
         // A skill opens at its `SKILL.md` whether it is new, whole or half
         // made — the one file that makes a directory a skill, and the one an

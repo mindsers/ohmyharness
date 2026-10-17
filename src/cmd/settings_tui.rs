@@ -124,8 +124,8 @@ fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) 
                     Ok(out) if out.status.success() => {
                         app.confirm(lines(&out.stdout), lines(&out.stderr), act);
                     }
-                    // The line that refused is the preview, so that is the one
-                    // shown — not the removal nobody ran.
+                    // Shown as the removal you would type: typed, it meets the
+                    // same refusal, which comes before the question.
                     Ok(out) => report(app, &line, &out),
                     Err(e) => app.report(shown(&line), false, "", &format!("{e:#}")),
                 }
@@ -174,7 +174,7 @@ fn edit(
     };
     suspend().context("handing the terminal to $EDITOR")?;
     let edited = settings::open_in_editor(&target);
-    let (ok, said, warned) = match &edited {
+    let (ok, said, mut warned) = match &edited {
         Ok(Edited::Done) => (true, "editor closed".to_string(), String::new()),
         Ok(Edited::Kept(dir)) => (
             true,
@@ -200,8 +200,39 @@ fn edit(
             if ok { &said } else { &warned }
         )
     })?;
+    // Read back, not assumed: the editor closing is not the entry being one.
+    if ok && warned.is_empty() {
+        warned = after_edit(&model(paths), capability, name).unwrap_or_default();
+    }
     app.report(shown(line), ok, &said, &warned);
     Ok(())
+}
+
+/// What an edit left, read back from a fresh read of the catalogue: a file
+/// that no longer parses, an entry that is not one — or a hook omh ships,
+/// which `omh upgrade` puts back over the edit. `None` when there is nothing
+/// to say.
+fn after_edit(model: &Model, capability: Option<&str>, name: Option<&str>) -> Option<String> {
+    let section = model
+        .sections
+        .iter()
+        .find(|s| s.page.capability() == capability)?;
+    let Some(name) = name else {
+        return section.problem.clone();
+    };
+    let row = section.rows.iter().find(|r| r.name == name)?;
+    let cap = capability.unwrap_or_default();
+    match (
+        &row.warning,
+        row.fixed && section.page == Page::Entries("hooks"),
+    ) {
+        (Some(w), _) => Some(format!("{cap}/{name}: {w}")),
+        (None, true) => Some(format!(
+            "omh ships {cap}/{name}: `omh upgrade` puts its own back, keeping yours as \
+             {name}.json.yours"
+        )),
+        (None, false) => None,
+    }
 }
 
 /// The command line an act is, after `omh`.
@@ -314,7 +345,9 @@ fn shown(line: &[String]) -> String {
     };
     let mut hidden = Vec::with_capacity(line.len());
     let mut after_env = false;
-    for word in flags {
+    // The screen's own: it previews with `--dry-run` and answers with `--yes`
+    // because it asked. The line shown is the one a person would type.
+    for word in flags.iter().filter(|w| *w != "--dry-run" && *w != "--yes") {
         hidden.push(match word.split_once('=') {
             Some((k, _)) if after_env => format!("{k}=…"),
             _ => word.clone(),
@@ -451,6 +484,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
     };
     for k in key::KEYS {
         let mut warning = None;
+        let mut fallback = k.unset.to_string();
         let edit = match (k.name, &k.shape) {
             (_, key::Shape::Choice(allowed)) => {
                 Edit::Choice(allowed.iter().map(|a| a.to_string()).collect())
@@ -462,8 +496,15 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                     hint: "a login's name, as `omh auth <harness> -n <name>` captured it".into(),
                 };
                 match logins(paths, adapters) {
-                    Ok(names) if names.is_empty() => typed,
-                    Ok(names) => Edit::Suggest(names),
+                    Ok(held) => {
+                        (fallback, warning) = unset_account(&held);
+                        let names: std::collections::BTreeSet<String> =
+                            held.into_iter().flat_map(|(_, names)| names).collect();
+                        match names.is_empty() {
+                            true => typed,
+                            false => Edit::Suggest(names.into_iter().collect()),
+                        }
+                    }
                     Err(e) => {
                         warning = Some(format!("could not list the logins: {e:#}"));
                         typed
@@ -475,7 +516,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
         out.rows.push(Row {
             name: k.name.to_string(),
             value: mine.get(k.name).cloned(),
-            fallback: Some(k.unset.to_string()),
+            fallback: Some(fallback),
             warning,
             about: vec![k.does.to_string()],
             edit,
@@ -518,17 +559,46 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
     out
 }
 
-/// Every login captured for any harness, by name.
-fn logins(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Result<Vec<String>> {
+/// The logins captured, by harness, for every harness that has one.
+fn logins(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Result<Vec<(String, Vec<String>)>> {
     let adapters = match adapters {
         Ok(adapters) => adapters,
         Err(e) => anyhow::bail!("could not read the adapters: {e:#}"),
     };
-    let mut names = std::collections::BTreeSet::new();
+    let mut held = Vec::new();
     for adapter in adapters {
-        names.extend(crate::auth::accounts(paths, adapter)?);
+        let names = crate::auth::accounts(paths, adapter)?;
+        if !names.is_empty() {
+            held.push((adapter.name.to_string(), names));
+        }
     }
-    Ok(names.into_iter().collect())
+    Ok(held)
+}
+
+/// What a launch does with `account` unset, from the logins there are — the
+/// rule `auth::resolve` applies: none is a login to capture, one is used, and
+/// several are refused rather than guessed between.
+fn unset_account(held: &[(String, Vec<String>)]) -> (String, Option<String>) {
+    let several: Vec<String> = held
+        .iter()
+        .filter(|(_, names)| names.len() > 1)
+        .map(|(harness, names)| format!("{harness} has {} ({})", names.len(), names.join(", ")))
+        .collect();
+    match (held, several.is_empty()) {
+        ([], _) => (
+            "no login captured — `omh auth <harness>` captures one".into(),
+            None,
+        ),
+        (_, false) => (
+            "none chosen".into(),
+            Some(format!(
+                "none chosen — {}, and a launch refuses to guess between them",
+                several.join("; ")
+            )),
+        ),
+        ([(harness, names)], true) => (format!("{}, the only login {harness} has", names[0]), None),
+        (_, true) => ("the one login each harness has".into(), None),
+    }
 }
 
 /// A table of the defaults file on one line: `skills = ["tdd"] · hooks = []`.
@@ -893,9 +963,13 @@ mod tests {
                                 command,
                                 args,
                                 env,
+                                replace,
                             },
                     }),
             } => {
+                // A new server: the form refuses a name already taken, so the
+                // screen never writes over one.
+                assert!(!replace);
                 assert_eq!(name, "linear");
                 assert_eq!(command, "npx");
                 assert_eq!(args, ["--env", "-y", "--", "x y"]);
@@ -1045,8 +1119,9 @@ mod tests {
         // A table holds something, and says what: `[use]` was drawn unset.
         assert_eq!(row("[use]").edit, Edit::None);
         assert_eq!(row("[use]").value.as_deref(), Some("skills = []"));
-        // Every unset key says what applies instead, from the table.
-        for k in key::KEYS {
+        // Every unset key says what applies instead, from the table — but
+        // `account`, which is worked out from the logins there are.
+        for k in key::KEYS.iter().filter(|k| k.name != "account") {
             assert_eq!(row(k.name).fallback.as_deref(), Some(k.unset), "{}", k.name);
         }
     }
@@ -1104,6 +1179,50 @@ mod tests {
             .unwrap();
         assert_eq!(row.edit, Edit::Suggest(vec!["work".into()]));
         assert_eq!(row.warning, None);
+        assert_eq!(
+            row.fallback.as_deref(),
+            Some("work, the only login claude has")
+        );
+    }
+
+    /// Unset, `account` is what a launch will do, worked out from the logins
+    /// there are: it said "the only login captured" with two captured, where
+    /// a launch refuses to guess between them.
+    #[test]
+    fn an_unset_account_says_what_a_launch_will_do() {
+        let (_dir, paths) = paths();
+        seed_adapters(&paths);
+        let account = |paths: &Paths| {
+            let model = model(paths);
+            let row = page(&model, "defaults")
+                .rows
+                .iter()
+                .find(|r| r.name == "account")
+                .unwrap()
+                .clone();
+            (row.fallback.unwrap_or_default(), row.warning)
+        };
+        let (fallback, warning) = account(&paths);
+        assert!(
+            fallback.contains("no login captured") && fallback.contains("omh auth"),
+            "{fallback}"
+        );
+        assert_eq!(warning, None, "none yet is where everybody starts");
+        for name in ["work", "personal"] {
+            let token = paths
+                .creds("claude")
+                .join(name)
+                .join(".claude/.credentials.json");
+            std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+            std::fs::write(&token, r#"{"token":"seeded"}"#).unwrap();
+        }
+        let (fallback, warning) = account(&paths);
+        let warning = warning.unwrap_or_default();
+        assert!(
+            warning.contains("claude has 2 (personal, work)") && warning.contains("refuses"),
+            "{warning}"
+        );
+        assert!(fallback.contains("none chosen"), "{fallback}");
     }
 
     /// Logins omh could not list are said on the row, not taken for none:
@@ -1213,6 +1332,43 @@ mod tests {
         assert!(!fixed("servers", "linear"));
         assert!(fixed("hooks", &hook), "hooks/{hook}");
         assert!(!fixed("hooks", "mine"));
+    }
+
+    /// What an edit left is read back, and said: the editor closing is not
+    /// the entry being one. "✓ editor closed" sat beside a hook the row one
+    /// column over called not a hook omh can run.
+    #[test]
+    fn what_an_edit_left_is_read_back() {
+        let (_dir, paths) = paths();
+        write(&paths.root.join("hooks/mine.json"), "{ \"on\": ");
+        write(
+            &paths.root.join("hooks/fine.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let model = model(&paths);
+        let broken = after_edit(&model, Some("hooks"), Some("mine")).unwrap_or_default();
+        assert!(
+            broken.contains("hooks/mine") && broken.contains("not a hook omh can run"),
+            "{broken}"
+        );
+        assert_eq!(after_edit(&model, Some("hooks"), Some("fine")), None);
+        write(&paths.root.join("default.toml"), "idle_timeout = \n");
+        let model = super::model(&paths);
+        let defaults = after_edit(&model, None, None).unwrap_or_default();
+        assert!(defaults.contains("default.toml"), "{defaults}");
+        // A hook omh ships is read back whole, and `omh upgrade` puts its own
+        // back over an edit.
+        let shipped = settings::shipped_hooks()[0].clone();
+        write(
+            &paths.root.join(format!("hooks/{shipped}.json")),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let model = super::model(&paths);
+        let note = after_edit(&model, Some("hooks"), Some(&shipped)).unwrap_or_default();
+        assert!(
+            note.contains("omh upgrade") && note.contains(&format!("{shipped}.json.yours")),
+            "{note}"
+        );
     }
 
     fn write(path: &std::path::Path, body: &str) {
@@ -1381,6 +1537,32 @@ mod tests {
         assert!(said.contains("running omh settings mcp add"), "{said}");
         assert!(!said.contains("sk-very-secret"), "{said}");
         assert!(!said.contains("sk-arg-secret"), "{said}");
+    }
+
+    /// The line shown is the one you would type: not the screen's own
+    /// `--dry-run` preview, which read like an instruction under a refusal,
+    /// nor the `--yes` it adds because it already asked. Typed at a terminal,
+    /// that line asks the same question or meets the same refusal.
+    #[test]
+    fn the_line_shown_is_the_one_you_would_type() {
+        let line: Vec<String> = [
+            "--dry-run",
+            "settings",
+            "rm",
+            "--yes",
+            "--",
+            "mcp",
+            "codegraph",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(shown(&line), "settings rm mcp codegraph");
+        let rm = argv(&Act::Remove {
+            capability: "skills".into(),
+            name: "tdd".into(),
+        });
+        assert!(rm.iter().any(|w| w == "--yes"), "what runs still answers");
+        assert_eq!(shown(&rm), "settings rm skills tdd");
     }
 
     /// The line shown for a new server names its environment and hides the

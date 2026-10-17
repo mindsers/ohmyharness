@@ -931,6 +931,11 @@ pub fn mcp_add(paths: &Paths, name: &str, server: Server) -> Result<Written> {
     })
 }
 
+/// The server your catalogue holds under `name`, if it holds one.
+pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
+    Ok(read_servers(&mcp_path(paths))?.remove(name))
+}
+
 /// Bring omh's own servers back in line with the manifest, and leave yours
 /// alone. Answers the names it changed.
 ///

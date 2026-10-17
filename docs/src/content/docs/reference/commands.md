@@ -2079,7 +2079,7 @@ omh settings rm <capability> <name> [--yes]
                                       take one entry out of your catalogue
 
 omh settings mcp ls
-omh settings mcp add <name> <cmd> [args…] [--env K=V]
+omh settings mcp add [--replace] <name> <cmd> [args…] [--env K=V]
 omh settings mcp import <harness> [--from <path>] [--replace]
 ```
 
@@ -2088,7 +2088,7 @@ omh settings mcp import <harness> [--from <path>] [--replace]
 | `--yes` `-y` | remove without asking. Off a terminal there is nobody to ask, so `rm` refuses without it |
 | `--env K=V` | an environment variable the server runs with. Repeat for several |
 | `--from <path>` | read this file instead of where the adapter says the harness keeps its servers |
-| `--replace` | overwrite a catalogue entry of the same name that differs. Without it yours is kept and the difference reported |
+| `--replace` | overwrite a server of the same name. Without it `mcp add` refuses one, naming what it runs, and `mcp import` keeps yours and reports the difference. omh's own servers are refused either way |
 
 ```console
 $ omh settings set idle_timeout 45m
@@ -2151,6 +2151,7 @@ pages are one line along the top.
 |---|---|
 | `↓` `↑` (`j` `k`), `home` `end` (`g` `G`) | move in the list |
 | `⇥` `⇧⇥` or `→` `←` (`l` `h`), `1`–`7` | change page |
+| a letter, in a list to pick from | go to the option it starts; `esc` or `q` closes it, and no other key does |
 | `enter` | set a default — picked from its choices where it has them, typed where it does not; open a rule, skill, command, subagent or hook in `$EDITOR` |
 | `e` | `$EDITOR` on the entry, or on the file a page lives in |
 | `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |
@@ -2200,8 +2201,16 @@ same.
 
 **Nothing read is drawn as a control sequence.** A skill's description, a
 hook's `does` and a command's output are drawn with every control character
-as `�`, so text somebody else wrote — an entry `i` just imported — cannot
-drive your terminal.
+as `�` — a line break stays one — so text somebody else wrote, an entry `i`
+just imported, cannot drive your terminal. A value typed into a new server's
+env is drawn as `•`, as it is hidden everywhere else.
+
+**What an edit left is read back.** When `$EDITOR` closes, the entry is read
+again, and one that no longer parses is said, not reported done. A hook omh
+ships can be opened, and the screen says what `omh upgrade` does to an edit:
+puts its own back and keeps yours as `<name>.json.yours`. A link to nothing is
+refused before any editor runs — opened, an editor writes through it, out of
+the catalogue — and the refusal names the `rm` that takes it out.
 
 **Not `omh set`.** `omh set` is this checkout; `omh settings` is what a new one
 starts from. `omh setting` is refused rather than guessed at.

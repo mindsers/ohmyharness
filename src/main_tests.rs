@@ -1943,6 +1943,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // sandbox, and `--local` being the spelling omh accepts is what
         // this scan is for.
         ("src/cmd/inspect.rs", 5),
+        // `mcp add`'s refusals: `omh set <feature> off` and `omh upgrade` for
+        // a server omh ships, and the `--replace` line for one of yours.
+        ("src/cmd/mcp.rs", 3),
         ("src/cmd/memory.rs", 1),
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
@@ -1954,15 +1957,18 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         // + `omh settings edit mcp`, in the refusal of a name for a server.
         // + `omh set <feature> off` and `omh init`, in the refusal for a
-        // server omh ships.
-        ("src/cmd/settings.rs", 16),
+        // server omh ships. + `omh settings rm <capability> <name>`, in the
+        // refusal to edit a link to nothing.
+        ("src/cmd/settings.rs", 17),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
         // and in the error when the screen cannot come back after `$EDITOR`,
         // `omh auth <harness> -n <name>` in the account's hint, and
-        // `omh set <feature> off` beside a server a feature owns.
-        ("src/cmd/settings_tui.rs", 7),
+        // `omh set <feature> off` beside a server a feature owns. +
+        // `omh auth <harness>` where no login is captured, and `omh upgrade`
+        // after an edit to a hook omh ships.
+        ("src/cmd/settings_tui.rs", 9),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather

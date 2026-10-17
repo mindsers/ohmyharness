@@ -465,6 +465,11 @@ pub(crate) enum McpCmd {
         /// Repeat for several.
         #[arg(long = "env", value_parser = parse_env)]
         env: Vec<(String, String)>,
+        /// Write over a server of the same name. Without it, one is refused,
+        /// naming what it runs — the flag `mcp import` takes for the same act.
+        /// Before the name: everything after the command is the server's.
+        #[arg(long = "replace")]
+        replace: bool,
     },
     /// Import servers you already configured in an installed harness.
     Import {

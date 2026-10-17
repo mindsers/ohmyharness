@@ -416,9 +416,10 @@ impl App {
         let mut lines: Vec<(Tone, String)> = [(stdout, out), (stderr, err)]
             .into_iter()
             .flat_map(|(text, tone)| {
+                // Every line here is omh's: its name said again is noise.
                 text.lines()
                     .filter(|l| !l.trim().is_empty())
-                    .map(move |l| (tone, clean(l)))
+                    .map(move |l| (tone, clean(l.strip_prefix("omh: ").unwrap_or(l))))
             })
             .collect();
         if lines.is_empty() {
@@ -759,6 +760,13 @@ impl App {
             return Next::Stay;
         };
         match section.page.capability() {
+            None if row.edit == Edit::None => {
+                self.note(format!(
+                    "{} is a table — e opens the file it is in",
+                    row.name
+                ));
+                Next::Stay
+            }
             None if row.value.is_none() => {
                 let line = format!("{} is not set — there is nothing to unset", row.name);
                 self.note(line);
@@ -819,12 +827,30 @@ impl App {
                         pick.at = (pick.at + 1).min(pick.options.len().saturating_sub(1));
                     }
                     KeyCode::Up | KeyCode::Char('k') => pick.at = pick.at.saturating_sub(1),
-                    KeyCode::Home => pick.at = 0,
-                    KeyCode::End => pick.at = pick.options.len().saturating_sub(1),
+                    KeyCode::Home | KeyCode::Char('g') => pick.at = 0,
+                    KeyCode::End | KeyCode::Char('G') => {
+                        pick.at = pick.options.len().saturating_sub(1)
+                    }
                     KeyCode::Enter => return self.chosen(pick),
-                    // Any other key closes the pick: it was taken off the
-                    // screen with `take` and is not put back.
-                    _ => return Next::Stay,
+                    // Closed by the keys that close everything else, and by
+                    // nothing more: it was taken off the screen with `take`
+                    // and is not put back.
+                    KeyCode::Esc | KeyCode::Char('q') => return Next::Stay,
+                    // A letter goes to the next option it starts. Any other
+                    // key stays here — one that closed the pick went on to the
+                    // page, where `podman`'s `d` unset the row.
+                    KeyCode::Char(c) if plain(key) => {
+                        let starts = |o: &String| {
+                            o.chars().next().is_some_and(|f| f.eq_ignore_ascii_case(&c))
+                        };
+                        let after = pick.options.iter().enumerate().cycle().skip(pick.at + 1);
+                        if let Some((i, _)) =
+                            after.take(pick.options.len()).find(|(_, o)| starts(o))
+                        {
+                            pick.at = i;
+                        }
+                    }
+                    _ => {}
                 }
                 self.modal = Some(Modal::Pick(pick));
                 Next::Stay
@@ -868,6 +894,16 @@ impl App {
     }
 
     fn key_in_form(&mut self, mut form: Form, key: KeyEvent) -> Next {
+        let leaving_the_name =
+            form.at == 0 && matches!(key.code, KeyCode::Enter | KeyCode::Tab | KeyCode::Down);
+        if let Some(why) = leaving_the_name
+            .then(|| self.taken(&form.fields[0].text.iter().collect::<String>()))
+            .flatten()
+        {
+            form.error = Some(why);
+            self.modal = Some(Modal::Form(form));
+            return Next::Stay;
+        }
         match key.code {
             KeyCode::Esc => return Next::Stay,
             KeyCode::Tab | KeyCode::Down => form.at = (form.at + 1).min(2),
@@ -881,6 +917,23 @@ impl App {
         }
         self.modal = Some(Modal::Form(form));
         Next::Stay
+    }
+
+    /// Why a server cannot be called `name`: one of that name is in your
+    /// catalogue, and `mcp add` will not write over it — or is omh's own.
+    fn taken(&self, name: &str) -> Option<String> {
+        let name = name.trim();
+        let row = self
+            .model
+            .sections
+            .iter()
+            .filter(|s| s.page == Page::Servers)
+            .flat_map(|s| &s.rows)
+            .find(|r| r.name == name)?;
+        Some(match row.fixed {
+            true => format!("`{name}` is omh's own server — it is switched off, not replaced"),
+            false => format!("`{name}` is already a server — d removes it, e opens the file"),
+        })
     }
 
     /// A finished form is a server, or the form again on the field that was
@@ -897,6 +950,7 @@ impl App {
             words(&env).and_then(|w| parse_env(&w)),
         ) {
             (true, _, _) => Some((0, "a name, first".to_string())),
+            _ if self.taken(&name).is_some() => self.taken(&name).map(|why| (0, why)),
             (false, Err(e), _) => Some((1, e)),
             (false, Ok(w), _) if w.is_empty() => Some((1, "the program to run, first".into())),
             (false, _, Err(e)) => Some((2, e)),
@@ -1162,10 +1216,21 @@ impl App {
         // omh's base set unreadable has both — and as tall as it needs, up to
         // half the list: a failed read says *where* first and *why* last.
         if let Some(problem) = &section.problem {
-            let text = Text::from(Line::from(Span::styled(
-                format!("✗ could not look — {problem}"),
-                self.look.tone(Tone::Bad),
-            )));
+            let text = Text::from(
+                problem
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        Line::from(Span::styled(
+                            match i {
+                                0 => format!("✗ could not look — {line}"),
+                                _ => format!("  {line}"),
+                            },
+                            self.look.tone(Tone::Bad),
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            );
             let height = (Paragraph::new(text.clone())
                 .wrap(Wrap { trim: false })
                 .line_count(list.width) as u16)
@@ -1310,9 +1375,14 @@ impl App {
         }
         let used: usize = spans.iter().map(Span::width).sum();
         let room = width.saturating_sub(used);
-        let (text, style) = match (&row.warning, &row.value, section.page) {
-            (Some(w), _, Page::Entries(_)) => (w.clone(), self.look.tone(Tone::Warn)),
-            (_, Some(v), _) => match &row.warning {
+        // A row is one line: a warning's first, and the rest in the detail.
+        let warning = row
+            .warning
+            .as_deref()
+            .map(|w| w.lines().next().unwrap_or_default());
+        let (text, style) = match (warning, &row.value, section.page) {
+            (Some(w), _, Page::Entries(_)) => (w.to_string(), self.look.tone(Tone::Warn)),
+            (_, Some(v), _) => match warning {
                 Some(w) => (format!("{v}  ! {w}"), self.look.tone(Tone::Warn)),
                 None => (v.clone(), Style::default()),
             },
@@ -1353,10 +1423,12 @@ impl App {
             Line::default(),
         ];
         if let Some(w) = &row.warning {
-            lines.push(Line::from(Span::styled(
-                format!("! {w}"),
-                self.look.tone(Tone::Warn),
-            )));
+            for (i, line) in w.lines().enumerate() {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{line}", if i == 0 { "! " } else { "  " }),
+                    self.look.tone(Tone::Warn),
+                )));
+            }
         }
         lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
         if section.page == Page::Defaults {
@@ -1466,6 +1538,10 @@ impl App {
             )));
         }
         lines.extend(last);
+        // Read already, it is one line: what it was about, not all of it again.
+        if !status.fresh {
+            lines.truncate(1);
+        }
         Some(Text::from(lines))
     }
 
@@ -1665,7 +1741,7 @@ impl App {
         let mut lines = Vec::new();
         for (i, (label, field)) in FORM_LABELS.iter().zip(&form.fields).enumerate() {
             let here = i == form.at;
-            let typed: String = field.text.iter().collect();
+            let typed = drawn_field(i, &field.text);
             lines.push(Line::from(vec![
                 Span::styled(if here { "▸ " } else { "  " }, self.look.accent()),
                 Span::styled(
@@ -1684,6 +1760,12 @@ impl App {
                 self.look.tone(Tone::Bad),
             )));
         }
+        if form.at == 1 {
+            lines.push(Line::from(Span::styled(
+                "  a token goes in env: arguments are kept as typed, and env values are not shown",
+                self.look.dim(),
+            )));
+        }
         lines.push(Line::default());
         lines.push(self.chips(&[
             ("⇥", "next field"),
@@ -1692,7 +1774,7 @@ impl App {
         ]));
         let area = self.popup(f, "new server", Text::from(lines));
         let field = &form.fields[form.at];
-        let typed_before: String = field.text[..field.cursor].iter().collect();
+        let typed_before = drawn_field(form.at, &field.text[..field.cursor]);
         let x = area.x
             + 4
             + Span::raw(FORM_LABELS[form.at]).width() as u16
@@ -1898,11 +1980,18 @@ fn clean(text: &str) -> String {
         .collect()
 }
 
+/// [`clean`], line by line: a line break stays one, so an error that quotes a
+/// line and points under it still lines up. Anything else — `\r` among them —
+/// is `�`.
+fn clean_lines(text: &str) -> String {
+    text.split('\n').map(clean).collect::<Vec<_>>().join("\n")
+}
+
 fn cleaned(mut model: Model) -> Model {
     let all = |v: &[String]| v.iter().map(|l| clean(l)).collect::<Vec<_>>();
     model.root = clean(&model.root);
     for section in &mut model.sections {
-        section.problem = section.problem.as_deref().map(clean);
+        section.problem = section.problem.as_deref().map(clean_lines);
         section.import = match &section.import {
             Import::From(harnesses) => Import::From(all(harnesses)),
             Import::Not(why) => Import::Not(clean(why)),
@@ -1917,11 +2006,11 @@ fn cleaned(mut model: Model) -> Model {
                 &mut row.fallback,
                 &mut row.summary,
                 &mut row.badge,
-                &mut row.warning,
                 &mut row.group,
             ] {
                 *text = text.as_deref().map(clean);
             }
+            row.warning = row.warning.as_deref().map(clean_lines);
             row.about = all(&row.about);
             row.edit = match &row.edit {
                 Edit::None => Edit::None,
@@ -1932,6 +2021,43 @@ fn cleaned(mut model: Model) -> Model {
         }
     }
     model
+}
+
+/// An env line as it is drawn: every name, and every value as `•` — a quoted
+/// one to its closing quote, since a space inside it is still the value.
+fn masked_env(text: &[char]) -> String {
+    let (mut value, mut quote) = (false, None);
+    text.iter()
+        .map(|&c| match (value, quote, c) {
+            (true, Some(q), _) if c == q => {
+                quote = None;
+                '•'
+            }
+            (true, Some(_), _) => '•',
+            (true, None, '\'' | '"') => {
+                quote = Some(c);
+                '•'
+            }
+            (_, None, ' ') => {
+                value = false;
+                ' '
+            }
+            (false, _, '=') => {
+                value = true;
+                '='
+            }
+            (true, _, _) => '•',
+            (false, _, _) => c,
+        })
+        .collect()
+}
+
+/// A form field as it is drawn: the env field masked, the others as typed.
+fn drawn_field(at: usize, text: &[char]) -> String {
+    match at {
+        2 => masked_env(text),
+        _ => text.iter().collect(),
+    }
 }
 
 /// `KEY=VALUE` words, as `--env` takes them.

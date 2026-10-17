@@ -6273,6 +6273,93 @@ fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
         .contains("linear"));
 }
 
+/// `mcp add` does not write over a server: it replaced one of the same name
+/// in silence, so a second `linear` took the first one's arguments and its
+/// token with it — and replaced `codegraph`, which `rm` refuses to take out.
+/// `--replace` says you meant it, as it does for `mcp import`; omh's own
+/// servers are refused with it too, since `omh upgrade` puts them back.
+#[test]
+fn mcp_add_does_not_write_over_a_server() {
+    let sb = sandbox();
+    sb.seed_base();
+    let catalogue = sb.home.join(".omh/mcp.json");
+    std::fs::create_dir_all(catalogue.parent().unwrap()).unwrap();
+    std::fs::write(
+        &catalogue,
+        r#"{"mcpServers":{"linear":{"command":"npx","args":["-y","mcp-remote"],"env":{"LINEAR_TOKEN":"lin_api_x"}},"codegraph":{"command":"codebase-memory-mcp"}}}"#,
+    )
+    .unwrap();
+    let held = || std::fs::read_to_string(&catalogue).unwrap();
+    let before = held();
+
+    for argv in [
+        vec!["settings", "mcp", "add", "linear", "echo"],
+        vec!["--dry-run", "settings", "mcp", "add", "linear", "echo"],
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "`omh {}` wrote over it",
+            argv.join(" ")
+        );
+        assert!(said.contains("--replace"), "and says how: {said}");
+        assert!(
+            said.contains("LINEAR_TOKEN"),
+            "naming what it holds: {said}"
+        );
+        assert!(!said.contains("lin_api_x"), "and never its value: {said}");
+    }
+    assert_eq!(held(), before);
+
+    let out = sb.omh(&[
+        "--dry-run",
+        "settings",
+        "mcp",
+        "add",
+        "--replace",
+        "linear",
+        "echo",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("would replace linear"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(held(), before);
+
+    for argv in [
+        vec!["settings", "mcp", "add", "codegraph", "echo"],
+        vec!["settings", "mcp", "add", "--replace", "codegraph", "echo"],
+        vec!["settings", "mcp", "add", "memory", "echo"],
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "`omh {}` took omh's name",
+            argv.join(" ")
+        );
+        assert!(said.contains("omh's own"), "{said}");
+    }
+    assert_eq!(held(), before);
+
+    let out = sb.omh(&["settings", "mcp", "add", "--replace", "linear", "echo"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(held().contains("echo") && !held().contains("LINEAR_TOKEN"));
+    let out = sb.omh(&["settings", "mcp", "add", "gh", "npx"]);
+    assert!(out.status.success(), "a new name is added as before");
+}
+
 /// A name that answers to two files is refused rather than guessed at.
 ///
 /// A catalogue name is a file with its extension off, so `house.md` and
@@ -6641,6 +6728,35 @@ fn settings_edit_refuses_a_name_for_a_server() {
     );
     assert!(!sb.home.join(".omh/mcp.json").is_dir());
     assert!(sb.opened_in_the_editor().is_empty());
+}
+
+/// A link to nothing is refused before `$EDITOR` sees it.
+///
+/// It was opened as the link, so the editor wrote through it: the file landed
+/// wherever the link pointed, outside the catalogue, and with the link's parent
+/// missing the editor failed and the edit blamed it. What to do with a link to
+/// nothing is take it out, and the refusal says how.
+#[test]
+fn edit_refuses_a_link_to_nothing() {
+    let sb = sandbox();
+    sb.seed_base();
+    let outside = sb.home.join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(sb.home.join(".omh/skills")).unwrap();
+    std::os::unix::fs::symlink(outside.join("gone"), sb.home.join(".omh/skills/gone")).unwrap();
+    let out = sb.omh(&["settings", "edit", "skills", "gone"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a link to nothing reached the editor"
+    );
+    assert!(said.contains("a link to nothing"), "{said}");
+    assert!(said.contains("omh settings rm skills gone"), "{said}");
+    assert!(sb.opened_in_the_editor().is_empty());
+    assert!(
+        !outside.join("gone").exists(),
+        "the edit wrote through the link, out of the catalogue"
+    );
 }
 
 /// An editor that fails fails the edit, saying which one; one written with
@@ -7635,6 +7751,37 @@ fn an_editor_that_fails_is_said_on_the_screen() {
     tty.wait_for("name:");
     tty.send("team/review\r");
     tty.wait_for("never a path");
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+}
+
+/// What an edit left is read back and said: an editor that saved a hook omh
+/// cannot run was reported "✓ editor closed".
+#[test]
+fn what_an_edit_left_is_said_on_the_screen() {
+    let sb = sandbox();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh/hooks")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/hooks/mine.json"),
+        r#"{"on":"turn-end","run":"true"}"#,
+    )
+    .unwrap();
+    let breaking = sb.bin.join("breaking-editor");
+    std::fs::write(&breaking, "#!/bin/sh\nprintf '{ broken' > \"$1\"\n").unwrap();
+    std::fs::set_permissions(
+        &breaking,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let breaking = breaking.display().to_string();
+    let mut tty = sb.omh_on_a_terminal_with(&["settings"], &[("EDITOR", &breaking)], true);
+    tty.wait_for("idle_timeout");
+    tty.send("7");
+    tty.wait_for("mine");
+    tty.send("\r");
+    tty.wait_for("hooks/mine: not a hook omh can run");
     tty.send("q");
     let (status, raw) = tty.finish();
     assert!(status.success(), "{raw}");
@@ -15290,6 +15437,14 @@ const EXERCISES: &[Exercise] = &[
             "--",
             "--flag",
         ],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // Over the one just added: without `--replace` it is refused, so this is
+    // the run that writes.
+    Exercise {
+        argv: &["settings", "mcp", "add", "--replace", "demo", "demo-server"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: false,

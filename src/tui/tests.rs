@@ -372,6 +372,40 @@ fn a_choice_is_picked_not_typed() {
     );
 }
 
+/// **A key typed in a pick stays in the pick.** Any key it did not know closed
+/// it, so typing `podman` into `runtime`'s closed it on `p` — and the `d` that
+/// followed reached the page, where it unsets the row: `runtime` gone, with no
+/// question asked. A letter jumps to the option it starts; anything else does
+/// nothing; Esc and q close.
+#[test]
+fn a_key_typed_in_a_pick_never_reaches_the_page() {
+    let mut app = App::new(model(), true);
+    app.key(press('j'));
+    app.key(code(KeyCode::Enter));
+    for c in "podman".chars() {
+        assert_eq!(app.key(press(c)), Next::Stay, "`{c}` acted");
+        assert!(
+            matches!(app.modal, Some(Modal::Pick(_))),
+            "`{c}` closed the pick"
+        );
+    }
+    app.key(press('p'));
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Run(Act::Set {
+            key: "runtime".into(),
+            value: "podman".into()
+        }),
+        "a letter jumps to the option it starts"
+    );
+    for close in [code(KeyCode::Esc), press('q')] {
+        app.key(code(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Pick(_))));
+        assert_eq!(app.key(close), Next::Stay);
+        assert_eq!(app.modal, None, "{close:?} closes it");
+    }
+}
+
 /// A suggestion is picked, or another is typed.
 #[test]
 fn a_suggestion_is_picked_or_another_typed() {
@@ -440,6 +474,9 @@ fn esc_leaves_a_question_unanswered() {
     assert_eq!(app.key(code(KeyCode::Esc)), Next::Quit);
 }
 
+/// A table is the file's: neither set from a line nor unset by `d`, which
+/// ran `omh settings unset '[use]'` and was told `[use]` was not set while it
+/// sat in the file.
 #[test]
 fn a_table_in_your_defaults_is_not_set_from_a_line() {
     let mut app = App::new(model(), true);
@@ -448,6 +485,10 @@ fn a_table_in_your_defaults_is_not_set_from_a_line() {
     assert_eq!(app.key(code(KeyCode::Enter)), Next::Stay);
     assert_eq!(app.modal, None);
     assert!(drawn(&app).contains("[use] is a table"));
+    for key in [press('d'), code(KeyCode::Delete)] {
+        assert_eq!(app.key(key), Next::Stay, "{key:?} acted on a table");
+        assert!(drawn(&app).contains("[use] is a table"));
+    }
 }
 
 #[test]
@@ -545,6 +586,79 @@ fn a_server_is_one_form_and_its_command_is_split_like_a_shell() {
     assert!(matches!(&app.modal, Some(Modal::Form(f)) if f.at == 1));
     app.key(code(KeyCode::BackTab));
     assert!(matches!(&app.modal, Some(Modal::Form(f)) if f.at == 0));
+}
+
+/// **A value typed into env is not drawn.** The list hides a server's env
+/// values and the status line hides them in the line it shows, and the form
+/// drew them as typed — the one place on the screen a token was on it. Each
+/// value is drawn as `•`, quoted ones too; the name stays, and what is added is
+/// what was typed.
+#[test]
+fn an_env_value_is_not_drawn_as_it_is_typed() {
+    let mut app = App::new(model(), true);
+    app.key(press('3'));
+    app.key(press('a'));
+    typed(&mut app, "gh");
+    // Arguments are kept as typed, so the field says where a token goes.
+    assert!(
+        drawn(&app).contains("a token goes in env"),
+        "{}",
+        drawn(&app)
+    );
+    typed(&mut app, "npx -y @acme/mcp");
+    let env = "GITHUB_TOKEN=ghp_secret123 NOTE='two words'";
+    for c in env.chars() {
+        app.key(press(c));
+    }
+    let screen = drawn(&app);
+    for secret in ["ghp_secret123", "two", "words"] {
+        assert!(!screen.contains(secret), "`{secret}` is drawn:\n{screen}");
+    }
+    assert!(
+        screen.contains("GITHUB_TOKEN=") && screen.contains("NOTE="),
+        "{screen}"
+    );
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Run(Act::AddServer {
+            name: "gh".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@acme/mcp".into()],
+            env: vec![
+                ("GITHUB_TOKEN".into(), "ghp_secret123".into()),
+                ("NOTE".into(), "two words".into())
+            ],
+        })
+    );
+}
+
+/// A name already taken is said on the name field, not after three fields:
+/// `mcp add` refuses to write over a server, and omh's own are never yours to
+/// replace.
+#[test]
+fn a_server_name_already_taken_is_said_on_its_field() {
+    let mut model = model();
+    model.sections[2].rows = vec![
+        Row {
+            fixed: true,
+            ..row("codegraph")
+        },
+        row("linear"),
+    ];
+    for (name, says) in [("linear", "already a server"), ("codegraph", "omh's own")] {
+        let mut app = App::new(model.clone(), true);
+        app.key(press('3'));
+        app.key(press('a'));
+        assert_eq!(typed(&mut app, name), Next::Stay);
+        match &app.modal {
+            Some(Modal::Form(f)) => {
+                assert_eq!(f.at, 0, "{name}: moved past the name");
+                let error = f.error.clone().unwrap_or_default();
+                assert!(error.contains(says), "{name}: {error}");
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -653,7 +767,7 @@ fn what_a_command_said_wraps_under_itself_and_the_command_comes_last() {
     let lines: Vec<&str> = screen.lines().collect();
     let first = lines
         .iter()
-        .position(|l| l.contains("✗ omh: the"))
+        .position(|l| l.contains("✗ the `codegraph`"))
         .unwrap_or_else(|| panic!("{screen}"));
     let footer = lines.len() - 1;
     let status = &lines[first + 1..footer];
@@ -670,6 +784,34 @@ fn what_a_command_said_wraps_under_itself_and_the_command_comes_last() {
     assert!(
         status.iter().any(|l| l.contains("omh set codegraph off")),
         "{screen}"
+    );
+}
+
+/// omh's own `omh: ` is not said again on a screen that is all omh; and once
+/// what a command said is old news — the next key — it is one line, not a
+/// quarter of the screen spent on what was already read.
+#[test]
+fn an_old_status_is_one_line_without_the_programs_name() {
+    let mut app = App::new(model(), true);
+    app.report(
+        "settings rm mcp codegraph".into(),
+        false,
+        "",
+        "omh: the `codegraph` server is omh's own. In a repo:\n  omh set codegraph off",
+    );
+    let screen = drawn_at(&app, 120, 30);
+    assert!(screen.contains("✗ the `codegraph` server"), "{screen}");
+    assert!(!screen.contains("omh: the"), "{screen}");
+    assert!(screen.contains("omh set codegraph off"), "{screen}");
+    app.key(press('j'));
+    let screen = drawn_at(&app, 120, 30);
+    assert!(
+        screen.contains("✗ the `codegraph` server"),
+        "still said:\n{screen}"
+    );
+    assert!(
+        !screen.contains("omh set codegraph off"),
+        "an old status keeps its whole height:\n{screen}"
     );
 }
 
@@ -1045,6 +1187,35 @@ fn nothing_read_reaches_the_terminal_as_a_control_sequence() {
         drawn(&app).contains("a�]52;c;ZXZpbA==�b"),
         "{}",
         drawn(&app)
+    );
+}
+
+/// A line break in what omh read is a line break: a TOML error's caret points
+/// at the column under the line it quotes, and drawn as `�` it pointed at
+/// nothing. Every other control character is still `�`.
+#[test]
+fn a_multi_line_error_is_drawn_as_its_lines() {
+    let error = "parse error at line 1, column 16\n  |\n1 | idle_timeout = \n  |                ^\nstring values must be quoted";
+    let mut model = model();
+    model.sections[0].problem = Some(error.into());
+    model.sections[1].rows[0].warning = Some(error.into());
+    let mut app = App::new(model, true);
+    let screen = drawn_at(&app, 120, 40);
+    assert!(!screen.contains('�'), "{screen}");
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains("1 | idle_timeout =") && !l.contains("column 16")),
+        "the quoted line is not its own:\n{screen}"
+    );
+    app.key(press('2'));
+    let screen = drawn_at(&app, 120, 40);
+    assert!(!screen.contains('�'), "{screen}");
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains("string values must be quoted") && !l.contains("idle_timeout")),
+        "{screen}"
     );
 }
 
