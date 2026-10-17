@@ -1217,10 +1217,15 @@ pub(crate) fn defaults_use(
             config::forget_list(paths, layer, config::USE, cap)?;
             config::forget_list(paths, layer, config::UNUSE, cap)?;
         }
+        // As the screen says it: a guard is not one of "all".
+        let but = match now.guards.is_empty() {
+            true => "",
+            false => ", but the guards",
+        };
         let said = match (changed, dry_run) {
-            (false, _) => format!("new repos already take all your {cap}"),
-            (true, true) => format!("new repos would take all your {cap} again"),
-            (true, false) => format!("new repos take all your {cap} again"),
+            (false, _) => format!("new repos already take all your {cap}{but}"),
+            (true, true) => format!("new repos would take all your {cap} again{but}"),
+            (true, false) => format!("new repos take all your {cap} again{but}"),
         };
         ctx.say(
             &report::Action::new("defaults-use-all", said)

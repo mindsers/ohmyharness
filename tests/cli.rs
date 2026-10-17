@@ -4926,7 +4926,10 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
 
     run(&["settings", "unuse", "skills", "review-diff"]);
     let (ok, said) = run(&["settings", "use", "hooks", "--all"]);
-    assert!(ok && said.contains("take all your hooks again"), "{said}");
+    assert!(
+        ok && said.contains("take all your hooks again, but the guards"),
+        "as the screen says it: {said}"
+    );
     assert_eq!(list("use", "hooks"), None, "{:?}", doc());
     assert_eq!(
         list("unuse", "skills"),

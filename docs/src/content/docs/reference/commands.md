@@ -2078,7 +2078,7 @@ omh settings set <feature> on|off     switch one of omh's features, for new repo
 omh settings use <capability> <name>  have new repos take an entry of your catalogue
 omh settings unuse <capability> <name>
                                       have new repos leave one out
-omh settings use <capability> --all   have new repos take every entry of a kind again
+omh settings use <capability> --all   have new repos follow your catalogue for a kind again
 omh settings edit [<capability> [name]]
                                       $EDITOR on your defaults, or on one entry
 omh settings rm <capability> <name> [--yes]
