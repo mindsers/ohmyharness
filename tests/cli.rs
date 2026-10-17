@@ -5035,6 +5035,8 @@ fn rm_says_what_goes_with_it_and_that_it_cannot_be_undone() {
     assert!(said.contains("LINEAR_TOKEN"), "{said}");
     assert!(!said.contains("sk-live-123"), "never the value: {said}");
     assert!(said.contains("cannot be undone"), "{said}");
+    // And how far it goes: not new repos alone, every repo that takes it.
+    assert!(said.contains("next launch"), "{said}");
 
     let said = preview("skills", "half-made");
     assert!(

@@ -807,6 +807,10 @@ fn import_from(paths: &Paths, template: &str) -> String {
     }
 }
 
+/// How far a change to an entry goes, said on each: the screen spoke of new
+/// repos alone, under which an edit read as reaching none.
+const REACHES: &str = "reaches every repo that takes it, at its next launch";
+
 /// What belongs on a page, for one with nothing on it yet: what the kind is,
 /// where one lives in your catalogue, and how to get one.
 fn belongs(cap: Capability, import: &Import) -> Vec<String> {
@@ -954,7 +958,12 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             value,
             fallback: Some(fallback),
             warning,
-            about: vec![k.does.to_string()],
+            about: vec![
+                k.does.to_string(),
+                "seeds a new repo's .omh/settings.toml, which is committed — a repo that \
+                 exists keeps its own"
+                    .into(),
+            ],
             edit,
             ..Row::default()
         });
@@ -1148,6 +1157,7 @@ fn servers(paths: &Paths) -> Section {
             about.push(format!("env   {env}"));
         }
         about.push(format!("file  {}", within(paths, &path)));
+        about.push(REACHES.into());
         // Names and counts, as the detail says them: never a value.
         let mut summary = vec![server.command.clone()];
         if !server.args.is_empty() {
@@ -1202,6 +1212,8 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
             true => format!("dir   {}", within(paths, &path)),
             false => format!("file  {}", within(paths, &path)),
         });
+        // How far an edit goes: not new repos alone.
+        about.push(REACHES.into());
         if ships {
             about.push(
                 "omh ships this one and `omh upgrade` refreshes it — `omh unuse hooks` \
@@ -1369,6 +1381,46 @@ mod tests {
                 line[1..].join(" ")
             ),
         }
+    }
+
+    /// Each row says how far a change to it goes, which is not "new repos"
+    /// alone: an entry reaches every repo that takes it, at its next launch,
+    /// and a default lands in a new repo's committed settings file. The screen
+    /// said only what new repos get, under which an edit read as reaching no
+    /// repo at all.
+    #[test]
+    fn each_row_says_how_far_a_change_to_it_goes() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("skills/tdd/SKILL.md"),
+            "---\nname: tdd\ndescription: x\n---\n",
+        );
+        write(
+            &config::mcp_path(&paths),
+            r#"{"mcpServers":{"linear":{"command":"npx"}}}"#,
+        );
+        let model = model(&paths);
+        let about = |title: &str, name: &str| {
+            page(&model, title)
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {title}/{name}"))
+                .about
+                .join("\n")
+        };
+        for (title, name) in [("skills", "tdd"), ("servers", "linear")] {
+            let said = about(title, name);
+            assert!(
+                said.contains("every repo that takes it") && said.contains("next launch"),
+                "{title}/{name}: {said}"
+            );
+        }
+        let said = about("defaults", "idle_timeout");
+        assert!(
+            said.contains("settings.toml") && said.contains("committed"),
+            "{said}"
+        );
     }
 
     /// A skill or a subagent with no description in its front matter is

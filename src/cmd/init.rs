@@ -223,7 +223,7 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
     for k in key::KEYS {
         if let Some(item) = doc.get(k.name) {
             // No `is_value()` check here. `refuse_what_cannot_be_seeded` has
-            // already refused every table but `[use]` and `[omh]`, so
+            // already refused every table but `[use]`, `[unuse]` and `[omh]`, so
             // `[carry_in]` never reaches this loop — a second guard for it
             // could not fire, and a check nothing can reach is decoration.
             out.insert(k.name, item.clone());

@@ -1507,21 +1507,25 @@ pub(crate) fn rm(
 /// name and never by value; the files in an entry's directory; of a link,
 /// that only the link goes.
 fn what_goes(paths: &Paths, name: &str, entry: Option<&std::path::Path>) -> Result<String> {
-    const FOR_GOOD: &str = "it cannot be undone";
+    const FOR_GOOD: &str =
+        "every repo that takes it loses it at its next launch, and it cannot be undone";
     let Some(path) = entry else {
         let env: Vec<String> = config::held_server(paths, name)?
             .map(|s| s.env.into_keys().collect())
             .unwrap_or_default();
         return Ok(match env.is_empty() {
             true => FOR_GOOD.to_string(),
-            false => format!("its env goes with it — {} — and {FOR_GOOD}", env.join(", ")),
+            false => format!("its env goes with it — {}; {FOR_GOOD}", env.join(", ")),
         });
     };
     if path.is_symlink() {
         let to = std::fs::read_link(path)
             .map(|t| format!(", {},", t.display()))
             .unwrap_or_default();
-        return Ok(format!("only the link goes — what it points at{to} stays"));
+        return Ok(format!(
+            "only the link goes — what it points at{to} stays; every repo that takes it \
+             loses it at its next launch"
+        ));
     }
     if !path.is_dir() {
         return Ok(FOR_GOOD.to_string());
@@ -1531,7 +1535,7 @@ fn what_goes(paths: &Paths, name: &str, entry: Option<&std::path::Path>) -> Resu
         .with_context(|| format!("reading what is in {}", path.display()))?;
     files.sort();
     let named = match files.len() {
-        0 => return Ok(format!("it is empty, and {FOR_GOOD}")),
+        0 => return Ok(format!("it is empty; {FOR_GOOD}")),
         n if n <= 5 => files.join(", "),
         n => format!("{}, and {} more", files[..4].join(", "), n - 4),
     };
@@ -1539,7 +1543,7 @@ fn what_goes(paths: &Paths, name: &str, entry: Option<&std::path::Path>) -> Resu
         1 => "1 file goes".to_string(),
         n => format!("{n} files go"),
     };
-    Ok(format!("{count} with it — {named} — and {FOR_GOOD}"))
+    Ok(format!("{count} with it — {named}; {FOR_GOOD}"))
 }
 
 /// Every file under `dir`, named from `root`.
