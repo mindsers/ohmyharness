@@ -257,21 +257,180 @@ fn what_omh_owns_is_not_offered_for_removal() {
     ];
     let mut app = App::new(model, true);
     app.key(press('3'));
-    // The detail's keys and the footer's, each on its own: either one
-    // offering it is the screen offering it.
+    // The footer is where the keys are; the detail no longer repeats them.
     let offered = |app: &App| {
-        let detail = app.detail_text().to_string();
         let screen = drawn_at(app, 120, 30);
         let footer = screen.lines().last().unwrap_or_default().to_string();
-        (detail.contains("d remove"), footer.contains("d remove"))
+        footer.contains("d remove")
     };
-    assert_eq!(offered(&app), (false, false), "codegraph");
+    assert!(!offered(&app), "codegraph");
     assert!(matches!(
         app.key(press('d')),
         Next::Preview(Act::Remove { .. })
     ));
     app.key(press('j'));
-    assert_eq!(offered(&app), (true, true), "a server of yours");
+    assert!(offered(&app), "a server of yours");
+}
+
+/// The keys at the foot are the ones that act here, the row's own first: no
+/// `↵ set` on a table, no `d unset` on what is unset, no `i` where import is
+/// refused, no `d remove` on an empty page — and while a popup is open, the
+/// popup's. The detail does not repeat them.
+#[test]
+fn the_footer_offers_what_acts_here() {
+    let footer = |app: &App| {
+        drawn_at(app, 120, 30)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut app = App::new(model(), true);
+    let f = footer(&app);
+    assert!(
+        f.contains("↵ set") && f.contains("d unset"),
+        "idle_timeout: {f}"
+    );
+    assert!(
+        f.find("d unset") < f.find("⇥ page"),
+        "the row's keys come first: {f}"
+    );
+    app.key(press('j'));
+    let f = footer(&app);
+    assert!(
+        f.contains("↵ set") && !f.contains("d unset"),
+        "runtime: {f}"
+    );
+    app.key(press('j'));
+    let f = footer(&app);
+    assert!(
+        !f.contains("↵ set") && !f.contains("d unset") && f.contains("e "),
+        "[use]: {f}"
+    );
+    app.key(press('3'));
+    let f = footer(&app);
+    assert!(
+        !f.contains("d remove") && f.contains("a add"),
+        "no servers: {f}"
+    );
+    app.key(press('4'));
+    let f = footer(&app);
+    assert!(!f.contains("i import"), "hooks: {f}");
+    app.key(press('2'));
+    assert!(!app.detail_text().to_string().contains("d remove"));
+    app.key(press('a'));
+    let f = footer(&app);
+    assert!(f.contains("esc") && !f.contains("⇥ page"), "a popup: {f}");
+}
+
+/// The rail says what a page holds before you go to it: its number, a `!`
+/// where a row has a warning, and `✗` where omh could not look — whose count
+/// is `—`, not `0`, since could not look is not none.
+#[test]
+fn the_rail_numbers_the_pages_and_marks_their_trouble() {
+    let mut model = model();
+    model.sections[1].rows[0].warning = Some("no SKILL.md in it".into());
+    let mut app = App::new(model, true);
+    let screen = drawn_at(&app, 120, 30);
+    let rail = |title: &str| {
+        screen
+            .lines()
+            .find(|l| l.split('│').next().is_some_and(|r| r.contains(title)))
+            .and_then(|l| l.split('│').next())
+            .unwrap_or_else(|| panic!("no {title} in the rail:\n{screen}"))
+            .to_string()
+    };
+    assert!(
+        rail("Defaults").contains("1 Defaults"),
+        "{}",
+        rail("Defaults")
+    );
+    let skills = rail("Skills");
+    assert!(
+        skills.contains("2 Skills") && skills.contains('!'),
+        "{skills}"
+    );
+    assert!(rail("Hooks").contains('✗'), "{}", rail("Hooks"));
+    assert!(!rail("Servers").contains('!'), "{}", rail("Servers"));
+    app.key(press('4'));
+    let screen = drawn_at(&app, 120, 30);
+    assert!(screen.lines().any(|l| l.contains("Hooks  —")), "{screen}");
+}
+
+/// A long page: three of yours and thirty shipped, as the hooks page is.
+fn long_model() -> Model {
+    let mut model = model();
+    model.sections[1].rows = (0..33)
+        .map(|i| Row {
+            group: Some(if i < 3 { "yours" } else { "shipped with omh" }.into()),
+            summary: Some(format!("entry number {i}")),
+            about: match i % 3 {
+                0 => vec!["one line".into()],
+                1 => vec!["a line".into(), "and a second".into(), "and a third".into()],
+                _ => vec![],
+            },
+            ..row(&format!("entry-{i:02}"))
+        })
+        .collect();
+    model
+}
+
+/// Stacked, the list over its detail, the rule between them stays put as the
+/// cursor moves: it was the selected row's detail that sized it, so the list
+/// grew and shrank under every `j`. It is the page's tallest detail now. It
+/// meets the column rule as `├`, and a page with no row has no rule at all.
+#[test]
+fn the_stacked_split_holds_still() {
+    let mut app = App::new(long_model(), true);
+    app.key(press('2'));
+    let rule = |app: &App| {
+        let screen = drawn_at(app, 80, 24);
+        screen
+            .lines()
+            .position(|l| l.contains("├─"))
+            .unwrap_or_else(|| panic!("no junction:\n{screen}"))
+    };
+    let first = rule(&app);
+    for _ in 0..6 {
+        app.key(press('j'));
+        assert_eq!(
+            rule(&app),
+            first,
+            "the rule moved:\n{}",
+            drawn_at(&app, 80, 24)
+        );
+    }
+    let mut app = App::new(model(), true);
+    app.key(press('3'));
+    let screen = drawn_at(&app, 80, 24);
+    assert!(!screen.contains("──"), "a rule over no detail:\n{screen}");
+}
+
+/// A list longer than its room says so with a thumb at its edge, and the
+/// heading of the group the cursor is in stays at the top once it has
+/// scrolled away: at 60×20 the visible hooks had no group at all.
+#[test]
+fn a_long_list_says_there_is_more_and_keeps_its_heading() {
+    let mut app = App::new(long_model(), true);
+    app.key(press('2'));
+    let screen = drawn_at(&app, 80, 24);
+    assert!(screen.contains('┃'), "no sign of more:\n{screen}");
+    app.key(press('G'));
+    let screen = drawn_at(&app, 80, 24);
+    assert!(screen.contains("entry-32"), "{screen}");
+    let list: Vec<&str> = screen
+        .lines()
+        .skip_while(|l| !l.contains("Skills  33"))
+        .skip(2)
+        .collect();
+    assert!(
+        list.first().is_some_and(|l| l.contains("SHIPPED WITH OMH")),
+        "the heading scrolled away:\n{screen}"
+    );
+    // At the top, nothing is pinned twice.
+    app.key(press('g'));
+    let screen = drawn_at(&app, 80, 24);
+    assert_eq!(screen.matches("YOURS").count(), 1, "{screen}");
 }
 
 /// The columns start on one line: the first page, the list's heading, and —

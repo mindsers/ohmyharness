@@ -1057,7 +1057,12 @@ impl App {
                 .areas(body);
                 self.draw_pages(f, pages);
                 self.draw_rule(f, a);
-                self.draw_stacked(f, rest);
+                // Where the list's rule meets the column's, one line, not two.
+                if let Some(y) = self.draw_stacked(f, rest) {
+                    f.buffer_mut()[(a.x, y)]
+                        .set_symbol("├")
+                        .set_style(self.look.dim());
+                }
             }
             Width::Narrow => {
                 let [tabs, rest] =
@@ -1104,14 +1109,31 @@ impl App {
     }
 
     /// The list over its detail, where there is no room for them side by side.
-    /// The detail is as tall as what it says, up to half.
-    fn draw_stacked(&self, f: &mut Frame, area: Rect) {
-        let detail = self.detail_text();
-        let height = (Paragraph::new(detail.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(area.width.saturating_sub(2)) as u16
-            + 1)
-        .min(area.height / 2);
+    ///
+    /// **The split is the page's, not the row's**: as tall as the tallest
+    /// detail among the page's rows, up to two fifths. Sized by the selected
+    /// one, the list grew and shrank under every `j`. A page with no row has
+    /// no detail and no rule. Answers the rule's line, for the junction.
+    fn draw_stacked(&self, f: &mut Frame, area: Rect) -> Option<u16> {
+        let section = self.section()?;
+        let width = area.width.saturating_sub(2);
+        let tallest = match self.row() {
+            None => 0,
+            Some(_) => section
+                .rows
+                .iter()
+                .map(|row| {
+                    Paragraph::new(self.detail_for(section, row))
+                        .wrap(Wrap { trim: false })
+                        .line_count(width) as u16
+                })
+                .max()
+                .unwrap_or(0),
+        };
+        let height = match tallest {
+            0 => 0,
+            n => (n + 1).min(area.height * 2 / 5),
+        };
         let [list, rule, detail_area] = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(u16::from(height > 0)),
@@ -1119,6 +1141,9 @@ impl App {
         ])
         .areas(area);
         self.draw_list(f, list);
+        if height == 0 {
+            return None;
+        }
         f.render_widget(
             Paragraph::new(Span::styled(
                 "─".repeat(usize::from(rule.width)),
@@ -1127,9 +1152,10 @@ impl App {
             rule,
         );
         f.render_widget(
-            Paragraph::new(detail).wrap(Wrap { trim: false }),
+            Paragraph::new(self.detail_text()).wrap(Wrap { trim: false }),
             detail_area.inner(Margin::new(1, 0)),
         );
+        Some(rule.y)
     }
 
     fn draw_pages(&self, f: &mut Frame, area: Rect) {
@@ -1143,14 +1169,29 @@ impl App {
                 true => Span::styled("▌ ", self.look.accent()),
                 false => Span::raw("  "),
             };
-            let count = match (s.problem.is_some(), s.page) {
-                (true, _) => Span::styled("!", self.look.tone(Tone::Bad)),
-                // Entries and servers are counted; your defaults are every key
-                // omh reads, so a count there would be the same number forever.
-                (false, Page::Defaults) => Span::raw(""),
-                (false, _) => Span::styled(s.rows.len().to_string(), self.look.dim()),
-            };
-            let width = usize::from(area.width).saturating_sub(2 + count.width() + 1);
+            // What the page holds, before you go to it: `✗` where omh could
+            // not look, `!` where a row has a warning, and how many. Your
+            // defaults are every key omh reads, so a count there would be the
+            // same number forever.
+            let warned = s.rows.iter().any(|r| r.warning.is_some());
+            let mut right = Vec::new();
+            match (s.problem.is_some(), s.page) {
+                (true, _) => right.push(Span::styled("✗", self.look.tone(Tone::Bad))),
+                (false, page) => {
+                    if warned {
+                        right.push(Span::styled("!", self.look.tone(Tone::Warn)));
+                    }
+                    if page != Page::Defaults {
+                        right.push(Span::styled(
+                            format!("{}{}", if warned { " " } else { "" }, s.rows.len()),
+                            self.look.dim(),
+                        ));
+                    }
+                }
+            }
+            let used: usize = right.iter().map(Span::width).sum();
+            let number = Span::styled(format!("{} ", i + 1), self.look.dim());
+            let width = usize::from(area.width).saturating_sub(2 + 2 + used + 1);
             let title = Span::styled(
                 pad(&capitalised(s.title), width),
                 match here {
@@ -1158,7 +1199,9 @@ impl App {
                     false => Style::default(),
                 },
             );
-            lines.push(Line::from(vec![mark, title, count]));
+            let mut line = vec![mark, number, title];
+            line.extend(right);
+            lines.push(Line::from(line));
         }
         f.render_widget(Paragraph::new(lines), area);
     }
@@ -1187,9 +1230,14 @@ impl App {
         let shown = self.shown(self.at);
 
         // The page's own heading: what it is, how many, and the filter.
+        // A page omh could not read holds an unknown number, not none.
+        let count = match (&section.problem, section.rows.is_empty()) {
+            (Some(_), true) => "—".to_string(),
+            _ => shown.len().to_string(),
+        };
         let mut head = vec![
             Span::styled(capitalised(section.title), self.look.title()),
-            Span::styled(format!("  {}", shown.len()), self.look.dim()),
+            Span::styled(format!("  {count}"), self.look.dim()),
         ];
         if let Some(filter) = &self.filter {
             head.push(Span::styled(
@@ -1294,6 +1342,8 @@ impl App {
             .min(10);
         let mut items = Vec::new();
         let mut index = Vec::new();
+        // Where each heading is, by item, and what it says.
+        let mut headings: Vec<(usize, String)> = Vec::new();
         let mut group: Option<&str> = None;
         let selected = self.rows[self.at].min(shown.len() - 1);
         let mut selected_item = 0;
@@ -1306,6 +1356,7 @@ impl App {
                 }
                 group = row.group.as_deref();
                 if let Some(heading) = group {
+                    headings.push((items.len(), heading.to_uppercase()));
                     items.push(ListItem::new(Span::styled(
                         heading.to_uppercase(),
                         self.look.dim(),
@@ -1325,19 +1376,72 @@ impl App {
             )));
             index.push(Some(i));
         }
-        let mut state = ListState::default().with_selected(Some(selected_item));
+
+        // The window onto the items: the least scrolling that shows the
+        // cursor. Past the heading of the cursor's group, that heading is
+        // pinned to the top, where it says what the rows under it are.
+        let total = items.len();
+        let room = usize::from(list.height);
+        let offset_for = |room: usize| selected_item.saturating_sub(room.saturating_sub(1));
+        let mut offset = offset_for(room);
+        let heading = headings.iter().rev().find(|(at, _)| *at <= selected_item);
+        let pinned = match heading {
+            Some((at, text)) if total > room && room > 1 && *at < offset => {
+                offset = offset_for(room - 1);
+                (*at < offset).then(|| text.clone())
+            }
+            _ => None,
+        };
+        let mut rows_area = list;
+        if let Some(text) = &pinned {
+            let [top, rest] =
+                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(list);
+            f.render_widget(
+                Paragraph::new(Span::styled(text.clone(), self.look.dim())),
+                top,
+            );
+            rows_area = rest;
+        } else if total <= room {
+            offset = 0;
+        }
+        let mut state = ListState::default()
+            .with_offset(offset)
+            .with_selected(Some(selected_item));
         f.render_stateful_widget(
             List::new(items).highlight_style(self.look.selected()),
-            list,
+            rows_area,
             &mut state,
         );
         let offset = state.offset();
+
+        // More than fits: a thumb at the list's right edge says how much, and
+        // where in it you are.
+        if total > room && room > 0 {
+            let edge = Rect {
+                x: list.right(),
+                width: 1,
+                ..list
+            };
+            let thumb = (room * room / total).max(1);
+            let at = (offset * room / total).min(room - thumb);
+            for y in 0..room {
+                let symbol = if (at..at + thumb).contains(&y) {
+                    "┃"
+                } else {
+                    " "
+                };
+                f.buffer_mut()[(edge.x, edge.y + y as u16)]
+                    .set_symbol(symbol)
+                    .set_style(self.look.dim());
+            }
+        }
+
         let mut hit = self.hit.borrow_mut();
-        hit.list = list;
+        hit.list = rows_area;
         hit.lines = index
             .into_iter()
             .skip(offset)
-            .take(usize::from(list.height))
+            .take(usize::from(rows_area.height))
             .collect();
     }
 
@@ -1402,12 +1506,16 @@ impl App {
         Line::from(spans)
     }
 
-    /// What the selected row is: its name, what it says about itself, and the
-    /// keys that act on it.
+    /// What the selected row is: its name and what it says about itself.
     fn detail_text(&self) -> Text<'static> {
-        let (Some(section), Some(row)) = (self.section(), self.row()) else {
-            return Text::default();
-        };
+        match (self.section(), self.row()) {
+            (Some(section), Some(row)) => self.detail_for(section, row),
+            _ => Text::default(),
+        }
+    }
+
+    /// What one row is, as the detail draws it.
+    fn detail_for(&self, section: &Section, row: &Row) -> Text<'static> {
         let title = match section.page.capability() {
             Some(capability) => format!("{capability}/{}", row.name),
             None => row.name.clone(),
@@ -1460,17 +1568,8 @@ impl App {
                 lines.push(Line::from(Span::styled(hint.clone(), self.look.dim())));
             }
         }
-        lines.push(Line::default());
-        let keys: &[(&str, &str)] = match section.page {
-            Page::Defaults if row.edit == Edit::None => &[("e", "edit the file")],
-            Page::Defaults if row.value.is_some() => &[("↵", "set"), ("d", "unset")],
-            Page::Defaults => &[("↵", "set")],
-            Page::Servers if row.fixed => &[("e", "edit the file")],
-            Page::Servers => &[("e", "edit the file"), ("d", "remove")],
-            Page::Entries(_) if row.fixed => &[("↵", "edit")],
-            Page::Entries(_) => &[("↵", "edit"), ("d", "remove")],
-        };
-        lines.push(self.chips(keys));
+        // The keys are the footer's, which follows the row: a second list of
+        // them here spent two rows of a stacked screen saying it again.
         Text::from(lines)
     }
 
@@ -1548,46 +1647,34 @@ impl App {
         Some(Text::from(lines))
     }
 
-    /// The keys for this page, as many as fit, with `?` and `q` always there.
+    /// The keys that act here, as many as fit, with `?` and `q` always there:
+    /// a popup's own while one is open, and otherwise the row's first, then the
+    /// page's, then moving — the order they are dropped in from the right.
     fn keys(&self, width: u16) -> Line<'static> {
-        let page: &[(&str, &str)] = match self.section().map(|s| s.page) {
-            _ if self.filter.as_ref().is_some_and(|f| f.typing) => {
-                &[("↵", "keep the filter"), ("esc", "drop it"), ("↑↓", "move")]
+        let page: Vec<(&str, &str)> = match &self.modal {
+            Some(Modal::Input(_)) => vec![("↵", "done"), ("esc", "cancel"), ("ctrl-u", "clear")],
+            Some(Modal::Pick(_)) => {
+                vec![
+                    ("↑↓", "move"),
+                    ("↵", "pick"),
+                    ("a letter", "jumps"),
+                    ("esc", "close"),
+                ]
             }
-            None | Some(Page::Defaults) => &[
-                ("↑↓", "move"),
-                ("⇥", "page"),
-                ("↵", "set"),
-                ("d", "unset"),
-                ("e", "edit the file"),
-                ("/", "filter"),
-            ],
-            Some(Page::Servers) => &[
-                ("↑↓", "move"),
-                ("⇥", "page"),
-                ("a", "add"),
-                ("d", "remove"),
-                ("i", "import"),
-                ("e", "edit the file"),
-                ("/", "filter"),
-            ],
-            Some(Page::Entries(_)) => &[
-                ("↑↓", "move"),
-                ("⇥", "page"),
-                ("↵", "edit"),
-                ("a", "new"),
-                ("d", "remove"),
-                ("i", "import"),
-                ("/", "filter"),
-            ],
+            Some(Modal::Confirm { .. }) => vec![("y", "remove"), ("any other key", "keeps it")],
+            Some(Modal::Form(_)) => {
+                vec![
+                    ("⇥", "next field"),
+                    ("↵", "next, then add"),
+                    ("esc", "cancel"),
+                ]
+            }
+            Some(Modal::Help) => vec![("any key", "closes")],
+            None if self.filter.as_ref().is_some_and(|f| f.typing) => {
+                vec![("↵", "keep the filter"), ("esc", "drop it"), ("↑↓", "move")]
+            }
+            None => self.page_keys(),
         };
-        // Not offered on what the command will not remove.
-        let fixed = self.row().is_some_and(|r| r.fixed);
-        let page: Vec<(&str, &str)> = page
-            .iter()
-            .copied()
-            .filter(|&key| !(fixed && key == ("d", "remove")))
-            .collect();
         let right = self.chips(&[("?", "help"), ("q", "quit")]);
         let room = usize::from(width).saturating_sub(right.width() + 2);
         let mut take = page.len();
@@ -1602,6 +1689,52 @@ impl App {
         spans.push(Span::raw(" ".repeat(gap)));
         spans.extend(right.spans);
         Line::from(spans)
+    }
+
+    /// What acts on this page and this row: a key that would only be told no
+    /// is not offered — `↵ set` on a table, `d` on what is unset or is omh's,
+    /// `i` where import is refused.
+    fn page_keys(&self) -> Vec<(&'static str, &'static str)> {
+        let mut keys = Vec::new();
+        if let Some(section) = self.section() {
+            let row = self.row();
+            let importable = matches!(&section.import, Import::From(h) if !h.is_empty());
+            match section.page {
+                Page::Defaults => {
+                    if let Some(row) = row.filter(|r| r.edit != Edit::None) {
+                        keys.push(("↵", "set"));
+                        if row.value.is_some() {
+                            keys.push(("d", "unset"));
+                        }
+                    }
+                    keys.push(("e", "edit the file"));
+                }
+                Page::Servers => {
+                    if row.is_some_and(|r| !r.fixed) {
+                        keys.push(("d", "remove"));
+                    }
+                    keys.push(("a", "add"));
+                    if importable {
+                        keys.push(("i", "import"));
+                    }
+                    keys.push(("e", "edit the file"));
+                }
+                Page::Entries(_) => {
+                    if let Some(row) = row {
+                        keys.push(("↵", "edit"));
+                        if !row.fixed {
+                            keys.push(("d", "remove"));
+                        }
+                    }
+                    keys.push(("a", "new"));
+                    if importable {
+                        keys.push(("i", "import"));
+                    }
+                }
+            }
+        }
+        keys.extend([("/", "filter"), ("⇥", "page"), ("↑↓", "move")]);
+        keys
     }
 
     fn chips(&self, keys: &[(&str, &str)]) -> Line<'static> {
