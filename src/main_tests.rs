@@ -3427,6 +3427,55 @@ fn one_of_a_thing_is_said_in_the_singular() {
     );
 }
 
+/// **The agent's index is not asked whether its work is there.** It writes
+/// that index, and `update-index --assume-unchanged` or `--skip-worktree` on a
+/// file it edited makes `status` pass over the edit. `omh s` — which asks the
+/// session's own index — said the path was uncommitted while `omh sNN rm`
+/// found nothing at stake, asked nothing, and deleted it.
+#[test]
+fn work_the_agent_told_its_index_to_ignore_is_still_at_stake() {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let sandbox_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("--git-dir")
+            .arg(&shadow.gitdir)
+            .arg("--work-tree")
+            .arg(&session.worktree)
+            .current_dir(&session.worktree)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Everything committed so far has been handed over, so only what follows
+    // is at stake.
+    std::fs::write(&shadow.landed_record, sandbox_git(&["rev-parse", "HEAD"])).unwrap();
+    assert!(
+        matches!(
+            cmd::harvest::at_stake(&paths, &session),
+            cmd::harvest::AtStake::Nothing
+        ),
+        "precondition: nothing at stake before the edits"
+    );
+
+    std::fs::write(session.worktree.join("one.rs"), "fn an_afternoon() {}\n").unwrap();
+    std::fs::write(session.worktree.join("two.rs"), "fn and_a_morning() {}\n").unwrap();
+    sandbox_git(&["update-index", "--assume-unchanged", "one.rs"]);
+    sandbox_git(&["update-index", "--skip-worktree", "two.rs"]);
+
+    assert_eq!(
+        session.changed().unwrap(),
+        ["one.rs", "two.rs"],
+        "precondition: `omh s` counts both edits"
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(&stake, cmd::harvest::AtStake::Work(what) if what == "2 uncommitted paths"),
+        "rm would delete both edits without asking: {stake:?}"
+    );
+}
+
 /// Naming checkpoints needs a git that can drop an already-applied
 /// commit, and says so rather than handing over a usage dump.
 ///
