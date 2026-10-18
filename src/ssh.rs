@@ -15,9 +15,13 @@ use std::path::{Path, PathBuf};
 
 pub const INCLUDE_LINE: &str = "Include ~/.ssh/config.d/omh";
 
-/// SSH host alias for a session.
+/// SSH host alias for a session: the session's container name.
+///
+/// Respelled by [`crate::profile::runtime_id`], because a space in a `Host`
+/// line is two patterns and in `HostKeyAlias` a parse error — and the block is
+/// included from `~/.ssh/config`, so the error stops every ssh on the machine.
 pub fn host_alias(repo: &str, session: &str) -> String {
-    format!("omh-{repo}-{session}")
+    format!("omh-{}-{session}", crate::profile::runtime_id(repo))
 }
 
 /// Loopback port for a session's sshd.
@@ -123,9 +127,33 @@ pub fn config_block(alias: &str, port: u16, key: &Path, known_hosts: &Path) -> S
          StrictHostKeyChecking yes\n  \
          UserKnownHostsFile {}\n  \
          LogLevel ERROR\n",
-        key.display(),
-        known_hosts.display()
+        config_path(key),
+        config_path(known_hosts)
     )
+}
+
+/// A path as one `ssh_config` argument.
+///
+/// Quoted, because the paths are under `~/.omh/keys` and a home directory may
+/// have a space in it, which ssh reads as a second argument — OpenSSH 10.3
+/// then refuses the whole config, and this block is included from
+/// `~/.ssh/config`. Inside the quotes ssh's tokeniser takes `\` as an escape,
+/// so `\` and `"` are escaped; `%` is doubled because both keywords expand
+/// `%` tokens, and a lone one is `unknown key` at the next connection.
+fn config_path(path: &Path) -> String {
+    let mut out = String::from('"');
+    for c in path.display().to_string().chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '%' => out.push_str("%%"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The known_hosts entry for one alias: `alias type key`, without the comment
@@ -418,7 +446,7 @@ mod tests {
         assert!(block.contains("StrictHostKeyChecking yes"), "got: {block}");
         assert!(block.contains("HostKeyAlias omh-x-s01"), "got: {block}");
         assert!(
-            block.contains("UserKnownHostsFile /k/known_hosts"),
+            block.contains("UserKnownHostsFile \"/k/known_hosts\""),
             "got: {block}"
         );
         assert!(
@@ -457,11 +485,13 @@ mod tests {
             "ssh refused the block: {}\n{block}",
             String::from_utf8_lossy(&out.stderr)
         );
+        // `-G` prints each value unquoted and before `%` expansion, which is
+        // when `%%` becomes `%` — measured with OpenSSH 10.3.
         let read = String::from_utf8_lossy(&out.stdout);
         for (keyword, path) in [("identityfile", &key), ("userknownhostsfile", &known_hosts)] {
             let want = format!("{keyword} {}", path.display());
             assert!(
-                read.lines().any(|l| l == want),
+                read.lines().any(|l| l.replace("%%", "%") == want),
                 "ssh did not read `{want}` back:\n{read}"
             );
         }

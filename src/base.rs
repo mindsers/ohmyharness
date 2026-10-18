@@ -414,8 +414,12 @@ pub const GRAPH_BIN: &str = "codebase-memory-mcp";
 /// server's scope to its data's scope removes the duplication, survives
 /// sessions starting and stopping, and lets the container mount *only* the
 /// index: no worktree, no credentials, no profile.
+///
+/// `repo` is the repo id, respelled by [`crate::profile::runtime_id`] here
+/// rather than by every caller, because docker refuses a name outside its
+/// charset.
 pub fn ui_container(repo: &str) -> String {
-    format!("omh-graph-{repo}")
+    format!("omh-graph-{}", crate::profile::runtime_id(repo))
 }
 
 /// A stable loopback port for the graph UI.
@@ -522,8 +526,12 @@ pub const PROJECT_ENV: &str = "OMH_GRAPH_PROJECT";
 
 /// A graph is per-session, because a session's worktree is not the checkout the
 /// agent started from — it holds whatever the agent has since written.
+///
+/// Respelled by [`crate::profile::runtime_id`], because the name is quoted
+/// into a shell line in the sandbox (`drop_graph_command`) and a `'` in a
+/// checkout's directory name would end the quote.
 pub fn project_name(repo: &str, session: &str) -> String {
-    format!("{repo}-{session}")
+    format!("{}-{session}", crate::profile::runtime_id(repo))
 }
 
 /// Read a note and take it away in one command.

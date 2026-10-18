@@ -117,7 +117,9 @@ JetBrains Gateway works through the same alias.
 The alias is `omh-<repo id>-<session>`, and the repo id is the checkout's
 directory name plus a short digest of where it is —
 `omh info --repo` prints it. It is stable for a given checkout, so a bookmark
-keeps working.
+keeps working. The alias is also the session's container name, so a
+character Docker does not take in one — a space, an accent — is spelled `_`
+there: a checkout called `My App` has aliases starting `omh-My_App-`.
 
 <details>
 <summary>Why an include rather than a plugin, and why the alias carries a digest</summary>
