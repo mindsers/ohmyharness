@@ -65,8 +65,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: check formatting
         run: cargo fmt --check
+      # `--features e2e`: tests/e2e is `required-features`, so `--all-targets`
+      # alone leaves it out, and the suite nightly runs was compiled by nothing
+      # on a push — a pull request could break it and land green.
       - name: lint, with warnings as errors
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --features e2e -- -D warnings
 
   # install.sh runs before omh does, on a machine nobody has checked, and it is
   # the only file here that no compiler reads. scripts/check.sh is the second
@@ -136,4 +139,4 @@ jobs:
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: build on the floor omh declares
-        run: cargo build --locked --all-targets
+        run: cargo build --locked --all-targets --features e2e

@@ -15,7 +15,6 @@ use crate::{
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::process::Command;
 
 /// What to do next, in the order somebody does it.
 ///
@@ -991,7 +990,8 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 &paths.repo,
                 &paths.runtime_id(),
             );
-            Command::new(backend.program())
+            backend
+                .command()
                 .args(&args)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

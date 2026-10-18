@@ -206,7 +206,7 @@ pub(crate) fn session_up(
     // caller can sample it too early.
     let mut opts = opts;
     match memory::deliver::ensure(
-        backend.program(),
+        &backend.spawned().to_string_lossy(),
         paths,
         memory::deliver::sources_at(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
@@ -286,7 +286,8 @@ pub(crate) fn session_up(
     // whatever the agent has since written. Index it now; the Stop hook keeps
     // it current from here.
     let project = base::project_name(&paths.repo_id(), &session.id);
-    let _ = Command::new(backend.program())
+    let _ = backend
+        .command()
         .args(backend.exec_args(
             &name,
             &[
@@ -2307,7 +2308,8 @@ pub(crate) fn run(
     }
     remember_hooks(hooks_seen, ctx);
     ctx.announce(&status_line);
-    let status = Command::new(backend.program())
+    let status = backend
+        .command()
         .args(backend.exec_args(&name, &plan.argv, true))
         .status()?;
     // `omh s01 diff`, not `omh diff`. There is no top-level `diff` — the name

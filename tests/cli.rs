@@ -12211,16 +12211,11 @@ fn doctor_says_when_the_runtime_is_installed_but_not_answering() {
 #[test]
 fn doctor_without_adapters_reports_the_host_and_fails_honestly() {
     let sb = sandbox();
-    let _log = sb.fake_docker();
+    let log = sb.fake_docker();
     sb.git_init();
     sb.seed_catalogue(&["base", "editors", "stacks"]);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
-        .args(["doctor", "--json"])
-        .current_dir(&sb.repo)
-        .env("HOME", &sb.home)
-        .output()
-        .expect("the binary under test must run");
+    let out = sb.omh(&["doctor", "--json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     assert!(!out.status.success(), "no adapter is a failure: {stdout}");
@@ -12238,6 +12233,14 @@ fn doctor_without_adapters_reports_the_host_and_fails_honestly() {
             .as_array()
             .is_some_and(|c| c.iter().any(|o| o["name"] == "git on the host")),
         "the host's rows are still reported: {stdout}"
+    );
+    // The host's rows asked the sandbox's docker, not the machine's: run
+    // without the sandbox's PATH, the leftovers sweep listed the developer's
+    // own containers and volumes, and the shim above heard nothing.
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        asked.lines().any(|l| l.starts_with("ps ")),
+        "doctor's listing reached a docker other than this sandbox's: {asked:?}"
     );
 }
 

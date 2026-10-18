@@ -22,6 +22,9 @@ on:
       - "adapters/**"
       - "base/**"
       - "editors/**"
+      - "hooks/**"
+      - "markers/**"
+      - "stacks/**"
 
 permissions:
   contents: read
@@ -75,7 +78,7 @@ jobs:
       - name: run every test
         run: cargo test --locked -- --include-ignored
       - name: lint, with warnings as errors
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --features e2e -- -D warnings
 
   # Linux builds are static musl, and that is not a portability nicety here.
   # On Linux omh mounts its own executable into the sandbox and the harness

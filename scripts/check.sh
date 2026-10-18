@@ -117,7 +117,7 @@ step "format"
 run cargo fmt --check
 
 step "lints"
-run cargo clippy --locked --all-targets -- -D warnings
+run cargo clippy --locked --all-targets --features e2e -- -D warnings
 
 if [ "${1:-}" = --all ]; then
   step "tests, including the ones needing a container runtime"

@@ -4896,9 +4896,15 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let (paths, adapter) = measurement_fixture(dir.path());
     // Exits non-zero for everything, so the image "exists" is false and the
-    // probe fails — the shape of a daemon that is refusing.
+    // probe fails — the shape of a daemon that is refusing. It writes down
+    // what it was asked, because the build in between is a spawn of its own.
     let bin = dir.path().join("failing-runtime");
-    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+    let asked = dir.path().join("asked");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", asked.display()),
+    )
+    .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -4911,6 +4917,17 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
         &base::Own::default(),
         &settings::RepoPolicy::default(),
         &out::Ctx::plain(),
+    );
+
+    // **The build went to the shim, not to the host's docker.** It is the
+    // one runner that spawns a `Child` instead of going through `output`,
+    // and a shim that covered only `output` sent this test's `docker build`
+    // to whatever `docker` was on PATH — a real image build on any machine
+    // that ran the default suite.
+    let said = std::fs::read_to_string(&asked).unwrap_or_default();
+    assert!(
+        said.lines().any(|l| l.starts_with("build ")),
+        "the build skipped the shim and ran the host's docker; the shim heard: {said:?}"
     );
 
     assert_eq!(

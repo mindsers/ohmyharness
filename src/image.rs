@@ -1285,7 +1285,8 @@ fn build(
     // share one directory and race to create and remove it.
     let context = build_context()?;
 
-    let mut child = std::process::Command::new(program)
+    let mut child = backend
+        .command()
         .args(build_args(tag, context.path(), kind))
         .stdin(Stdio::piped())
         // Piped so omh can read the reason it failed, then written straight

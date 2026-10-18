@@ -11,7 +11,6 @@ use crate::session::Session;
 use crate::{auth, container, image, memory, persist, report, runtime};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
-use std::process::Command;
 
 struct NetworkCleanup<'a> {
     backend: &'a runtime::Backend,
@@ -193,9 +192,7 @@ fn login_in_sandbox(
             None => String::new(),
         }
     ));
-    let status = Command::new(backend.program())
-        .args(backend.args(&plan))
-        .status()?;
+    let status = backend.command().args(backend.args(&plan)).status()?;
     if let Err(e) = session.remove(&paths.repo, "", &paths.shadows()) {
         // A leftover `auth` worktree is a session `omh s` would list and offer
         // as a real one. Removed so the login leaves nothing behind.

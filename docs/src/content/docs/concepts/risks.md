@@ -36,6 +36,7 @@ them, because a risk that vanishes teaches nobody what it cost.
 | Risk | Where it stands |
 |---|---|
 | [1. The credential model is weaker than `sbx`'s](#1-the-credential-model-is-weaker-than-sbxs) | open — gated on the `sbx` backend |
+| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | open — argued, not measured |
 | [2. A sandbox protects the host, not the repo](#2-a-sandbox-protects-the-host-not-the-repo) | inherent |
 | [2b. The sandbox's repository is agent-writable](#2b-the-sandboxs-repository-is-agent-writable-its-push-wall-is-a-signpost) | narrowed |
 | [2c. ~~`omh sNN rm` destroys the agent's own commits~~](#2c-omh-snn-rm-destroys-the-agents-own-commits) | closed in #58 |
@@ -70,6 +71,37 @@ Adopting that is the single largest security improvement available, and it is
 gated on the
 [backend spike](/concepts/architecture/#declared-capabilities-and-honest-unknowns).
 Several accounts widens this gap rather than narrowing it.
+
+### 1b. The account directory is writable, and every repo shares it
+
+**Reading the token is not the only thing a writable account mount allows.**
+omh mounts each `creds` path read-write, because OAuth tokens refresh in
+place, and a captured account lives under `~/.omh/creds/<harness>/<name>` —
+one directory for every repo that uses it. For Claude Code that is all of
+`~/.claude/` and `~/.claude.json`; for omp, all of `~/.omp/agent/`; for Codex,
+`~/.codex/`.
+
+**Those directories hold more than credentials.** By the adapters' own
+accounts of what each harness reads:
+
+- `~/.claude/CLAUDE.md` is Claude Code's personal memory file, and
+  `~/.claude.json` holds user-scope MCP servers nested per project — and every
+  session's project is `/work`;
+- `~/.codex/AGENTS.md` is Codex's user-scope instructions;
+- omp discovers every module under `~/.omp/agent/hooks/pre/`, and omh's own
+  `omh.ts` is only one file in that directory.
+
+So an agent in one repo can leave instructions, a server or a hook there, and
+every later session of every repo on that account loads it — where `carry_in`
+may have put that repo's secrets in reach.
+
+**Argued, not measured.** The paths come from the adapters; whether each
+harness reads these files from the mount, at launch, is a claim about external
+software that only `tests/e2e` or a real session can settle. The mitigation is
+not built: read-only overlays for the instruction, MCP and hook paths inside
+the account directory, the way omh already mounts its own files there. Until
+then, an account used for untrusted repos is best kept separate from one used
+for work — `omh auth <harness> -n <name>` captures as many as you like.
 
 ### 2. A sandbox protects the host, not the repo
 
