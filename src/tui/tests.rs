@@ -867,6 +867,31 @@ fn a_box_says_its_keys_once_and_what_enter_does() {
     );
 }
 
+/// The question before a removal says its keys once, in the footer: the box
+/// said `y remove · any other key keeps it` above a footer that said it too.
+#[test]
+fn the_removal_question_says_its_keys_once() {
+    let mut app = App::new(model(), true);
+    app.confirm(
+        vec!["would remove ~/.omh/skills/keep".into()],
+        vec![],
+        Act::Remove {
+            capability: "skills".into(),
+            name: "keep".into(),
+        },
+    );
+    let screen = drawn_at(&app, 120, 30);
+    assert_eq!(screen.matches("keeps it").count(), 1, "{screen}");
+    assert!(
+        screen
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .contains("keeps it"),
+        "{screen}"
+    );
+}
+
 /// A box being typed into holds its width: it grew from 58 to 76 columns
 /// and re-centred the moment a warning appeared, under the cursor. Behind any
 /// box the screen is dim, and the one that removes is not coloured like help.
@@ -1916,6 +1941,28 @@ fn a_page_off_your_catalogue_offers_the_way_back() {
         Next::Stay,
         "a page that follows takes no A"
     );
+}
+
+/// The rail keeps a gap before its border, whatever it counts: under a
+/// search `6 Subagents  0/1│` touched it.
+#[test]
+fn the_rail_keeps_a_gap_before_its_border() {
+    let mut model = model();
+    model.sections[1].title = "subagents";
+    let mut app = App::new(model, true);
+    app.key(press('/'));
+    for c in "keep".chars() {
+        app.key(press(c));
+    }
+    let screen = drawn_at(&app, 120, 30);
+    for line in screen.lines().skip(1).take(4) {
+        let rail: Vec<char> = line.chars().take_while(|c| *c != '│').collect();
+        assert_eq!(rail.last(), Some(&' '), "{line}");
+    }
+    // And by keeping the count in its four columns, not by cutting the name.
+    let rail = screen.lines().nth(2).unwrap_or_default();
+    let rail = &rail[..rail.find('│').unwrap()];
+    assert!(rail.contains("Subagents"), "{rail}");
 }
 
 /// `space` flips whether the repos `omh init` sets up after get a row, by the

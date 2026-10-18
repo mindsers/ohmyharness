@@ -4964,6 +4964,26 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     );
 }
 
+/// A feature switched back leaves no empty `[omh]` behind: `unset codegraph`
+/// took the switch and left the table with nothing under it.
+#[test]
+fn a_feature_unset_leaves_no_empty_table() {
+    let sb = sandbox();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["settings", "set", "codegraph", "off"])
+        .status
+        .success());
+    let out = sb.omh(&["settings", "unset", "codegraph"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
+    assert!(!file.contains("[omh]"), "{file:?}");
+}
+
 /// Your defaults are said as your defaults: `unset` said "removed … from the
 /// personal layer", a word for a file `config.rs` calls a template; `mcp ls`
 /// called omh's own servers "your catalogue"; and a feature given neither on

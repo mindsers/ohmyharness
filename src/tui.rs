@@ -1538,7 +1538,8 @@ impl App {
                 (true, _) => Span::raw(pad_left("", 3)),
                 // What a search finds here, of how many.
                 (false, _) if searching => Span::styled(
-                    pad_left(&format!("{}/{}", self.shown(i).len(), s.rows.len()), 5),
+                    // The mark's column and the count's, four between them.
+                    pad_left(&format!("{}/{}", self.shown(i).len(), s.rows.len()), 4),
                     match self.shown(i).is_empty() {
                         true => self.look.dim(),
                         false => self.look.accent(),
@@ -1555,8 +1556,9 @@ impl App {
             let used: usize = right.iter().map(Span::width).sum();
             let number = Span::styled(format!("{} ", i + 1), self.look.dim());
             let width = usize::from(area.width).saturating_sub(2 + 2 + used + 1);
+            // Cut rather than run into the border: `6 Subagents  0/1│`.
             let title = Span::styled(
-                pad(&capitalised(s.title), width),
+                pad(&ellipsized(&capitalised(s.title), width), width),
                 match here {
                     true => self.look.title(),
                     false => Style::default(),
@@ -2377,11 +2379,7 @@ impl App {
                 .iter()
                 .map(|l| Line::from(Span::styled(l.clone(), self.look.tone(Tone::Warn)))),
         );
-        lines.push(Line::default());
-        lines.push(Line::from(vec![
-            Span::styled("y", self.look.key()),
-            Span::styled(" remove · any other key keeps it", self.look.dim()),
-        ]));
+        // The keys are the footer's: said here too, they were said twice.
         self.popup(f, &title, Text::from(lines), Popup::Removing);
     }
 

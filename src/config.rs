@@ -714,6 +714,11 @@ pub fn forget_feature(paths: &Paths, layer: Layer, feature: &str) -> Result<bool
     if table.remove(feature).is_none() {
         return Ok(false);
     }
+    // The table goes with its last switch, as a list's does, rather than sit
+    // in the file as `[omh]` with nothing under it.
+    if table.is_empty() {
+        doc.remove(OMH);
+    }
     std::fs::write(&path, doc.to_string())
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(true)
