@@ -83,10 +83,12 @@ fn model() -> Model {
                     Source {
                         harness: "claude".into(),
                         from: "~/.claude/skills".into(),
+                        empty: false,
                     },
                     Source {
                         harness: "codex".into(),
                         from: "~/.codex/skills — nothing there".into(),
+                        empty: true,
                     },
                 ]),
                 about: Vec::new(),
@@ -615,21 +617,31 @@ fn the_columns_start_level() {
     }
 }
 
-/// An unset default says what applies instead; a table says what it holds.
+/// An unset default says what applies instead, dimmed — the dim is what
+/// says it is not yours, and it survives `NO_COLOR` — and a table says what
+/// it holds. `default:` before nine of thirteen rows was noise the dim
+/// already carried; the detail says it once, beside the value.
 #[test]
 fn a_default_says_what_it_is_and_what_applies_when_unset() {
-    let app = App::new(model(), true);
+    let mut app = App::new(model(), true);
     let screen = drawn(&app);
-    let line = |name: &str| {
+    let line = |screen: &str, name: &str| {
         screen
             .lines()
             .find(|l| l.contains(name))
             .unwrap_or_default()
             .to_string()
     };
-    assert!(line("runtime").contains("default: auto"), "{screen}");
-    assert!(line("[use]").contains("skills = [\"tdd\"]"), "{screen}");
+    assert!(line(&screen, "runtime").contains("auto"), "{screen}");
+    assert!(!screen.contains("default:"), "{screen}");
+    assert!(
+        line(&screen, "[use]").contains("skills = [\"tdd\"]"),
+        "{screen}"
+    );
     assert!(!screen.contains("(unset)"), "{screen}");
+    app.key(press('j'));
+    let screen = drawn(&app);
+    assert!(screen.contains("auto · default"), "{screen}");
 }
 
 /// A page's rows under their headings, and `j` steps from the last row of one
@@ -804,6 +816,53 @@ fn a_value_is_checked_as_it_is_typed() {
     );
 }
 
+/// A box's keys are the footer's, once, and `↵` says what it will do: the
+/// box said `↵ save` while the footer said `↵ done`; after a refusal `↵`
+/// writes anyway, and in the new-entry box it opens `$EDITOR` — both still
+/// said `save`.
+#[test]
+fn a_box_says_its_keys_once_and_what_enter_does() {
+    let check: Check = Box::new(|key, value| {
+        (key == "idle_timeout" && value == "soon").then(|| "not a duration".to_string())
+    });
+    let mut app = App::new(model(), true).with_check(check);
+    let footer = |app: &App| {
+        drawn_at(app, 120, 30)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+    app.key(code(KeyCode::Enter));
+    let screen = drawn_at(&app, 120, 30);
+    let boxed: Vec<&str> = screen
+        .lines()
+        .filter(|l| l.contains('│') && l.contains("idle_timeout"))
+        .collect();
+    assert!(
+        screen.matches("↵ save").count() == 1,
+        "said twice:\n{screen}"
+    );
+    assert!(footer(&app).contains("↵ save"), "{}", footer(&app));
+    // `?` and `q` type, here: not offered as keys that leave.
+    assert!(!footer(&app).contains("q quit"), "{}", footer(&app));
+    assert!(!boxed.is_empty());
+    app.key(with('u', KeyModifiers::CONTROL));
+    for c in "soon".chars() {
+        app.key(press(c));
+    }
+    app.key(code(KeyCode::Enter));
+    assert!(footer(&app).contains("↵ write anyway"), "{}", footer(&app));
+    app.key(code(KeyCode::Esc));
+    app.key(press('2'));
+    app.key(press('a'));
+    assert!(
+        footer(&app).contains("↵ open in $EDITOR"),
+        "{}",
+        footer(&app)
+    );
+}
+
 /// A box being typed into holds its width: it grew from 58 to 76 columns
 /// and re-centred the moment a warning appeared, under the cursor. Behind any
 /// box the screen is dim, and the one that removes is not coloured like help.
@@ -835,7 +894,8 @@ fn a_popup_holds_still_and_says_what_kind_it_is() {
     let buffer = frame(&app);
     assert!(drawn(&app).contains("not a duration"));
     let after = corners(&buffer);
-    assert_eq!((before.0, before.1), (after.0, after.1), "the box moved");
+    // Its top too: it moved from row 9 to 7 to 8 as the warning came and went.
+    assert_eq!(before, after, "the box moved");
     // Behind it, dim: the rail's first page is outside every box.
     let (x, y) = (0..30u16)
         .flat_map(|y| (0..20u16).map(move |x| (x, y)))
@@ -1080,6 +1140,54 @@ fn the_env_mask_reads_a_line_as_words_does() {
     }
 }
 
+/// The form's values start in one column, and a field's hint goes on under
+/// its value: they started at three columns — after `name: `, `command and
+/// arguments: ` and `env (KEY=VALUE …), or nothing: ` — and the hint's second
+/// line went back to column 0.
+#[test]
+fn the_form_s_values_start_in_one_column() {
+    let mut app = App::new(model(), true);
+    app.key(press('3'));
+    app.key(press('a'));
+    typed(&mut app, "gh");
+    typed(&mut app, "npx -y @acme/mcp");
+    for c in "GH_TOKEN=x".chars() {
+        app.key(press(c));
+    }
+    let screen = drawn_at(&app, 80, 24);
+    let column = |text: &str| {
+        let line = screen
+            .lines()
+            .find(|l| l.contains(text))
+            .unwrap_or_else(|| panic!("no {text}:\n{screen}"));
+        line[..line.find(text).unwrap()].chars().count()
+    };
+    let at = column("gh");
+    assert_eq!(column("npx -y"), at, "{screen}");
+    assert_eq!(column("GH_TOKEN"), at, "{screen}");
+    // The hint under env, wrapped at 60 columns, goes on under the value.
+    let screen = drawn_at(&app, 60, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+    let env = lines.iter().position(|l| l.contains("GH_TOKEN")).unwrap();
+    let start = lines[env][..lines[env].find("GH_TOKEN").unwrap()]
+        .chars()
+        .count();
+    for hint in &lines[env + 1..env + 3] {
+        let text = hint.trim_end_matches([' ', '│']);
+        if let Some((i, _)) = text
+            .char_indices()
+            .skip(1)
+            .find(|(_, c)| !c.is_whitespace() && *c != '│')
+        {
+            let col = text[..i].chars().count();
+            assert!(
+                col >= start,
+                "a hint line at {col}, the value at {start}:\n{screen}"
+            );
+        }
+    }
+}
+
 /// **A value typed into env is not drawn.** The list hides a server's env
 /// values and the status line hides them in the line it shows, and the form
 /// drew them as typed — the one place on the screen a token was on it. Each
@@ -1209,13 +1317,13 @@ fn import_picks_from_the_harnesses_that_keep_this_kind() {
             .any(|l| l.contains("claude") && l.contains("~/.claude/skills")),
         "{screen}"
     );
-    assert!(screen.contains("nothing there"), "{screen}");
-    app.key(press('j'));
+    // Codex, with nothing there, is named and not offered.
+    assert!(screen.contains("nothing there in codex"), "{screen}");
     assert_eq!(
         app.key(code(KeyCode::Enter)),
         Next::Run(Act::Import {
             capability: "skills".into(),
-            harness: "codex".into()
+            harness: "claude".into()
         })
     );
     app.key(press('4'));
@@ -1250,7 +1358,7 @@ fn a_filter_narrows_the_page_and_acts_on_what_it_shows() {
     assert!(drawn(&app).contains("keep what works"));
     app.key(press('/'));
     app.key(press('z'));
-    assert!(drawn(&app).contains("nothing matches"));
+    assert!(drawn(&app).contains("nothing matches, on any page"));
     app.key(code(KeyCode::Enter));
     app.key(press('1'));
     assert!(app.filter.is_some(), "a filter is a search, across pages");
@@ -1494,6 +1602,282 @@ fn a_heading_after_rows_has_room_above_it() {
     assert!(above.trim().is_empty(), "{screen}");
 }
 
+/// A row's `!` outranks the `✓` of a change just made: `space` seeded a
+/// skill with no `SKILL.md`, and the row answered with a green `✓` over the
+/// warning. And inside the bar no span keeps its colour — the glyphs carry
+/// the meaning, as under `NO_COLOR` — where a warned row's bar ran green,
+/// cyan, reverse and yellow along its length.
+#[test]
+fn a_warning_outranks_a_change_and_the_bar_is_one_tone() {
+    let mut model = model();
+    let toggle = Act::Use {
+        capability: "skills".into(),
+        name: "keep".into(),
+    };
+    model.sections[1].rows[0].seeded = Some(false);
+    model.sections[1].rows[0].toggle = Some(toggle.clone());
+    model.sections[1].rows[0].warning = Some("no SKILL.md in it".into());
+    let mut app = App::new(model.clone(), true);
+    app.key(press('2'));
+    assert_eq!(app.key(press(' ')), Next::Run(toggle));
+    app.report(
+        "settings use -- skills keep".into(),
+        true,
+        "new repos take skills/keep",
+        "",
+    );
+    // As the driver does after every act.
+    app.reload(model);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let y = (0..30u16)
+        .find(|&y| {
+            (0..120u16)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .contains("no SKILL.md in it")
+        })
+        .expect("the row");
+    let line: String = (0..120u16)
+        .map(|x| buffer[(x, y)].symbol().to_string())
+        .collect();
+    let row = &line[line.find('│').unwrap() + '│'.len_utf8()..];
+    assert!(row.trim_start().starts_with('!'), "{line}");
+    let x0 = line[..line.find('│').unwrap()].chars().count() as u16 + 1;
+    let colours: std::collections::BTreeSet<String> = (x0..x0 + 50)
+        .map(|x| format!("{:?}", buffer[(x, y)].fg))
+        .collect();
+    assert!(colours.len() <= 1, "the bar runs {colours:?}: {line}");
+}
+
+/// What a command printed says your home as `~`, as the screen says every
+/// path of its own — and only your home: `/Users/young` is not `/Users/you`.
+#[test]
+fn what_a_command_printed_says_your_home_as_tilde() {
+    let mut app = App::new(model(), true).with_home(Some("/Users/you".into()));
+    app.report(
+        "settings set idle_timeout 45m".into(),
+        true,
+        "wrote → /Users/you/.omh/default.toml\nkept /Users/young/notes",
+        "",
+    );
+    let screen = drawn_at(&app, 120, 30);
+    assert!(screen.contains("wrote → ~/.omh/default.toml"), "{screen}");
+    assert!(screen.contains("/Users/young/notes"), "{screen}");
+}
+
+/// A page's heading keeps the filter in sight and says when it is cut: at
+/// 130 columns a committed filter was off the end of `Hooks  9  new repos get
+/// all, each where its stack ap`, cut mid-word with nothing to say so.
+#[test]
+fn a_heading_keeps_the_filter_and_says_when_it_is_cut() {
+    let mut model = model();
+    model.sections[1].seeds =
+        Some("new repos get all but the guards, by stack, and a good deal more to say".into());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    app.key(press('/'));
+    for c in "kee".chars() {
+        app.key(press(c));
+    }
+    app.key(code(KeyCode::Enter));
+    let screen = drawn_at(&app, 80, 24);
+    let heading = screen
+        .lines()
+        .find(|l| l.contains("Skills"))
+        .unwrap_or_default();
+    assert!(heading.contains("/ kee"), "{heading}");
+    assert!(heading.contains('…'), "{heading}");
+}
+
+/// Three columns from 120 only, the detail a fixed width and the list the
+/// rest: at 100 the list dropped to 44 columns, narrower than the stacked
+/// layout gave it at 99, while the detail used 6 of its 28 rows.
+#[test]
+fn three_columns_from_120_with_the_list_given_the_room() {
+    let app = App::new(model(), true);
+    let rules = |width: u16| {
+        let screen = drawn_at(&app, width, 30);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("idle_timeout") && l.contains("30m"))
+            .unwrap_or_default()
+            .to_string();
+        row.char_indices()
+            .filter(|(_, c)| *c == '│')
+            .map(|(i, _)| row[..i].chars().count())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rules(110).len(), 1, "stacked below 120: {:?}", rules(110));
+    let wide = rules(120);
+    assert_eq!(wide.len(), 2, "{wide:?}");
+    assert!(
+        wide[1] - wide[0] >= 58,
+        "the list is {} wide",
+        wide[1] - wide[0]
+    );
+}
+
+/// The stacked detail says the value first and its prose last, and says
+/// when it is cut: at 80×24 the git-notice detail ended mid-prose and its
+/// `now` and `one of` lines — the answer — never showed.
+#[test]
+fn the_stacked_detail_says_the_value_first_and_when_it_is_cut() {
+    let mut model = model();
+    model.sections[0].rows[1].about = (0..12)
+        .map(|i| format!("a line of prose about the runtime, number {i}"))
+        .collect();
+    let mut app = App::new(model, true);
+    app.key(press('j'));
+    let screen = drawn_at(&app, 80, 24);
+    let below = &screen[screen.find('├').expect("stacked")..];
+    assert!(below.contains("auto · default"), "the value:\n{screen}");
+    assert!(
+        below.contains("auto · docker · podman"),
+        "the choices:\n{screen}"
+    );
+    // Not `↓` alone, which the footer's `↑↓ move` holds.
+    assert!(below.contains("↓ more"), "and that it is cut:\n{screen}");
+    // Where it fits, nothing says it is cut.
+    let screen = drawn_at(&app, 80, 60);
+    assert!(!screen.contains("↓ more"), "{screen}");
+}
+
+/// A source with nothing in it is not offered: all four said `— nothing
+/// there` and could still be picked, and picking one failed with advice — a
+/// flag — the screen cannot follow. The others are offered and the empty ones
+/// named; with nothing anywhere, no pick opens.
+#[test]
+fn a_source_with_nothing_in_it_is_not_offered() {
+    let mut app = App::new(model(), true);
+    app.key(press('2'));
+    app.key(press('i'));
+    let Some(Modal::Pick(pick)) = &app.modal else {
+        panic!("no pick: {}", drawn(&app));
+    };
+    assert_eq!(pick.options, ["claude"]);
+    assert!(
+        pick.about.iter().any(|l| l.contains("codex")),
+        "{:?}",
+        pick.about
+    );
+
+    let mut model = model();
+    if let Import::From(sources) = &mut model.sections[1].import {
+        for s in sources.iter_mut() {
+            s.empty = true;
+        }
+    }
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    app.key(press('i'));
+    assert_eq!(app.modal, None, "a pick of nothing: {}", drawn(&app));
+    assert!(drawn(&app).contains("nothing to import"), "{}", drawn(&app));
+}
+
+/// A value already there is selected when the box opens: a letter replaces
+/// it, as in any field that comes filled in. `j j ↵ 1h` made `45m1h`. A
+/// movement key keeps it, to change it rather than replace it.
+#[test]
+fn a_value_already_there_is_replaced_by_typing() {
+    let mut app = App::new(model(), true);
+    app.key(code(KeyCode::Enter));
+    // Drawn as selected.
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let at = (0..30u16)
+        .flat_map(|y| (0..118u16).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            buffer[(x, y)].symbol() == "3"
+                && buffer[(x + 1, y)].symbol() == "0"
+                && buffer[(x + 2, y)].symbol() == "m"
+                && buffer[(x.saturating_sub(2), y)].symbol() == "="
+        })
+        .expect("the value in the box");
+    assert!(
+        buffer[at].modifier.contains(Modifier::REVERSED),
+        "not drawn selected"
+    );
+    assert_eq!(
+        typed(&mut app, "1h"),
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "1h".into()
+        })
+    );
+    app.key(code(KeyCode::Enter));
+    app.key(code(KeyCode::End));
+    assert_eq!(
+        typed(&mut app, "s"),
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "30ms".into()
+        }),
+        "moved into it, typing goes on after it"
+    );
+    app.key(code(KeyCode::Enter));
+    app.key(code(KeyCode::Backspace));
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "".into()
+        }),
+        "backspace takes the whole of it"
+    );
+}
+
+/// A search with nothing on this page says where its hits are: Defaults
+/// said `nothing matches` while Skills and Hooks held them, and at 60
+/// columns those counts appeared nowhere.
+#[test]
+fn a_search_with_nothing_here_says_where_its_hits_are() {
+    let mut app = App::new(model(), true);
+    app.key(press('/'));
+    for c in "keep".chars() {
+        app.key(press(c));
+    }
+    for width in [120, 60] {
+        let screen = drawn_at(&app, width, 24);
+        assert!(
+            screen.contains("nothing on Defaults — Skills 1"),
+            "at {width}:\n{screen}"
+        );
+    }
+    app.key(press('z'));
+    assert!(
+        drawn(&app).contains("nothing matches, on any page"),
+        "{}",
+        drawn(&app)
+    );
+}
+
+/// The rail's marks are in one column and its counts right-aligned after
+/// them: `1 Defaults    !` had it at column 16 and `3 Skills    ! 4` at 14.
+#[test]
+fn the_rail_s_marks_are_in_one_column() {
+    let mut model = model();
+    model.sections[0].rows[0].warning = Some("x".into());
+    model.sections[1].rows[0].warning = Some("x".into());
+    let app = App::new(model, true);
+    let screen = drawn_at(&app, 120, 30);
+    let at = |page: &str, mark: char| {
+        let line = screen
+            .lines()
+            .find(|l| l.contains(page))
+            .unwrap_or_else(|| panic!("{screen}"));
+        let rail = &line[..line.find('│').unwrap()];
+        rail.chars()
+            .position(|c| c == mark)
+            .unwrap_or_else(|| panic!("no {mark} on {page}:\n{screen}"))
+    };
+    let defaults = at("Defaults", '!');
+    assert_eq!(at("Skills", '!'), defaults, "{screen}");
+    assert_eq!(at("Hooks", '✗'), defaults, "{screen}");
+}
+
 /// `space` flips whether the repos `omh init` sets up after get a row, by the
 /// act the row carries; the row's `●`/`○` and the page's heading say which way
 /// it is now. A row with nothing to flip takes no `space`.
@@ -1554,7 +1938,12 @@ fn u_undoes_the_last_change() {
         "nothing until it is said to have worked"
     );
     app.report("settings set idle_timeout 45m".into(), true, "wrote", "");
-    assert!(drawn(&app).contains("u undoes"), "{}", drawn(&app));
+    // What it undoes, said: "u undoes it" read as the row under the cursor.
+    assert!(
+        drawn(&app).contains("u idle_timeout back to 30m"),
+        "{}",
+        drawn(&app)
+    );
     let undo = app.key(press('u'));
     assert_eq!(
         undo,
@@ -1591,6 +1980,7 @@ fn a_servers_page_omh_could_not_read_takes_no_add() {
     model.sections[2].import = Import::From(vec![Source {
         harness: "claude".into(),
         from: "./.mcp.json".into(),
+        empty: false,
     }]);
     let mut app = App::new(model, true);
     app.key(press('3'));
@@ -1667,7 +2057,11 @@ fn space_is_undone_by_what_the_caller_says_undoes_it() {
     assert_eq!(app.key(press(' ')), Next::Run(guard));
     app.report("settings use -- skills review-diff".into(), true, "", "");
     assert_eq!(app.key(press('u')), Next::Stay);
-    assert!(!drawn(&app).contains("u undoes"), "{}", drawn(&app));
+    let footer = drawn(&app).lines().last().unwrap_or_default().to_string();
+    assert!(
+        !footer.trim_start().starts_with("u "),
+        "u is offered: {footer}"
+    );
 }
 
 /// Enter on a key that was probably meant to be another moves its value

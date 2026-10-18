@@ -47,7 +47,9 @@ pub(crate) fn wanted(json: bool, dry_run: bool) -> bool {
 }
 
 pub(crate) fn run(paths: &Paths, color: bool, ctx: &crate::out::Ctx) -> Result<()> {
-    let mut app = App::new(model(paths), color).with_check(Box::new(refusal));
+    let mut app = App::new(model(paths), color)
+        .with_check(Box::new(refusal))
+        .with_home(dirs::home_dir().map(|h| h.display().to_string()));
     let mut screen = Screen::open()?;
     let mut ran = Vec::new();
     let driven = drive(&mut app, &mut screen.terminal, paths, &mut ran);
@@ -624,9 +626,11 @@ pub(crate) fn model(paths: &Paths) -> Model {
                     .iter()
                     .filter_map(|a| {
                         let template = a.supports(cap)?.import.as_deref()?;
+                        let (from, empty) = import_from(paths, template);
                         Some(crate::tui::Source {
                             harness: a.name.to_string(),
-                            from: import_from(paths, template),
+                            from,
+                            empty,
                         })
                     })
                     .collect(),
@@ -813,7 +817,7 @@ fn feature_switches(paths: &Paths) -> std::collections::BTreeMap<String, bool> {
 /// Where an import reads, as the pick says it: the adapter's path on this
 /// host — from where omh was started, for `$REPO` — and whether there is
 /// anything there. The bare list of harness names said neither.
-fn import_from(paths: &Paths, template: &str) -> String {
+fn import_from(paths: &Paths, template: &str) -> (String, bool) {
     let home = dirs::home_dir();
     let at = crate::adapter::expand_host(
         template,
@@ -826,9 +830,10 @@ fn import_from(paths: &Paths, template: &str) -> String {
         false => tilde(&at, home.as_deref()),
     };
     match at.try_exists() {
-        Ok(true) => shown,
-        Ok(false) => format!("{shown} — nothing there"),
-        Err(e) => format!("{shown} — could not look: {e}"),
+        Ok(true) => (shown, false),
+        Ok(false) => (format!("{shown} — nothing there"), true),
+        // Could not look is not none: offered, and the import says why.
+        Err(e) => (format!("{shown} — could not look: {e}"), false),
     }
 }
 
@@ -997,17 +1002,42 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
     // heading of their own — where `[omh]` was one table row to open the file
     // for.
     let switched = feature_switches(paths);
+    let shipped = crate::base::Manifest::shipped();
     for feature in settings::shipped_features().unwrap_or_default() {
+        let mut about = vec![format!(
+            "one of omh's features — its servers, hooks and rules section, on or off \
+                 together, for the repos `omh init` sets up after. A repo that exists \
+                 keeps its own: `omh set {feature} off` there."
+        )];
+        // What switching it whole switches, by name: the sentence above named
+        // none of them.
+        match &shipped {
+            Ok(manifest) => {
+                about.push(String::new());
+                for (kind, label) in [
+                    (crate::base::Kind::Mcp, "server  "),
+                    (crate::base::Kind::Hook, "hooks   "),
+                    (crate::base::Kind::Rules, "rules   "),
+                ] {
+                    let names: Vec<&str> = manifest
+                        .entries
+                        .iter()
+                        .filter(|e| e.feature == feature && e.kind == kind)
+                        .map(|e| e.name.as_str())
+                        .collect();
+                    if !names.is_empty() {
+                        about.push(format!("{label}{}", names.join(", ")));
+                    }
+                }
+            }
+            Err(e) => about.push(format!("could not read what it brings: {e:#}")),
+        }
         out.rows.push(Row {
             value: switched
                 .get(&feature)
                 .map(|on| if *on { "on" } else { "off" }.to_string()),
             fallback: Some("on".into()),
-            about: vec![format!(
-                "one of omh's features — its servers, hooks and rules section, on or off \
-                     together, for the repos `omh init` sets up after. A repo that exists \
-                     keeps its own: `omh set {feature} off` there."
-            )],
+            about,
             edit: Edit::Choice(vec!["on".into(), "off".into()]),
             group: Some("features".into()),
             name: feature,
@@ -1405,6 +1435,36 @@ mod tests {
                 "`omh {}` is not a line omh accepts: {e}",
                 line[1..].join(" ")
             ),
+        }
+    }
+
+    /// A feature's row says what it brings — its server, its hooks, its
+    /// section of the rules — which is what switching it whole switches.
+    /// "Its servers, hooks and rules section" named none of them.
+    #[test]
+    fn a_feature_says_what_it_brings() {
+        let (_dir, paths) = paths();
+        let model = model(&paths);
+        let manifest = crate::base::Manifest::shipped().unwrap();
+        let defaults = page(&model, "defaults");
+        for feature in defaults
+            .rows
+            .iter()
+            .filter(|r| r.group.as_deref() == Some("features"))
+        {
+            let said = feature.about.join("\n");
+            for entry in manifest
+                .entries
+                .iter()
+                .filter(|e| e.feature == feature.name)
+            {
+                assert!(
+                    said.contains(&entry.name),
+                    "{}: no {}:\n{said}",
+                    feature.name,
+                    entry.name
+                );
+            }
         }
     }
 

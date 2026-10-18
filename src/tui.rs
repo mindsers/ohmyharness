@@ -101,6 +101,8 @@ pub struct Source {
     pub harness: String,
     /// The place, as the caller says it: `~/.claude/skills — nothing there`.
     pub from: String,
+    /// Nothing is there to import.
+    pub empty: bool,
 }
 
 /// One default, one server, or one entry.
@@ -266,6 +268,9 @@ pub struct App {
     status: Option<Status>,
     look: Look,
     check: Option<Check>,
+    /// Your home, said as `~` in what a command printed — as the screen says
+    /// every path of its own.
+    home: Option<String>,
     filter: Option<Filter>,
     /// The row an act just changed, marked until the next key.
     changed: Option<String>,
@@ -332,6 +337,9 @@ enum Modal {
 struct Typed {
     text: Vec<char>,
     cursor: usize,
+    /// The whole line is what was there, selected: a letter replaces it, as
+    /// in any field that comes filled in — `45m` then `1h` made `45m1h`.
+    selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,11 +398,17 @@ struct Form {
     leaving: bool,
 }
 
-const FORM_LABELS: [&str; 3] = [
-    "name: ",
-    "command and arguments: ",
-    "env (KEY=VALUE …), or nothing: ",
+/// One label column, so the three values start level: they started at three
+/// columns, after labels that were sentences. What each takes is said under
+/// it, while it is the field being typed.
+const FORM_LABELS: [&str; 3] = ["name", "command", "env"];
+const FORM_HINTS: [&str; 3] = [
+    "what a `[use]` list calls it",
+    "program and arguments — a token goes in env",
+    "KEY=VALUE …, or nothing — values are never shown",
 ];
+/// The label column's width, with the gap after it.
+const FORM_LABEL: usize = 9;
 
 /// No modifier but Shift: a letter as it was typed.
 ///
@@ -419,6 +433,7 @@ impl App {
             status: None,
             look: Look { color },
             check: None,
+            home: None,
             filter: None,
             changed: None,
             pending: None,
@@ -432,6 +447,34 @@ impl App {
     pub fn with_check(mut self, check: Check) -> Self {
         self.check = Some(check);
         self
+    }
+
+    /// Say `home` as `~` in what a command printed, for display alone: the
+    /// line that ran is the line that ran.
+    pub fn with_home(mut self, home: Option<String>) -> Self {
+        self.home = home.filter(|h| !h.is_empty());
+        self
+    }
+
+    /// A line a command printed, its paths from your home down.
+    fn homed(&self, line: &str) -> String {
+        let Some(home) = &self.home else {
+            return clean(line);
+        };
+        let mut out = String::new();
+        let mut rest = line;
+        while let Some(at) = rest.find(home.as_str()) {
+            let after = &rest[at + home.len()..];
+            out.push_str(&rest[..at]);
+            // Only the home itself: `/Users/you` in `/Users/young` is not it.
+            match after.chars().next() {
+                None | Some('/') => out.push('~'),
+                Some(_) => out.push_str(home),
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+        clean(&out)
     }
 
     /// A fresh read, after an act. The selection follows the row by name, so
@@ -490,8 +533,9 @@ impl App {
                 // Every line here is omh's: its name said again is noise.
                 text.lines()
                     .filter(|l| !l.trim().is_empty())
-                    .map(move |l| (tone, clean(l.strip_prefix("omh: ").unwrap_or(l))))
+                    .map(move |l| (tone, l.strip_prefix("omh: ").unwrap_or(l)))
             })
+            .map(|(tone, l)| (tone, self.homed(l)))
             .collect();
         if lines.is_empty() {
             lines.push(if ok {
@@ -527,8 +571,8 @@ impl App {
     /// and any warning it gave on the way.
     pub fn confirm(&mut self, lines: Vec<String>, warnings: Vec<String>, act: Act) {
         self.modal = Some(Modal::Confirm {
-            lines: lines.iter().map(|l| clean(l)).collect(),
-            warnings: warnings.iter().map(|l| clean(l)).collect(),
+            lines: lines.iter().map(|l| self.homed(l)).collect(),
+            warnings: warnings.iter().map(|l| self.homed(l)).collect(),
             act,
         });
     }
@@ -834,6 +878,7 @@ impl App {
             label: format!("{} = ", row.name),
             line: Typed {
                 cursor: current.len(),
+                selected: !current.is_empty(),
                 text: current,
             },
             error: None,
@@ -955,16 +1000,44 @@ impl App {
         if section.page == Page::Servers && section.problem.is_some() {
             return self.note("omh could not read your servers — e opens the file to fix it");
         }
+        // A source with nothing in it is not offered: picked, it failed with
+        // advice — a flag — the screen cannot follow. The empty ones named.
+        let (empty, offered): (Vec<&Source>, Vec<&Source>) = match &section.import {
+            Import::From(harnesses) => harnesses.iter().partition(|h| h.empty),
+            Import::Not(_) => (Vec::new(), Vec::new()),
+        };
         let line = match (section.page.capability(), &section.import) {
+            (Some(_), Import::From(harnesses)) if !harnesses.is_empty() && offered.is_empty() => {
+                format!(
+                    "nothing to import — {} {} none",
+                    empty
+                        .iter()
+                        .map(|h| h.harness.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if empty.len() == 1 { "has" } else { "have" }
+                )
+            }
             (Some(capability), Import::From(harnesses)) if !harnesses.is_empty() => {
+                let about = match empty.is_empty() {
+                    true => Vec::new(),
+                    false => vec![format!(
+                        "nothing there in {}",
+                        empty
+                            .iter()
+                            .map(|h| h.harness.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )],
+                };
                 self.modal = Some(Modal::Pick(Pick {
                     title: format!("import {} from", section.title),
-                    options: harnesses.iter().map(|h| h.harness.clone()).collect(),
-                    notes: harnesses.iter().map(|h| h.from.clone()).collect(),
+                    options: offered.iter().map(|h| h.harness.clone()).collect(),
+                    notes: offered.iter().map(|h| h.from.clone()).collect(),
                     at: 0,
                     current: None,
                     fallback: None,
-                    about: Vec::new(),
+                    about,
                     typed: String::new(),
                     then: Chosen::Import {
                         capability: capability.into(),
@@ -1287,12 +1360,14 @@ impl App {
         self.draw_head(f, head);
         match Width::of(area.width) {
             Width::Wide => {
+                // The detail a fixed width, the list the rest: shared 6:5, the
+                // list at 100 columns was narrower than stacking gave it at 99.
                 let [pages, a, list, b, detail] = Layout::horizontal([
                     Constraint::Length(18),
                     Constraint::Length(1),
-                    Constraint::Fill(6),
+                    Constraint::Fill(1),
                     Constraint::Length(1),
-                    Constraint::Fill(5),
+                    Constraint::Length(40),
                 ])
                 .areas(body);
                 self.draw_pages(f, pages);
@@ -1406,10 +1481,7 @@ impl App {
             )),
             rule,
         );
-        f.render_widget(
-            Paragraph::new(self.detail_text()).wrap(Wrap { trim: false }),
-            detail_area.inner(Margin::new(1, 0)),
-        );
+        self.draw_detail(f, detail_area.inner(Margin::new(1, 0)));
         Some(rule.y)
     }
 
@@ -1428,31 +1500,33 @@ impl App {
             // not look, `!` where a row has a warning, and how many. Your
             // defaults are every key omh reads, so a count there would be the
             // same number forever.
+            // In fixed columns — the mark, then the count right-aligned — so
+            // a `!` sits under a `!`: it moved with the count beside it.
             let warned = s.rows.iter().any(|r| r.warning.is_some());
-            let mut right = Vec::new();
             let searching = self.filter.as_ref().is_some_and(|f| !f.text.is_empty());
-            match (s.problem.is_some(), s.page) {
-                (true, _) => right.push(Span::styled("✗", self.look.tone(Tone::Bad))),
+            let state = match (s.problem.is_some(), warned) {
+                (true, _) => Span::styled("✗", self.look.tone(Tone::Bad)),
+                (false, true) => Span::styled("!", self.look.tone(Tone::Warn)),
+                (false, false) => Span::raw(" "),
+            };
+            let count = match (s.problem.is_some(), s.page) {
+                (true, _) => Span::raw(pad_left("", 3)),
                 // What a search finds here, of how many.
-                (false, _) if searching => right.push(Span::styled(
-                    format!("{}/{}", self.shown(i).len(), s.rows.len()),
+                (false, _) if searching => Span::styled(
+                    pad_left(&format!("{}/{}", self.shown(i).len(), s.rows.len()), 5),
                     match self.shown(i).is_empty() {
                         true => self.look.dim(),
                         false => self.look.accent(),
                     },
-                )),
-                (false, page) => {
-                    if warned {
-                        right.push(Span::styled("!", self.look.tone(Tone::Warn)));
-                    }
-                    if page != Page::Defaults {
-                        right.push(Span::styled(
-                            format!("{}{}", if warned { " " } else { "" }, s.rows.len()),
-                            self.look.dim(),
-                        ));
-                    }
-                }
-            }
+                ),
+                (false, Page::Defaults) => Span::raw(pad_left("", 3)),
+                (false, _) => Span::styled(pad_left(&s.rows.len().to_string(), 3), self.look.dim()),
+            };
+            let right = match searching && s.problem.is_none() {
+                // A search's `n/m` takes the mark's column too.
+                true => vec![count],
+                false => vec![state, count],
+            };
             let used: usize = right.iter().map(Span::width).sum();
             let number = Span::styled(format!("{} ", i + 1), self.look.dim());
             let width = usize::from(area.width).saturating_sub(2 + 2 + used + 1);
@@ -1523,9 +1597,8 @@ impl App {
             Span::styled(capitalised(section.title), self.look.title()),
             Span::styled(format!("  {count}"), self.look.dim()),
         ];
-        if let Some(seeds) = &section.seeds {
-            heading.push(Span::styled(format!("   {seeds}"), self.look.dim()));
-        }
+        // The filter before what new repos get: it was off the end of a long
+        // heading, where nothing said it was still on.
         if let Some(filter) = &self.filter {
             heading.push(Span::styled(
                 format!(
@@ -1538,6 +1611,16 @@ impl App {
                     false => self.look.dim(),
                 },
             ));
+        }
+        if let Some(seeds) = &section.seeds {
+            let used: usize = heading.iter().map(Span::width).sum();
+            let room = usize::from(area.width).saturating_sub(used + 3);
+            if room > 1 {
+                heading.push(Span::styled(
+                    format!("   {}", ellipsized(seeds, room)),
+                    self.look.dim(),
+                ));
+            }
         }
         let lines = if head { 2 } else { 0 };
         let [head_area, mut list] =
@@ -1597,10 +1680,27 @@ impl App {
                     ]),
                 ],
             }),
-            (false, true) => Some(vec![Line::from(Span::styled(
-                "nothing matches",
-                self.look.dim(),
-            ))]),
+            // Where the hits are, when they are elsewhere: it said "nothing
+            // matches" over pages that held them.
+            (false, true) => {
+                let elsewhere: Vec<String> = (0..self.model.sections.len())
+                    .filter(|&i| i != self.at)
+                    .filter_map(|i| {
+                        let n = self.shown(i).len();
+                        (n > 0)
+                            .then(|| format!("{} {n}", capitalised(self.model.sections[i].title)))
+                    })
+                    .collect();
+                let said = match elsewhere.is_empty() {
+                    true => "nothing matches, on any page".to_string(),
+                    false => format!(
+                        "nothing on {} — {}",
+                        capitalised(section.title),
+                        elsewhere.join(" · ")
+                    ),
+                };
+                Some(vec![Line::from(Span::styled(said, self.look.dim()))])
+            }
             (false, false) => None,
         };
         if let Some(lines) = empty {
@@ -1738,10 +1838,12 @@ impl App {
         width: usize,
     ) -> Line<'static> {
         let changed = self.changed.as_deref() == Some(row.name.as_str());
-        // Column 0 is the row's state; where the cursor is, the bar says.
-        let mark = match (changed, row.warning.is_some()) {
-            (true, _) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
-            (false, true) => Span::styled("! ", self.look.tone(Tone::Warn)),
+        // Column 0 is the row's state; where the cursor is, the bar says. What
+        // is wrong with it outranks a change just made to it: `space` on a
+        // skill with no SKILL.md answered with a green ✓ over the `!`.
+        let mark = match (row.warning.is_some(), changed) {
+            (true, _) => Span::styled("! ", self.look.tone(Tone::Warn)),
+            (false, true) => Span::styled("✓ ", self.look.tone(Tone::Ok)),
             (false, false) => Span::raw("  "),
         };
         // Inside the bar nothing is dim: reversed, dim reads as a gap in it.
@@ -1787,8 +1889,9 @@ impl App {
                 None => (v.clone(), Style::default()),
             },
             (_, None, Page::Defaults) => (
+                // Dim says it is not yours, and survives `NO_COLOR`.
                 match &row.fallback {
-                    Some(f) => format!("default: {f}"),
+                    Some(f) => f.clone(),
                     None => "not set".to_string(),
                 },
                 dim,
@@ -1796,6 +1899,14 @@ impl App {
             (_, None, _) => (row.summary.clone().unwrap_or_default(), dim),
         };
         spans.push(Span::styled(ellipsized(&text, room), style));
+        // Inside the bar, one tone: reversed, every colour along it was a
+        // stripe — green, cyan, yellow — and the glyphs already say what each
+        // colour did, as they do under `NO_COLOR`.
+        if selected {
+            for span in &mut spans {
+                span.style = span.style.fg(Color::Reset).bg(Color::Reset);
+            }
+        }
         Line::from(spans)
     }
 
@@ -1822,19 +1933,31 @@ impl App {
             Some(capability) => format!("{capability}/{}", row.name),
             None => row.name.clone(),
         };
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(title, self.look.title()),
-                Span::styled(
-                    row.badge
-                        .clone()
-                        .map(|b| format!("  {b}"))
-                        .unwrap_or_default(),
-                    self.look.dim(),
-                ),
-            ]),
-            Line::default(),
+        let defaults = section.page == Page::Defaults;
+        let mut head = vec![
+            Span::styled(title, self.look.title()),
+            Span::styled(
+                row.badge
+                    .clone()
+                    .map(|b| format!("  {b}"))
+                    .unwrap_or_default(),
+                self.look.dim(),
+            ),
         ];
+        // A default's value on its title line: stacked, the detail is cut
+        // from the bottom, and the value at the bottom was what went.
+        if defaults {
+            head.extend(match (&row.value, &row.fallback) {
+                (Some(v), _) => vec![Span::raw("  "), Span::styled(v.clone(), self.look.title())],
+                (None, Some(f)) => vec![
+                    Span::raw("  "),
+                    Span::raw(f.clone()),
+                    Span::styled(" · default", self.look.dim()),
+                ],
+                (None, None) => vec![Span::styled("  unset", self.look.dim())],
+            });
+        }
+        let mut lines = vec![Line::from(head), Line::default()];
         if let Some(w) = &row.warning {
             for (i, line) in w.lines().enumerate() {
                 lines.push(Line::from(Span::styled(
@@ -1843,7 +1966,28 @@ impl App {
                 )));
             }
         }
-        lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
+        if defaults {
+            if let Edit::Choice(options) = &row.edit {
+                if !options.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("one of  ", self.look.dim()),
+                        Span::raw(options.join(" · ")),
+                    ]));
+                }
+            }
+            if let Edit::Text { hint } = &row.edit {
+                if !hint.is_empty() {
+                    lines.push(Line::from(Span::styled(hint.clone(), self.look.dim())));
+                }
+            }
+            // The prose last, where a cut costs least.
+            if !row.about.is_empty() {
+                lines.push(Line::default());
+                lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
+            }
+        } else {
+            lines.extend(row.about.iter().map(|l| Line::raw(l.clone())));
+        }
         if let Some(on) = row.seeded {
             lines.push(Line::from(vec![
                 Span::styled("new repos  ", self.look.dim()),
@@ -1854,41 +1998,28 @@ impl App {
                 Span::styled("  — space changes it", self.look.dim()),
             ]));
         }
-        if section.page == Page::Defaults {
-            lines.push(Line::default());
-            lines.push(Line::from(match (&row.value, &row.fallback) {
-                (Some(v), _) => vec![
-                    Span::styled("now     ", self.look.dim()),
-                    Span::styled(v.clone(), self.look.title()),
-                ],
-                (None, Some(f)) => vec![
-                    Span::styled("now     ", self.look.dim()),
-                    Span::raw(f.clone()),
-                    Span::styled("  (unset)", self.look.dim()),
-                ],
-                (None, None) => vec![Span::styled("unset", self.look.dim())],
-            }));
-            if let Edit::Choice(options) = &row.edit {
-                if !options.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("one of  ", self.look.dim()),
-                        Span::raw(options.join(" · ")),
-                    ]));
-                }
-            }
-            if let Edit::Text { hint } = &row.edit {
-                lines.push(Line::from(Span::styled(hint.clone(), self.look.dim())));
-            }
-        }
         // The keys are the footer's, which follows the row: a second list of
         // them here spent two rows of a stacked screen saying it again.
         Text::from(lines)
     }
 
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
+        let paragraph = Paragraph::new(self.detail_text()).wrap(Wrap { trim: false });
+        // Cut, it says so: the detail ended mid-prose with nothing to say
+        // there was more.
+        let cut = paragraph.line_count(area.width) > usize::from(area.height);
+        if !cut || area.height < 2 {
+            return f.render_widget(paragraph, area);
+        }
+        let [text, cue] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+        f.render_widget(paragraph, text);
         f.render_widget(
-            Paragraph::new(self.detail_text()).wrap(Wrap { trim: false }),
-            area,
+            Paragraph::new(Span::styled(
+                "↓ more, in a taller terminal",
+                self.look.dim(),
+            )),
+            cue,
         );
     }
 
@@ -1963,8 +2094,30 @@ impl App {
     /// a popup's own while one is open, and otherwise the row's first, then the
     /// page's, then moving — the order they are dropped in from the right.
     fn keys(&self, width: u16) -> Line<'static> {
+        // What `u` undoes, said: "u undoes it" read as the row under the
+        // cursor, where it is the last change that worked.
+        let undoes = self.undo.as_ref().map(|act| match act {
+            Act::Set { key, value } | Act::SetAnyway { key, value } => {
+                format!("{key} back to {}", ellipsized(value, 16))
+            }
+            Act::Unset { key } => format!("{key} unset again"),
+            Act::Use { capability, name } => format!("{capability}/{name} back to new repos"),
+            Act::Unuse { capability, name } => format!("{capability}/{name} left out again"),
+            Act::Move { to, .. } => format!("{to} back where it was"),
+            _ => "undo".to_string(),
+        });
         let page: Vec<(&str, &str)> = match &self.modal {
-            Some(Modal::Input(_)) => vec![("↵", "done"), ("esc", "cancel"), ("ctrl-u", "clear")],
+            // What `↵` will do, as it stands: it said `save` while it wrote
+            // anyway, and while it opened $EDITOR.
+            Some(Modal::Input(input)) => vec![
+                match (&input.then, input.forcing) {
+                    (_, true) => ("↵", "write anyway"),
+                    (Then::NewEntry { .. }, false) => ("↵", "open in $EDITOR"),
+                    (Then::Value { .. }, false) => ("↵", "save"),
+                },
+                ("esc", "cancel"),
+                ("ctrl-u", "clear"),
+            ],
             Some(Modal::Pick(_)) => {
                 vec![
                     ("↑↓", "move"),
@@ -1987,13 +2140,18 @@ impl App {
             }
             None => {
                 let mut keys = self.page_keys();
-                if self.undo.is_some() {
-                    keys.insert(0, ("u", "undoes it"));
+                if let Some(undo) = &undoes {
+                    keys.insert(0, ("u", undo.as_str()));
                 }
                 keys
             }
         };
-        let right = self.chips(&[("?", "help"), ("q", "quit")]);
+        // Where a line is typed into, `?` and `q` are letters, not keys.
+        let typing = matches!(self.modal, Some(Modal::Input(_)) | Some(Modal::Form(_)));
+        let right = match typing {
+            true => Line::default(),
+            false => self.chips(&[("?", "help"), ("q", "quit")]),
+        };
         let room = usize::from(width).saturating_sub(right.width() + 2);
         let mut take = page.len();
         let mut left = self.chips(&page[..take]);
@@ -2134,7 +2292,13 @@ impl App {
         let typed: String = input.line.text.iter().collect();
         lines.push(Line::from(vec![
             Span::styled(input.label.clone(), self.look.title()),
-            Span::raw(typed.clone()),
+            match input.line.selected {
+                true => Span::styled(
+                    typed.clone(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ),
+                false => Span::raw(typed.clone()),
+            },
         ]));
         // What omh would say about the value as it stands, before it is
         // written rather than after.
@@ -2145,11 +2309,20 @@ impl App {
             }
             _ => None,
         };
-        if let Some((tone, w)) = warning {
-            lines.push(Line::from(Span::styled(clean(&w), self.look.tone(tone))));
-        }
-        lines.push(Line::default());
-        lines.push(self.chips(&[("↵", "save"), ("esc", "cancel")]));
+        // Two lines kept for what omh says about the value, there or not, so
+        // the box holds still as it comes and goes: it moved from row 9 to 7
+        // to 8. The keys are the footer's, said once.
+        let room = usize::from(f.area().width.saturating_sub(2).clamp(1, 64)).saturating_sub(4);
+        let mut said: Vec<Line> = match warning {
+            Some((tone, w)) => wrapped(&clean(&w), room.max(12))
+                .into_iter()
+                .take(2)
+                .map(|l| Line::from(Span::styled(l, self.look.tone(tone))))
+                .collect(),
+            None => Vec::new(),
+        };
+        said.resize(2, Line::default());
+        lines.extend(said);
         let area = self.popup(f, &input.title, Text::from(lines), Popup::Typing);
         let above = Paragraph::new(Text::from(before))
             .wrap(Wrap { trim: false })
@@ -2239,7 +2412,7 @@ impl App {
             lines.push(Line::from(vec![
                 Span::styled(if here { "▸ " } else { "  " }, self.look.accent()),
                 Span::styled(
-                    label.to_string(),
+                    pad(label, FORM_LABEL),
                     match here {
                         true => self.look.title(),
                         false => self.look.dim(),
@@ -2248,31 +2421,29 @@ impl App {
                 Span::raw(typed),
             ]));
         }
+        // What the field takes, under the value column, wrapped there: the
+        // hint's second line went back to column 0.
+        let indent = " ".repeat(2 + FORM_LABEL);
+        let room = usize::from(f.area().width.saturating_sub(2).clamp(1, 64))
+            .saturating_sub(4 + indent.len())
+            .max(12);
+        for part in wrapped(FORM_HINTS[form.at], room) {
+            lines.push(Line::from(Span::styled(
+                format!("{indent}{part}"),
+                self.look.dim(),
+            )));
+        }
         if let Some(e) = &form.error {
             lines.push(Line::from(Span::styled(
                 format!("✗ {e}"),
                 self.look.tone(Tone::Bad),
             )));
         }
-        if form.at == 1 {
-            lines.push(Line::from(Span::styled(
-                "  a token goes in env: arguments are kept as typed, and env values are not shown",
-                self.look.dim(),
-            )));
-        }
-        lines.push(Line::default());
-        lines.push(self.chips(&[
-            ("⇥", "next field"),
-            ("↵", "next, then add"),
-            ("esc", "cancel"),
-        ]));
+        // The keys are the footer's.
         let area = self.popup(f, "new server", Text::from(lines), Popup::Typing);
         let field = &form.fields[form.at];
         let typed_before = drawn_field(form.at, &field.text[..field.cursor]);
-        let x = area.x
-            + 4
-            + Span::raw(FORM_LABELS[form.at]).width() as u16
-            + Span::raw(typed_before.as_str()).width() as u16;
+        let x = area.x + 4 + FORM_LABEL as u16 + Span::raw(typed_before.as_str()).width() as u16;
         f.set_cursor_position((
             x.min(area.right().saturating_sub(2)),
             (area.y + 1 + form.at as u16).min(area.bottom().saturating_sub(2)),
@@ -2374,6 +2545,12 @@ impl App {
     }
 }
 
+/// `text` right-aligned in `width` columns.
+fn pad_left(text: &str, width: usize) -> String {
+    let used = Span::raw(text).width();
+    format!("{}{text}", " ".repeat(width.saturating_sub(used)))
+}
+
 /// How wide the screen is, for the layout it gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Width {
@@ -2388,8 +2565,8 @@ enum Width {
 impl Width {
     fn of(columns: u16) -> Self {
         match columns {
-            100.. => Width::Wide,
-            70..=99 => Width::Medium,
+            120.. => Width::Wide,
+            70..=119 => Width::Medium,
             _ => Width::Narrow,
         }
     }
@@ -2453,6 +2630,19 @@ impl Typed {
     /// The editing keys a shell's line has, and no more.
     fn edit(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Selected, a letter or a deletion takes the whole of it; any other
+        // key keeps it, and is the one that moves into it.
+        if std::mem::take(&mut self.selected) {
+            let replaces = matches!(key.code, KeyCode::Char(_) if plain(key))
+                || matches!(key.code, KeyCode::Backspace | KeyCode::Delete);
+            if replaces {
+                self.text.clear();
+                self.cursor = 0;
+                if !matches!(key.code, KeyCode::Char(_)) {
+                    return;
+                }
+            }
+        }
         match key.code {
             KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = self.text.len(),
@@ -2550,6 +2740,7 @@ fn cleaned(mut model: Model) -> Model {
                     .map(|h| Source {
                         harness: clean(&h.harness),
                         from: clean(&h.from),
+                        empty: h.empty,
                     })
                     .collect(),
             ),

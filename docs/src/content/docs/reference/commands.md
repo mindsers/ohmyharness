@@ -2133,35 +2133,35 @@ defaults, then one page per kind of catalogue entry — rules, skills, servers,
 commands, subagents, hooks. Piped, redirected, or with `--json` or `--dry-run`,
 it is the report above.
 
-From 100 columns it is three: the pages, the list, and what the selected row
+From 120 columns it is three: the pages, the list, and what the selected row
 is. From 70, what the row is sits under the list, as below; narrower, the
 pages are one line along the top.
 
 ```
  omh settings  ~/.omh
-▌ 1 Defaults      │ Defaults  8
+▌ 1 Defaults      │ Defaults  11
   2 Rules       1 │
-  3 Skills      2 │   carry_in        default: nothing carried
-  4 Servers     1 │   account         default: no login captured — `omh auth <…
-  5 Commands    0 │ ✓ idle_timeout    45m
-  6 Subagents   0 │   sandbox_memory  default: the runtime's own
-  7 Hooks       0 │   sandbox_cpus    default: the runtime's own
-                  │   runtime         default: auto
-                  │   ca_cert         default: no extra CA
-                  │   persistence     default: dtach
+  3 Skills      2 │   carry_in        nothing carried                          ┃
+  4 Servers     1 │   account         no login captured — `omh auth <harness>`…┃
+  5 Commands    0 │ ✓ idle_timeout    45m                                      ┃
+  6 Subagents   0 │   sandbox_memory  the runtime's own                        ┃
+  7 Hooks       0 │   sandbox_cpus    the runtime's own                        ┃
+                  │   runtime         auto                                     ┃
+                  │   ca_cert         no extra CA                              ┃
+                  │   persistence     dtach
                   │
-                  │
+                  │ FEATURES
                   ├─────────────────────────────────────────────────────────────
-                  │ idle_timeout
+                  │ idle_timeout  45m
                   │
-                  │ How long a session may sit unused before omh stops it.
-                  │
-                  │ now     45m
                   │ a duration: 90s, 30m, 2h, 1d
                   │
- ✓ wrote → /Users/you/.omh/default.toml (seeds new repos)
+                  │ How long a session may sit unused before omh stops it.
+                  │ seeds a new repo's .omh/settings.toml, which is committed —
+                  │ a repo that exists keeps its own
+ ✓ wrote → ~/.omh/default.toml (seeds new repos)
    $ omh settings set idle_timeout 45m
- ↵ set  d unset  e edit the file  / filter  ⇥ page  ↑↓ move       ? help  q quit
+ u idle_timeout unset again  ↵ set  d unset  e edit the file      ? help  q quit
 ```
 
 | | |
@@ -2169,6 +2169,7 @@ pages are one line along the top.
 | `↓` `↑` (`j` `k`), `home` `end` (`g` `G`) | move in the list |
 | `⇥` `⇧⇥` or `→` `←` (`l` `h`), `1`–`7` | change page |
 | letters, in a list to pick from | go to the option they spell — `pod` is `podman`; `esc` or `q` closes it, and no other key does |
+| typing, in a box that opens filled in | replaces what was there, which opens selected; `←` `→` or `home` `end` move into it instead |
 | `enter` | set a default — picked from its choices where it has them, typed where it does not; open a rule, skill, command, subagent or hook in `$EDITOR` |
 | `e` | `$EDITOR` on the entry, or on the file a page lives in |
 | `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |
