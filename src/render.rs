@@ -1171,9 +1171,31 @@ fn one_hook(
     }
     if let Some(when) = &hook.when {
         b.push_str(&format!(
-            "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n      if (p.code !== 0) {{ {}return }}\n",
+            "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n",
             js(when),
             js(name),
+        ));
+        // Fails closed, as `omp_one_hook` does and for its reason: a shell
+        // that never started leaves `p.code` at 1, the same as a guard that
+        // declined, and returning from `tool.execute.before` lets the call
+        // through. Only a refusal blocks; an `inject` or a `run` still falls
+        // through to silence.
+        if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
+            b.push_str(&format!(
+                "      if (!p.ran) {{ {}{} }}\n",
+                log_call(log, name, ledger::Decision::Unevaluated),
+                t.template
+                    .replace(
+                        "{{text}}",
+                        &js(&format!(
+                            "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
+                        )),
+                    )
+                    .replace("{{event}}", wired.event),
+            ));
+        }
+        b.push_str(&format!(
+            "      if (p.code !== 0) {{ {}return }}\n",
             log_call(log, name, ledger::Decision::Silent),
         ));
     }
