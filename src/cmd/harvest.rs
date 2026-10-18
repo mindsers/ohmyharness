@@ -927,7 +927,7 @@ pub(crate) enum AtStake {
 /// arm does: `log` cannot show you the repository and says so; `rm` would
 /// delete it, so it asks first.
 ///
-/// Over the metadata result rather than the path, so all four answers are a
+/// Over the stat results rather than the paths, so every answer is a
 /// table. The permission arm cannot be produced by a test that might run as
 /// root — `chmod 000` does not stop uid 0 — which is exactly the arm that
 /// silently deleted a sandbox before this.
@@ -936,16 +936,21 @@ pub(crate) fn from_the_seed_record(
     gitdir: std::io::Result<()>,
     shadow: &shadow::Shadow,
 ) -> Option<AtStake> {
-    let gitdir_exists = gitdir.is_ok();
     match metadata {
         Ok(()) => None,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !gitdir_exists => {
-            Some(AtStake::Nothing)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(AtStake::Unknown(format!(
-            "a sandbox repository at {} and no record of where it started",
-            shadow.gitdir.display()
-        ))),
+        // Only `NotFound` is absent, for the repository as for the record: a
+        // stat that failed otherwise is a repository omh could not see.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match gitdir {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(AtStake::Nothing),
+            Ok(()) => Some(AtStake::Unknown(format!(
+                "a sandbox repository at {} and no record of where it started",
+                shadow.gitdir.display()
+            ))),
+            Err(e) => Some(AtStake::Unknown(format!(
+                "a sandbox repository omh could not look at, at {}: {e}",
+                shadow.gitdir.display()
+            ))),
+        },
         Err(e) => Some(AtStake::Unknown(format!(
             "a sandbox omh could not read at {}: {e}",
             shadow.seed_record.display()
