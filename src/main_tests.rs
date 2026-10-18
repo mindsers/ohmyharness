@@ -2808,6 +2808,63 @@ fn a_sync_preserves_committed_and_uncommitted_session_work() {
     );
 }
 
+/// **A sync that refuses has changed nothing — and the way out it names runs.**
+///
+/// The user's own commit on the session branch does not replay onto trunk,
+/// which the sync refuses over, saying *Nothing was changed*. It had already
+/// written trunk's tree into the worktree by then: conflict markers in the
+/// user's file, trunk's files beside it, and `diff` reporting them as session
+/// work. And the command it offered — `git -C <repo> rebase … omh/sNN` — fails
+/// on its own, because that branch is checked out in the session's worktree.
+#[test]
+fn a_sync_that_refuses_has_changed_nothing() {
+    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    // The user's own commit on the session branch (`omh s01 commit -m`)…
+    std::fs::write(session.worktree.join("f.txt"), "mine\n").unwrap();
+    git(&session.worktree, &["add", "f.txt"]);
+    git(&session.worktree, &["commit", "-qm", "mine"]);
+    // …and trunk writing the same file, plus one of its own.
+    std::fs::write(paths.repo.join("f.txt"), "trunk\n").unwrap();
+    std::fs::write(paths.repo.join("from-trunk.rs"), "fn trunk() {}\n").unwrap();
+    git(&paths.repo, &["add", "-A"]);
+    git(&paths.repo, &["commit", "-qm", "trunk"]);
+
+    let err = cmd::harvest::sync_session(&paths, &session, "main")
+        .expect_err("the branch's own commit does not replay onto trunk");
+    let said = format!("{err:#}");
+    assert!(said.contains("Nothing was changed"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(session.worktree.join("f.txt")).unwrap(),
+        "mine\n",
+        "omh said nothing was changed: {said}"
+    );
+    assert!(
+        !session.worktree.join("from-trunk.rs").exists(),
+        "omh said nothing was changed, and trunk's file is in the worktree: {said}"
+    );
+
+    // The remedy, run as written.
+    let remedy = said
+        .split('`')
+        .find(|part| part.starts_with("git -C ") && part.contains(" rebase "))
+        .unwrap_or_else(|| panic!("the refusal names a command: {said}"));
+    let words: Vec<&str> = remedy.split_whitespace().collect();
+    let ran = Command::new(words[0]).args(&words[1..]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        !stderr.contains("already used by worktree") && !stderr.contains("already checked out"),
+        "the command omh offered cannot run: `{remedy}`: {stderr}"
+    );
+}
+
 /// **Three behaviours, one value.** `force` and `terminal` were adjacent
 /// `bool`s meaning opposite things — *the user said delete it anyway* and
 /// *there is somebody at a keyboard*. Swapping them compiles, and the two
