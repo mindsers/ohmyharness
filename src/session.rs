@@ -1551,7 +1551,7 @@ pub struct Claimed<'a> {
 pub fn pick(claimed: &Claimed, start: Start) -> Result<String> {
     match start {
         Start::Named(id) => Ok(id.to_string()),
-        Start::Fresh => next_id(claimed.worktrees),
+        Start::Fresh => next_unclaimed(claimed),
     }
 }
 
@@ -1679,31 +1679,67 @@ pub enum Start<'a> {
 /// `NotFound` stays zero: a checkout that has never made a session has no
 /// worktrees directory, and `s01` is the right answer there.
 pub fn next_id(worktrees_dir: &Path) -> Result<String> {
-    let entries = match std::fs::read_dir(worktrees_dir) {
+    Ok(format!("s{:02}", highest_in(worktrees_dir)? + 1))
+}
+
+/// The id after every one anything still holds — the worktrees directory,
+/// `omh/sNN` branches, sandbox repositories and run directories alike.
+///
+/// The worktrees directory alone forgot an id the moment `rm` took its
+/// worktree, while `rm` keeps a branch that holds work: the next `omh new`
+/// reused the id and `ensure` reattached it to that branch. The highest of
+/// all four rather than the first gap, so ids stay monotonic the way
+/// [`next_id`] already made them. A place omh could not look is an error,
+/// never "nothing there" — the rule [`next_id`] states for its directory.
+fn next_unclaimed(claimed: &Claimed) -> Result<String> {
+    let mut used = highest_in(claimed.worktrees)?;
+    used = used.max(highest_in(claimed.shadows)?);
+    used = used.max(highest_in(claimed.runs)?);
+    let refs = git(
+        claimed.repo,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/omh/"],
+    )
+    .with_context(|| {
+        format!(
+            "listing the session branches in {}, to start a session none of \
+             them holds",
+            claimed.repo.display()
+        )
+    })?;
+    for name in refs.lines().filter_map(|r| r.strip_prefix("refs/heads/omh/")) {
+        used = used.max(session_number(name).unwrap_or(0));
+    }
+    Ok(format!("s{:02}", used + 1))
+}
+
+/// The highest session number named in `dir`: `s07` for a worktree or a run
+/// directory, `s07.git` / `s07.seed` for what a sandbox repository leaves.
+///
+/// Absent is zero; unreadable is an error, entry by entry.
+fn highest_in(dir: &Path) -> Result<u32> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok("s01".to_string());
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => {
-            return Err(anyhow::Error::new(e))
-                .with_context(|| format!("reading {}", worktrees_dir.display()))
+            return Err(anyhow::Error::new(e)).with_context(|| format!("reading {}", dir.display()))
         }
     };
     let mut used = 0;
     for entry in entries {
         // Not `.flatten()`: an entry dropped there lowers the maximum, and the
         // id that comes back is then one another session is already using.
-        let entry = entry.with_context(|| format!("reading {}", worktrees_dir.display()))?;
-        if let Some(n) = entry
-            .file_name()
-            .to_string_lossy()
-            .strip_prefix('s')
-            .and_then(|rest| rest.parse::<u32>().ok())
-        {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        if let Some(n) = session_number(&entry.file_name().to_string_lossy()) {
             used = used.max(n);
         }
     }
-    Ok(format!("s{:02}", used + 1))
+    Ok(used)
+}
+
+/// `s07` and `s07.<anything>` → 7; any other name → nothing.
+fn session_number(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('s')?;
+    rest.split('.').next()?.parse().ok()
 }
 
 /// Every session of this checkout, in id order.
@@ -5046,6 +5082,49 @@ mod tests {
         assert!(
             !fresh.worktree.join("old.rs").exists(),
             "a fresh session ({id}) opened on the old session's unreviewed commit"
+        );
+    }
+
+    /// What a removal that could not finish leaves behind holds its id too.
+    ///
+    /// A sandbox repository's records and a run directory both carry state the
+    /// next session under that id would take for its own — a landed record is
+    /// a replay point, a harness marker says what to rejoin as.
+    #[test]
+    fn a_fresh_session_steps_past_what_a_removal_left_behind() {
+        let (d, root) = repo();
+        let wt = d.path().join("wt");
+        let shadows = d.path().join("shadows");
+        let runs = d.path().join("run");
+        for dir in [&wt, &shadows, &runs] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(shadows.join("s03.landed"), "abc\n").unwrap();
+        std::fs::create_dir_all(runs.join("s05")).unwrap();
+        // Not ids: what `omh doctor` and `omh auth` stage under the same tree.
+        std::fs::create_dir_all(runs.join("doctor")).unwrap();
+        let at = Claimed {
+            worktrees: &wt,
+            repo: &root,
+            shadows: &shadows,
+            runs: &runs,
+        };
+        assert_eq!(pick(&at, Start::Fresh).unwrap(), "s06");
+    }
+
+    /// **A branch list omh could not read is not an empty one.** Answering
+    /// `s01` there is answering with the one id most likely to be held.
+    #[test]
+    fn a_fresh_session_is_refused_when_the_branches_cannot_be_listed() {
+        let d = tempfile::tempdir().unwrap();
+        let not_a_repo = d.path().join("plain");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        let nowhere = d.path().join("nowhere");
+        let err = pick(&claimed(&nowhere, &not_a_repo, &nowhere), Start::Fresh)
+            .expect_err("an unreadable branch list must not read as none");
+        assert!(
+            format!("{err:#}").contains("listing the session branches"),
+            "the refusal says what omh could not look at: {err:#}"
         );
     }
 
