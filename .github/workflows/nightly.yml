@@ -55,12 +55,14 @@ jobs:
       # `--exact` with a name no test carries runs nothing and passes:
       # `0 passed; 4 filtered out`, exit 0. A harness renamed in `adapters/`
       # and not here would go green every night having run nothing, so the
-      # name is asked for first.
+      # name is asked for first. Into a variable rather than piped to
+      # `grep -q`: Actions runs bash with `pipefail`, and a grep that quits at
+      # its first match can fail the listing with SIGPIPE.
       - name: run every scenario against ${{ matrix.harness }}
         env:
           HARNESS: ${{ matrix.harness }}
         run: |
-          cargo test --locked --features e2e --test e2e -- --list --exact "$HARNESS" \
-            | grep -qx "$HARNESS: test" \
+          listed="$(cargo test --locked --features e2e --test e2e -- --list --exact "$HARNESS")"
+          grep -qx "$HARNESS: test" <<<"$listed" \
             || { echo "no e2e test is called $HARNESS"; exit 1; }
           cargo test --locked --features e2e --test e2e -- --exact "$HARNESS"
