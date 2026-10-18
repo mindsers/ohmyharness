@@ -7036,6 +7036,156 @@ fn materialise_never_removes_the_placeholders_omh_mounts_over() {
     );
 }
 
+/// A launch leaves your own checkout ignoring exactly what it ignored before.
+///
+/// `info/exclude` lives in the common git dir, so it is your checkout's file
+/// as much as the session's. Writing omh's placeholder names into it meant
+/// that after one launch an `AGENTS.md` you created in your checkout was
+/// missing from `git status`, `git add -A` stepped over it, and
+/// `git add AGENTS.md` called it ignored — and nothing ever took the lines
+/// back out.
+#[test]
+fn a_launch_changes_nothing_about_what_your_checkout_ignores() {
+    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
+
+    for name in carry::hidden_in_the_worktree() {
+        std::fs::write(paths.repo.join(name), "the user's own\n").unwrap();
+    }
+    let out = Command::new("git")
+        .current_dir(&paths.repo)
+        .args(["status", "--porcelain", "-uall"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let status = String::from_utf8_lossy(&out.stdout);
+    for name in carry::hidden_in_the_worktree() {
+        assert!(
+            status.lines().any(|l| l == format!("?? {name}")),
+            "{name} in your checkout is invisible to git status after a launch: {status:?}"
+        );
+    }
+}
+
+/// What a launch leaves in the worktree is nobody's work, on every host read
+/// that asks the worktree what changed.
+///
+/// A bind mount lands on an empty file omh creates in `/work`, one per name
+/// in `carry::hidden_in_the_worktree`. `omh s`, `diff`, `rm`'s question and
+/// `commit` all read the worktree from the host, and each has to leave those
+/// files out without an exclude file shared with your checkout.
+///
+/// No sandbox repository here, on purpose: that is the state in which `rm`
+/// asks the worktree itself rather than the sandbox's index.
+#[test]
+fn an_untouched_session_holds_nothing_but_omhs_placeholders() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    std::fs::write(paths.repo.join("kept.rs"), "fn kept() {}\n").unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "trunk"],
+    ] {
+        let out = Command::new("git")
+            .current_dir(&paths.repo)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    }
+    let session = Session::new(&paths.worktrees().join("s01"), "s01".to_string());
+    session.ensure(&paths.repo, "main").unwrap();
+    cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
+    // What `container::place_destination` leaves: an empty file, made new.
+    for name in carry::hidden_in_the_worktree() {
+        std::fs::write(session.worktree.join(name), "").unwrap();
+    }
+
+    assert_eq!(
+        session.changed().unwrap(),
+        Vec::<String>::new(),
+        "`omh s` counts omh's placeholders as uncommitted work"
+    );
+    let review = session.diff("main", session::What::Summary).unwrap();
+    for name in carry::hidden_in_the_worktree() {
+        assert!(
+            !review.contains(name),
+            "`omh s01 diff` shows omh's {name} as the session's work: {review:?}"
+        );
+    }
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(stake, cmd::harvest::AtStake::Nothing),
+        "`omh s01 rm` would ask about work nobody did: {stake:?}"
+    );
+    let refused = session
+        .commit(Some("nothing"), session::Carried::refusing(&[]))
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("nothing to commit"),
+        "`omh s01 commit` found work in omh's placeholders: {refused:#}"
+    );
+}
+
+/// Only the files omh placed are left out. An `AGENTS.md` the agent writes
+/// for one package is the agent's work, and a pattern in `info/exclude`
+/// matched that name at every depth.
+#[test]
+fn a_rules_file_the_agent_writes_below_the_root_is_its_work() {
+    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
+    std::fs::create_dir_all(session.worktree.join("pkg")).unwrap();
+    for name in carry::hidden_in_the_worktree() {
+        std::fs::write(session.worktree.join("pkg").join(name), "# pkg\n").unwrap();
+    }
+
+    let changed = session.changed().unwrap();
+    for name in carry::hidden_in_the_worktree() {
+        assert!(
+            changed.contains(&format!("pkg/{name}")),
+            "pkg/{name} is the agent's work and `omh s` does not count it: {changed:?}"
+        );
+    }
+}
+
+/// The exclude file is yours. omh may add a line to it and nothing else.
+///
+/// It read the file as UTF-8 and wrote back what it had read plus its own
+/// lines. One byte outside UTF-8 — a Latin-1 pattern written years ago —
+/// read as an empty file, and the write replaced every rule in it with
+/// omh's, so files you kept out of `git add -A` privately were swept up by
+/// the next one.
+#[test]
+fn the_users_own_exclude_rules_survive_a_launch() {
+    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let exclude = carry::exclude_path(&session.worktree).unwrap();
+    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    let theirs: &[u8] = b"caf\xe9.local\nprivate-notes.txt\n";
+    std::fs::write(&exclude, theirs).unwrap();
+    std::fs::write(paths.repo.join(".env.local"), "SECRET=1\n").unwrap();
+
+    // Carried the way `omh new` carries it: the one writer of this file.
+    carry::apply(&paths.repo, &session.worktree, &[".env.local".to_string()]).unwrap();
+    let after = std::fs::read(&exclude).unwrap();
+    assert!(
+        after.starts_with(theirs),
+        "your exclude rules are gone: {:?}",
+        String::from_utf8_lossy(&after)
+    );
+    assert!(
+        after.split(|b| *b == b'\n').any(|l| l == b".env.local"),
+        "the carried file is not excluded: {:?}",
+        String::from_utf8_lossy(&after)
+    );
+
+    // A second launch has nothing to add, so it writes nothing.
+    carry::apply(&paths.repo, &session.worktree, &[".env.local".to_string()]).unwrap();
+    assert_eq!(std::fs::read(&exclude).unwrap(), after);
+}
+
 /// A `Paths` under a throwaway home, with the repo initialised.
 fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
     let paths = Paths {
