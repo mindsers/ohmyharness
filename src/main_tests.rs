@@ -5152,6 +5152,28 @@ fn a_new_repo_gets_your_lists_your_exclusions_and_no_guard_unnamed() {
             .unwrap_or_default(),
         ["my-guard", "mine"]
     );
+    // A list is narrowed to this repo's stacks, as no list is: `use hooks
+    // <guard>` wrote every stack's hooks into the list, and `init` put go's
+    // and python's into a rust repo's committed `[use]`.
+    hook(
+        "go-check",
+        r#"{"on":"turn-end","run":"go vet ./...","stack":"go"}"#,
+    );
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "[use]\nhooks = [\"mine\", \"go-check\", \"gone\"]\n",
+    )
+    .unwrap();
+    let lists = cmd::catalogue::new_repo_lists(&paths).unwrap();
+    assert_eq!(
+        lists
+            .get(&adapter::Capability::Hooks)
+            .cloned()
+            .unwrap_or_default(),
+        ["mine", "gone"],
+        "a repo with no go in it — and a name the catalogue lacks stays, for \
+         `init` to warn about"
+    );
 }
 
 /// A selection in your defaults omh cannot read is refused before `init`

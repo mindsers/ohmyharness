@@ -1138,7 +1138,16 @@ pub(crate) fn new_repo_takes(
         _ => BTreeSet::new(),
     };
     let layer = config::Layer::Personal;
-    if let Some(takes) = config::list_in(paths, layer, config::USE, cap)? {
+    if let Some(mut takes) = config::list_in(paths, layer, config::USE, cap)? {
+        // Narrowed to this repo's stacks, as no list is: `use hooks <guard>`
+        // writes every stack's hooks into the list, and `init` put go's and
+        // python's into a rust repo. A name the catalogue does not have stays,
+        // for `init` to warn about.
+        if in_repo && cap == adapter::Capability::Hooks {
+            let known = catalogue_names_unfiltered(paths, cap)?;
+            let applicable = catalogue_names(paths, cap)?;
+            takes.retain(|n| !known.contains(n) || applicable.contains(n));
+        }
         return Ok(NewRepo {
             listed: true,
             takes,
