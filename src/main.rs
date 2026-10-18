@@ -548,11 +548,12 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     // One of omh's features: switched in `[omh]`, for the repos
                     // `init` seeds — never written as a bare key nothing reads.
                     if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
+                        let reach = cmd::settings::Reach::named(config::Layer::Personal);
                         return cmd::settings::feature_switch(
                             &paths,
                             key,
-                            cmd::settings::on_or_off(key, value)?,
-                            cmd::settings::Reach::named(config::Layer::Personal),
+                            cmd::settings::on_or_off(key, value, &reach)?,
+                            reach,
                             cli.dry_run,
                             ctx,
                         );
@@ -644,14 +645,17 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         } => {
             let paths = Paths::discover(&cwd)?;
             match cmd::settings::names(&paths, key, ctx) {
-                cmd::settings::Names::AFeature => cmd::settings::feature_switch(
-                    &paths,
-                    key,
-                    cmd::settings::on_or_off(key, value)?,
-                    cmd::settings::reach_in(&paths, config::OMH, key, *local, *save)?,
-                    cli.dry_run,
-                    ctx,
-                ),
+                cmd::settings::Names::AFeature => {
+                    let reach = cmd::settings::reach_in(&paths, config::OMH, key, *local, *save)?;
+                    cmd::settings::feature_switch(
+                        &paths,
+                        key,
+                        cmd::settings::on_or_off(key, value, &reach)?,
+                        reach,
+                        cli.dry_run,
+                        ctx,
+                    )
+                }
                 cmd::settings::Names::AnEntryOf(feature) => Err(
                     cmd::settings::an_entry_is_not_a_feature(key, &feature, false),
                 ),

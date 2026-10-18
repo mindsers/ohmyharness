@@ -311,12 +311,17 @@ omh: nothing was ignoring settings.local.toml — added it to /Users/you/proj/.o
 wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
 ```
 
-**A key omh has never heard of is written to the committed file and reported
-twice** — nothing reads it, and it went somewhere git carries:
+**A key omh has never heard of is refused**, with the one it was likely meant
+as. `--anyway` writes it — for a key only a newer omh reads — to the committed
+file, and reports it twice: nothing reads it, and it went somewhere git carries:
 
 ```console
 $ omh set carry_ins '[".env"]'
-omh: nothing in omh reads `carry_ins` — it is written, and it will sit there
+omh: nothing in omh reads `carry_ins` — did you mean `carry_in`? Nothing was written. For a key only a newer omh reads:
+  omh set --anyway carry_ins <value>
+
+$ omh set --anyway carry_ins '[".env"]'
+omh: nothing in omh reads `carry_ins` — written anyway, and it will sit there
 wrote → /Users/you/proj/.omh/settings.toml (committed)
 omh: and the committed file is COMMITTED — `carry_ins` went into a file git carries
 ```

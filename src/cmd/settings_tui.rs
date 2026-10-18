@@ -47,23 +47,45 @@ pub(crate) fn wanted(json: bool, dry_run: bool) -> bool {
 }
 
 pub(crate) fn run(paths: &Paths, color: bool, ctx: &crate::out::Ctx) -> Result<()> {
-    let mut app = App::new(model(paths), color).with_check(Box::new(|name, value| {
-        key::describes(name).and_then(|k| key::quarrel(k, value))
-    }));
+    let mut app = App::new(model(paths), color).with_check(Box::new(refusal));
     let mut screen = Screen::open()?;
-    let driven = drive(&mut app, &mut screen.terminal, paths);
+    let mut ran = Vec::new();
+    let driven = drive(&mut app, &mut screen.terminal, paths, &mut ran);
     // The screen gone, what it ran is said where scrollback keeps it: it held
     // the terminal, so nothing it did was left behind — a session's commands,
     // to read back or paste into a script.
     drop(screen);
-    if !app.ran().is_empty() {
-        let mut said = crate::report::Action::new("settings-screen-ran", "the screen ran:");
-        for line in app.ran() {
-            said = said.note(format!("omh {line}"));
-        }
+    if let Some(said) = what_ran(&ran) {
         ctx.say(&said);
     }
     driven
+}
+
+/// The lines [`ran_lines`] made, said once the screen closes — and, where one
+/// held a value back, that it did. `None` for a screen that changed nothing.
+fn what_ran(ran: &[(String, bool)]) -> Option<crate::report::Action> {
+    if ran.is_empty() {
+        return None;
+    }
+    let mut said = crate::report::Action::new("settings-screen-ran", "the screen ran:");
+    for (line, _) in ran {
+        said = said.note(line.clone());
+    }
+    if ran.iter().any(|(_, held)| *held) {
+        said = said.note(
+            "a server's env values and arguments are not shown — type them again to run \
+             that line",
+        );
+    }
+    Some(said)
+}
+
+/// What `omh settings set` would refuse a value for, asked as it is typed.
+fn refusal(name: &str, value: &str) -> Option<String> {
+    match key::describes(name) {
+        Some(k) => key::quarrel(k, value),
+        None => Some(format!("nothing in omh reads `{name}`")),
+    }
 }
 
 /// `omh settings` off a terminal: your defaults, and your catalogue as the
@@ -74,9 +96,34 @@ pub(crate) fn show(paths: &Paths, ctx: &crate::out::Ctx) -> Result<()> {
     said.meant = said
         .unread
         .iter()
-        .filter_map(|u| nearest_key(&u.key).map(|k| (u.key.clone(), k.to_string())))
+        .filter_map(|u| key::nearest(&u.key).map(|k| (u.key.clone(), k.to_string())))
         .collect();
-    said.catalogue = model(paths)
+    let model = model(paths);
+    // Your defaults as the screen's first page says them: what it marks on
+    // each, the features and their switch, what a table holds.
+    if let Some(defaults) = model.sections.iter().find(|s| s.page == Page::Defaults) {
+        let row = |name: &str| defaults.rows.iter().find(|r| r.name == name);
+        for k in &mut said.known {
+            k.warning = row(&k.key).and_then(|r| r.warning.clone());
+        }
+        for t in &mut said.tables {
+            if let Some(r) = row(&t.key) {
+                t.value = r.value.clone().unwrap_or_default();
+                t.warning = r.warning.clone();
+            }
+        }
+        said.features = defaults
+            .rows
+            .iter()
+            .filter(|r| r.group.as_deref() == Some("features"))
+            .map(|r| crate::report::FeatureSwitch {
+                feature: r.name.clone(),
+                on: r.value.as_deref().or(r.fallback.as_deref()) == Some("on"),
+                set: r.value.is_some(),
+            })
+            .collect();
+    }
+    said.catalogue = model
         .sections
         .into_iter()
         .filter(|s| s.page != Page::Defaults)
@@ -149,7 +196,12 @@ impl Drop for Screen {
     }
 }
 
-fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) -> Result<()> {
+fn drive(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    paths: &Paths,
+    ran: &mut Vec<(String, bool)>,
+) -> Result<()> {
     let exe = std::env::current_exe().context("finding omh")?;
     loop {
         terminal
@@ -184,7 +236,7 @@ fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) 
             }
             Next::Run(act) => {
                 let line = argv(&act);
-                match &act {
+                let worked = match &act {
                     Act::EditDefaults => edit(app, terminal, paths, None, None, &line)?,
                     Act::Edit { capability, name } => edit(
                         app,
@@ -195,6 +247,9 @@ fn drive(app: &mut App, terminal: &mut ratatui::DefaultTerminal, paths: &Paths) 
                         &line,
                     )?,
                     _ => run_all(app, &exe, &command_lines(&act)),
+                };
+                if worked {
+                    ran.extend(ran_lines(&act));
                 }
                 app.reload(model(paths));
             }
@@ -210,12 +265,12 @@ fn edit(
     capability: Option<&str>,
     name: Option<&str>,
     line: &[String],
-) -> Result<()> {
+) -> Result<bool> {
     let target = match settings::edit_target(paths, capability, name, config::Layer::Personal) {
         Ok(target) => target,
         Err(e) => {
             app.report(shown(line), false, "", &format!("{e:#}"));
-            return Ok(());
+            return Ok(false);
         }
     };
     suspend().context("handing the terminal to $EDITOR")?;
@@ -251,7 +306,7 @@ fn edit(
         warned = after_edit(&model(paths), capability, name).unwrap_or_default();
     }
     app.report(shown(line), ok, &said, &warned);
-    Ok(())
+    Ok(ok)
 }
 
 /// What an edit left, read back from a fresh read of the catalogue: a file
@@ -293,9 +348,39 @@ pub(crate) fn command_lines(act: &Act) -> Vec<Vec<String>> {
     }
 }
 
+/// What the screen ran, as it says it once it closes: each line as a shell
+/// runs it, and whether a value in it is held back.
+///
+/// Not [`shown`], which is the line as a person would type it — no `--yes`,
+/// one status for a move's two lines — and printed in scrollback that read as
+/// a script nothing could run. A server's env values and arguments can be a
+/// token, so that one line is `shown`'s, with them held back: never drawn,
+/// here least of all, where scrollback keeps it.
+fn ran_lines(act: &Act) -> Vec<(String, bool)> {
+    command_lines(act)
+        .iter()
+        .map(|line| {
+            if line.starts_with(&["settings".into(), "mcp".into(), "add".into()]) {
+                return (format!("omh {}", shown(line)), true);
+            }
+            // `--` only where a word after it would read as a flag.
+            let at = line.iter().position(|w| w == "--");
+            let needed = at.is_some_and(|i| line[i + 1..].iter().any(|w| w.starts_with('-')));
+            let words: Vec<String> = line
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| needed || Some(*i) != at)
+                .map(|(_, w)| w.clone())
+                .collect();
+            (format!("omh {}", said(&words)), false)
+        })
+        .collect()
+}
+
 /// Run an act's lines in order, stopping at the first that fails, and say
-/// what they said as one: what ran, joined, and every line's output.
-fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) {
+/// what they said as one: what ran, joined, and every line's output. Answers
+/// whether every line worked.
+fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) -> bool {
     let shown_all = lines
         .iter()
         .map(|l| shown(l))
@@ -312,7 +397,7 @@ fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) {
                         err.push_str(&format!("it ended with {}, and said nothing", done.status));
                     }
                     app.report(shown_all, false, &out, &err);
-                    return;
+                    return false;
                 }
             }
             // On the screen rather than out of it: a child that would not
@@ -321,11 +406,12 @@ fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) {
             Err(e) => {
                 err.push_str(&format!("{e:#}"));
                 app.report(shown_all, false, &out, &err);
-                return;
+                return false;
             }
         }
     }
     app.report(shown_all, true, &out, &err);
+    true
 }
 
 /// The command line an act is, after `omh`.
@@ -345,6 +431,11 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
         Act::Set { key, value } => s(&["settings", "set", "--", key, value]),
         Act::SetAnyway { key, value } => s(&["settings", "set", "--anyway", "--", key, value]),
         // The first of its two lines; `command_lines` adds the unset after it.
+        // A move undone writes the typo back, a key nothing reads, which `set`
+        // refuses without `--anyway`.
+        Act::Move { to, value, .. } if key::describes(to).is_none() => {
+            s(&["settings", "set", "--anyway", "--", to, value])
+        }
         Act::Move { to, value, .. } => s(&["settings", "set", "--", to, value]),
         Act::Use { capability, name } => s(&["settings", "use", "--", capability, name]),
         Act::Unuse { capability, name } => s(&["settings", "unuse", "--", capability, name]),
@@ -741,6 +832,10 @@ fn import_from(paths: &Paths, template: &str) -> String {
     }
 }
 
+/// How far a change to an entry goes, said on each: the screen spoke of new
+/// repos alone, under which an edit read as reaching none.
+const REACHES: &str = "reaches every repo that takes it, at its next launch";
+
 /// What belongs on a page, for one with nothing on it yet: what the kind is,
 /// where one lives in your catalogue, and how to get one.
 fn belongs(cap: Capability, import: &Import) -> Vec<String> {
@@ -822,6 +917,8 @@ fn hint(shape: &key::Shape) -> String {
         key::Shape::Paths => "a list of paths: [\".env\", \".env.local\"]".into(),
         key::Shape::Path => "an absolute path".into(),
         key::Shape::Duration => "a duration: 90s, 30m, 2h, 1d".into(),
+        key::Shape::Size => "a size: 4g, 512m".into(),
+        key::Shape::Count => "a number above zero: 2, 1.5".into(),
         key::Shape::Choice(allowed) => format!("one of {}", allowed.join(", ")),
     }
 }
@@ -846,8 +943,9 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             (_, key::Shape::Choice(allowed)) => {
                 Edit::Choice(allowed.iter().map(|a| a.to_string()).collect())
             }
-            // The logins omh has captured, offered by name — and still a line
-            // to type into, for `codex:work`, one harness's own.
+            // The logins omh has captured, by name and by one harness's — and
+            // only those, since a launch takes nothing else: `another…` let a
+            // name be typed, which was for `codex:work`, and that is here.
             ("account", _) => {
                 let typed = Edit::Text {
                     hint: "a login's name, as `omh auth <harness> -n <name>` captured it".into(),
@@ -856,10 +954,13 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                     Ok(held) => {
                         (fallback, warning) = unset_account(&held);
                         let names: std::collections::BTreeSet<String> =
-                            held.into_iter().flat_map(|(_, names)| names).collect();
+                            held.iter().flat_map(|(_, names)| names.clone()).collect();
+                        let qualified = held.iter().flat_map(|(harness, names)| {
+                            names.iter().map(move |n| format!("{harness}:{n}"))
+                        });
                         match names.is_empty() {
                             true => typed,
-                            false => Edit::Suggest(names.into_iter().collect()),
+                            false => Edit::Choice(names.into_iter().chain(qualified).collect()),
                         }
                     }
                     Err(e) => {
@@ -882,7 +983,12 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             value,
             fallback: Some(fallback),
             warning,
-            about: vec![k.does.to_string()],
+            about: vec![
+                k.does.to_string(),
+                "seeds a new repo's .omh/settings.toml, which is committed — a repo that \
+                 exists keeps its own"
+                    .into(),
+            ],
             edit,
             ..Row::default()
         });
@@ -948,7 +1054,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             false => Row {
                 name: name.clone(),
                 value: Some(value.clone()),
-                warning: Some(match nearest_key(name) {
+                warning: Some(match key::nearest(name) {
                     Some(meant) => format!("nothing omh reads — did you mean `{meant}`?"),
                     None => "nothing omh reads".into(),
                 }),
@@ -958,7 +1064,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                 },
                 // Apart from the keys omh reads, under a heading saying so.
                 group: Some("read by nothing".into()),
-                meant: nearest_key(name).map(String::from),
+                meant: key::nearest(name).map(String::from),
                 ..Row::default()
             },
         };
@@ -1028,35 +1134,6 @@ fn table_summary(doc: &Result<toml_edit::DocumentMut>, name: &str) -> String {
     }
 }
 
-/// The key a name nothing reads was probably meant to be: one edit or two
-/// away, the way `carry_ins` is from `carry_in`.
-fn nearest_key(name: &str) -> Option<&'static str> {
-    key::KEYS
-        .iter()
-        .map(|k| (distance(name, k.name), k.name))
-        .filter(|(d, _)| *d <= 2)
-        .min()
-        .map(|(_, k)| k)
-}
-
-/// How many single-character edits turn `a` into `b`.
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let here = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb))
-                .min(row[j] + 1)
-                .min(here + 1);
-            prev = here;
-        }
-    }
-    row[b.len()]
-}
-
 fn servers(paths: &Paths) -> Section {
     let mut out = section(Page::Servers, "servers");
     let path = config::mcp_path(paths);
@@ -1105,6 +1182,7 @@ fn servers(paths: &Paths) -> Section {
             about.push(format!("env   {env}"));
         }
         about.push(format!("file  {}", within(paths, &path)));
+        about.push(REACHES.into());
         // Names and counts, as the detail says them: never a value.
         let mut summary = vec![server.command.clone()];
         if !server.args.is_empty() {
@@ -1159,6 +1237,8 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
             true => format!("dir   {}", within(paths, &path)),
             false => format!("file  {}", within(paths, &path)),
         });
+        // How far an edit goes: not new repos alone.
+        about.push(REACHES.into());
         if ships {
             about.push(
                 "omh ships this one and `omh upgrade` refreshes it — `omh unuse hooks` \
@@ -1288,10 +1368,24 @@ fn describe(cap: Capability, path: &std::path::Path) -> Described {
             .find(|l| !l.is_empty() && *l != "---" && !l.contains(':'))
             .map(|l| l.trim_start_matches('#').trim().to_string())
     };
-    let summary = described.or_else(first);
+    // A skill or a subagent is chosen by its description: an empty one, or
+    // none, is one an agent is shown nothing for.
+    let chosen_by_it = matches!(cap, Capability::Skills | Capability::Subagents);
+    let warning = match described.as_deref() {
+        _ if !chosen_by_it => None,
+        Some("") => {
+            Some("its `description:` is empty — what an agent is shown to know when to use it")
+        }
+        None => Some(
+            "no `description:` in its front matter — what an agent is shown to know when to use it",
+        ),
+        Some(_) => None,
+    };
+    let summary = described.filter(|d| !d.is_empty()).or_else(first);
     Described {
         more: summary.iter().cloned().collect(),
         summary,
+        warning: warning.map(String::from),
         ..Described::default()
     }
 }
@@ -1312,6 +1406,213 @@ mod tests {
                 line[1..].join(" ")
             ),
         }
+    }
+
+    /// Each row says how far a change to it goes, which is not "new repos"
+    /// alone: an entry reaches every repo that takes it, at its next launch,
+    /// and a default lands in a new repo's committed settings file. The screen
+    /// said only what new repos get, under which an edit read as reaching no
+    /// repo at all.
+    #[test]
+    fn each_row_says_how_far_a_change_to_it_goes() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("skills/tdd/SKILL.md"),
+            "---\nname: tdd\ndescription: x\n---\n",
+        );
+        write(
+            &config::mcp_path(&paths),
+            r#"{"mcpServers":{"linear":{"command":"npx"}}}"#,
+        );
+        let model = model(&paths);
+        let about = |title: &str, name: &str| {
+            page(&model, title)
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {title}/{name}"))
+                .about
+                .join("\n")
+        };
+        for (title, name) in [("skills", "tdd"), ("servers", "linear")] {
+            let said = about(title, name);
+            assert!(
+                said.contains("every repo that takes it") && said.contains("next launch"),
+                "{title}/{name}: {said}"
+            );
+        }
+        let said = about("defaults", "idle_timeout");
+        assert!(
+            said.contains("settings.toml") && said.contains("committed"),
+            "{said}"
+        );
+    }
+
+    /// A skill or a subagent with no description in its front matter is
+    /// marked: the description is what an agent is shown to know when to use
+    /// one. An empty `description:` — what the skeleton opens with — drew a
+    /// blank row with no warning, and a `SKILL.md` stripped of its front
+    /// matter drew its first line of prose as though that were one.
+    #[test]
+    fn an_entry_with_no_description_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = |name: &str, body: &str| {
+            let at = dir.path().join(name);
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(at.join("SKILL.md"), body).unwrap();
+            describe(Capability::Skills, &at)
+        };
+        let warned = |d: Described| d.warning.unwrap_or_default();
+        assert!(
+            warned(skill("empty", "---\nname: empty\ndescription: \n---\n\n"))
+                .contains("description")
+        );
+        assert!(warned(skill("bare", "# Bare\n\nDoes things.\n")).contains("description"));
+        assert_eq!(
+            skill("whole", "---\nname: whole\ndescription: does x\n---\n").warning,
+            None
+        );
+        let agent = dir.path().join("researcher.md");
+        std::fs::write(&agent, "---\nname: researcher\n---\nprose\n").unwrap();
+        assert!(warned(describe(Capability::Subagents, &agent)).contains("description"));
+        // A rule has no front matter to speak of; its heading is what it says.
+        let rule = dir.path().join("house.md");
+        std::fs::write(&rule, "# house\n").unwrap();
+        assert_eq!(describe(Capability::Rules, &rule).warning, None);
+    }
+
+    /// The screen asks, as a value is typed, what the command would refuse
+    /// it for — a key nothing reads among them, now that `set` refuses one —
+    /// so `↵` twice writes it anyway rather than meeting a refusal that names
+    /// a flag the screen cannot pass.
+    #[test]
+    fn the_screen_asks_what_set_would_refuse() {
+        assert!(refusal("idle_timeout", "45m").is_none());
+        assert!(refusal("idle_timeout", "soon").is_some());
+        let unread = refusal("my_new_key", "1").unwrap_or_default();
+        assert!(unread.contains("nothing in omh reads"), "{unread:?}");
+    }
+
+    /// A move undone writes the typo back, which is a key nothing reads — so
+    /// that line is `--anyway`, since `set` refuses such a key now. The move
+    /// itself is not: the key it meant is read, and a value it cannot read is
+    /// said rather than written.
+    #[test]
+    fn a_move_undone_writes_the_typo_back_anyway() {
+        let first = |act: &Act| {
+            let mut argv = vec!["omh".to_string()];
+            argv.extend(command_lines(act).remove(0));
+            Cli::try_parse_from(&argv).unwrap().cmd
+        };
+        let value = "[\".env\"]".to_string();
+        let forward = Act::Move {
+            from: "carry_ins".into(),
+            to: "carry_in".into(),
+            value: value.clone(),
+        };
+        let back = Act::Move {
+            from: "carry_in".into(),
+            to: "carry_ins".into(),
+            value,
+        };
+        assert!(matches!(
+            first(&forward),
+            Cmd::Settings {
+                cmd: Some(SettingsCmd::Set { anyway: false, .. })
+            }
+        ));
+        assert!(matches!(
+            first(&back),
+            Cmd::Settings {
+                cmd: Some(SettingsCmd::Set { anyway: true, .. })
+            }
+        ));
+    }
+
+    /// A shell's reading of a line `said` wrote: words, single quotes, `'\''`.
+    fn unquote(line: &str) -> Vec<String> {
+        let (mut words, mut word, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+        for c in line.chars() {
+            match c {
+                '\'' => {
+                    quoted = !quoted;
+                    any = true;
+                }
+                '\\' if !quoted => {}
+                ' ' if !quoted => {
+                    if any || !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                    any = false;
+                }
+                c => word.push(c),
+            }
+        }
+        if any || !word.is_empty() {
+            words.push(word);
+        }
+        words
+    }
+
+    /// What the screen ran is said once it closes, where scrollback keeps it,
+    /// and each line runs as printed: `omh` on every one — a typo's move was
+    /// `omh … && settings unset …` — and `--yes` on a removal, which in a
+    /// script refused without it. A server's env values and arguments can be a
+    /// token, so they are held back and that is said: never drawn, even here.
+    #[test]
+    fn what_the_screen_ran_runs_as_printed() {
+        let runs = |act: &Act| {
+            for ((text, held), line) in ran_lines(act).into_iter().zip(command_lines(act)) {
+                assert!(!held, "{text}");
+                let words = unquote(&text);
+                assert_eq!(words[0], "omh", "{text}");
+                let mut want = vec!["omh".to_string()];
+                want.extend(line.into_iter().filter(|w| w != "--"));
+                let got: Vec<String> = words.into_iter().filter(|w| w != "--").collect();
+                assert_eq!(got, want, "{text}");
+            }
+        };
+        runs(&Act::Set {
+            key: "carry_in".into(),
+            value: "[\".env\", \"a b\"]".into(),
+        });
+        runs(&Act::Use {
+            capability: "skills".into(),
+            name: "-x".into(),
+        });
+        let remove = Act::Remove {
+            capability: "skills".into(),
+            name: "gone".into(),
+        };
+        runs(&remove);
+        assert!(ran_lines(&remove)[0].0.contains("--yes"));
+        let moved = Act::Move {
+            from: "carry_ins".into(),
+            to: "carry_in".into(),
+            value: "[\".env\"]".into(),
+        };
+        assert_eq!(ran_lines(&moved).len(), 2, "{:?}", ran_lines(&moved));
+        runs(&moved);
+
+        let server = ran_lines(&Act::AddServer {
+            name: "linear".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "--header".into(), "tok-456".into()],
+            env: vec![("LINEAR_TOKEN".into(), "sk-123".into())],
+        });
+        let (text, held) = &server[0];
+        assert!(*held, "{text}");
+        let said = format!("{:?}", what_ran(&server).unwrap());
+        assert!(said.contains("not shown"), "and that is said: {said}");
+        assert!(text.starts_with("omh settings mcp add"), "{text}");
+        assert!(
+            text.contains("LINEAR_TOKEN"),
+            "the name is not the secret: {text}"
+        );
+        assert!(
+            !text.contains("sk-123") && !text.contains("tok-456"),
+            "{text}"
+        );
     }
 
     /// The screen shows a line and runs it, so the line has to be one omh
@@ -2062,8 +2363,8 @@ mod tests {
                     k.name
                 ),
                 _ => assert!(
-                    matches!(row.edit, Edit::Text { .. } | Edit::Suggest(_)),
-                    "{} is typed or suggested",
+                    matches!(row.edit, Edit::Text { .. } | Edit::Choice(_)),
+                    "{} is typed, or picked from what there is",
                     k.name
                 ),
             }
@@ -2096,7 +2397,13 @@ mod tests {
             .iter()
             .find(|r| r.name == "account")
             .unwrap();
-        assert_eq!(row.edit, Edit::Suggest(vec!["work".into()]));
+        // Every value a launch takes, and only those: `another…` let one be
+        // typed, and every login there is is already here — `claude:work`
+        // for one harness's, which was what typing was for.
+        assert_eq!(
+            row.edit,
+            Edit::Choice(vec!["work".into(), "claude:work".into()])
+        );
         assert_eq!(row.warning, None);
         assert_eq!(
             row.fallback.as_deref(),

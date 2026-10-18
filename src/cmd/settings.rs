@@ -33,11 +33,22 @@ pub(crate) fn settings_report(paths: &Paths) -> Result<report::Settings> {
                 key: k.name.to_string(),
                 does: k.does.to_string(),
                 value: mine.get(k.name).cloned(),
+                warning: None,
             })
             .collect(),
         // `[use]`, `[unuse]` and `[omh]` seed a new repo, so they are neither a
         // default nor unread. `config::values` renders a table as `[name]`.
-        tables: mine.keys().filter(|k| seeding_table(k)).cloned().collect(),
+        // `[omh]` is said as the features it switches, not as a table.
+        tables: mine
+            .iter()
+            .filter(|(k, _)| seeding_table(k) && *k != &format!("[{}]", config::OMH))
+            .map(|(k, v)| report::SeededTable {
+                key: k.clone(),
+                value: v.clone(),
+                warning: None,
+            })
+            .collect(),
+        features: Vec::new(),
         unread: mine
             .iter()
             .filter(|(k, _)| key::describes(k).is_none() && !seeding_table(k))
@@ -361,7 +372,10 @@ pub(crate) fn feature_forget(
             ctx.say(
                 &report::Action::new(
                     "feature-forget-planned",
-                    format!("would drop the {feature} switch from the {layer} layer"),
+                    format!(
+                        "would drop the {feature} switch from {}",
+                        layer_said(*layer)
+                    ),
                 )
                 .data(serde_json::json!({ "feature": feature, "layer": layer.to_string() })),
             );
@@ -484,9 +498,9 @@ pub(crate) enum Names {
     /// which is how this checked `skills` alone and told somebody with a rule
     /// of that name that nothing reads it.
     ACatalogueEntry(adapter::Capability),
-    /// Neither. Written as a key and reported, the way it always was — a
-    /// settings file is hand-editable and a key a newer omh reads must not be
-    /// refused by this one.
+    /// Neither. A key, which `set` refuses unless `--anyway` when nothing in
+    /// this omh reads it — `--anyway` is how a key a newer omh reads is
+    /// written.
     Neither,
 }
 
@@ -725,14 +739,29 @@ pub(crate) fn an_entry_is_not_a_feature(
 /// switch and `omh set codegraph true` reads as somebody guessing at a
 /// serialisation. Refused rather than accepted-and-normalised, because the
 /// refusal is where the two words get taught.
-pub(crate) fn on_or_off(feature: &str, value: &str) -> Result<bool> {
+pub(crate) fn on_or_off(feature: &str, value: &str, reach: &Reach) -> Result<bool> {
+    // The verb it was typed as: `omh settings set` pointed at `omh set`,
+    // the repo's, which switches something else.
+    let verb = match reach.is_your_defaults() {
+        true => "omh settings set",
+        false => "omh set",
+    };
     match value {
         "on" => Ok(true),
         "off" => Ok(false),
         other => anyhow::bail!(
             "`{feature}` is one of omh's features, so it is on or off — \
-             `{other}` is neither.\n  omh set {feature} off"
+             `{other}` is neither.\n  {verb} {feature} off"
         ),
+    }
+}
+
+/// A layer as somebody reading the line knows it: your defaults are not a
+/// layer of a repo's, and "the personal layer" was a word for a template.
+fn layer_said(layer: config::Layer) -> String {
+    match layer {
+        config::Layer::Personal => "your defaults".to_string(),
+        other => format!("the {other} layer"),
     }
 }
 
@@ -772,32 +801,38 @@ pub(crate) fn set(
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    // Written either way. A settings file is hand-editable and a key a newer
-    // omh will read must not be refused by this one — but a key *this* omh
-    // reads nothing from looks identical to one that took, and `carry_ins` is
-    // a plausible thing to type. Named, not refused.
+    // Refused, unless `--anyway`: a key this omh reads nothing from, and a
+    // value it cannot read. Both were written either way, so that what a newer
+    // omh reads is not refused by this one — and the cost was `carry_ins`
+    // made with exit 0 and a warning above the `wrote →`, and `persistence =
+    // tmux` found at the next launch, in another command, minutes later. The
+    // newer key or value is the rare case and has `--anyway`; the typo is the
+    // common one, stopped where it was typed.
+    let again = match reach.layers.as_slice() {
+        [config::Layer::Personal] => format!("omh settings set --anyway {key} <value>"),
+        _ => format!("omh set --anyway {key} <value>"),
+    };
     match key::describes(key) {
+        None if !anyway => {
+            let meant = key::nearest(key)
+                .map(|k| format!(" — did you mean `{k}`?"))
+                .unwrap_or_else(|| ".".into());
+            anyhow::bail!(
+                "nothing in omh reads `{key}`{meant} Nothing was written. For a key only a \
+                 newer omh reads:\n  {}",
+                again
+            );
+        }
         None => ctx.warn(&format!(
-            "nothing in omh reads `{key}` — it is written, and it will sit there"
+            "nothing in omh reads `{key}` — written anyway, and it will sit there"
         )),
-        // Refused, unless `--anyway`. It was written either way, so that a
-        // value a newer omh accepts is not refused by this one — and the cost
-        // was `persistence = tmux` written with exit 0 and found at the next
-        // launch, in another command, minutes later. The newer value is the
-        // rare case and has `--anyway`; the typo is the common one, stopped
-        // where it was typed.
         Some(k) => {
             if let Some(quarrel) = key::quarrel(k, value) {
                 if !anyway {
-                    let again = match reach.layers.as_slice() {
-                        [config::Layer::Personal] => {
-                            format!("omh settings set --anyway {key} <value>")
-                        }
-                        _ => format!("omh set --anyway {key} <value>"),
-                    };
                     anyhow::bail!(
                         "{quarrel}. Nothing was written. For a value only a newer omh \
-                         reads:\n  {again}"
+                         reads:\n  {}",
+                        again
                     );
                 }
                 ctx.warn(&format!("{quarrel} — written anyway"));
@@ -962,7 +997,8 @@ pub(crate) fn unset(
                 &report::Action::new(
                     "setting-removal-planned",
                     format!(
-                        "would drop {what} from the {layer} layer ({})",
+                        "would drop {what} from {} ({})",
+                        layer_said(*layer),
                         tracked(*layer)
                     ),
                 )
@@ -983,9 +1019,9 @@ pub(crate) fn unset(
                     "setting-absent"
                 },
                 if removed {
-                    format!("removed {what} from the {layer} layer")
+                    format!("removed {what} from {}", layer_said(*layer))
                 } else {
-                    format!("{what} was not set in the {layer} layer")
+                    format!("{what} was not set in {}", layer_said(*layer))
                 },
             )
             .data(serde_json::json!({
@@ -1175,11 +1211,19 @@ pub(crate) fn edit_target(
         // A skill opens at its `SKILL.md` whether it is new, whole or half
         // made — the one file that makes a directory a skill, and the one an
         // editor can open. Given the directory, `nano` cannot, and `vi` lists.
-        (adapter::Capability::Skills, Some(skill)) if skill.is_dir() => EditTarget {
-            file: skill.join("SKILL.md"),
-            new_skill: None,
-            skeleton: None,
-        },
+        // One with no `SKILL.md` yet opens at the skeleton a new one does: an
+        // empty file let the editor's first line become the description.
+        (adapter::Capability::Skills, Some(skill)) if skill.is_dir() => {
+            let file = skill.join("SKILL.md");
+            let missing = !file
+                .try_exists()
+                .with_context(|| format!("reading {}", file.display()))?;
+            EditTarget {
+                file,
+                new_skill: None,
+                skeleton: missing.then(|| skeleton(cap, name)),
+            }
+        }
         (_, Some(file)) => EditTarget {
             file,
             new_skill: None,
@@ -1422,6 +1466,9 @@ pub(crate) fn rm(
              omh settings unuse {cap} {name}"
         ));
     }
+    // What goes with it, before the question: there is no trash, so this is
+    // the last that is said of it.
+    ctx.warn(&what_goes(paths, name, entry.as_deref())?);
     if dry_run {
         ctx.say(
             &report::Action::new("catalogue-entry-planned", format!("would remove {what}")).data(
@@ -1464,6 +1511,67 @@ pub(crate) fn rm(
             serde_json::json!({ "capability": cap.to_string(), "name": name, "removed": true }),
         ),
     );
+    Ok(())
+}
+
+/// What a removal takes with it, said before it asks: a server's env, by
+/// name and never by value; the files in an entry's directory; of a link,
+/// that only the link goes.
+fn what_goes(paths: &Paths, name: &str, entry: Option<&std::path::Path>) -> Result<String> {
+    const FOR_GOOD: &str =
+        "every repo that takes it loses it at its next launch, and it cannot be undone";
+    let Some(path) = entry else {
+        let env: Vec<String> = config::held_server(paths, name)?
+            .map(|s| s.env.into_keys().collect())
+            .unwrap_or_default();
+        return Ok(match env.is_empty() {
+            true => FOR_GOOD.to_string(),
+            false => format!("its env goes with it — {}; {FOR_GOOD}", env.join(", ")),
+        });
+    };
+    if path.is_symlink() {
+        let to = std::fs::read_link(path)
+            .map(|t| format!(", {},", t.display()))
+            .unwrap_or_default();
+        return Ok(format!(
+            "only the link goes — what it points at{to} stays; every repo that takes it \
+             loses it at its next launch"
+        ));
+    }
+    if !path.is_dir() {
+        return Ok(FOR_GOOD.to_string());
+    }
+    let mut files = Vec::new();
+    files_in(path, path, &mut files)
+        .with_context(|| format!("reading what is in {}", path.display()))?;
+    files.sort();
+    let named = match files.len() {
+        0 => return Ok(format!("it is empty; {FOR_GOOD}")),
+        n if n <= 5 => files.join(", "),
+        n => format!("{}, and {} more", files[..4].join(", "), n - 4),
+    };
+    let count = match files.len() {
+        1 => "1 file goes".to_string(),
+        n => format!("{n} files go"),
+    };
+    Ok(format!("{count} with it — {named}; {FOR_GOOD}"))
+}
+
+/// Every file under `dir`, named from `root`.
+fn files_in(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() && !path.is_symlink() {
+            files_in(root, &path, out)?;
+        } else {
+            out.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
     Ok(())
 }
 

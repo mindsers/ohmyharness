@@ -2168,7 +2168,7 @@ pages are one line along the top.
 |---|---|
 | `↓` `↑` (`j` `k`), `home` `end` (`g` `G`) | move in the list |
 | `⇥` `⇧⇥` or `→` `←` (`l` `h`), `1`–`7` | change page |
-| a letter, in a list to pick from | go to the option it starts; `esc` or `q` closes it, and no other key does |
+| letters, in a list to pick from | go to the option they spell — `pod` is `podman`; `esc` or `q` closes it, and no other key does |
 | `enter` | set a default — picked from its choices where it has them, typed where it does not; open a rule, skill, command, subagent or hook in `$EDITOR` |
 | `e` | `$EDITOR` on the entry, or on the file a page lives in |
 | `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |
@@ -2177,7 +2177,7 @@ pages are one line along the top.
 | `space` | whether the repos `omh init` sets up after get the entry: `●` they do, `○` they do not |
 | `/` | search every page by name, description or value — the rail counts what each holds; `esc` takes it off |
 | `u` | undo the last change that has an exact inverse: a value set back, an unset put back, a `space` flipped back — not one that wrote a guard's kind as a list, or took a rule off the middle of its list |
-| `?` | every key, on the screen |
+| `?` | every key, on the screen — `j` `k` scroll it where it is cut, and `esc`, `q` or `?` close it |
 | `ctrl-l` | read your catalogue again, for a file changed outside the screen |
 | `q` `esc` `ctrl-d` `ctrl-c` | leave |
 
@@ -2211,8 +2211,11 @@ no `i` where nothing imports — and while a box is open, the box's own. `?`
 lists every key. A list longer than its room has a thumb at its edge, and keeps
 the heading of the group you are in at the top.
 
-**When it closes, the screen says what it ran** — each command, as it showed
-it — where scrollback keeps them: to read back, or to paste into a script. A
+**When it closes, the screen says what it ran** — each command as a shell
+runs it, `--yes` on a removal included — where scrollback keeps them: to read
+back, or to paste into a script. A server added on the screen is the one line
+that is not whole: its env values and arguments can be a token, so they are
+held back, and that is said. A
 key nothing reads that was probably meant to be another moves its value there
 on Enter, `omh settings set` then `omh settings unset`.
 
@@ -2320,10 +2323,14 @@ hook omh ships: `omh upgrade` would put it back, so the refusal names
 `omh unuse hooks <name>`, which stops a repo running it. A server omh ships —
 `codegraph`, `memory` — is refused too: it is one of omh's features, switched
 off whole with `omh set <feature> off` rather than taken apart, and the screen
-does not offer to remove it.
+does not offer to remove it. There is no trash, so before it asks it says
+what goes with the entry, that every repo taking it loses it at its next
+launch, and that it cannot be undone — a server's env by name, never by
+value; the files in a skill's directory; of a link, that only the link goes:
 
 ```console
 $ omh settings rm skills review-diff
+omh: 1 file goes with it — SKILL.md; every repo that takes it loses it at its next launch, and it cannot be undone
 remove /Users/you/.omh/skills/review-diff? (y/N)
   > y
 removed /Users/you/.omh/skills/review-diff

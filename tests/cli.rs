@@ -3667,7 +3667,7 @@ fn set_mentions_git_where_git_was_asked_for_or_cannot_be_vouched_for() {
 
     // omh routed a key it has never heard of into a file git carries. It
     // cannot vouch for the value, and that is the half retyping does not undo.
-    let unknown = sb.omh(&["set", "carry_ins", "[\".env\"]"]);
+    let unknown = sb.omh(&["set", "--anyway", "carry_ins", "[\".env\"]"]);
     let flagged = String::from_utf8_lossy(&unknown.stderr).to_string();
     assert!(
         flagged.contains("COMMITTED") && flagged.contains("carry_ins"),
@@ -4457,7 +4457,7 @@ fn a_settings_write_survives_a_base_set_it_cannot_read() {
     sb.git_init();
     // Deliberately no `seed_base()`.
 
-    let out = sb.omh(&["set", "my_new_key", "1"]);
+    let out = sb.omh(&["set", "--anyway", "my_new_key", "1"]);
     assert!(
         out.status.success(),
         "a hand-editable settings file must not be refused because ~/.omh/base \
@@ -4478,7 +4478,7 @@ fn a_settings_write_survives_a_base_set_it_cannot_read() {
     let base = sb.home.join(".omh/base");
     std::fs::create_dir_all(&base).unwrap();
     std::fs::write(base.join("2026.08.toml"), "not a manifest").unwrap();
-    let out = sb.omh(&["set", "my_other_key", "1"]);
+    let out = sb.omh(&["set", "--anyway", "my_other_key", "1"]);
     assert!(
         out.status.success(),
         "{}",
@@ -4961,6 +4961,94 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     assert!(
         !ok && said.contains("omh settings use skills tdd"),
         "{said}"
+    );
+}
+
+/// Your defaults are said as your defaults: `unset` said "removed … from the
+/// personal layer", a word for a file `config.rs` calls a template; `mcp ls`
+/// called omh's own servers "your catalogue"; and a feature given neither on
+/// nor off pointed at `omh set`, the repo's verb, from `omh settings set`.
+#[test]
+fn your_defaults_are_said_as_yours_and_omhs_own_as_omhs() {
+    let sb = sandbox();
+    sb.seed_base();
+    let run = |argv: &[&str]| {
+        let out = sb.omh(argv);
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    run(&["settings", "set", "idle_timeout", "45m"]);
+    let said = run(&["settings", "unset", "idle_timeout"]);
+    assert!(said.contains("from your defaults"), "{said}");
+    assert!(!said.contains("personal"), "{said}");
+
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},"linear":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+    let said = run(&["settings", "mcp", "ls"]);
+    let line = |name: &str| {
+        said.lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("codegraph").contains("omh's own"), "{said}");
+    assert!(line("linear").contains("your catalogue"), "{said}");
+
+    let said = run(&["settings", "set", "codegraph", "maybe"]);
+    assert!(said.contains("omh settings set codegraph off"), "{said}");
+}
+
+/// A removal says what goes with it before it asks, and that it cannot be
+/// undone: a server's env — by name, never by value — the files in a skill's
+/// directory, and of a link, that only the link goes. `d y` on a server took
+/// its token with it, and on a skill a directory of notes, without a word.
+#[test]
+fn rm_says_what_goes_with_it_and_that_it_cannot_be_undone() {
+    let sb = sandbox();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"linear":{"command":"npx","env":{"LINEAR_TOKEN":"sk-live-123"}}}}"#,
+    )
+    .unwrap();
+    sb.catalogue(&["skills/half-made/SKILL.md", "skills/half-made/notes.txt"]);
+    let elsewhere = sb.home.join("elsewhere/linked");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("SKILL.md"), "x").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, sb.home.join(".omh/skills/linked")).unwrap();
+    let preview = |kind: &str, name: &str| {
+        let out = sb.omh(&["--dry-run", "settings", "rm", kind, name]);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(out.status.success(), "{said}");
+        said
+    };
+
+    let said = preview("mcp", "linear");
+    assert!(said.contains("LINEAR_TOKEN"), "{said}");
+    assert!(!said.contains("sk-live-123"), "never the value: {said}");
+    assert!(said.contains("cannot be undone"), "{said}");
+    // And how far it goes: not new repos alone, every repo that takes it.
+    assert!(said.contains("next launch"), "{said}");
+
+    let said = preview("skills", "half-made");
+    assert!(
+        said.contains("notes.txt") && said.contains("cannot be undone"),
+        "{said}"
+    );
+
+    let said = preview("skills", "linked");
+    assert!(said.contains("only the link"), "{said}");
+    assert!(
+        !said.contains("cannot be undone"),
+        "what it points at stays: {said}"
     );
 }
 
@@ -5728,7 +5816,7 @@ fn the_committed_warning_is_kept_for_what_it_is_for() {
 
     // A key nothing classified, sent to the committed file because that is what
     // omh does with one it has never heard of. Still worth saying out loud.
-    let unknown = sb.omh(&["set", "somekey", "somevalue"]);
+    let unknown = sb.omh(&["set", "--anyway", "somekey", "somevalue"]);
     assert!(unknown.status.success());
     assert!(
         String::from_utf8_lossy(&unknown.stderr).contains("COMMITTED"),
@@ -7368,6 +7456,34 @@ fn a_new_entry_opens_as_its_kinds_skeleton() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!sb.home.join(".omh/commands/pr.md").exists());
+
+    // A skill's directory with no `SKILL.md` yet opens at the skeleton too:
+    // it opened an empty file, and the editor's first line became the
+    // description. Untouched, the `SKILL.md` goes and the directory stays.
+    sb.catalogue(&["skills/half/notes.md"]);
+    let skill = sb.home.join(".omh/skills/half/SKILL.md");
+    let out = sb.omh(&["settings", "edit", "skills", "half"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!skill.exists(), "untouched, taken back");
+    assert!(sb.home.join(".omh/skills/half/notes.md").exists());
+    let out = sb.omh_env(
+        &["settings", "edit", "skills", "half"],
+        &[("EDITOR", &appending)],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let held = std::fs::read_to_string(&skill).unwrap();
+    assert!(
+        held.contains("name: half") && held.contains("written"),
+        "{held:?}"
+    );
 }
 
 /// Help speaks of omh, never of the parser it is built with: `omh settings
@@ -7395,6 +7511,11 @@ fn the_report_lists_the_catalogue_and_what_is_wrong_in_it() {
     let sb = sandbox();
     sb.seed_base();
     sb.catalogue(&["skills/tdd/SKILL.md", "skills/half-made/notes.txt"]);
+    std::fs::write(
+        sb.home.join(".omh/skills/tdd/SKILL.md"),
+        "---\nname: tdd\ndescription: test first\n---\n",
+    )
+    .unwrap();
     std::os::unix::fs::symlink("/nowhere/gone", sb.home.join(".omh/skills/gone")).unwrap();
     std::fs::write(
         sb.home.join(".omh/default.toml"),
@@ -7452,6 +7573,76 @@ fn the_report_lists_the_catalogue_and_what_is_wrong_in_it() {
             .as_str()
             .is_some_and(|p| p.contains("rules")),
         "{rules}"
+    );
+}
+
+/// The report says of your defaults what the screen says: a value omh cannot
+/// read, marked; omh's features and whether each is on; and what `[use]`
+/// holds, with what is wrong in it. It printed `[omh]` and `[use]` as bare
+/// names, no features at all, and a value the screen marks `!` as if it took.
+#[test]
+fn the_report_says_of_your_defaults_what_the_screen_says() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md"]);
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "persistence = \"tmux\"\n\n[omh]\ncodegraph = false\n\n[use]\nskills = [\"tdd\", \"gone\"]\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["settings"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = |what: &str| {
+        said.lines()
+            .find(|l| l.contains(what))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        line("persistence").contains("does not take `tmux`"),
+        "{said}"
+    );
+    assert!(said.contains("omh's features"), "{said}");
+    assert!(line("codegraph").contains("off"), "{said}");
+    assert!(line("git-notice").contains("on"), "{said}");
+    assert!(
+        line("[use]").contains("skills = [\"tdd\", \"gone\"]"),
+        "{said}"
+    );
+    assert!(said.contains("skills/gone"), "{said}");
+
+    let out = sb.omh(&["--json", "settings"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let known = doc["known"].as_array().unwrap();
+    let persistence = known.iter().find(|k| k["key"] == "persistence").unwrap();
+    assert!(
+        persistence["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("tmux")),
+        "{doc}"
+    );
+    let features = doc["features"].as_array().unwrap();
+    let codegraph = features
+        .iter()
+        .find(|f| f["feature"] == "codegraph")
+        .unwrap();
+    assert_eq!(codegraph["on"], false, "{doc}");
+    let tables = doc["tables"].as_array().unwrap();
+    let used = tables.iter().find(|t| t["key"] == "[use]").unwrap();
+    assert!(
+        used["value"].as_str().is_some_and(|v| v.contains("tdd")),
+        "{doc}"
+    );
+    assert!(
+        used["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("skills/gone")),
+        "{doc}"
     );
 }
 
@@ -8138,6 +8329,13 @@ fn an_entry_is_removed_on_the_screen_after_it_asks() {
     assert!(status.success(), "{raw}");
     assert!(!sb.home.join(".omh/skills/review-diff").exists());
     assert!(sb.home.join(".omh/skills/keep/SKILL.md").exists());
+    // Said once the screen is gone as a line a script can run: without
+    // `--yes` the removal asks, and off a terminal it refuses.
+    let after = &raw[raw.rfind("\x1b[?1049l").expect("left the screen")..];
+    assert!(
+        after.contains("omh settings rm --yes skills review-diff"),
+        "{after:?}"
+    );
 }
 
 /// A server is added on the screen, its command split the way a shell would.
@@ -8535,9 +8733,19 @@ fn settings_shows_the_tables_it_seeds_as_seeded() {
         .nth(1)
         .unwrap_or_else(|| panic!("no seeded section: {said}"));
     assert!(
-        seeded.contains("[omh]") && seeded.contains("[use]"),
+        seeded.contains("[use]"),
         "the tables the template propagates are named as such: {said}"
     );
+    // `[omh]` is said as what it switches: the features, each on or off.
+    let features = said
+        .split("omh's features")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no features: {said}"));
+    let codegraph = features
+        .lines()
+        .find(|l| l.contains("codegraph"))
+        .unwrap_or_default();
+    assert!(codegraph.contains("off"), "{said}");
     assert!(
         !said.contains("read by nothing"),
         "and not reported as read by nothing, which is the opposite: {said}"
@@ -10396,36 +10604,60 @@ fn committing_a_key_that_carries_a_secret_names_the_key() {
     );
 }
 
-/// A key omh does not read is written, and said so.
+/// A key omh does not read is refused, with the one it was likely meant as,
+/// unless `--anyway` — as a value omh cannot read is.
 ///
-/// `set` accepts any key at all — it has to, since a settings file is
-/// hand-editable and omh must not refuse a key a newer version will read. But
-/// accepting it silently means `carry_ins` and `idle_timout` land in the file,
-/// are never read by anything, and look exactly like a setting that took.
-///
-/// So it is written and named: the value is not lost, and the typo is not
-/// discovered by wondering why nothing changed.
+/// It was written and named, since a settings file is hand-editable and a key
+/// a newer omh reads must not be refused by this one. But that is how
+/// `carry_ins` got made: exit 0, a warning above the `wrote →`, and a key that
+/// looks exactly like a setting that took. The newer key is the rare case and
+/// has `--anyway`; the typo is the common one, stopped where it was typed.
 #[test]
-fn a_setting_omh_does_not_read_is_written_and_named() {
+fn a_setting_omh_does_not_read_is_refused_unless_anyway() {
     let sb = sandbox();
+    sb.git_init();
+    let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).to_string();
 
     let typo = sb.omh(&["set", "carry_ins", "[\".env\"]"]);
-    let said = String::from_utf8_lossy(&typo.stderr).to_string();
+    let said = stderr(&typo);
+    assert!(!typo.status.success(), "{said}");
+    assert!(said.contains("did you mean `carry_in`"), "{said}");
+    assert!(said.contains("omh set --anyway carry_ins"), "{said}");
     assert!(
-        typo.status.success(),
-        "an unknown key is still written: {said}"
+        !sb.settings().contains("carry_ins"),
+        "nothing written: {}",
+        sb.settings()
+    );
+
+    let typo = sb.omh(&["settings", "set", "idel_timeout", "45m"]);
+    let said = stderr(&typo);
+    assert!(!typo.status.success(), "{said}");
+    assert!(said.contains("did you mean `idle_timeout`"), "{said}");
+    assert!(
+        said.contains("omh settings set --anyway idel_timeout"),
+        "{said}"
     );
     assert!(
-        said.contains("carry_ins"),
-        "and omh says which key it knows nothing about: {said}"
+        !sb.home.join(".omh/default.toml").exists(),
+        "nothing written"
+    );
+
+    let anyway = sb.omh(&["set", "--anyway", "carry_ins", "[\".env\"]"]);
+    let said = stderr(&anyway);
+    assert!(anyway.status.success(), "{said}");
+    assert!(sb.settings().contains("carry_ins"), "{}", sb.settings());
+    assert!(
+        said.contains("nothing in omh reads `carry_ins`"),
+        "still named: {said}"
     );
 
     // A key omh does read says nothing extra — the warning has to mean
     // something, and one that fires for every write means nothing.
     let known = sb.omh(&["set", "carry_in", "[\".env\"]"]);
-    let quiet = String::from_utf8_lossy(&known.stderr).to_string();
+    let quiet = stderr(&known);
+    assert!(known.status.success(), "{quiet}");
     assert!(
-        !quiet.contains("nothing reads"),
+        !quiet.contains("nothing in omh reads"),
         "a key omh reads is not reported as unknown: {quiet}"
     );
 }

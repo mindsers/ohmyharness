@@ -1366,8 +1366,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // `use`, `unuse` and `use --all` in the synopsis.
         ("docs/src/content/docs/reference/commands.md", 152),
         // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
-        // the `--anyway` line it prints, and the run with it.
-        ("docs/src/content/docs/reference/configuration.md", 50),
+        // the `--anyway` line it prints, and the run with it. + the same two for
+        // a key nothing reads: the `--anyway` line it prints, and the run.
+        ("docs/src/content/docs/reference/configuration.md", 52),
         ("docs/src/content/docs/reference/memory.md", 1),
     ]
     .into_iter()
@@ -1973,8 +1974,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // refusal, and `omh init` in both answers a switch in your defaults
         // gives. + `omh settings use`/`unuse` where `settings set` is given an
         // entry of your catalogue. + `omh init` and `omh settings unuse` where
-        // rm takes an entry your defaults' `[use]` names.
-        ("src/cmd/settings.rs", 29),
+        // rm takes an entry your defaults' `[use]` names. + a feature given
+        // neither on nor off names the verb it was typed as: `omh settings
+        // set` and `omh set`, where one line said `omh set` for both.
+        ("src/cmd/settings.rs", 30),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
@@ -1987,8 +1990,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // row's about, and `omh settings set <feature>` on a hook of yours
         // named as one of omh's own. + `omh init` refusing, twice, in a
         // list's warning — a kind that is not one, a value that is not a list.
-        // + `omh <line>` for each command the screen ran, said once it closes.
-        ("src/cmd/settings_tui.rs", 17),
+        // + `omh <line>` for each command the screen ran, said once it closes —
+        // twice, a server's line with its values held back.
+        ("src/cmd/settings_tui.rs", 18),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather

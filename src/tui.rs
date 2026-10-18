@@ -154,8 +154,6 @@ pub enum Edit {
     Text { hint: String },
     /// One of these, and nothing else.
     Choice(Vec<String>),
-    /// One of these, or another typed in — logins omh has, for `account`.
-    Suggest(Vec<String>),
 }
 
 /// What a key asked for: one command line omh accepts.
@@ -277,8 +275,6 @@ pub struct App {
     pending_undo: Option<Act>,
     /// What undoes the last change that worked, for `u`.
     undo: Option<Act>,
-    /// Every command that worked, as shown — said once the screen closes.
-    ran: Vec<String>,
     /// Where the last draw put things, for a mouse to find them.
     hit: RefCell<Hit>,
 }
@@ -310,6 +306,8 @@ struct Hit {
     /// For each row of `list` on screen, the shown row it is — `None` for a
     /// heading or a blank.
     lines: Vec<Option<usize>>,
+    /// How far help can scroll at the size it was last drawn.
+    help_end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,7 +322,9 @@ enum Modal {
     },
     Pick(Pick),
     Form(Form),
-    Help,
+    Help {
+        scroll: usize,
+    },
 }
 
 /// A line being typed, and where the cursor is in it.
@@ -368,26 +368,17 @@ struct Pick {
     about: Vec<String>,
     /// A line beside each option — where an import reads — or none.
     notes: Vec<String>,
+    /// The letters typed so far, while an option starts with them.
+    typed: String,
     then: Chosen,
 }
 
 /// What a picked option becomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Chosen {
-    Import {
-        capability: String,
-    },
-    Value {
-        key: String,
-    },
-    /// A value, or — for the last option — a line to type one into.
-    ValueOrTyped {
-        key: String,
-    },
+    Import { capability: String },
+    Value { key: String },
 }
-
-/// The last option of a [`Chosen::ValueOrTyped`] pick.
-const ANOTHER: &str = "another…";
 
 /// A new server, asked for in one form rather than three questions in a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,17 +424,11 @@ impl App {
             pending: None,
             pending_undo: None,
             undo: None,
-            ran: Vec::new(),
             hit: RefCell::new(Hit::default()),
         }
     }
 
     /// Ask this, as a value is typed, what omh would say about it.
-    /// Every command the screen ran that worked, in order, as it showed them.
-    pub fn ran(&self) -> &[String] {
-        &self.ran
-    }
-
     pub fn with_check(mut self, check: Check) -> Self {
         self.check = Some(check);
         self
@@ -491,10 +476,7 @@ impl App {
         // What undoes it is kept only once it worked; the last change that did
         // is what `u` undoes, and one that did not is not a change.
         match ok {
-            true => {
-                self.undo = self.pending_undo.take();
-                self.ran.push(clean(&said));
-            }
+            true => self.undo = self.pending_undo.take(),
             false => self.pending_undo = None,
         }
         let (out, err) = if ok {
@@ -638,18 +620,21 @@ impl App {
                 .find(|r| r.name == key)
                 .and_then(|r| r.value.clone())
         };
+        // What was there goes back as it was, readable or not: one written
+        // `--anyway` put back with a plain `set` was refused.
+        let put_back = |key: &str, value: String| {
+            let key = key.to_string();
+            match self.check.as_ref().and_then(|c| c(&key, &value)) {
+                Some(_) => Act::SetAnyway { key, value },
+                None => Act::Set { key, value },
+            }
+        };
         match act {
             Act::Set { key, .. } | Act::SetAnyway { key, .. } => Some(match had(key) {
-                Some(value) => Act::Set {
-                    key: key.clone(),
-                    value,
-                },
+                Some(value) => put_back(key, value),
                 None => Act::Unset { key: key.clone() },
             }),
-            Act::Unset { key } => had(key).map(|value| Act::Set {
-                key: key.clone(),
-                value,
-            }),
+            Act::Unset { key } => had(key).map(|value| put_back(key, value)),
             // The caller's, beside the flip it worked out: the opposite verb
             // is not always the way back.
             Act::Use { .. } | Act::Unuse { .. } => self
@@ -706,7 +691,7 @@ impl App {
                 });
                 self.rows[self.at] = 0;
             }
-            KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('?') => self.modal = Some(Modal::Help { scroll: 0 }),
             KeyCode::Char('u') => {
                 if let Some(act) = self.undo.take() {
                     return Next::Run(act);
@@ -825,8 +810,7 @@ impl App {
                         ));
                     }
                     Edit::Text { hint } => self.ask_value(&row, hint),
-                    Edit::Choice(options) => self.pick_value(&row, options.clone(), false),
-                    Edit::Suggest(options) => self.pick_value(&row, options.clone(), true),
+                    Edit::Choice(options) => self.pick_value(&row, options.clone()),
                 }
                 Next::Stay
             }
@@ -860,14 +844,11 @@ impl App {
         }));
     }
 
-    fn pick_value(&mut self, row: &Row, mut options: Vec<String>, typed: bool) {
+    fn pick_value(&mut self, row: &Row, options: Vec<String>) {
         let current = row
             .value
             .as_ref()
             .and_then(|v| options.iter().position(|o| o == v.trim_matches('"')));
-        if typed {
-            options.push(ANOTHER.to_string());
-        }
         let fallback = row
             .fallback
             .as_ref()
@@ -880,13 +861,9 @@ impl App {
             about: row.about.clone(),
             notes: Vec::new(),
             options,
-            then: match typed {
-                true => Chosen::ValueOrTyped {
-                    key: row.name.clone(),
-                },
-                false => Chosen::Value {
-                    key: row.name.clone(),
-                },
+            typed: String::new(),
+            then: Chosen::Value {
+                key: row.name.clone(),
             },
         }));
     }
@@ -915,6 +892,9 @@ impl App {
         };
         match section.page {
             Page::Defaults => self.note("every key omh reads is listed — enter sets one"),
+            Page::Servers if section.problem.is_some() => {
+                self.note("omh could not read your servers — e opens the file to fix it")
+            }
             Page::Servers => {
                 self.modal = Some(Modal::Form(Form {
                     fields: Default::default(),
@@ -972,6 +952,9 @@ impl App {
         let Some(section) = self.section() else {
             return;
         };
+        if section.page == Page::Servers && section.problem.is_some() {
+            return self.note("omh could not read your servers — e opens the file to fix it");
+        }
         let line = match (section.page.capability(), &section.import) {
             (Some(capability), Import::From(harnesses)) if !harnesses.is_empty() => {
                 self.modal = Some(Modal::Pick(Pick {
@@ -982,6 +965,7 @@ impl App {
                     current: None,
                     fallback: None,
                     about: Vec::new(),
+                    typed: String::new(),
                     then: Chosen::Import {
                         capability: capability.into(),
                     },
@@ -1000,7 +984,23 @@ impl App {
 
     fn key_in_modal(&mut self, modal: Modal, key: KeyEvent) -> Next {
         match modal {
-            Modal::Help => Next::Stay,
+            // Scrolled as a list is; closed only by the keys that close
+            // everything — `j` closed it, at 80×24 where it was cut.
+            Modal::Help { mut scroll } => {
+                let end = self.hit.borrow().help_end;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => return Next::Stay,
+                    KeyCode::Down | KeyCode::Char('j') => scroll = (scroll + 1).min(end),
+                    KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                    KeyCode::Home | KeyCode::Char('g') => scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => scroll = end,
+                    KeyCode::PageDown => scroll = (scroll + 10).min(end),
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(10),
+                    _ => {}
+                }
+                self.modal = Some(Modal::Help { scroll });
+                Next::Stay
+            }
             Modal::Confirm { act, .. } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => Next::Run(act),
                 // Anything else keeps it, the rule `ask::confirm` follows: one
@@ -1011,34 +1011,67 @@ impl App {
                 }
             },
             Modal::Pick(mut pick) => {
+                let starts =
+                    |o: &String, with: &str| o.to_lowercase().starts_with(&with.to_lowercase());
+                // A letter some option starts with — the next one after `at`
+                // that does, so one letter again goes on to the next.
+                let next_with = |pick: &Pick, with: &str| {
+                    let after = pick.options.iter().enumerate().cycle().skip(pick.at + 1);
+                    after
+                        .take(pick.options.len())
+                        .find(|(_, o)| starts(o, with))
+                        .map(|(i, _)| i)
+                };
                 match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        pick.at = (pick.at + 1).min(pick.options.len().saturating_sub(1));
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => pick.at = pick.at.saturating_sub(1),
-                    KeyCode::Home | KeyCode::Char('g') => pick.at = 0,
-                    KeyCode::End | KeyCode::Char('G') => {
-                        pick.at = pick.options.len().saturating_sub(1)
-                    }
-                    KeyCode::Enter => return self.chosen(pick),
-                    // Closed by the keys that close everything else, and by
-                    // nothing more: it was taken off the screen with `take`
-                    // and is not put back.
-                    KeyCode::Esc | KeyCode::Char('q') => return Next::Stay,
-                    // A letter goes to the next option it starts. Any other
-                    // key stays here — one that closed the pick went on to the
-                    // page, where `podman`'s `d` unset the row.
+                    // Letters first: a word typed builds a prefix while some
+                    // option starts with it. Each letter jumped on its own, so
+                    // `podman` ended on `auto`, the last letter any option
+                    // started. One that fits none starts again from itself;
+                    // and a letter no option starts is what it is in a list.
                     KeyCode::Char(c) if plain(key) => {
-                        let starts = |o: &String| {
-                            o.chars().next().is_some_and(|f| f.eq_ignore_ascii_case(&c))
-                        };
-                        let after = pick.options.iter().enumerate().cycle().skip(pick.at + 1);
-                        if let Some((i, _)) =
-                            after.take(pick.options.len()).find(|(_, o)| starts(o))
-                        {
+                        let word = format!("{}{c}", pick.typed);
+                        if let Some(i) = pick.options.iter().position(|o| starts(o, &word)) {
                             pick.at = i;
+                            pick.typed = word;
+                        } else if let Some(i) = next_with(&pick, &c.to_string()) {
+                            pick.at = i;
+                            pick.typed = c.to_string();
+                        } else {
+                            pick.typed.clear();
+                            match c {
+                                'j' => {
+                                    pick.at =
+                                        (pick.at + 1).min(pick.options.len().saturating_sub(1))
+                                }
+                                'k' => pick.at = pick.at.saturating_sub(1),
+                                'g' => pick.at = 0,
+                                'G' => pick.at = pick.options.len().saturating_sub(1),
+                                // Closed by the keys that close everything
+                                // else: it was taken off the screen with
+                                // `take` and is not put back.
+                                'q' => return Next::Stay,
+                                // Any other key stays here — one that closed
+                                // the pick went on to the page, where
+                                // `podman`'s `d` unset the row.
+                                _ => {}
+                            }
                         }
                     }
+                    KeyCode::Down => {
+                        pick.typed.clear();
+                        pick.at = (pick.at + 1).min(pick.options.len().saturating_sub(1));
+                    }
+                    KeyCode::Up => {
+                        pick.typed.clear();
+                        pick.at = pick.at.saturating_sub(1);
+                    }
+                    KeyCode::Home => pick.at = 0,
+                    KeyCode::End => pick.at = pick.options.len().saturating_sub(1),
+                    KeyCode::Backspace => {
+                        pick.typed.pop();
+                    }
+                    KeyCode::Enter => return self.chosen(pick),
+                    KeyCode::Esc => return Next::Stay,
                     _ => {}
                 }
                 self.modal = Some(Modal::Pick(pick));
@@ -1068,18 +1101,7 @@ impl App {
                 capability,
                 harness: option,
             }),
-            Chosen::ValueOrTyped { key } if option == ANOTHER => {
-                let row = self
-                    .row()
-                    .cloned()
-                    .filter(|r| r.name == key)
-                    .unwrap_or_default();
-                self.ask_value(&Row { name: key, ..row }, "");
-                Next::Stay
-            }
-            Chosen::Value { key } | Chosen::ValueOrTyped { key } => {
-                Next::Run(Act::Set { key, value: option })
-            }
+            Chosen::Value { key } => Next::Run(Act::Set { key, value: option }),
         }
     }
 
@@ -1201,6 +1223,22 @@ impl App {
                     self.modal = Some(Modal::Input(input));
                     return Next::Stay;
                 }
+                // The server form's own check: one that is there opened as
+                // though it were new.
+                let there = self
+                    .model
+                    .sections
+                    .iter()
+                    .filter(|s| s.page.capability() == Some(capability.as_str()))
+                    .flat_map(|s| &s.rows)
+                    .any(|r| r.name == name);
+                if there {
+                    input.error = Some(format!(
+                        "`{name}` is already one of yours — ↵ on its row opens it"
+                    ));
+                    self.modal = Some(Modal::Input(input));
+                    return Next::Stay;
+                }
                 Next::Run(Act::Edit {
                     capability,
                     name: Some(name),
@@ -1303,7 +1341,7 @@ impl App {
             }) => self.draw_confirm(f, lines, warnings, act),
             Some(Modal::Pick(pick)) => self.draw_pick(f, pick),
             Some(Modal::Form(form)) => self.draw_form(f, form),
-            Some(Modal::Help) => self.draw_help(f),
+            Some(Modal::Help { scroll }) => self.draw_help(f, *scroll),
             None => {}
         }
     }
@@ -1830,7 +1868,7 @@ impl App {
                 ],
                 (None, None) => vec![Span::styled("unset", self.look.dim())],
             }));
-            if let Edit::Choice(options) | Edit::Suggest(options) = &row.edit {
+            if let Edit::Choice(options) = &row.edit {
                 if !options.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled("one of  ", self.look.dim()),
@@ -1931,7 +1969,7 @@ impl App {
                 vec![
                     ("↑↓", "move"),
                     ("↵", "pick"),
-                    ("a letter", "jumps"),
+                    ("letters", "go to what they spell"),
                     ("esc", "close"),
                 ]
             }
@@ -1943,7 +1981,7 @@ impl App {
                     ("esc", "cancel"),
                 ]
             }
-            Some(Modal::Help) => vec![("any key", "closes")],
+            Some(Modal::Help { .. }) => vec![("j k", "scroll"), ("esc", "close")],
             None if self.filter.as_ref().is_some_and(|f| f.typing) => {
                 vec![("↵", "keep the filter"), ("esc", "drop it"), ("↑↓", "move")]
             }
@@ -1998,9 +2036,12 @@ impl App {
                     if row.is_some_and(|r| r.toggle.is_some()) {
                         keys.push(("space", "new repos"));
                     }
-                    keys.push(("a", "add"));
-                    if importable {
-                        keys.push(("i", "import"));
+                    // An unread file takes no add: the form filled, then failed.
+                    if section.problem.is_none() {
+                        keys.push(("a", "add"));
+                        if importable {
+                            keys.push(("i", "import"));
+                        }
                     }
                     keys.push(("e", "edit the file"));
                 }
@@ -2238,7 +2279,7 @@ impl App {
         ));
     }
 
-    fn draw_help(&self, f: &mut Frame) {
+    fn draw_help(&self, f: &mut Frame, scroll: usize) {
         let groups: &[(&str, &[(&str, &str)])] = &[
             (
                 "move",
@@ -2259,7 +2300,9 @@ impl App {
                     ("d", "unset a default · remove an entry, after asking"),
                     ("i", "import from a harness"),
                     ("space", "whether the repos `omh init` sets up after get it"),
-                    ("/", "filter the list — esc takes it off"),
+                    ("u", "undo the last change"),
+                    ("/", "search every page — esc takes it off"),
+                    ("ctrl-l", "read your catalogue again"),
                 ],
             ),
             (
@@ -2269,18 +2312,12 @@ impl App {
                     ("ctrl-a  ctrl-e", "to its start, to its end"),
                     ("ctrl-u", "clear what is before the cursor"),
                     (
-                        "a letter",
-                        "in a list to pick from, go to the option it starts",
+                        "letters",
+                        "in a list to pick from, go to the option they spell",
                     ),
                 ],
             ),
-            (
-                "leave",
-                &[
-                    ("q  esc  ctrl-d  ctrl-c", "leave"),
-                    ("ctrl-l", "read your catalogue again"),
-                ],
-            ),
+            ("leave", &[("q  esc  ctrl-d  ctrl-c", "leave")]),
         ];
         let width = groups
             .iter()
@@ -2313,10 +2350,25 @@ impl App {
         }
         lines.push(Line::default());
         for part in wrapped(
-            "every change is a command, shown once it runs · any key closes this",
+            "every change is a command, shown once it runs · esc closes this",
             most.saturating_sub(4),
         ) {
             lines.push(Line::from(Span::styled(part, self.look.dim())));
+        }
+        // What fits, from where it is scrolled to, and a line saying there is
+        // more: cut at 80×24, it ended mid-list with nothing to say so.
+        let room = usize::from(f.area().height.saturating_sub(4)).max(2);
+        let end = lines.len().saturating_sub(room - 1);
+        self.hit.borrow_mut().help_end = if lines.len() > room { end } else { 0 };
+        if lines.len() > room {
+            let at = scroll.min(end);
+            let cue = match (at > 0, at < end) {
+                (true, true) => "↑↓ more — j k scroll",
+                (false, _) => "↓ more — j k scroll",
+                (true, false) => "↑ more — k scrolls back",
+            };
+            lines = lines.into_iter().skip(at).take(room - 1).collect();
+            lines.push(Line::from(Span::styled(cue, self.look.dim())));
         }
         self.popup(f, "keys", Text::from(lines), Popup::Showing);
     }
@@ -2523,7 +2575,6 @@ fn cleaned(mut model: Model) -> Model {
                 Edit::None => Edit::None,
                 Edit::Text { hint } => Edit::Text { hint: clean(hint) },
                 Edit::Choice(options) => Edit::Choice(all(options)),
-                Edit::Suggest(options) => Edit::Suggest(all(options)),
             };
         }
     }

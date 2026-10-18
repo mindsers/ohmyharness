@@ -43,7 +43,8 @@ pub struct Plan {
 /// How much of the host the sandbox may take, from `sandbox_memory` and
 /// `sandbox_cpus`. Each is passed to the runtime as written — `4g`, `1.5` —
 /// because the runtime is the one that knows what it accepts, and `omh doctor`
-/// is where a value it rejects gets found out.
+/// is where a value it rejects gets found out. A write refuses only what no
+/// runtime reads as a size or a count (`key::quarrel`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Limits {
     pub memory: Option<String>,

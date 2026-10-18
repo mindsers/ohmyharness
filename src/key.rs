@@ -28,6 +28,10 @@ pub enum Shape {
     Path,
     /// `90s`, `30m`, `2h`, `1d`, or bare seconds.
     Duration,
+    /// A size, as a runtime reads one: a number and a unit — `4g`, `512m`.
+    Size,
+    /// A number above zero, as a runtime reads a CPU count: `2`, `1.5`.
+    Count,
     /// One of a fixed set.
     Choice(&'static [&'static str]),
 }
@@ -124,7 +128,7 @@ pub const KEYS: &[Key] = &[
         name: "sandbox_memory",
         does: "How much memory a session's sandbox may use, as the runtime spells \
                it (`4g`, `512m`). Unset means the runtime's default.",
-        shape: Shape::Text,
+        shape: Shape::Size,
         secret: Secret::No,
         unset: "the runtime's own",
     },
@@ -132,7 +136,7 @@ pub const KEYS: &[Key] = &[
         name: "sandbox_cpus",
         does: "How many CPUs a session's sandbox may use, as the runtime spells it \
                (`2`, `1.5`). Unset means the runtime's default.",
-        shape: Shape::Text,
+        shape: Shape::Count,
         secret: Secret::No,
         unset: "the runtime's own",
     },
@@ -178,6 +182,34 @@ pub fn describes(name: &str) -> Option<&'static Key> {
     KEYS.iter().find(|k| k.name == name)
 }
 
+/// The key a name nothing reads was probably meant to be: one edit or two
+/// away, the way `carry_ins` is from `carry_in`.
+pub fn nearest(name: &str) -> Option<&'static str> {
+    KEYS.iter()
+        .map(|k| (distance(name, k.name), k.name))
+        .filter(|(d, _)| *d <= 2)
+        .min()
+        .map(|(_, k)| k)
+}
+
+/// How many single-character edits turn `a` into `b`.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let here = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(here + 1);
+            prev = here;
+        }
+    }
+    row[b.len()]
+}
+
 /// What is wrong with this value for this key, if omh can tell.
 ///
 /// `Choice`, `Path` and `Duration` are what is checkable here; `Text` and
@@ -186,10 +218,10 @@ pub fn describes(name: &str) -> Option<&'static Key> {
 /// `Duration` because the alternative was hearing about it at the next launch,
 /// on stderr, while a session was starting.
 ///
-/// Every one of these **warns**; none refuses. `idle::parse_duration` returns
-/// `None` rather than erroring so a typo in one layer cannot stop you working,
-/// and refusing the write here would undo that from the other end — see the
-/// rule `cmd::settings::set` states where it raises the warning.
+/// A write refuses on one of these unless `--anyway` — the rule
+/// `cmd::settings::set` states where it asks. A launch only warns:
+/// `idle::parse_duration` returns `None` rather than erroring, so a value in
+/// one layer that only a newer omh reads cannot stop you working.
 ///
 /// `None` back from here means *nothing to say*, never *this is fine*.
 pub fn quarrel(key: &Key, value: &str) -> Option<String> {
@@ -221,9 +253,61 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                      shared with the repo",
                     key.name
                 ))
+            } else if !std::path::Path::new(bare).is_file() {
+                // The build refuses it there, after the write said nothing.
+                Some(format!(
+                    "`{}` names nothing at `{bare}` on this machine",
+                    key.name
+                ))
             } else {
                 None
             }
+        }
+        // Loosely, as the runtime reads it — a number, then an optional unit
+        // and `i`/`b` — so a value only one runtime spells is let through for
+        // that runtime to judge, and `banana` is not.
+        Shape::Size => {
+            let bare = value.trim().trim_matches('"');
+            let digits = bare.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+            let unit = bare[digits.len()..].to_ascii_lowercase();
+            let number = !digits.is_empty()
+                && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && digits.parse::<f64>().is_ok();
+            let unit_ok = matches!(
+                unit.as_str(),
+                "" | "b"
+                    | "k"
+                    | "m"
+                    | "g"
+                    | "t"
+                    | "kb"
+                    | "mb"
+                    | "gb"
+                    | "tb"
+                    | "kib"
+                    | "mib"
+                    | "gib"
+                    | "tib"
+            );
+            (!(number && unit_ok)).then(|| {
+                format!(
+                    "`{}` was given `{bare}`, which is not a size — it takes a number \
+                     and a unit, as `4g` or `512m`",
+                    key.name
+                )
+            })
+        }
+        Shape::Count => {
+            let bare = value.trim().trim_matches('"');
+            let above_zero = bare.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && bare.parse::<f64>().is_ok_and(|n| n > 0.0);
+            (!above_zero).then(|| {
+                format!(
+                    "`{}` was given `{bare}`, which is not a number above zero — it \
+                     takes one, as `2` or `1.5`",
+                    key.name
+                )
+            })
         }
         Shape::Duration => {
             // Asked of the reader, never of a second pattern written here: a
@@ -281,9 +365,8 @@ mod tests {
     /// `ca_cert` is `Secret::No`, so it lands in the *committed* layer, where
     /// the directory omh happened to be run from is not a shared fact.
     ///
-    /// Warned rather than refused, because that is what `quarrel` is —
-    /// `cmd::settings` prints it and writes the value anyway. The refusal that
-    /// stops a build still lives in `ca_for`.
+    /// Refused at the write unless `--anyway`, which is what `quarrel` is
+    /// for. The refusal that stops a build still lives in `Root::read`.
     #[test]
     fn a_path_key_says_so_when_the_path_is_not_absolute() {
         let ca = KEYS
@@ -305,14 +388,50 @@ mod tests {
             );
         }
 
-        // Absolute is the shape that works, and a quoted one is the same
-        // string to a person — `Choice` already learned that lesson.
-        for absolute in ["/etc/ssl/corp.pem", "\"/etc/ssl/corp.pem\""] {
+        // Absolute and there is the shape that works, and a quoted one is the
+        // same string to a person — `Choice` already learned that lesson.
+        let dir = tempfile::tempdir().unwrap();
+        let pem = dir.path().join("corp.pem");
+        std::fs::write(&pem, "x").unwrap();
+        let at = pem.display().to_string();
+        for absolute in [at.clone(), format!("\"{at}\"")] {
             assert_eq!(
-                quarrel(ca, absolute),
+                quarrel(ca, &absolute),
                 None,
                 "`{absolute}` is absolute and must pass"
             );
+        }
+        // Absolute and not there: the build refuses it, so the write says so
+        // first. `/nope/ca.pem` was written with exit 0.
+        let missing = dir.path().join("nope.pem").display().to_string();
+        let said = quarrel(ca, &missing).expect("a missing certificate is said");
+        assert!(said.contains("nothing at"), "{said}");
+    }
+
+    /// A size and a CPU count are checked as loosely as the runtime reads
+    /// them, and no looser: `sandbox_memory banana` and `sandbox_cpus lots`
+    /// were written with exit 0, and found at the next launch. A value no
+    /// runtime reads as one is refused; anything a runtime might is let
+    /// through for it to judge.
+    #[test]
+    fn a_size_and_a_cpu_count_are_checked_as_a_runtime_reads_them() {
+        let key = |name: &str| KEYS.iter().find(|k| k.name == name).unwrap();
+        let (memory, cpus) = (key("sandbox_memory"), key("sandbox_cpus"));
+        for ok in [
+            "4g", "512m", "1.5g", "1024", "2GiB", "512mb", "4G", "\"4g\"",
+        ] {
+            assert_eq!(quarrel(memory, ok), None, "`{ok}` is a size");
+        }
+        for bad in ["banana", "g4", "", "4x", "-1g", "4 gigs"] {
+            let said = quarrel(memory, bad).unwrap_or_else(|| panic!("`{bad}` is not a size"));
+            assert!(said.contains("sandbox_memory"), "{said}");
+        }
+        for ok in ["2", "1.5", "0.5", "\"2\""] {
+            assert_eq!(quarrel(cpus, ok), None, "`{ok}` is a count");
+        }
+        for bad in ["lots", "0", "-1", "", "nan", "inf", "2 cores"] {
+            let said = quarrel(cpus, bad).unwrap_or_else(|| panic!("`{bad}` is not a count"));
+            assert!(said.contains("sandbox_cpus"), "{said}");
         }
     }
 

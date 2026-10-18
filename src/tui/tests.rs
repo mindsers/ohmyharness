@@ -56,7 +56,7 @@ fn model() -> Model {
                     },
                     Row {
                         fallback: Some("the only login captured".into()),
-                        edit: Edit::Suggest(vec!["personal".into(), "work".into()]),
+                        edit: Edit::Choice(vec!["personal".into(), "work".into()]),
                         ..row("account")
                     },
                 ],
@@ -459,7 +459,7 @@ fn help_lists_every_key_under_what_it_is_for() {
     app.key(press('?'));
     let screen = drawn_at(&app, 120, 40);
     for said in [
-        "MOVE", "CHANGE", "TYPING", "LEAVE", "g G", "ctrl-u", "ctrl-a", "a letter",
+        "MOVE", "CHANGE", "TYPING", "LEAVE", "g G", "ctrl-u", "ctrl-a", "letters",
     ] {
         assert!(screen.contains(said), "no `{said}`:\n{screen}");
     }
@@ -479,6 +479,42 @@ fn help_lists_every_key_under_what_it_is_for() {
         text_at.is_some_and(|(at, _)| at >= column),
         "`{key}`'s description wrapped under the key:\n{screen}"
     );
+}
+
+/// Help is read whole at 80×24, where it was cut after `ctrl-a` with no way
+/// on — `j` closed it. It scrolls with the keys a list does, and only esc, q
+/// and `?` close it. It lists `u`, says `/` searches every page, and keeps
+/// ctrl-l out of the keys that leave, which it is not one of.
+#[test]
+fn help_scrolls_where_it_is_cut_and_lists_every_key() {
+    let mut app = App::new(model(), true);
+    app.key(press('?'));
+    let mut seen = String::new();
+    for _ in 0..30 {
+        let screen = drawn_at(&app, 80, 24);
+        seen.push_str(&screen);
+        assert!(
+            matches!(app.modal, Some(Modal::Help { .. })),
+            "closed:\n{screen}"
+        );
+        app.key(press('j'));
+    }
+    for said in ["undo", "ctrl-l", "every page", "every change is a command"] {
+        assert!(seen.contains(said), "never shown: `{said}`");
+    }
+    let screen = drawn_at(&app, 120, 40);
+    let leave = screen.find("LEAVE").expect("a LEAVE group");
+    let reread = screen.find("read your catalogue again").expect("ctrl-l");
+    assert!(reread < leave, "ctrl-l is under LEAVE:\n{screen}");
+    for key in [press('x'), press(' ')] {
+        app.key(key);
+        assert!(matches!(app.modal, Some(Modal::Help { .. })));
+    }
+    for close in [code(KeyCode::Esc), press('q'), press('?')] {
+        app.key(press('?'));
+        app.key(close);
+        assert_eq!(app.modal, None, "{close:?} did not close it");
+    }
 }
 
 /// A pick says what it is setting and marks both the value now and the one
@@ -685,29 +721,68 @@ fn a_key_typed_in_a_pick_never_reaches_the_page() {
     }
 }
 
-/// A suggestion is picked, or another is typed.
+/// A word typed in a pick goes to the option it spells. Each letter jumped
+/// on its own, so `podman` ended on the last letter any option started —
+/// `a`, for `auto` — and `↵` wrote that. Letters build a prefix while some
+/// option starts with it; one that fits none starts again from itself.
 #[test]
-fn a_suggestion_is_picked_or_another_typed() {
+fn a_word_typed_in_a_pick_goes_to_the_option_it_spells() {
     let mut app = App::new(model(), true);
-    for _ in 0..3 {
-        app.key(press('j'));
+    app.key(press('j'));
+    let typed = |app: &mut App, word: &str| {
+        app.key(code(KeyCode::Enter));
+        for c in word.chars() {
+            app.key(press(c));
+        }
+        app.key(code(KeyCode::Enter))
+    };
+    let set = |value: &str| {
+        Next::Run(Act::Set {
+            key: "runtime".into(),
+            value: value.into(),
+        })
+    };
+    assert_eq!(typed(&mut app, "podman"), set("podman"));
+    assert_eq!(typed(&mut app, "do"), set("docker"));
+    assert_eq!(typed(&mut app, "au"), set("auto"));
+    // A letter no option starts is nothing: `z` leaves `podman` where it is.
+    assert_eq!(typed(&mut app, "poz"), set("podman"));
+}
+
+/// A new entry named as one that is there is said in the box, which stays
+/// open: `a tdd` on Skills opened the skill that was already there, as
+/// though it were new — the server form's own check, missing here.
+#[test]
+fn a_new_entry_named_as_one_that_is_there_is_said() {
+    let mut app = App::new(model(), true);
+    app.key(press('2'));
+    let name = app.model.sections[1].rows[0].name.clone();
+    app.key(press('a'));
+    for c in name.chars() {
+        app.key(press(c));
     }
-    app.key(code(KeyCode::Enter));
-    assert!(drawn(&app).contains(ANOTHER));
-    app.key(code(KeyCode::End));
+    assert_eq!(app.key(code(KeyCode::Enter)), Next::Stay);
+    let Some(Modal::Input(input)) = &app.modal else {
+        panic!("the box closed: {}", drawn(&app));
+    };
+    let said = input.error.clone().unwrap_or_default();
+    assert!(said.contains(&name) && said.contains("already"), "{said:?}");
+    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    for c in "fresh".chars() {
+        app.key(press(c));
+    }
     assert_eq!(
         app.key(code(KeyCode::Enter)),
-        Next::Stay,
-        "another… asks for a line"
-    );
-    assert_eq!(
-        typed(&mut app, "codex:work"),
-        Next::Run(Act::Set {
-            key: "account".into(),
-            value: "codex:work".into()
+        Next::Run(Act::Edit {
+            capability: "skills".into(),
+            name: Some("fresh".into())
         })
     );
 }
+
+// `a_suggestion_is_picked_or_another_typed` went with `another…`: every login
+// a launch takes is offered by name and by one harness's, so there was nothing
+// left to type — `account_offers_the_logins_captured` in the driver says so.
 
 /// A value is checked as it is typed, by what the caller handed in.
 #[test]
@@ -1214,26 +1289,24 @@ fn a_filter_searches_every_page() {
     );
 }
 
-/// `?` shows every key, and any key closes it.
+/// `?` shows every key, and a key help has no use for does nothing: it
+/// neither reaches the page — `d` there unsets a default — nor closes help,
+/// which any key did, so `j` to read on closed it instead.
 #[test]
-fn help_shows_every_key_and_any_key_closes_it() {
+fn help_shows_every_key_and_a_key_it_has_no_use_for_does_nothing() {
     let mut app = App::new(model(), true);
     app.key(press('?'));
     let screen = drawn(&app);
     for key in [
         "change page",
-        "filter the list",
+        "search every page",
         "import from a harness",
         "leave",
     ] {
         assert!(screen.contains(key), "{screen}");
     }
-    assert_eq!(
-        app.key(press('d')),
-        Next::Stay,
-        "a key closes help, and does nothing else"
-    );
-    assert_eq!(app.modal, None);
+    assert_eq!(app.key(press('d')), Next::Stay, "`d` reached the page");
+    assert!(matches!(app.modal, Some(Modal::Help { .. })));
 }
 
 /// What a command said reads as a paragraph: a line too long for the screen
@@ -1506,6 +1579,57 @@ fn u_undoes_the_last_change() {
     app.key(press('d'));
     app.report("settings unset idle_timeout".into(), false, "", "omh: no");
     assert_eq!(app.key(press('u')), Next::Stay);
+}
+
+/// A servers page whose file omh could not read takes no `a` or `i`: the
+/// form let three fields be filled, and the add then failed on the file it
+/// could not read. `e` is the way in, to fix the file.
+#[test]
+fn a_servers_page_omh_could_not_read_takes_no_add() {
+    let mut model = model();
+    model.sections[2].problem = Some("parsing ~/.omh/mcp.json: trailing characters".into());
+    model.sections[2].import = Import::From(vec![Source {
+        harness: "claude".into(),
+        from: "./.mcp.json".into(),
+    }]);
+    let mut app = App::new(model, true);
+    app.key(press('3'));
+    let screen = drawn_at(&app, 120, 30);
+    let footer = screen.lines().last().unwrap_or_default();
+    assert!(
+        !footer.contains("add") && !footer.contains("import"),
+        "{footer}"
+    );
+    assert!(footer.contains("edit the file"), "{footer}");
+    for key in ['a', 'i'] {
+        app.key(press(key));
+        assert_eq!(app.modal, None, "`{key}` opened something: {}", drawn(&app));
+    }
+}
+
+/// Undoing puts back what was there even where omh cannot read it: a value
+/// written `--anyway` was put back with a plain `set`, which refused it, so
+/// `u` after changing it did nothing but fail.
+#[test]
+fn u_puts_back_a_value_written_anyway() {
+    let check: Check = Box::new(|key, value| {
+        (key == "idle_timeout" && value == "forever").then(|| "not a duration".to_string())
+    });
+    let mut model = model();
+    model.sections[0].rows[0].value = Some("forever".into());
+    let mut app = App::new(model, true).with_check(check);
+    app.key(code(KeyCode::Enter));
+    app.key(with('u', KeyModifiers::CONTROL));
+    let set = typed(&mut app, "2h");
+    assert!(matches!(set, Next::Run(Act::Set { .. })), "{set:?}");
+    app.report("settings set idle_timeout 2h".into(), true, "wrote", "");
+    assert_eq!(
+        app.key(press('u')),
+        Next::Run(Act::SetAnyway {
+            key: "idle_timeout".into(),
+            value: "forever".into()
+        })
+    );
 }
 
 /// `space` is undone by what the caller says undoes it, not by the opposite
