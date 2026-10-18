@@ -406,6 +406,80 @@ impl Sandbox {
         log
     }
 
+    /// A `docker` whose sandbox answers `omh doctor`'s probe, one row per check.
+    ///
+    /// `fake_docker`'s `run` prints nothing, so a doctor run under it never
+    /// gets past "the probe produced no output" — and every path that only a
+    /// probe that *answered* can reach went untested. This one reads the check
+    /// names out of the script it is handed (each check prints
+    /// `ok<TAB>name<TAB>…` on success) and answers each, as `ok` unless it is
+    /// named in `failing`, and not at all if it is named in `silent`. The
+    /// program probe `top_up` runs (`printf 'ok\t%s…'`) gets no answer, which
+    /// is a sandbox that could not be measured, as under `fake_docker`.
+    fn fake_docker_answering_doctor(&self, failing: &[&str], silent: &[&str]) -> PathBuf {
+        let log = self.bin.join("docker.log");
+        let answer = self.bin.join("doctor-answer");
+        let names = |list: &[&str]| list.iter().map(|n| format!("{n}\n")).collect::<String>();
+        std::fs::write(self.bin.join("doctor-failing"), names(failing)).unwrap();
+        std::fs::write(self.bin.join("doctor-silent"), names(silent)).unwrap();
+        std::fs::write(
+            &answer,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$1" | sed -n "s/.*printf 'ok\\\\t\([^\\\\]*\)\\\\t.*/\1/p" |
+while IFS= read -r name; do
+  grep -qxF -- "$name" {silent} && continue
+  if grep -qxF -- "$name" {failing}; then printf 'fail\t%s\tplanted by the test\n' "$name"
+  else printf 'ok\t%s\tanswered by the test\n' "$name"; fi
+done
+"#,
+                failing = self.bin.join("doctor-failing").display(),
+                silent = self.bin.join("doctor-silent").display(),
+            ),
+        )
+        .unwrap();
+        let shim = self.bin.join("docker");
+        std::fs::write(
+            &shim,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> {log}
+if [ "$1" = inspect ]; then echo true; fi
+for a in "$@"; do
+  case "$a" in
+    '#!/bin/sh'*) case "$a" in *"printf 'ok\t%s"*) ;; *) sh {answer} "$a" ;; esac ;;
+  esac
+done
+exit 0
+"#,
+                log = log.display(),
+                answer = answer.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // An `openssl` that fails, so the TLS row is "could not check" rather
+        // than a real handshake with the network from inside a test.
+        let openssl = self.bin.join("openssl");
+        std::fs::write(&openssl, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&openssl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::create_dir_all(self.repo.join(".omh")).unwrap();
+        std::fs::write(
+            self.repo.join(".omh/settings.toml"),
+            "runtime = \"docker\"\n",
+        )
+        .unwrap();
+        log
+    }
+
     /// A `docker` that has no images yet, so a build actually happens, and
     /// answers `images`/`ps` from files the test seeds.
     ///
@@ -10886,6 +10960,118 @@ fn doctor_json_is_one_document() {
     );
 }
 
+/// Every JSON document on stdout, refusing anything that is not one.
+fn json_documents(stdout: &[u8]) -> Vec<serde_json::Value> {
+    serde_json::Deserializer::from_slice(stdout)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| {
+            panic!(
+                "stdout is not JSON: {e}\n{}",
+                String::from_utf8_lossy(stdout)
+            )
+        })
+}
+
+/// **A doctor whose sandbox failed a check is one report, and it says failed.**
+///
+/// The sandbox report was said, then the failure it reported came back out of
+/// the closure as an error — and the error arm, which exists for the failures
+/// that happen *before* any report, said the host's rows a second time. Under
+/// `--json` that is two documents on stdout, and with every host row green
+/// the second carried `"ok": true` with no harness: a consumer keeping the
+/// last document read a failed run as a passed one. In text, "all N checks
+/// passed — the host answered" followed the failing table.
+///
+/// `doctor_json_is_one_document` never reached this: under the suite's
+/// `docker` no probe answers, so the run fails before any report is said.
+#[test]
+fn a_doctor_that_failed_a_check_is_one_report_and_says_so() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // A commit, so every host row is green: then a second, host-only report
+    // is the `"ok": true` one, which is the inversion this guards.
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+    sb.fake_docker_answering_doctor(&["starts"], &[]);
+
+    let out = sb.omh(&["doctor", "--json", "--harness", "claude"]);
+    assert!(!out.status.success(), "a failed check fails the run");
+    let documents = json_documents(&out.stdout);
+    assert_eq!(
+        documents.len(),
+        1,
+        "omh doctor --json printed {} documents:\n{}",
+        documents.len(),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        documents[0]["ok"],
+        serde_json::json!(false),
+        "the one document says the run failed: {}",
+        documents[0]
+    );
+    assert_eq!(
+        documents[0]["harness"],
+        serde_json::json!("claude"),
+        "and it is the sandbox's report, not the host's alone: {}",
+        documents[0]
+    );
+
+    let out = sb.omh(&["doctor", "--harness", "claude"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("checks passed"),
+        "a failed run must not end on a passing tally:\n{stdout}"
+    );
+}
+
+/// **A check the sandbox did not answer is a failure, not a row nobody sees.**
+///
+/// Every check prints one line, and `parse` keeps what it can read. A check
+/// whose line never arrived — a probe the shell could not run, a quote that
+/// swallowed the next line — simply was not in the report, and with the rest
+/// green doctor said "all checks passed" and exited 0. `init`'s predicate run
+/// already refuses an answer shorter than its question (`fired_from`); this is
+/// doctor's half.
+#[test]
+fn a_check_the_sandbox_did_not_answer_fails_the_run_by_name() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // A commit, so every host row is green and the missing answer is the only
+    // thing that can fail the run.
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+    sb.fake_docker_answering_doctor(&[], &["hooks"]);
+
+    let out = sb.omh(&["doctor", "--harness", "claude"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "a check with no answer passed the run:\n{said}"
+    );
+    // One line, because `hooks` alone is satisfied by the host's `repo hooks`.
+    assert!(
+        said.lines()
+            .any(|l| l.contains("no answer") && l.contains("`hooks`")),
+        "the run must name the check that went unanswered:\n{said}"
+    );
+}
+
 /// `omh doctor` honours the account you name, or says why it cannot.
 ///
 /// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
@@ -10956,30 +11142,35 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
     );
 }
 
-/// The report out of `--json`, which is the **last** document on stdout.
+/// The report out of `omh doctor --json`, which is the **only** document on
+/// stdout.
 ///
-/// **`--json` emits a stream, not one object.** Anything omh says through
-/// `ctx.say` before the report is its own document ahead of it — on Linux,
-/// `doctor`'s TLS-inspection row reporting `Unknown`, because Linux has no
-/// line between a root the platform ships and one somebody installed. Parsing
-/// the whole of stdout works on a machine where nothing else spoke and fails
-/// where something did, which is the platform-shaped test bug this helper
-/// exists to stop repeating.
+/// This took the *last* document with a `checks` array, which was tolerant of
+/// exactly the defect it should have caught: a failed run printed its report
+/// and then the host's rows again as a second document, and the helper read
+/// the second — `"ok": true`, no harness — as if it were the answer. One
+/// document is `doctor --json`'s contract (`doctor_json_is_one_document`), so
+/// anything else fails here, by count.
 fn report_json(stdout: &str) -> serde_json::Value {
-    serde_json::Deserializer::from_str(stdout)
-        .into_iter::<serde_json::Value>()
-        .filter_map(Result::ok)
-        // `checks` **as an array**. `report::Action::json` merges its `data`
-        // into the top level, and `doctor-nothing-to-check` already carries a
-        // scalar `"checks": 0` — matched by a bare `is_some()`, and today only
-        // ordering keeps it from being picked.
-        .filter(|v| {
-            v.get("checks")
-                .and_then(serde_json::Value::as_array)
-                .is_some()
-        })
-        .last()
-        .unwrap_or_else(|| panic!("no report in stdout: {stdout}"))
+    let mut documents = json_documents(stdout.as_bytes());
+    assert_eq!(
+        documents.len(),
+        1,
+        "omh doctor --json printed {} documents:\n{stdout}",
+        documents.len()
+    );
+    let report = documents.remove(0);
+    // `checks` **as an array**. `report::Action::json` merges its `data` into
+    // the top level, and `doctor-nothing-to-check` carries a scalar
+    // `"checks": 0` — which is not a report of checks.
+    assert!(
+        report
+            .get("checks")
+            .and_then(serde_json::Value::as_array)
+            .is_some(),
+        "the document is not a doctor report: {stdout}"
+    );
+    report
 }
 
 /// **A checkout records which omh set it up, and the stamp is not committed.**

@@ -3910,6 +3910,63 @@ mod tests {
         );
     }
 
+    /// A server this repo did not select is deliberately absent from the
+    /// document the harness is given — `render` drops it with the same two
+    /// retains it uses for a switched-off feature — so a check demanding it
+    /// fails forever and blames the harness for obeying.
+    ///
+    /// The case above carried across to directories and not to servers. It is
+    /// the ordinary configuration, not an edge: `omh init` writes `mcp = []`
+    /// when the catalogue holds only omh's own servers, so the first
+    /// `omh settings mcp add` afterwards made every `omh doctor` in that repo
+    /// fail on two rows, `mcp` and `mcp-loaded`, both `missing: linear`.
+    #[test]
+    fn a_server_this_repo_did_not_select_is_not_demanded() {
+        let fx = fixture();
+        std::fs::write(
+            fx._dir.path().join("home/mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"},"linear":{"command":"l"}}}"#,
+        )
+        .unwrap();
+        let (own, mut repo) = decided();
+        repo.selection
+            .apply(
+                &BTreeMap::from([("mcp".to_string(), Vec::new())]),
+                Path::new("settings.toml"),
+            )
+            .unwrap();
+
+        let got = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &own,
+            &repo,
+            &Default::default(),
+        )
+        .unwrap();
+        let mcp = got
+            .iter()
+            .find(|c| c.name == "mcp")
+            .expect("claude stages mcp");
+        assert_eq!(
+            mcp.expect,
+            Expect::Mentions(vec!["codegraph".to_string()]),
+            "codegraph is omh's and always goes in; linear was not selected here"
+        );
+        let loaded = got
+            .iter()
+            .find(|c| c.name == "mcp-loaded")
+            .expect("claude says how to ask it which servers it loaded");
+        match &loaded.expect {
+            Expect::Loaded { names, .. } => assert_eq!(
+                names,
+                &vec!["codegraph".to_string()],
+                "the harness is asked only about servers it was given"
+            ),
+            other => panic!("mcp-loaded asks the harness, not {other:?}"),
+        }
+    }
+
     #[test]
     fn every_declared_capability_is_checked() {
         let fx = fixture();
