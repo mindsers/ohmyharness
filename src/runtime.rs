@@ -897,13 +897,16 @@ pub fn installed(program: &str) -> bool {
 /// 0.9.0 audit went unwritten: there was no place to put the test.
 ///
 /// It derefs to the runtime it wraps, so `backend.exec_args(..)` and
-/// `backend.program()` read as they always did. Interactive spawns — a tty
-/// attach, a build that pipes a Dockerfile on stdin — still take `program()`
-/// and build their own `Command`; everything that waits for an answer goes
-/// through `output`.
+/// `backend.program()` read as they always did. Everything that waits for an
+/// answer goes through `output`. Interactive spawns — a tty attach, a build
+/// that pipes a Dockerfile on stdin — start from `command`, never from
+/// `Command::new(backend.program())`: a test's stand-in has to own those too,
+/// or the one spawn it does not cover runs the host's real docker. That is
+/// how the default suite came to build an image on every machine it ran on.
 pub struct Backend {
     rt: Box<dyn Runtime>,
     run: Box<Run>,
+    spawn: std::ffi::OsString,
 }
 
 /// The runtime's argv, run and waited for.
@@ -931,6 +934,7 @@ impl Backend {
         Backend {
             rt,
             run: Box::new(move |args| std::process::Command::new(program).args(args).output()),
+            spawn: program.into(),
         }
     }
 
@@ -940,16 +944,30 @@ impl Backend {
         (self.run)(&args)
     }
 
+    /// The runtime's program as a `Command`, for a spawn that needs a `Child`
+    /// or the terminal rather than an answer.
+    pub fn command(&self) -> std::process::Command {
+        std::process::Command::new(&self.spawn)
+    }
+
+    /// What `command` starts, for code that builds its `Command` elsewhere —
+    /// the memory server's cross-build is handed a program, not a backend.
+    pub fn spawned(&self) -> &std::ffi::OsStr {
+        &self.spawn
+    }
+
     /// The runtime's argv, run through some other program — a shell script
     /// standing in for docker. For tests that want a real process to record
     /// what was asked and answer from a file, where `scripted` would have to
-    /// know the argv in advance.
+    /// know the argv in advance. It stands in for `command` as well.
     #[cfg(test)]
     pub fn shimmed(rt: Box<dyn Runtime>, program: &std::path::Path) -> Backend {
+        let spawn = program.as_os_str().to_owned();
         let program = program.to_path_buf();
         Backend {
             rt,
             run: Box::new(move |args| std::process::Command::new(&program).args(args).output()),
+            spawn,
         }
     }
 
@@ -962,6 +980,10 @@ impl Backend {
     /// default answer: a test that runs a command it did not expect has found
     /// a behaviour it did not know about, and a silent success there is the
     /// exact collapse `Running::Unknown` exists to keep out of production.
+    ///
+    /// A table cannot answer a spawn, so `command` names a program that does
+    /// not exist: a test that reaches one fails to start it, rather than
+    /// starting the host's docker.
     #[cfg(test)]
     pub fn scripted(
         rt: Box<dyn Runtime>,
@@ -989,6 +1011,7 @@ impl Backend {
             Backend {
                 rt,
                 run: Box::new(run),
+                spawn: "/nonexistent/omh-scripted-backend-spawns-nothing".into(),
             },
             log,
         )
@@ -1962,6 +1985,32 @@ mod tests {
                 "a tag reaped out from under this launch must fail, not pull: {args:?}"
             );
         }
+    }
+
+    /// The runtime's program is started from `Backend::command`, so a test's
+    /// stand-in owns every spawn. A `Command::new(backend.program())` is a
+    /// spawn the stand-in cannot see: the image build was one, and the
+    /// default suite ran a real `docker build` through it.
+    #[test]
+    fn no_spawn_of_the_runtime_bypasses_the_backend() {
+        let mut found = Vec::new();
+        let mut files = 0;
+        for (path, body) in crate::testsrc::production() {
+            files += 1;
+            for (i, line) in crate::testsrc::code_of(&body).lines().enumerate() {
+                if line.contains("Command::new(") && line.contains(".program()") {
+                    found.push(format!("{}:{}", path.display(), i + 1));
+                }
+            }
+        }
+        assert!(
+            files > 40,
+            "the walk read {files} files — it is not reading src/"
+        );
+        assert!(
+            found.is_empty(),
+            "a spawn of the runtime that no stand-in can answer: {found:?}"
+        );
     }
 }
 

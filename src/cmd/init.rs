@@ -15,7 +15,6 @@ use crate::{
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::process::Command;
 
 /// What to do next, in the order somebody does it.
 ///
@@ -960,7 +959,8 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         )
         .and_then(|tag| {
             let args = base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_id());
-            Command::new(backend.program())
+            backend
+                .command()
                 .args(&args)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

@@ -2369,10 +2369,9 @@ command = "c"
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&indexer, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let path = std::env::join_paths(
-            std::iter::once(stand_ins.clone())
-                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
-        )
+        let path = std::env::join_paths(std::iter::once(stand_ins.clone()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
         .unwrap();
         for ((name, r), command) in all_rendered()
             .into_iter()
@@ -2381,6 +2380,8 @@ command = "c"
             let mut child = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&r.command)
+                .env("PATH", &path)
+                .env("HOME", scratch.path())
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -2447,7 +2448,6 @@ command = "c"
             "the graph hooks ran an indexer that was not this test's stand-in — \
              the host's own, against the developer's cache and daemon"
         );
-        let _ = &path;
     }
 
     /// The other half, and the one a hook cannot reach: what the agent is told

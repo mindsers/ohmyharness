@@ -517,7 +517,7 @@ pub(crate) fn doctor_cmd(
         let memory_bin = match dry_run {
             true => memory::deliver::available(&paths, ctx),
             false => match memory::deliver::ensure(
-                backend.program(),
+                &backend.spawned().to_string_lossy(),
                 &paths,
                 memory::deliver::sources_at(
                     std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
