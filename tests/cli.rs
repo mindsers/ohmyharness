@@ -2272,6 +2272,57 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
     assert!(printed.contains("feature.rs"), "got: {printed}");
 }
 
+/// A `core.hooksPath` inside the worktree — husky v9's `.husky/_` — is a
+/// directory the agent writes, so landing runs none of it, and says so.
+///
+/// Through the binary because the sentence is the command's: the session
+/// tests prove the hooks stay off, and this proves the user hears why their
+/// `pre-commit` did not run rather than finding out from CI.
+#[cfg(unix)]
+#[test]
+fn a_commit_says_it_set_aside_hooks_the_agent_could_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    let config = Command::new("git")
+        .arg("-C")
+        .arg(&sb.repo)
+        .args(["config", "core.hooksPath", ".husky/_"])
+        .output()
+        .unwrap();
+    assert!(config.status.success(), "{config:?}");
+    let ran = sb._dir.path().join("ran");
+    let hooks = worktree.join(".husky/_");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join(".gitignore"), "*\n").unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(
+        &hook,
+        format!("#!/bin/sh\necho pre-commit >> '{}'\n", ran.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "Add the feature"]);
+
+    assert!(
+        out.status.success(),
+        "commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!ran.exists(), "the agent's pre-commit ran on the host");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("hooks not run") && said.contains(".husky/_"),
+        "the user is not told their hooks were set aside: {said}"
+    );
+}
+
 /// The refusal is wired to the command, not just to a function that could
 /// refuse.
 ///

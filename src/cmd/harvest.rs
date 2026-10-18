@@ -960,6 +960,9 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
             AtStake::Nothing if session.worktree.is_dir() => {
                 let out = std::process::Command::new("git")
                     .current_dir(&session.worktree)
+                    // A `status` can write the index, which runs
+                    // `post-index-change`. See `session::Hooks`.
+                    .args(session::NO_HOOKS)
                     // The worktree's files are the agent's, and a `status`
                     // asked about a repository nested among them answers by
                     // running git inside it. See `shadow::out_of_nested`.
@@ -1234,7 +1237,7 @@ pub(crate) fn commit(
     } else {
         session::Carried::refusing(&carried)
     };
-    session.commit(message, policy)?;
+    let hooks = session.commit(message, policy)?;
 
     // Counted against the base rather than reported as "committed", because the
     // number is what tells you whether the branch is worth pushing — and it is
@@ -1243,9 +1246,12 @@ pub(crate) fn commit(
     let held = session.glance(&paths.repo, &base);
     warn_uncounted(&held, ctx, &base);
     ctx.say(
-        &report::Action::new(
-            "committed",
-            format!("committed to {}{}", session.label(), branch_tally(&held)),
+        &with_hooks_said(
+            report::Action::new(
+                "committed",
+                format!("committed to {}{}", session.label(), branch_tally(&held)),
+            ),
+            &hooks,
         )
         .data(serde_json::json!({
             "session": session.id,
@@ -1356,6 +1362,19 @@ pub(crate) fn branch_tally(held: &Settling) -> String {
     }
 }
 
+/// A landing that ran none of the user's hooks says so: a `pre-commit` that
+/// silently stopped running would be found out later, from whatever it was
+/// there to catch.
+fn with_hooks_said(action: report::Action, hooks: &session::Hooks) -> report::Action {
+    match hooks {
+        session::Hooks::Yours => action,
+        session::Hooks::SetAside(path) => action.note(format!(
+            "hooks not run: core.hooksPath ({path}) is inside the session's worktree, \
+             which the agent writes"
+        )),
+    }
+}
+
 pub(crate) fn push(
     cwd: &std::path::Path,
     id: Option<&str>,
@@ -1365,15 +1384,17 @@ pub(crate) fn push(
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
-    let target = session.push(name)?;
+    let session::Pushed { target, hooks } = session.push(name)?;
     ctx.say(
-        &report::Action::new("pushed", format!("{} → origin/{target}", session.label())).data(
-            serde_json::json!({
-                "session": session.id,
-                "branch": session.label(),
-                "target": target,
-            }),
-        ),
+        &with_hooks_said(
+            report::Action::new("pushed", format!("{} → origin/{target}", session.label())),
+            &hooks,
+        )
+        .data(serde_json::json!({
+            "session": session.id,
+            "branch": session.label(),
+            "target": target,
+        })),
     );
 
     if !pr {
