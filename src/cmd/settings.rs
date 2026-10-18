@@ -1433,7 +1433,9 @@ pub(crate) fn rm(
     if cap == adapter::Capability::Hooks && shipped_hooks().iter().any(|h| h == name) {
         anyhow::bail!(
             "omh ships hooks/{name}, and `omh upgrade` would put it back. To stop a \
-             repo running it:\n  omh unuse hooks {name}"
+             repo running it:\n  omh unuse hooks {name}\n\
+             and for every repo `omh init` sets up after:\n  \
+             omh settings unuse hooks {name}"
         );
     }
     if cap == adapter::Capability::Mcp {
@@ -1696,10 +1698,14 @@ pub(crate) fn shipped_hooks() -> Vec<String> {
 pub(crate) fn capability_from(key: &str) -> Result<adapter::Capability> {
     adapter::Capability::from_key(key).with_context(|| {
         // One letter off is a typo, and the kinds are plural: `skill`, `hook`.
-        let near = adapter::Capability::ALL
-            .iter()
-            .map(|c| c.key())
-            .find(|k| k.strip_suffix('s') == Some(key));
+        // And the screen's word for the servers page is not the verbs'.
+        let near = match key {
+            "servers" | "server" => Some("mcp"),
+            _ => adapter::Capability::ALL
+                .iter()
+                .map(|c| c.key())
+                .find(|k| k.strip_suffix('s') == Some(key)),
+        };
         format!(
             "`{key}` is not a capability — {}expected {}",
             near.map(|k| format!("did you mean `{k}`? "))

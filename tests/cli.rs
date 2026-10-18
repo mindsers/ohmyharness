@@ -7652,12 +7652,29 @@ fn the_report_says_of_your_defaults_what_the_screen_says() {
 fn a_kind_spelled_nearly_right_is_named() {
     let sb = sandbox();
     sb.seed_base();
-    for (typed, meant) in [("skill", "skills"), ("hook", "hooks"), ("rule", "rules")] {
+    // And the screen's word for a page: it says "servers", the verbs `mcp`.
+    for (typed, meant) in [
+        ("skill", "skills"),
+        ("hook", "hooks"),
+        ("rule", "rules"),
+        ("servers", "mcp"),
+        ("server", "mcp"),
+    ] {
         let out = sb.omh(&["settings", "rm", typed, "x", "--yes"]);
         let said = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success());
         assert!(said.contains(&format!("did you mean `{meant}`")), "{said}");
     }
+    // A hook omh ships is refused with the verb for your defaults too: it
+    // named only `omh unuse`, the repo's.
+    sb.catalogue(&["hooks/rust-test.json"]);
+    let out = sb.omh(&["settings", "rm", "hooks", "rust-test", "--yes"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("omh settings unuse hooks rust-test"),
+        "{said}"
+    );
 }
 
 /// `$VISUAL` is read before `$EDITOR`, as git reads them: with `VISUAL` set
