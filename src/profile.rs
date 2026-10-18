@@ -2258,6 +2258,118 @@ mod tests {
         );
     }
 
+    /// Docker's charset for the names it is handed: `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
+    fn docker_accepts(name: &str) -> bool {
+        let mut chars = name.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+            && chars.all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+    }
+
+    /// Every name omh hands the container runtime is one it accepts, whatever
+    /// the checkout's directory is called.
+    ///
+    /// The repo id carries the directory's name as it is, and docker refuses
+    /// anything outside its charset — measured against docker 29.8.2:
+    /// `"omh-cache-My App-1a2b3c4d" includes invalid characters for a local
+    /// volume name`. So a checkout at `~/code/My App` or `~/code/café` could
+    /// not start a session at all. The ssh alias is here because it is the
+    /// container's name too, and a space in it breaks `~/.ssh/config` for
+    /// every host on the machine, not only omh's. The graph's project name is
+    /// here because it is quoted into a shell line in the sandbox.
+    #[test]
+    fn every_name_the_runtime_sees_is_one_it_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["My App", "café", "a:b", "it's", "tab\there"] {
+            let paths = Paths {
+                root: dir.path().join("home"),
+                repo: dir.path().join(name),
+            };
+            let id = paths.repo_id();
+            for runtime_name in [
+                paths.container("s01"),
+                paths.cache_volume(),
+                paths.session_network("s01"),
+                paths.scratch_network(),
+                crate::base::ui_container(&id),
+                crate::base::project_name(&id, "s01"),
+                crate::ssh::host_alias(&id, "s01"),
+            ] {
+                assert!(
+                    docker_accepts(&runtime_name),
+                    "a checkout called {name:?} is handed to the runtime as {runtime_name:?}"
+                );
+            }
+        }
+    }
+
+    /// A name the runtime already accepted is left exactly as it was, so every
+    /// container, volume, network and ssh alias that exists today keeps its
+    /// name across the upgrade.
+    #[test]
+    fn a_name_the_runtime_accepted_is_left_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["api", "my-app", "my_app.v2", "Web2"] {
+            let paths = Paths {
+                root: dir.path().join("home"),
+                repo: dir.path().join(name),
+            };
+            let id = paths.repo_id();
+            assert_eq!(paths.container("s01"), format!("omh-{id}-s01"));
+            assert_eq!(paths.cache_volume(), format!("omh-cache-{id}"));
+            assert_eq!(paths.session_network("s01"), format!("omh-{id}-s01"));
+            assert_eq!(paths.scratch_network(), format!("omh-{id}"));
+            assert_eq!(crate::base::ui_container(&id), format!("omh-graph-{id}"));
+            assert_eq!(crate::base::project_name(&id, "s01"), format!("{id}-s01"));
+            assert_eq!(crate::ssh::host_alias(&id, "s01"), format!("omh-{id}-s01"));
+        }
+    }
+
+    /// A runtime name still leads back to its checkout.
+    ///
+    /// `omh prune` and `omh doctor` read the repo id back out of a volume's,
+    /// container's or network's name and ask the registry whose it is. Where
+    /// the runtime's name had to respell the id, the registry holds no record
+    /// under the respelling — so without a way back, that checkout's cache,
+    /// containers and networks would read as nobody's for as long as they
+    /// exist.
+    #[test]
+    fn a_name_the_runtime_was_given_is_still_attributed_to_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["My App", "api"] {
+            let repo = dir.path().join(name);
+            std::fs::create_dir_all(&repo).unwrap();
+            let paths = Paths {
+                root: dir.path().join("home"),
+                repo: repo.clone(),
+            };
+            paths.remember_checkout().unwrap();
+            let read_back = [
+                (
+                    paths.cache_volume(),
+                    paths
+                        .cache_volume()
+                        .strip_prefix("omh-cache-")
+                        .map(str::to_string),
+                ),
+                (
+                    paths.container("s01"),
+                    crate::cmd::prune::id_in_container(&paths.container("s01")),
+                ),
+                (
+                    paths.session_network("s01"),
+                    crate::cmd::prune::id_in_network(&paths.session_network("s01")),
+                ),
+            ];
+            for (runtime_name, id) in read_back {
+                let id = id.unwrap_or_else(|| panic!("{runtime_name} does not parse back"));
+                match attribution_of(&paths.root, &id, Backfill::DoNot) {
+                    Attribution::Live(at) => assert_eq!(at, settled(&repo)),
+                    other => panic!("{runtime_name} is {name:?}'s, and read as {other:?}"),
+                }
+            }
+        }
+    }
+
     /// Keyed by repo, not harness — this is what lets memory survive a switch.
     ///
     /// Asserted as the property rather than as the string. It read

@@ -427,6 +427,46 @@ mod tests {
         );
     }
 
+    /// A key path with a space in it is one argument to ssh, and a `%` in it is
+    /// a percent sign rather than a token.
+    ///
+    /// The block reaches ssh through the `Include` in `~/.ssh/config`, so a
+    /// line ssh cannot parse is not omh's alone to suffer: OpenSSH 10.3 stops
+    /// every connection on the machine — `github.com` included — with
+    /// `keyword identityfile extra arguments at end of line … terminating`. A
+    /// home directory with a space in it was enough, since the paths are under
+    /// `~/.omh/keys`.
+    #[test]
+    fn a_key_path_with_a_space_or_a_percent_is_one_path_to_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("John Smith 100%/keys");
+        let key = keys.join("id_ed25519");
+        let known_hosts = keys.join("known_hosts");
+        let block = config_block("omh-x-s01", 49200, &key, &known_hosts);
+        let cfg = dir.path().join("config");
+        std::fs::write(&cfg, &block).unwrap();
+        let out = std::process::Command::new("ssh")
+            .arg("-G")
+            .arg("-F")
+            .arg(&cfg)
+            .arg("omh-x-s01")
+            .output()
+            .expect("ssh must be installed to run this test");
+        assert!(
+            out.status.success(),
+            "ssh refused the block: {}\n{block}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let read = String::from_utf8_lossy(&out.stdout);
+        for (keyword, path) in [("identityfile", &key), ("userknownhostsfile", &known_hosts)] {
+            let want = format!("{keyword} {}", path.display());
+            assert!(
+                read.lines().any(|l| l == want),
+                "ssh did not read `{want}` back:\n{read}"
+            );
+        }
+    }
+
     /// One line per alias, carrying the key and not the comment ssh-keygen
     /// appends — a known_hosts entry is `host type key`, and a fourth field is
     /// read as part of the key.
