@@ -1126,8 +1126,24 @@ impl Shadow {
             // inside one, which `omh sNN rm` believes. A pointer omh will not
             // follow is work at stake, not work that is absent. One `status`
             // did report is already in the count.
+            //
+            // **And `status` is asked of an index of omh's own, read from
+            // HEAD — never the agent's.** The agent writes that index, and
+            // `update-index --assume-unchanged` or `--skip-worktree` on a file
+            // it edited makes `status` pass over the edit: `omh s` counted it
+            // while this said nothing was at stake, and `rm` deleted it. A
+            // fresh index carries neither bit, so every path that differs from
+            // HEAD is counted, whether the agent staged it or not.
             {
-                let status = git(&self.gitdir, worktree, &["status", "--porcelain"])?;
+                let scratch = tempfile::tempdir().context("making an index omh owns")?;
+                let index = scratch.path().join("index");
+                git_with_index(&self.gitdir, worktree, &index, &["read-tree", "HEAD"])?;
+                let status = git_with_index(
+                    &self.gitdir,
+                    worktree,
+                    &index,
+                    &["status", "--porcelain"],
+                )?;
                 let unseen = nested(&self.gitdir, worktree)?
                     .iter()
                     .filter(|path| !status.lines().any(|l| l.ends_with(path.as_str())))
@@ -3133,7 +3149,18 @@ fn git_owned(gitdir: &Path, worktree: &Path, args: &[String]) -> Result<String> 
 }
 
 fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
-    let out = host_git(gitdir)
+    git_over(host_git(gitdir), worktree, args)
+}
+
+/// [`git`], over the index at `index` instead of the one the agent writes.
+fn git_with_index(gitdir: &Path, worktree: &Path, index: &Path, args: &[&str]) -> Result<String> {
+    let mut cmd = host_git(gitdir);
+    cmd.env("GIT_INDEX_FILE", index);
+    git_over(cmd, worktree, args)
+}
+
+fn git_over(mut cmd: Command, worktree: &Path, args: &[&str]) -> Result<String> {
+    let out = cmd
         .args(before_the_verb(args))
         // Explicitly, because a child inherits omh's cwd and `add -A .` is
         // resolved against it: invoked from inside the session's worktree, git
