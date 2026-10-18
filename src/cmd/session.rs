@@ -1992,11 +1992,8 @@ pub(crate) fn remember_hooks(record: Option<notice::Record>, ctx: &out::Ctx) {
 /// happened — a `.env` you thought you were carrying and are not is exactly the
 /// failure that wastes an hour inside the sandbox.
 pub(crate) fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
-    // The rules themselves are mounted, not written here — this covers the
-    // empty placeholder each mount lands on, and any backend that cannot mount
-    // a single file. It must run before `plan` places those placeholders.
-    carry::hide_staged_rules(&session.worktree)?;
-
+    // Nothing here for omh's own placeholders: the host reads in `session.rs`
+    // leave them out, so your checkout's `info/exclude` is not asked to.
     let patterns = config::policy_list(paths, "carry_in");
     if patterns.is_empty() {
         return Ok(());

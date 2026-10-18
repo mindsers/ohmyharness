@@ -1061,10 +1061,10 @@ impl Session {
         let add: Vec<&str> = add.iter().map(String::as_str).collect();
         git_with_index(&self.worktree, index, &add)?;
 
-        // The same unstage `commit` does, from the same list, because the
+        // The same unstages `commit` does, from the same lists, because the
         // reason is the same: omh mounts its rules over a placeholder it writes
-        // into the worktree, and `info/exclude` cannot hide that placeholder
-        // when the repo tracks the filename. Reading the worktree meant a
+        // into the worktree, and leaving out untracked placeholders cannot hide
+        // one when the repo tracks the filename. Reading the worktree meant a
         // review opened with `AGENTS.md | 1 -` — omh's own scaffolding shown as
         // the agent emptying the project's rules, in this repo among others.
         //
@@ -1073,6 +1073,7 @@ impl Session {
         let unstage = unstage_rules_args();
         let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
         git_with_index(&self.worktree, index, &unstage)?;
+        unstage_placeholders(&self.worktree, Some(index))?;
 
         take(&self.worktree, index, merge_base)
     }
@@ -1159,6 +1160,7 @@ impl Session {
         // are ignored by one of your .gitignore files" about the very file the
         // pathspec was written to leave alone.
         git_owned(&self.worktree, &unstage_rules_args())?;
+        unstage_placeholders(&self.worktree, None)?;
 
         // Asked *after* staging, and against the index rather than the worktree:
         // `git diff` says nothing about untracked files, so a session whose only
@@ -1250,6 +1252,9 @@ impl Session {
         let mut records = out.split('\0').filter(|r| !r.is_empty());
         let mut changed = Vec::new();
         while let Some(record) = records.next() {
+            if is_placeholder(record) {
+                continue;
+            }
             // `XY ` then the path. Two ASCII status characters and a space, so
             // byte 3 is always a character boundary.
             let Some((status, path)) = record.split_at_checked(3) else {
@@ -1397,12 +1402,12 @@ impl Session {
 
 /// The files omh wrote into the worktree, kept out of the user's work.
 ///
-/// `carry`'s `info/exclude` covers these only while they are untracked, and a
-/// repo that commits its own `CLAUDE.md` — normal for one whose users run agent
-/// harnesses — has omh's copy written over a tracked file, which gitignore
-/// semantics say nothing about. Without this, omh's generated rules land on top
-/// of the project's own conventions in the user's commit, and a session where
-/// the agent did nothing still looks like it has work in it.
+/// `is_placeholder` and `unstage_placeholders` cover these only while they are
+/// untracked, and a repo that commits its own `CLAUDE.md` — normal for one
+/// whose users run agent harnesses — has omh's copy written over a tracked
+/// file. Without this, omh's generated rules land on top of the project's own
+/// conventions in the user's commit, and a session where the agent did nothing
+/// still looks like it has work in it.
 fn rules_pathspec() -> Vec<String> {
     std::iter::once(".".to_string())
         .chain(
@@ -1427,6 +1432,44 @@ fn status_args() -> Vec<String> {
         .map(|s| s.to_string())
         .chain(rules_pathspec())
         .collect()
+}
+
+/// Whether a `status --porcelain -z` record is one of omh's mount
+/// placeholders as `container::place_destination` leaves it: untracked, at the
+/// worktree's root, under a name `carry::hidden_in_the_worktree` lists.
+///
+/// Asked of each record rather than written into `info/exclude`, which lives
+/// in the common git dir — so it was your checkout's exclude file too, and
+/// after one launch the `AGENTS.md` you created there was invisible to git.
+pub(crate) fn is_placeholder(record: &str) -> bool {
+    record
+        .strip_prefix("?? ")
+        .is_some_and(|path| crate::carry::hidden_in_the_worktree().contains(&path))
+}
+
+/// Take back out what `add -A` just staged of omh's placeholders — the ones it
+/// *added*, which is what an untracked placeholder becomes. A `.mcp.json` the
+/// repo tracks is the project's, and a change to it is a change, so it stays
+/// staged: the same line `is_placeholder` draws.
+///
+/// An unstage rather than an `:(exclude)` pathspec on the `add`, for the
+/// reason `commit` gives about the rules: naming a path some ignore file also
+/// names makes `add` exit 1 with "the following paths are ignored", having
+/// staged the rest — and a checkout omh launched in before this still has
+/// these names in its `info/exclude`. Measured against git 2.56.0.
+fn unstage_placeholders(worktree: &Path, index: Option<&Path>) -> Result<()> {
+    let run = |args: &[&str]| match index {
+        Some(index) => git_with_index(worktree, index, args),
+        None => git(worktree, args),
+    };
+    let added = run(&["diff", "--cached", "--name-only", "--diff-filter=A", "-z"])?;
+    let hidden = crate::carry::hidden_in_the_worktree();
+    let mut reset = vec!["reset", "-q", "--"];
+    reset.extend(added.split('\0').filter(|path| hidden.contains(path)));
+    if reset.len() > 3 {
+        run(&reset)?;
+    }
+    Ok(())
 }
 
 /// Reject a session id that is not a single path component.
@@ -3430,7 +3473,6 @@ mod tests {
 
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
-        crate::carry::hide_staged_rules(&s.worktree).unwrap();
         // the placeholder a bind mount needs its destination to be
         std::fs::write(s.worktree.join(rules), "").unwrap();
         std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
@@ -3550,8 +3592,8 @@ mod tests {
     }
 
     /// `commit` stages everything, so the guarantee that omh's own staging stays
-    /// out of the user's work rests entirely on `carry`'s exclusion holding.
-    /// Nothing else connects these two modules, and the failure — omh's
+    /// out of the user's work rests entirely on the unstages after the `add`.
+    /// Nothing else stands between them, and the failure — omh's
     /// `CLAUDE.md` riding into a PR on the commit omh itself made — is invisible
     /// until a reviewer finds it.
     #[test]
@@ -3559,7 +3601,6 @@ mod tests {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
-        crate::carry::hide_staged_rules(&s.worktree).unwrap();
         std::fs::write(s.worktree.join("CLAUDE.md"), "staged by omh").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
@@ -3946,7 +3987,6 @@ mod tests {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
-        crate::carry::hide_staged_rules(&s.worktree).unwrap();
         std::fs::write(s.worktree.join("CLAUDE.md"), "staged by omh").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
@@ -4170,10 +4210,10 @@ mod tests {
     }
 
     /// A repo that commits its own `CLAUDE.md` is the normal case for one whose
-    /// users run agent harnesses, and it is the case `carry`'s exclusion cannot
-    /// reach: `info/exclude` is gitignore semantics, silent about a file git
-    /// already tracks. omh overwrites it at launch, so git sees a modification
-    /// and `add -A` stages it — omh's generated rules landing on top of the
+    /// users run agent harnesses, and it is the case the placeholder rule cannot
+    /// reach: `is_placeholder` leaves out untracked files only, and is silent
+    /// about a file git already tracks. omh overwrites it at launch, so git sees
+    /// a modification and `add -A` stages it — omh's generated rules landing on top of the
     /// project's own conventions, in the user's PR, on the commit omh made.
     #[test]
     fn omhs_rules_stay_out_of_the_commit_even_when_the_repo_tracks_them() {
@@ -4185,7 +4225,6 @@ mod tests {
 
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
-        crate::carry::hide_staged_rules(&s.worktree).unwrap();
         // What omh does at launch: overwrite it with the merged rules.
         std::fs::write(s.worktree.join("CLAUDE.md"), "omh generated rules").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
@@ -4217,7 +4256,6 @@ mod tests {
 
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
-        crate::carry::hide_staged_rules(&s.worktree).unwrap();
         std::fs::write(s.worktree.join("CLAUDE.md"), "omh generated rules").unwrap();
 
         assert_eq!(
