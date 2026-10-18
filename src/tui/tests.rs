@@ -1659,12 +1659,14 @@ fn what_a_command_printed_says_your_home_as_tilde() {
     app.report(
         "settings set idle_timeout 45m".into(),
         true,
-        "wrote → /Users/you/.omh/default.toml\nkept /Users/young/notes",
+        "wrote → /Users/you/.omh/default.toml\nkept /Users/young/notes\nfrom (/private/Users/you/repo)",
         "",
     );
     let screen = drawn_at(&app, 120, 30);
     assert!(screen.contains("wrote → ~/.omh/default.toml"), "{screen}");
     assert!(screen.contains("/Users/young/notes"), "{screen}");
+    // Nor a path that only has your home inside it: `/private~/repo`.
+    assert!(screen.contains("(/private/Users/you/repo)"), "{screen}");
 }
 
 /// A page's heading keeps the filter in sight and says when it is cut: at

@@ -465,11 +465,18 @@ impl App {
         let mut rest = line;
         while let Some(at) = rest.find(home.as_str()) {
             let after = &rest[at + home.len()..];
+            // Only the home itself, as a path of its own: `/Users/you` is not
+            // in `/Users/young`, nor in `/private/Users/you`, which became
+            // `/private~` — a path begins where the text before it is not one.
+            let starts = rest[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || "/._-~".contains(c)));
+            let ends = matches!(after.chars().next(), None | Some('/'));
             out.push_str(&rest[..at]);
-            // Only the home itself: `/Users/you` in `/Users/young` is not it.
-            match after.chars().next() {
-                None | Some('/') => out.push('~'),
-                Some(_) => out.push_str(home),
+            match starts && ends {
+                true => out.push('~'),
+                false => out.push_str(home),
             }
             rest = after;
         }
