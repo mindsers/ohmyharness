@@ -752,12 +752,18 @@ pub fn render(
     }
 
     // Before `when`, so a predicate can test what was captured.
+    //
+    // `capture` and `when` are the hook author's own shell, and each sits on
+    // lines of its own — the rule `codex_guard` already follows — so a
+    // trailing `# comment` in one ends at its newline. On one line with the
+    // rest, a comment in `when` swallowed the decline and the action, and a
+    // `refuse` written that way allowed every call.
     if let Action::Inject {
         capture: Some(capture),
         ..
     } = &hook.action
     {
-        command.push_str(&format!("{CAPTURE_VAR}=$({capture}); "));
+        command.push_str(&format!("{CAPTURE_VAR}=$(\n{capture}\n); "));
     }
     if let Some(when) = &hook.when {
         let silent = match log {
@@ -767,7 +773,7 @@ pub fn render(
             ),
             None => "exit 0".to_string(),
         };
-        command.push_str(&format!("{when} || {silent}; "));
+        command.push_str(&format!("{{ {when}\n}} || {silent}; "));
     }
     // Right before the action, regardless of whether `when` was present: a
     // hook with no `when` always reaches its action, and that decision is as
