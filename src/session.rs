@@ -6023,6 +6023,34 @@ mod tests {
         );
     }
 
+    /// The unstage that takes omh's placeholders back out of a commit writes
+    /// the index, and an index written is a `post-index-change`. It runs only
+    /// when `add -A` staged a placeholder, so the commit above, holding only
+    /// `work.rs`, never reaches it: an untracked `.mcp.json` at the root does.
+    #[cfg(unix)]
+    #[test]
+    fn taking_a_placeholder_back_out_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        let (s, ran) = husky_session(d.path(), &root);
+        std::fs::write(s.worktree.join(".mcp.json"), "{}\n").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+
+        s.commit(Some("land it"), Carried::refusing(&[])).unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "unstaging a placeholder ran, on the host, hooks the agent wrote"
+        );
+        assert_eq!(
+            git(&root, &["show", "--name-only", "--format=", "omh/s01"])
+                .unwrap()
+                .trim(),
+            "work.rs",
+            "and the placeholder was taken back out of the commit"
+        );
+    }
+
     /// The editor's commit is a `git` of its own, built where `git()` is not.
     ///
     /// Whether the commit lands is not this test's question, and depends on
