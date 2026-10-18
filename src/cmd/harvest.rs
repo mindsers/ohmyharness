@@ -958,8 +958,14 @@ pub(crate) fn worktree_to_ask(
     is_dir: std::io::Result<bool>,
     worktree: &std::path::Path,
 ) -> Result<bool, AtStake> {
-    let _ = worktree;
-    Ok(is_dir.unwrap_or(false))
+    match is_dir {
+        Ok(is_dir) => Ok(is_dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(AtStake::Unknown(format!(
+            "the worktree at {} could not be inspected: {e}",
+            worktree.display()
+        ))),
+    }
 }
 
 pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
