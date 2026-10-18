@@ -435,6 +435,9 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            // Refused where `render::merge_hooks` refuses it, for the reason
+            // the parse below gives: two readers of one directory agree.
+            crate::selection::validate_entry_name(&name, crate::adapter::Capability::Hooks, &path)?;
             // Parsed, never probed for a key. A hook file that is truncated,
             // half-written, or hand-edited with the wrong key used to yield a
             // blank command here, which compares unequal to every baseline and
@@ -1518,6 +1521,22 @@ mod tests {
             err.contains("run") && err.contains("inject"),
             "must say what is missing: {err}"
         );
+    }
+
+    /// A hook file whose name breaks a line is an error here too, because a
+    /// launch refuses it (`render::merge_hooks`) and `omh why` listing it as
+    /// a hook would be the second of two stories about one directory.
+    #[test]
+    fn a_hook_whose_name_breaks_a_line_is_an_error_not_a_listing() {
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Shared,
+            "hooks/lint\ncheck.json",
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let err = format!("{:#}", hooks(&paths).unwrap_err());
+        assert!(err.contains("line break"), "must say why: {err}");
     }
 
     /// An entry omh cannot run is an error, not a server with a blank command.

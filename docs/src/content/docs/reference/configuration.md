@@ -1393,6 +1393,11 @@ anywhere — which is where omh's own conventional ones live.
 **Exactly one of `run`, `inject` or `refuse`.** `capture` needs `inject` —
 collecting output nobody reads says nothing, and a refusal is a fixed reason.
 
+**The file's name is the hook's name**, and it is one line of plain text: a
+name holding a line break or a control character is refused, naming the file,
+because the name labels the hook in the programs omh generates for opencode and
+omp. A `# comment` at the end of `when` or `capture` is fine.
+
 **Not every harness has a word for every tool.** No adapter spells `search`
 today, so a hook narrowed to it is dropped by name wherever it runs, and Codex
 has no `read` either. An adapter's `[tools]` map is what it can spell.
@@ -1437,7 +1442,9 @@ that quietly became a nudge would let through the call it existed to stop.
 `$OMH_TOOL_FILE` and `$OMH_TOOL_COMMAND` are the tool call, in omh's words.
 Mention one in any body and omh reads it for you — `${OMH_TOOL_FILE:-none}`
 counts too. Mention neither and your hook pays for nothing, which matters:
-`before-tool` on `read` fires on the most frequent tool there is.
+`before-tool` on `read` fires on the most frequent tool there is. What a hook
+binds, `$OMH_CAPTURE` included, is in the environment of every program it
+runs, on every harness — a script your `run` calls reads `$OMH_TOOL_FILE` too.
 
 Three more are set in every sandbox, whatever the tool call:
 

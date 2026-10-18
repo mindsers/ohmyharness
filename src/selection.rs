@@ -271,6 +271,23 @@ pub fn validate_entry_name(name: &str, cap: Capability, whence: &Path) -> Result
             whence.display()
         );
     }
+    // One line of text. A hook's name labels its handler in the JavaScript
+    // omh generates, where LF, CR, U+2028 and U+2029 all end a `//` comment,
+    // and the rest of the name became code.
+    if name
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    {
+        // Escaped, the path too: it ends in the name, and printed raw the
+        // message would break where the name does.
+        bail!(
+            "{}: `{}` is not a `{cap}` entry — it holds a line break or a \
+             control character, and a name is one line of plain text. Rename \
+             the file.",
+            whence.display().to_string().escape_debug(),
+            name.escape_debug()
+        );
+    }
     Ok(())
 }
 
@@ -403,6 +420,37 @@ mod tests {
             assert!(
                 err.contains("never a path"),
                 "{bad:?} slipped through: {err}"
+            );
+        }
+    }
+
+    /// A name is one line of text. A hook's name labels its handler in the
+    /// JavaScript omh generates for opencode and omp, so a line break in it —
+    /// git commits a file named `lint\ncheck.json` without complaint — ended
+    /// that label's `//` comment and turned the rest of the name into code: a
+    /// module that throws at load, which takes every hook down with it, omh's
+    /// own guards included. U+2028 and U+2029 end a JavaScript line too, and
+    /// U+0085 ends one for plenty of tools that read these names.
+    #[test]
+    fn a_name_that_breaks_a_line_is_refused() {
+        for bad in [
+            "lint\ncheck",
+            "lint\rcheck",
+            "lint\u{2028}check",
+            "lint\u{2029}check",
+            "lint\u{85}check",
+            "lint\tcheck",
+            "lint\u{7f}check",
+        ] {
+            assert!(
+                validate_entry_name(bad, Capability::Hooks, Path::new("h")).is_err(),
+                "{bad:?} slipped through"
+            );
+        }
+        for good in ["graph-read", "café", "rust_test", "v1.2"] {
+            assert!(
+                validate_entry_name(good, Capability::Hooks, Path::new("h")).is_ok(),
+                "{good:?} is an ordinary name"
             );
         }
     }
