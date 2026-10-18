@@ -407,6 +407,37 @@ mod tests {
         }
     }
 
+    /// A name is one line of text. A hook's name labels its handler in the
+    /// JavaScript omh generates for opencode and omp, so a line break in it —
+    /// git commits a file named `lint\ncheck.json` without complaint — ended
+    /// that label's `//` comment and turned the rest of the name into code: a
+    /// module that throws at load, which takes every hook down with it, omh's
+    /// own guards included. U+2028 and U+2029 end a JavaScript line too, and
+    /// U+0085 ends one for plenty of tools that read these names.
+    #[test]
+    fn a_name_that_breaks_a_line_is_refused() {
+        for bad in [
+            "lint\ncheck",
+            "lint\rcheck",
+            "lint\u{2028}check",
+            "lint\u{2029}check",
+            "lint\u{85}check",
+            "lint\tcheck",
+            "lint\u{7f}check",
+        ] {
+            assert!(
+                validate_entry_name(bad, Capability::Hooks, Path::new("h")).is_err(),
+                "{bad:?} slipped through"
+            );
+        }
+        for good in ["graph-read", "café", "rust_test", "v1.2"] {
+            assert!(
+                validate_entry_name(good, Capability::Hooks, Path::new("h")).is_ok(),
+                "{good:?} is an ordinary name"
+            );
+        }
+    }
+
     /// `[use]` names *your* entries. omh's belong to `[omh]`, and the rule holds
     /// across every capability rather than for hooks alone: `init` seeds
     /// `codegraph` and `memory` into `~/.omh/mcp.json`, where they look exactly

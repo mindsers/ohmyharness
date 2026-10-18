@@ -3448,6 +3448,185 @@ template = 'return { block: true, reason: {{text}} }'
         );
     }
 
+    /// A hook file whose name breaks a line is refused, by file, before
+    /// anything renders it.
+    ///
+    /// The name is the file's stem, and git commits `lint\ncheck.json` from a
+    /// repo you clone as readily as any other. Nothing between `read_dir` and
+    /// the renderer asked what the name was; `validate_entry_name` was called
+    /// where `[use]` lists and catalogue listings mint names, and not here.
+    #[test]
+    fn a_hook_file_whose_name_breaks_a_line_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/lint\nomh_planted_suffix.json",
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let err = document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .map(|d| d.body)
+        .expect_err("a name that breaks a line must not render");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("lint"),
+            "the refusal names the file it refused: {said}"
+        );
+    }
+
+    /// No hook name can end the comment that labels it.
+    ///
+    /// The refusal above is where names are read; this is the renderer not
+    /// relying on it. JavaScript ends a `//` comment at LF, CR, U+2028 and
+    /// U+2029, and `serde_json` leaves the last two raw — so neither the raw
+    /// name nor its JSON form is safe on that line.
+    #[test]
+    fn a_hook_name_cannot_end_the_comment_that_labels_it() {
+        let mut hooks = BTreeMap::new();
+        for name in [
+            "lint\nomh_planted_suffix",
+            "lint\romh_planted_suffix",
+            "lint\u{2028}omh_planted_suffix",
+            "lint\u{2029}omh_planted_suffix",
+        ] {
+            hooks.insert(
+                name.to_string(),
+                hook::Hook::parse(r#"{"on":"before-tool","tools":["read"],"run":"true"}"#, "h")
+                    .unwrap(),
+            );
+        }
+        let bodies = [
+            omp_plugin(&hooks, omp_hooks(), &omp().tools, None)
+                .unwrap()
+                .body,
+            opencode_plugin(&hooks, opencode_hooks(), &opencode().tools, None)
+                .unwrap()
+                .body,
+        ];
+        for body in bodies {
+            let loose: Vec<&str> = body
+                .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .filter(|l| l.trim_start().starts_with("omh_planted_suffix"))
+                .collect();
+            assert!(
+                loose.is_empty(),
+                "a name's tail landed on a line of its own, as code: {loose:?}\n{body}"
+            );
+        }
+    }
+
+    /// The same, asked of a JavaScript runtime: a module carrying such a name
+    /// still loads, and every hook in it registers.
+    ///
+    /// Measured before the fix: node threw `omh_planted_suffix is not defined`
+    /// when omp called the factory, so not one hook registered — the guard
+    /// below included.
+    #[test]
+    #[ignore]
+    fn a_hook_name_cannot_take_an_omp_module_down() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "lint\nomh_planted_suffix".to_string(),
+            hook::Hook::parse(r#"{"on":"turn-end","run":"true"}"#, "h").unwrap(),
+        );
+        hooks.insert(
+            "z-guard".to_string(),
+            hook::Hook::parse(
+                r#"{"on":"before-tool","tools":["shell"],"refuse":"no"}"#,
+                "h",
+            )
+            .unwrap(),
+        );
+        let body = omp_plugin(&hooks, omp_hooks(), &omp().tools, None)
+            .unwrap()
+            .body;
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, &body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import plugin from "file://{}"
+const handlers = {{}}
+plugin({{ on: (event, f) => {{ (handlers[event] ??= []).push(f) }} }})
+console.log(JSON.stringify(Object.fromEntries(Object.entries(handlers).map(([k, v]) => [k, v.length]))))
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .output()
+            .expect("node is required to check the program omh generates");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.trim() == r#"{"turn_end":1,"tool_call":1}"#
+                || said.trim() == r#"{"tool_call":1,"turn_end":1}"#,
+            "both hooks have to register: {said}{}\n{body}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// opencode's twin: a tool call the broken name's hook is about still
+    /// goes through rather than throwing.
+    ///
+    /// Measured before the fix: every `tool.execute.before` threw
+    /// `omh_planted_suffix is not defined`, which opencode reads as a block —
+    /// so every tool call was refused, reads included.
+    #[test]
+    #[ignore]
+    fn a_hook_name_cannot_take_an_opencode_module_down() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "lint\nomh_planted_suffix".to_string(),
+            hook::Hook::parse(r#"{"on":"before-tool","tools":["read"],"run":"true"}"#, "h")
+                .unwrap(),
+        );
+        let body = opencode_plugin(&hooks, opencode_hooks(), &opencode().tools, None)
+            .unwrap()
+            .body;
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, &body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import plugin from "file://{}"
+const hooks = await plugin({{}})
+try {{
+  await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "/work/x" }} }})
+  console.log("ALLOWED")
+}} catch (e) {{ console.log("THREW " + e.message) }}
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .output()
+            .expect("node is required to check the program omh generates");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("ALLOWED"),
+            "a read must go through: {said}{}\n{body}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     #[ignore]
     fn show_the_omp_module() {
