@@ -4435,6 +4435,10 @@ fn unset_tells_an_entry_from_the_feature_that_contains_it() {
 /// do with what was typed — in a home where `omh init` had never run, `omh set
 /// my_new_key 1` exited 1, and so did `omh unset`, which is the command a
 /// person runs to get a secret out of git.
+///
+/// A base set that is not there yet is asked of the binary, which is what
+/// `init` would install, so the check is whole; one that is there and cannot
+/// be read is the reduced check, said.
 #[test]
 fn a_settings_write_survives_a_base_set_it_cannot_read() {
     let sb = sandbox();
@@ -4452,6 +4456,21 @@ fn a_settings_write_survives_a_base_set_it_cannot_read() {
         sb.settings().contains("my_new_key"),
         "and the value is written: {}",
         sb.settings()
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("base set"),
+        "a base not there yet is the binary's, checked whole: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let base = sb.home.join(".omh/base");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("2026.08.toml"), "not a manifest").unwrap();
+    let out = sb.omh(&["set", "my_other_key", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
     // Said, not swallowed: omh could not check the name against its features.
     assert!(
@@ -4681,47 +4700,280 @@ fn settings_set_does_not_warn_about_a_file_git_does_not_carry() {
     );
 }
 
-/// One of omh's features is not a cross-project default.
+/// One of omh's features, switched in your defaults, seeds the repos `omh init`
+/// sets up after — in `[omh]`, never as a bare key.
 ///
-/// A feature is a fact about a checkout — `[omh]` is read from the personal
-/// layer, so writing one there would switch it for every project you open,
-/// which is not a decision this command should make easy to reach by accident.
+/// It was refused: `[omh]` was once read from the personal layer, so a switch
+/// there changed every project you opened. It seeds a new repo now and decides
+/// nothing after (`a_feature_switched_in_the_template_does_not_switch_this_repo`),
+/// and refusing it left a file to edit by hand as the one way to say "never the
+/// code graph" for every repo to come. The guard's own defect stays guarded:
+/// `omh settings set codegraph off` once wrote a bare `codegraph = "off"`,
+/// warned that nothing reads it, and left the feature on.
 #[test]
-fn settings_refuses_a_feature_name() {
+fn settings_switches_a_feature_for_the_repos_init_sets_up_after() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_base();
+    let held = || std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
+    let doc = || held().parse::<toml::Table>().unwrap_or_default();
 
-    // **Both verbs.** The guard was written for four doors and four commands
-    // were routed through it; two of those commands were retired, and the
-    // test went with them — leaving `unset` alone behind, where deleting the
-    // guard call outright passed the whole suite.
-    for argv in [
-        vec!["settings", "set", "codegraph", "off"],
-        vec!["settings", "unset", "codegraph"],
-    ] {
-        let out = sb.omh(&argv);
-        let said = format!(
-            "{:?}\n{}{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            !out.status.success(),
-            "`omh {}`: a feature is not a default",
-            argv.join(" ")
-        );
-        assert!(
-            said.contains("omh set codegraph"),
-            "and it names the spelling that works: {said}"
-        );
-    }
+    let out = sb.omh(&["settings", "set", "codegraph", "off"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
-        !std::fs::read_to_string(sb.home.join(".omh/default.toml"))
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        doc().get("omh").and_then(|t| t.get("codegraph")),
+        Some(&toml::Value::Boolean(false)),
+        "{}",
+        held()
+    );
+    assert!(doc().get("codegraph").is_none(), "a bare key: {}", held());
+    assert!(
+        said.contains("omh init") && said.contains("keeps its own"),
+        "it says which repos it reaches: {said}"
+    );
+
+    let out = sb.omh(&["settings", "set", "codegraph", "on"]);
+    assert!(out.status.success());
+    assert_eq!(
+        doc().get("omh").and_then(|t| t.get("codegraph")),
+        Some(&toml::Value::Boolean(true))
+    );
+    let out = sb.omh(&["settings", "unset", "codegraph"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!held().contains("codegraph"), "handed back: {}", held());
+
+    // A part of a feature is not one, and says which it belongs to.
+    let out = sb.omh(&["settings", "set", "graph-first", "off"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(said.contains("omh settings set codegraph off"), "{said}");
+    assert!(!held().contains("graph-first"));
+}
+
+/// Your defaults are changed before `omh init` has ever run, which is when
+/// you are most likely to be setting them.
+///
+/// `~/.omh/base` is written by the first `init`, and the defaults verbs read
+/// what omh owns from it: `use` and `unuse` failed on it, and `settings set
+/// codegraph off` could not tell a feature from a setting and wrote a bare
+/// `codegraph` key nothing reads. What omh ships is in the binary.
+#[test]
+fn your_defaults_are_changed_before_omh_init_has_ever_run() {
+    let sb = sandbox();
+    sb.catalogue(&["skills/tdd/SKILL.md"]);
+    assert!(
+        !sb.home.join(".omh/base").exists(),
+        "the fixture is a fresh machine"
+    );
+    let doc = || {
+        std::fs::read_to_string(sb.home.join(".omh/default.toml"))
             .unwrap_or_default()
-            .contains("codegraph"),
-        "and neither verb left the bare key behind"
+            .parse::<toml::Table>()
+            .unwrap()
+    };
+    let run = |argv: &[&str]| {
+        let out = sb.omh(argv);
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+
+    let (ok, said) = run(&["settings", "set", "codegraph", "off"]);
+    assert!(ok, "{said}");
+    assert_eq!(
+        doc()["omh"]["codegraph"].as_bool(),
+        Some(false),
+        "{:?}",
+        doc()
+    );
+    assert!(!doc().contains_key("codegraph"), "no bare key: {:?}", doc());
+    assert!(!said.contains("could not read"), "{said}");
+
+    let (ok, said) = run(&["settings", "unuse", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    let (ok, said) = run(&["settings", "unuse", "hooks", "graph-first"]);
+    assert!(
+        !ok && said.contains("omh settings set codegraph off"),
+        "{said}"
+    );
+}
+
+/// What new repos take from your catalogue is changed from your defaults:
+/// `[use]` and `[unuse]` in `default.toml`, which `omh init` resolves into a
+/// repo's lists.
+///
+/// **No list is every entry, and leaving one out keeps it that way.** `unuse`
+/// once wrote the rest of the kind as a list, so an entry added to your
+/// catalogue after was never seeded, and `use` after `unuse` did not put the
+/// file back. Now it names the one left out, and `use` takes it back off. A
+/// guard is never seeded unless named, so using one is the case that writes a
+/// list — said, with the way back.
+#[test]
+fn settings_use_and_unuse_change_what_new_repos_take() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md", "skills/review-diff/SKILL.md"]);
+    let hook = |name: &str, body: &str| {
+        let at = sb.home.join(".omh/hooks").join(format!("{name}.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    };
+    hook("mine", r#"{"on":"turn-end","run":"make check"}"#);
+    hook("other", r#"{"on":"turn-end","run":"make lint"}"#);
+    hook(
+        "my-guard",
+        r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+    );
+    let doc = || {
+        std::fs::read_to_string(sb.home.join(".omh/default.toml"))
+            .unwrap_or_default()
+            .parse::<toml::Table>()
+            .unwrap_or_default()
+    };
+    let list = |table: &str, kind: &str| {
+        doc().get(table).and_then(|u| u.get(kind)).map(|v| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    let run = |argv: &[&str]| {
+        let out = sb.omh(argv);
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+
+    let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    assert!(said.contains("already take skills/tdd"), "{said}");
+    assert!(doc().is_empty(), "and nothing written: {:?}", doc());
+
+    let (ok, said) = run(&["settings", "unuse", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    assert_eq!(list("unuse", "skills"), Some(vec!["tdd".to_string()]));
+    assert_eq!(list("use", "skills"), None, "no list: {:?}", doc());
+    assert!(!said.contains("--all"), "nothing frozen to undo: {said}");
+    let (ok, said) = run(&["settings", "unuse", "skills", "tdd"]);
+    assert!(ok && said.contains("left out already"), "{said}");
+
+    // Undone exactly: the file is what it was.
+    let (ok, said) = run(&["settings", "use", "skills", "tdd"]);
+    assert!(ok, "{said}");
+    assert!(doc().is_empty(), "{:?}", doc());
+
+    let (ok, said) = run(&["settings", "use", "skills", "nope"]);
+    assert!(!ok && said.contains("nope"), "{said}");
+    let (ok, said) = run(&["settings", "unuse", "skills", "nope"]);
+    assert!(!ok && said.contains("nope"), "{said}");
+
+    // A guard: not seeded unless named, which only a list can do.
+    let (ok, said) = run(&["settings", "unuse", "hooks", "my-guard"]);
+    assert!(ok && said.contains("a guard"), "{said}");
+    assert!(doc().is_empty(), "{:?}", doc());
+    // A file of yours named as one of omh's own is its feature's, and a list
+    // naming it would be refused in every repo it reached.
+    hook("graph-first", r#"{"on":"turn-end","run":"true"}"#);
+    run(&["settings", "unuse", "hooks", "other"]);
+    let (ok, said) = run(&["settings", "use", "hooks", "my-guard"]);
+    assert!(ok, "{said}");
+    let hooks = list("use", "hooks").expect("a list now");
+    assert_eq!(hooks, ["mine", "my-guard"]);
+    assert_eq!(
+        list("unuse", "hooks"),
+        None,
+        "a list is the whole answer, so what was left out goes with it: {:?}",
+        doc()
+    );
+    std::fs::remove_file(sb.home.join(".omh/hooks/graph-first.json")).unwrap();
+    assert!(
+        said.contains("omh settings use hooks --all"),
+        "the list is said, with the way back: {said}"
+    );
+    // On a list, leaving out takes off the list.
+    let (ok, said) = run(&["settings", "unuse", "hooks", "mine"]);
+    assert!(ok, "{said}");
+    assert_eq!(list("use", "hooks"), Some(vec!["my-guard".to_string()]));
+    assert_eq!(list("unuse", "hooks"), None);
+    let (ok, said) = run(&["settings", "unuse", "hooks", "mine"]);
+    assert!(
+        ok && said.contains("already leave out hooks/mine"),
+        "{said}"
+    );
+
+    run(&["settings", "unuse", "skills", "review-diff"]);
+    let (ok, said) = run(&["settings", "use", "hooks", "--all"]);
+    assert!(
+        ok && said.contains("take all your hooks again, but the guards"),
+        "as the screen says it: {said}"
+    );
+    assert_eq!(list("use", "hooks"), None, "{:?}", doc());
+    assert_eq!(
+        list("unuse", "skills"),
+        Some(vec!["review-diff".to_string()]),
+        "--all is one kind's"
+    );
+    let (ok, said) = run(&["settings", "use", "skills", "--all"]);
+    assert!(ok && said.contains("take all your skills again"), "{said}");
+    assert!(doc().is_empty(), "{:?}", doc());
+
+    // omh's own are switched, not listed.
+    let (ok, said) = run(&["settings", "unuse", "hooks", "graph-first"]);
+    assert!(!ok, "{said}");
+    assert!(said.contains("omh settings set codegraph off"), "{said}");
+    // An entry handed to `settings set` is said to be one, with this verb.
+    let (ok, said) = run(&["settings", "set", "tdd", "on"]);
+    assert!(
+        !ok && said.contains("omh settings use skills tdd"),
+        "{said}"
+    );
+}
+
+/// Removing an entry your defaults' `[use]` names says so before it goes:
+/// the list would go on naming it, and every repo `omh init` sets up after
+/// would be told it is missing. The preview says it, so the screen's
+/// question does.
+#[test]
+fn rm_says_when_new_repos_are_seeded_with_the_entry() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md", "skills/other/SKILL.md"]);
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "[use]\nskills = [\"tdd\"]\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["--dry-run", "settings", "rm", "skills", "tdd"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("omh settings unuse skills tdd"), "{said}");
+    let out = sb.omh(&["--dry-run", "settings", "rm", "skills", "other"]);
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("unuse"),
+        "an entry the list does not name is not warned about"
     );
 }
 
@@ -4801,6 +5053,66 @@ fn init_seeds_the_repo_from_your_template_and_says_so() {
         !seeded.contains("rubbish"),
         "a key omh reads nothing from is not propagated into every repo you \
          ever start: {seeded}"
+    );
+}
+
+/// A new repo's lists are what your defaults come to, and a guard is in one
+/// only where somebody named it.
+///
+/// `init` copied the template's `[use]` as it stood, so a kind it did not list
+/// had no list in the repo — every hook, the guards among them, which refuse
+/// the agent's edits. The screen drew them as not taken. Ignored because
+/// `init` builds an image; `a_new_repo_gets_your_lists_your_exclusions_and_no_guard_unnamed`
+/// covers the rule without one.
+#[test]
+#[ignore]
+fn init_seeds_no_guard_nobody_named() {
+    let sb = real_sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md", "skills/review-diff/SKILL.md"]);
+    let hook = |name: &str, body: &str| {
+        let at = sb.home.join(".omh/hooks").join(format!("{name}.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    };
+    hook("mine", r#"{"on":"turn-end","run":"make check"}"#);
+    hook("other", r#"{"on":"turn-end","run":"make lint"}"#);
+    hook(
+        "my-guard",
+        r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+    );
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "[use]\nskills = [\"tdd\"]\n\n[unuse]\nhooks = [\"other\"]\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let seeded: toml::Table = sb.settings().parse().unwrap();
+    let list = |kind: &str| -> Option<Vec<String>> {
+        seeded.get("use")?.get(kind).map(|v| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_str().unwrap().to_string())
+                .collect()
+        })
+    };
+    assert_eq!(list("skills"), Some(vec!["tdd".to_string()]), "{seeded}");
+    assert_eq!(
+        list("hooks"),
+        Some(vec!["mine".to_string()]),
+        "every hook but the one left out, and no guard: {seeded}"
+    );
+    assert!(
+        !seeded.contains_key("unuse"),
+        "a repo has lists, not exclusions: {seeded}"
     );
 }
 
@@ -7948,7 +8260,12 @@ fn a_catalogue_entry_of_any_capability_is_not_a_setting() {
         ("mysubagent", "subagents"),
         ("myhook", "hooks"),
     ] {
-        for argv in [vec!["set", name, "on"], vec!["settings", "set", name, "on"]] {
+        // Each door names its own verb: a repo's list is `omh use`, what new
+        // repos take is `omh settings use`.
+        for (argv, verb) in [
+            (vec!["set", name, "on"], "omh use"),
+            (vec!["settings", "set", name, "on"], "omh settings use"),
+        ] {
             let out = sb.omh(&argv);
             let said = format!(
                 "{:?}\n{}{}",
@@ -7962,7 +8279,7 @@ fn a_catalogue_entry_of_any_capability_is_not_a_setting() {
                 argv.join(" ")
             );
             assert!(
-                said.contains(&format!("omh use {capability} {name}")),
+                said.contains(&format!("{verb} {capability} {name}")),
                 "the refusal spells the capability it found `{name}` in, or it                  is advice that does not work: {said}"
             );
         }
@@ -15469,6 +15786,26 @@ const EXERCISES: &[Exercise] = &[
     // A value omh cannot read: refused bare, so this is the run that writes.
     Exercise {
         argv: &["settings", "set", "--anyway", "persistence", "tmux"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // What new repos take: left out (which writes the rest as the list), taken
+    // back, and the list taken out so the kind follows the catalogue again.
+    Exercise {
+        argv: &["settings", "unuse", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "use", "skills", "review-diff"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    Exercise {
+        argv: &["settings", "use", "skills", "--all"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: false,

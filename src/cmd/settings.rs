@@ -35,25 +35,12 @@ pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
                 value: mine.get(k.name).cloned(),
             })
             .collect(),
-        // `[use]` and `[omh]` are seeded, so they are neither a default nor
-        // unread. `config::values` renders a table as `[name]`.
-        tables: mine
-            .keys()
-            .filter(|k| {
-                *k == &format!("[{}]", config::USE)
-                    || *k == &format!("[{}]", config::OMH)
-                    || *k == "[account]"
-            })
-            .cloned()
-            .collect(),
+        // `[use]`, `[unuse]` and `[omh]` seed a new repo, so they are neither a
+        // default nor unread. `config::values` renders a table as `[name]`.
+        tables: mine.keys().filter(|k| seeding_table(k)).cloned().collect(),
         unread: mine
             .iter()
-            .filter(|(k, _)| {
-                key::describes(k).is_none()
-                    && *k != &format!("[{}]", config::USE)
-                    && *k != &format!("[{}]", config::OMH)
-                    && *k != "[account]"
-            })
+            .filter(|(k, _)| key::describes(k).is_none() && !seeding_table(k))
             .map(|(k, v)| report::Setting {
                 key: k.clone(),
                 value: v.clone(),
@@ -62,6 +49,14 @@ pub(crate) fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
             .collect(),
     });
     Ok(())
+}
+
+/// A table of your defaults that seeds a new repo, as `config::values` names
+/// it: `[use]`, `[unuse]`, `[omh]`, `[account]`.
+pub(crate) fn seeding_table(name: &str) -> bool {
+    [config::USE, config::UNUSE, config::OMH, "account"]
+        .iter()
+        .any(|t| name == format!("[{t}]"))
 }
 
 /// What is effective in this checkout, and which file decided it.
@@ -210,6 +205,14 @@ pub(crate) fn key_layer(key: &str) -> config::Layer {
 pub(crate) struct Reach {
     layers: Vec<config::Layer>,
     why: Why,
+}
+
+impl Reach {
+    /// Your defaults alone — what `omh settings` writes, which seeds a repo
+    /// and decides nothing in one that exists.
+    pub(crate) fn is_your_defaults(&self) -> bool {
+        self.layers == [config::Layer::Personal]
+    }
 }
 
 /// What sent a write to its layers.
@@ -393,10 +396,14 @@ pub(crate) fn feature_forget(
             } else {
                 "feature-unset"
             },
-            if dropped.is_empty() {
-                format!("{feature} was not switched here")
-            } else {
-                format!("this checkout no longer switches {feature}")
+            match (dropped.is_empty(), reach.is_your_defaults()) {
+                (true, false) => format!("{feature} was not switched here"),
+                (false, false) => format!("this checkout no longer switches {feature}"),
+                (true, true) => format!("your defaults do not switch {feature}"),
+                (false, true) => format!(
+                    "your defaults no longer switch {feature} — the repos `omh init` sets \
+                     up after take omh's own"
+                ),
             },
         )
         .data(serde_json::json!({
@@ -408,8 +415,11 @@ pub(crate) fn feature_forget(
         return Err(e).with_context(|| format!("the {layer} layer still switches `{feature}`"));
     }
     // What is still deciding, if anything. `config::policy` cannot answer —
-    // it skips tables by design, so `[omh]` is invisible to it — and the
-    // personal layer is one no repo command writes but every read consults.
+    // it skips tables by design, so `[omh]` is invisible to it. Your defaults
+    // decide nothing in a repo, so there is nothing to say after them.
+    if reach.is_your_defaults() {
+        return Ok(());
+    }
     say_what_still_switches(paths, feature, ctx)
 }
 
@@ -479,18 +489,31 @@ pub(crate) enum Names {
     Neither,
 }
 
+/// The base manifest [`names`] and [`feature_switch`] answer by, one read for
+/// both: `~/.omh/base`, or — before the first `omh init` writes it — the
+/// binary's, which is what `init` installs. A home not set up yet is where
+/// your defaults are set first, and without this `omh settings set codegraph
+/// off` could not tell the feature from a setting and wrote a bare key nothing
+/// reads.
+fn base_manifest(paths: &Paths) -> Result<base::Manifest> {
+    match paths.base().try_exists() {
+        Ok(false) => base::Manifest::shipped(),
+        _ => base::Manifest::load_dir(&paths.base()),
+    }
+}
+
 pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
     if key::describes(name).is_some() {
         return Names::ASetting;
     }
     // **Reported and withdrawn, never fatal.** The manifest is consulted only
-    // to *rule out* a feature name, and a home where `omh init` has not run has
-    // none — which must not be how `omh unset <key>` starts failing, since that
-    // is the command a person runs to get a secret out of git. Propagating the
-    // error made an ordinary repo-local write depend on the health of a
-    // directory the user never mentioned, and the `Neither` arm below promises
-    // the opposite in as many words.
-    let manifest = match base::Manifest::load_dir(&paths.base()) {
+    // to *rule out* a feature name, and a base set omh cannot read must not be
+    // how `omh unset <key>` starts failing, since that is the command a person
+    // runs to get a secret out of git. Propagating the error made an ordinary
+    // repo-local write depend on the health of a directory the user never
+    // mentioned, and the `Neither` arm below promises the opposite in as many
+    // words. A home `omh init` has not set up is not one: [`base_manifest`].
+    let manifest = match base_manifest(paths) {
         Ok(m) => m,
         Err(e) => {
             ctx.warn(&format!(
@@ -650,8 +673,8 @@ pub(crate) fn no_legacy_write_over_a_name_omh_owns(
             "`{name}` is one of omh's features, not a setting — a bare key of \
              that name is read by nothing.\n  omh set {name} off"
         ),
-        Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(name, &feature)),
-        Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(name, cap)),
+        Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(name, &feature, true)),
+        Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(name, cap, true)),
         Names::ASetting | Names::Neither => Ok(()),
     }
 }
@@ -661,21 +684,37 @@ pub(crate) fn no_legacy_write_over_a_name_omh_owns(
 pub(crate) fn a_catalogue_entry_is_not_a_setting(
     name: &str,
     cap: adapter::Capability,
+    defaults: bool,
 ) -> anyhow::Error {
-    anyhow::anyhow!(
-        "`{name}` is one of your {cap}, not a setting — what a project takes \
-         from your catalogue is `omh use`.\n  omh use {cap} {name}\n  \
-         omh unuse {cap} {name}"
-    )
+    match defaults {
+        true => anyhow::anyhow!(
+            "`{name}` is one of your {cap}, not a setting — what new repos take from \
+             your catalogue is `omh settings use`.\n  omh settings use {cap} {name}\n  \
+             omh settings unuse {cap} {name}"
+        ),
+        false => anyhow::anyhow!(
+            "`{name}` is one of your {cap}, not a setting — what a project takes \
+             from your catalogue is `omh use`.\n  omh use {cap} {name}\n  \
+             omh unuse {cap} {name}"
+        ),
+    }
 }
 
 /// The grouping, said where somebody has just guessed at it.
 ///
 /// Kept beside `names` so the two orders stay visible together.
-pub(crate) fn an_entry_is_not_a_feature(name: &str, feature: &str) -> anyhow::Error {
+pub(crate) fn an_entry_is_not_a_feature(
+    name: &str,
+    feature: &str,
+    defaults: bool,
+) -> anyhow::Error {
+    let switch = match defaults {
+        true => format!("omh settings set {feature} off"),
+        false => format!("omh set {feature} off"),
+    };
     anyhow::anyhow!(
         "`{name}` is part of the `{feature}` feature, not a feature itself. \
-         A feature is all or nothing.\n  omh set {feature} off"
+         A feature is all or nothing.\n  {switch}"
     )
 }
 
@@ -1291,9 +1330,8 @@ pub(crate) fn rm(
                 "the `{name}` server is omh's own — the {feature} feature, which is \
                  switched off whole rather than taken apart. In a repo:\n  \
                  omh set {feature} off\n\
-                 and for every repo `omh init` sets up after, `[omh] {feature} = false` \
-                 in {}",
-                config::Layer::Personal.file(paths).display()
+                 and for every repo `omh init` sets up after:\n  \
+                 omh settings set {feature} off"
             );
         }
     }
@@ -1302,6 +1340,17 @@ pub(crate) fn rm(
         None => format!("the `{name}` server from {}", source.display()),
     };
 
+    // The list new repos are seeded from would go on naming it, and `omh init`
+    // would say it is missing in every repo after. Said before the question.
+    if config::list_in(paths, config::Layer::Personal, config::USE, cap)?
+        .is_some_and(|listed| listed.iter().any(|n| n == name))
+    {
+        ctx.warn(&format!(
+            "[use] in your defaults names {cap}/{name}, so the repos `omh init` sets up \
+             after would be told it is missing. To take it out of the list:\n  \
+             omh settings unuse {cap} {name}"
+        ));
+    }
     if dry_run {
         ctx.say(
             &report::Action::new("catalogue-entry-planned", format!("would remove {what}")).data(
@@ -1407,7 +1456,11 @@ fn find_entry(cap: adapter::Capability, name: &str, dir: &std::path::Path) -> Re
 
 /// The refusal for a name nothing in the catalogue answers to, in the words
 /// `omh use` gives the same mistake.
-fn no_such_entry(cap: adapter::Capability, name: &str, held: &[String]) -> anyhow::Error {
+pub(crate) fn no_such_entry(
+    cap: adapter::Capability,
+    name: &str,
+    held: &[String],
+) -> anyhow::Error {
     anyhow::anyhow!(
         "your catalogue has no {cap} called `{name}`.\n  {cap}: {}",
         if held.is_empty() {
@@ -1419,22 +1472,33 @@ fn no_such_entry(cap: adapter::Capability, name: &str, held: &[String]) -> anyho
 }
 
 /// The servers omh ships, by name, each with the feature it is part of.
+pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, String>> {
+    shipped_owned(adapter::Capability::Mcp)
+}
+
+/// What omh ships of one kind, by name, each with the feature it is part of.
 ///
 /// From the manifests in the binary, as [`shipped_hooks`] is from its hooks,
 /// rather than `~/.omh/base`: what omh owns is not a file that a stray or
 /// unreadable copy could make removable.
-pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, String>> {
-    let mut out = std::collections::BTreeMap::new();
+pub(crate) fn shipped_owned(
+    cap: adapter::Capability,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    Ok(base::Manifest::shipped()?
+        .entries
+        .into_iter()
+        .filter(|e| e.kind.capability() == cap)
+        .map(|e| (e.name, e.feature))
+        .collect())
+}
+
+/// omh's features, from the manifests in the binary — what `[omh]` switches.
+pub(crate) fn shipped_features() -> Result<std::collections::BTreeSet<String>> {
+    let mut out = std::collections::BTreeSet::new();
     for file in crate::bundled::Shipped::Base.files() {
         let manifest: base::Manifest = toml::from_str(file.contents)
             .with_context(|| format!("reading omh's own base/{}", file.name))?;
-        out.extend(
-            manifest
-                .entries
-                .into_iter()
-                .filter(|e| e.kind.capability() == adapter::Capability::Mcp)
-                .map(|e| (e.name, e.feature)),
-        );
+        out.extend(manifest.entries.into_iter().map(|e| e.feature));
     }
     Ok(out)
 }
@@ -1486,7 +1550,7 @@ pub(crate) fn feature_switch(
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    let manifest = base::Manifest::load_dir(&paths.base())?;
+    let manifest = base_manifest(paths)?;
     let features: std::collections::BTreeSet<&str> = manifest
         .entries
         .iter()
@@ -1503,7 +1567,11 @@ pub(crate) fn feature_switch(
         // The entry-name case is the interesting error: it is how somebody
         // discovers the grouping without reading the manifest.
         if let Some(entry) = manifest.entry(feature) {
-            return Err(an_entry_is_not_a_feature(feature, &entry.feature));
+            return Err(an_entry_is_not_a_feature(
+                feature,
+                &entry.feature,
+                reach.is_your_defaults(),
+            ));
         }
         anyhow::bail!(
             "`{feature}` is not one of omh's features ({}). \
@@ -1545,16 +1613,23 @@ pub(crate) fn feature_switch(
         written.push(config::write_feature(paths, *layer, feature, on)?);
     }
     let wrote = crate::cmd::catalogue::written_paths(&written);
+    let state = if on { "on" } else { "off" };
     let mut action = report::Action::new(
         if on { "feature-on" } else { "feature-off" },
-        format!("{feature} is {} here", if on { "on" } else { "off" }),
+        match reach.is_your_defaults() {
+            true => format!(
+                "{feature} is {state} for every repo `omh init` sets up after — a repo \
+                 that exists keeps its own"
+            ),
+            false => format!("{feature} is {state} here"),
+        },
     )
     .data(serde_json::json!({
         "feature": feature,
         "on": on,
         "paths": wrote,
     }));
-    if !on {
+    if !on && !reach.is_your_defaults() {
         action = action.note("nothing was uninstalled; the next repo gets it back");
     }
     for w in &written {

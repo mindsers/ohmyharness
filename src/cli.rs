@@ -696,6 +696,34 @@ pub(crate) enum SettingsCmd {
         /// Which setting to drop.
         key: String,
     },
+    /// Have the repos `omh init` sets up after take an entry of your catalogue.
+    ///
+    /// `omh use` for your defaults, in `default.toml`, which `omh init` writes
+    /// a new repo's lists from. A kind with no list takes every entry but the
+    /// guards and what you left out, so this takes one back off `[unuse]`; a
+    /// guard is taken only where a list names it, so using one writes the
+    /// kind as a list.
+    Use {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: String,
+        /// Which entry.
+        name: Option<String>,
+        /// Take the kind's list and what it leaves out away, so new repos
+        /// follow your catalogue for it again.
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+    },
+    /// Have the repos `omh init` sets up after leave an entry out.
+    ///
+    /// Off the kind's list where it has one; otherwise named in `[unuse]`, and
+    /// the kind goes on following the rest of your catalogue, an entry you add
+    /// later included.
+    Unuse {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: String,
+        /// Which entry to leave out.
+        name: String,
+    },
     /// Open your defaults, or one catalogue entry, in $EDITOR.
     Edit {
         /// One of rules, skills, mcp, commands, subagents, hooks. Without it,
@@ -1045,6 +1073,8 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
             None
             | Some(SettingsCmd::Set { .. })
             | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Use { .. })
+            | Some(SettingsCmd::Unuse { .. })
             | Some(SettingsCmd::Rm { .. })
             | Some(SettingsCmd::Mcp { .. }) => true,
         },
@@ -1121,6 +1151,8 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
             None
             | Some(SettingsCmd::Set { .. })
             | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Use { .. })
+            | Some(SettingsCmd::Unuse { .. })
             | Some(SettingsCmd::Rm { .. })
             | Some(SettingsCmd::Mcp { .. }) => true,
         },

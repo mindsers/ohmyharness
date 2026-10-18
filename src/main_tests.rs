@@ -1362,8 +1362,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // − 2 repeated examples; the summary block became a usage line per entry
         // + `omh settings rm`'s console example; its synopsis line replaced
         // the server's own `rm`. + the header of the settings screen's drawing,
-        // + the command its status line names.
-        ("docs/src/content/docs/reference/commands.md", 148),
+        // + the command its status line names. + `omh settings set <feature>`,
+        // `use`, `unuse` and `use --all` in the synopsis.
+        ("docs/src/content/docs/reference/commands.md", 152),
         // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
         // the `--anyway` line it prints, and the run with it.
         ("docs/src/content/docs/reference/configuration.md", 50),
@@ -1921,15 +1922,19 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
     // out is loud; a file appearing is loud; a shape quietly leaving one
     // file while another gains lines is loud, and no floor can see that.
     let expected: std::collections::BTreeMap<String, usize> = [
-        // Each `remove` says `omh set <feature> off`, and `omh init` for the
-        // every-new-repo route — which was `omh settings rm mcp <server>`
-        // until omh's own servers could no longer be removed.
-        ("base/2026.08.toml", 19),
+        // Each `remove` says `omh set <feature> off`, and `omh settings set
+        // <feature> off` with the `omh init` it seeds for the every-new-repo
+        // route — which was `omh settings rm mcp <server>` until omh's own
+        // servers could no longer be removed.
+        ("base/2026.08.toml", 27),
         ("src/auth.rs", 7),
         ("src/base.rs", 3),
         ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences
         ("src/cmd/auth.rs", 3),
-        ("src/cmd/catalogue.rs", 12),
+        // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as
+        // the way back from a freeze, and `omh settings set <feature> off` with
+        // its `omh init` for a name omh owns.
+        ("src/cmd/catalogue.rs", 17),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         ("src/cmd/init.rs", 8),     // + the `omh upgrade` redirect when a repo is already set up
         ("src/cmd/upgrade.rs", 1),  // the `omh init` redirect when a repo is not set up
@@ -1946,8 +1951,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // this scan is for.
         ("src/cmd/inspect.rs", 5),
         // `mcp add`'s refusals: `omh set <feature> off` and `omh upgrade` for
-        // a server omh ships, and the `--replace` line for one of yours.
-        ("src/cmd/mcp.rs", 3),
+        // a server omh ships, and the `--replace` line for one of yours. +
+        // `omh settings set <feature> off` and its `omh init`, for new repos.
+        ("src/cmd/mcp.rs", 5),
         ("src/cmd/memory.rs", 1),
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
@@ -1962,17 +1968,26 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // server omh ships. + `omh settings rm <capability> <name>`, in the
         // refusal to edit a link to nothing. + the `--anyway` line for each of
         // `set` and `settings set`, under a value omh cannot read. +
-        // `omh settings edit`, where unset is given a table.
-        ("src/cmd/settings.rs", 20),
+        // `omh settings edit`, where unset is given a table. + `omh settings set
+        // <feature> off` under the server refusal and the part-of-a-feature
+        // refusal, and `omh init` in both answers a switch in your defaults
+        // gives. + `omh settings use`/`unuse` where `settings set` is given an
+        // entry of your catalogue. + `omh init` and `omh settings unuse` where
+        // rm takes an entry your defaults' `[use]` names.
+        ("src/cmd/settings.rs", 29),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
         // and in the error when the screen cannot come back after `$EDITOR`,
-        // `omh auth <harness> -n <name>` in the account's hint, and
-        // `omh set <feature> off` beside a server a feature owns. +
+        // and `omh auth <harness> -n <name>` in the account's hint. +
         // `omh auth <harness>` where no login is captured, and `omh upgrade`
-        // after an edit to a hook omh ships.
-        ("src/cmd/settings_tui.rs", 9),
+        // after an edit to a hook omh ships. + `omh init` and `omh set
+        // <feature> off` in a feature row's about, and `omh init` in the
+        // `[use]` row's about and its warning. + `omh init` in the `[unuse]`
+        // row's about, and `omh settings set <feature>` on a hook of yours
+        // named as one of omh's own. + `omh init` refusing, twice, in a
+        // list's warning — a kind that is not one, a value that is not a list.
+        ("src/cmd/settings_tui.rs", 16),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
@@ -2030,7 +2045,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // The screen's header, `omh settings`; `$ omh <line>` beside what the
         // command it ran said; and `omh settings edit <capability> <name>` in
         // the box that names a new entry.
-        ("src/tui.rs", 3),
+        // + `omh init` in help's line for space.
+        ("src/tui.rs", 4),
         ("src/why.rs", 3),
     ]
     .into_iter()
@@ -5072,6 +5088,103 @@ fn write_if_absent_reports_only_a_write_it_made() {
     );
 }
 
+/// What a new repo gets, from your defaults, as `omh init` writes it: `[use]`'s
+/// list where it has one — guards it names included — and otherwise every
+/// entry but the guards and what `[unuse]` leaves out.
+///
+/// `init` copied a template's `[use]` as it stood, so a kind it did not list
+/// had no list in the repo, which is every entry — guards too, which refuse the
+/// agent's edits. A guard is seeded only where somebody named it.
+#[test]
+fn a_new_repo_gets_your_lists_your_exclusions_and_no_guard_unnamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(paths.repo.join(".git")).unwrap();
+    let hook = |name: &str, body: &str| {
+        let at = paths.root.join("hooks").join(format!("{name}.json"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, body).unwrap();
+    };
+    hook("mine", r#"{"on":"turn-end","run":"make check"}"#);
+    hook("other", r#"{"on":"turn-end","run":"make lint"}"#);
+    hook(
+        "my-guard",
+        r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+    );
+    for skill in ["tdd", "review-diff"] {
+        let at = paths.root.join("skills").join(skill).join("SKILL.md");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, "---\nname: x\ndescription: y\n---\n").unwrap();
+    }
+    cmd::init::install_bundled(&paths.base(), bundled::Shipped::Base, &out::Ctx::plain()).unwrap();
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "[use]\nskills = [\"tdd\"]\n\n[unuse]\nhooks = [\"mine\"]\n",
+    )
+    .unwrap();
+    let lists = cmd::catalogue::new_repo_lists(&paths).unwrap();
+    let of = |cap| lists.get(&cap).cloned().unwrap_or_default();
+    assert_eq!(of(adapter::Capability::Skills), ["tdd"], "a list is a list");
+    assert_eq!(
+        of(adapter::Capability::Hooks),
+        ["other"],
+        "every hook but the one left out, and never a guard nobody named"
+    );
+    // A guard named in a list is seeded: somebody chose it.
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "[use]\nhooks = [\"my-guard\", \"mine\"]\n",
+    )
+    .unwrap();
+    let lists = cmd::catalogue::new_repo_lists(&paths).unwrap();
+    assert_eq!(
+        lists
+            .get(&adapter::Capability::Hooks)
+            .cloned()
+            .unwrap_or_default(),
+        ["my-guard", "mine"]
+    );
+}
+
+/// A selection in your defaults omh cannot read is refused before `init`
+/// writes anything, by name.
+///
+/// The template's `[use]` was copied into the repo, where the launcher read
+/// it. Resolved into lists instead, a kind that is not one — `skill` for
+/// `skills` — was nobody's to read, and a value that is not a list failed
+/// `init` after it had already written half a repo.
+#[test]
+fn a_selection_your_defaults_cannot_mean_is_refused_before_init_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let refused = |template: &str| {
+        std::fs::write(config::Layer::Personal.file(&paths), template).unwrap();
+        format!(
+            "{:#}",
+            cmd::init::seed_settings(&paths).expect_err(template)
+        )
+    };
+    let said = refused("[use]\nskill = [\"tdd\"]\n");
+    assert!(
+        said.contains("[use] skill") && said.contains("`skills`"),
+        "{said}"
+    );
+    let said = refused("[unuse]\nhooks = \"mine\"\n");
+    assert!(
+        said.contains("[unuse] hooks") && said.contains("not a list"),
+        "{said}"
+    );
+    let said = refused("[use]\nskills = [1]\n");
+    assert!(said.contains("[use] skills"), "{said}");
+}
+
 /// The template hands on what omh reads, and refuses what it must not.
 ///
 /// `init` builds an image, so the end-to-end half of this runs only where a
@@ -5091,7 +5204,8 @@ fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
     std::fs::write(
         &template,
         "idle_timeout = \"45m\"\nrubbish = \"ignored\"\n\n\
-         [use]\nskills = [\"tdd\"]\n\n[omh]\ncodegraph = false\n",
+         [use]\nskills = [\"tdd\"]\n\n[unuse]\nhooks = [\"lint\"]\n\n\
+         [omh]\ncodegraph = false\n",
     )
     .unwrap();
     let (body, took) = cmd::init::seed_settings(&paths).unwrap();
@@ -5102,9 +5216,12 @@ fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
         "and one it does not is left behind rather than propagated into \
          every repo you ever start: {body}"
     );
+    // The selection travels as what it comes to: `init` writes every kind's
+    // list from it once the file is there (`new_repo_lists`). Copied as it
+    // stood, a kind it did not list was every entry in the repo, guards too.
     assert!(
-        body.contains("[use]") && body.contains("tdd"),
-        "the selection travels: {body}"
+        !body.contains("[use]") && !body.contains("[unuse]"),
+        "the selection is not copied as it stood: {body}"
     );
     // Parsed, not grepped. The old assertion was satisfied by the
     // commented-out `# [omh]` placeholder the header appends when no

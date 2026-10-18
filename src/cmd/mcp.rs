@@ -35,7 +35,9 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                 anyhow::bail!(
                     "the `{name}` server is omh's own — the {feature} feature, and \
                      `omh upgrade` puts its definition back. To switch it off in a repo:\n  \
-                     omh set {feature} off"
+                     omh set {feature} off\n\
+                     and for every repo `omh init` sets up after:\n  \
+                     omh settings set {feature} off"
                 );
             }
             // Written over in silence, a second `linear` took the first one's

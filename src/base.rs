@@ -292,6 +292,25 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// The newest manifest in the binary, by [`Self::load_dir`]'s rule — what
+    /// `omh init` installs, for whatever asks before it has.
+    pub fn shipped() -> Result<Self> {
+        let mut newest: Option<((u32, u32), Self)> = None;
+        for file in crate::bundled::Shipped::Base.files() {
+            let manifest: Self = toml::from_str(file.contents)
+                .with_context(|| format!("reading omh's own base/{}", file.name))?;
+            let Some(version) = parse_ym(&manifest.version) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(best, _)| version > *best) {
+                newest = Some((version, manifest));
+            }
+        }
+        newest
+            .map(|(_, m)| m)
+            .context("omh carries no usable base manifest")
+    }
+
     /// Which manifest answered, and at what version.
     ///
     /// Four separate wrong answers reduced to `omh why` never saying this.

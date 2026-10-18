@@ -63,6 +63,7 @@ fn model() -> Model {
                 problem: None,
                 import: Import::Not("your defaults are typed, not imported".into()),
                 about: Vec::new(),
+                seeds: None,
             },
             Section {
                 title: "skills",
@@ -80,6 +81,7 @@ fn model() -> Model {
                 problem: None,
                 import: Import::From(vec!["claude".into(), "codex".into()]),
                 about: Vec::new(),
+                seeds: None,
             },
             Section {
                 title: "servers",
@@ -88,6 +90,7 @@ fn model() -> Model {
                 problem: None,
                 import: Import::From(vec![]),
                 about: Vec::new(),
+                seeds: None,
             },
             Section {
                 title: "hooks",
@@ -96,6 +99,7 @@ fn model() -> Model {
                 problem: Some("could not read ~/.omh/hooks: permission denied".into()),
                 import: Import::Not("a hook lands in a repo".into()),
                 about: Vec::new(),
+                seeds: None,
             },
         ],
     }
@@ -1319,6 +1323,65 @@ fn a_badge_is_not_in_the_accent() {
         })
         .expect("the badge is drawn");
     assert_ne!(buffer[(x, y)].fg, Color::Cyan, "the badge is in the accent");
+}
+
+/// A group's heading has a line above it whenever rows come before it, not
+/// only when another group did: `FEATURES` sat under `[use]` with no gap.
+#[test]
+fn a_heading_after_rows_has_room_above_it() {
+    let mut model = model();
+    model.sections[0].rows.push(Row {
+        group: Some("features".into()),
+        ..row("codegraph")
+    });
+    let app = App::new(model, true);
+    let screen = drawn_at(&app, 120, 30);
+    let lines: Vec<&str> = screen.lines().collect();
+    let at = lines.iter().position(|l| l.contains("FEATURES")).unwrap();
+    let above = lines[at - 1].split('│').nth(1).unwrap_or_default();
+    assert!(above.trim().is_empty(), "{screen}");
+}
+
+/// `space` flips whether the repos `omh init` sets up after get a row, by the
+/// act the row carries; the row's `●`/`○` and the page's heading say which way
+/// it is now. A row with nothing to flip takes no `space`.
+#[test]
+fn space_flips_what_new_repos_get() {
+    let mut model = model();
+    let unuse = Act::Unuse {
+        capability: "skills".into(),
+        name: "keep".into(),
+    };
+    model.sections[1].rows[0].seeded = Some(true);
+    model.sections[1].rows[0].toggle = Some(unuse.clone());
+    model.sections[1].rows[1].seeded = Some(false);
+    model.sections[1].rows[1].toggle = Some(Act::Use {
+        capability: "skills".into(),
+        name: "review-diff".into(),
+    });
+    model.sections[1].seeds = Some("new repos get 1 of 2".into());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    let screen = drawn_at(&app, 120, 30);
+    assert!(screen.contains("new repos get 1 of 2"), "{screen}");
+    let line = |name: &str| {
+        screen
+            .lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(line("keep what works").contains('●'), "{screen}");
+    assert!(line("read a diff").contains('○'), "{screen}");
+    let footer = screen.lines().last().unwrap_or_default();
+    assert!(footer.contains("space"), "{footer}");
+    assert_eq!(app.key(press(' ')), Next::Run(unuse));
+    app.key(press('1'));
+    assert_eq!(
+        app.key(press(' ')),
+        Next::Stay,
+        "a default has nothing to flip"
+    );
 }
 
 /// The row an act changed is marked once the page is read again, until the

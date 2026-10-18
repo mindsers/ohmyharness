@@ -548,7 +548,8 @@ compose in filename order, which is the fallback rather than the plan.
 **It layers like everything else in these files: later wins, per capability,
 wholesale.** A list in `settings.local.toml` replaces the committed list for
 that capability rather than adding to it. Your `~/.omh/default.toml` can carry a
-default selection, which `omh init` seeds into a new repo.
+default selection — a `[use]` list, or an `[unuse]` list of what a kind with no
+list leaves out — which `omh init` writes into a new repo as its lists.
 
 <details>
 <summary>Why a list is replaced rather than merged</summary>
@@ -630,7 +631,7 @@ There are three ways to take a feature away, at different reaches:
 |---|---|---|
 | switch it off in this repo | `omh set codegraph off` | this repo — the server, its hooks and its rules section together |
 | hand the decision back to omh's own default | `omh unset codegraph` | this repo |
-| switch it off in every repo `init` sets up after | `omh settings edit`, and `[omh] codegraph = false` in it | every new repo |
+| switch it off in every repo `init` sets up after | `omh settings set codegraph off` | every new repo |
 
 **Feature names only.** `graph-first = false` is refused, naming the feature it
 belongs to — keeping the graph while dropping one of the things that make it
@@ -1489,7 +1490,8 @@ hook that blocks the call rather than advising around it. omh ships two:
 
 **Guards are never in the default expansion.** `omh init` and `omh use --all`
 turn on every other applicable catalogue hook, but never a guard — the same
-way `graph-first` etc. are never a wall. Turn one on by name:
+way `graph-first` etc. are never a wall. A new repo gets one only where your
+defaults' `[use]` names it. Turn one on by name:
 
 ```console
 $ omh use hooks tdd-guard
