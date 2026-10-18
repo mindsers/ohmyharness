@@ -278,11 +278,13 @@ pub fn validate_entry_name(name: &str, cap: Capability, whence: &Path) -> Result
         .chars()
         .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
     {
+        // Escaped, the path too: it ends in the name, and printed raw the
+        // message would break where the name does.
         bail!(
             "{}: `{}` is not a `{cap}` entry — it holds a line break or a \
              control character, and a name is one line of plain text. Rename \
              the file.",
-            whence.display(),
+            whence.display().to_string().escape_debug(),
             name.escape_debug()
         );
     }

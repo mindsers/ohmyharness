@@ -3581,8 +3581,12 @@ template = 'return { block: true, reason: {{text}} }'
         .expect_err("a name that breaks a line must not render");
         let said = format!("{err:#}");
         assert!(
-            said.contains("lint"),
+            said.contains("lint\\nomh_planted_suffix.json"),
             "the refusal names the file it refused: {said}"
+        );
+        assert!(
+            !said.contains('\n'),
+            "the refusal breaks where the name does: {said}"
         );
     }
 
