@@ -441,6 +441,7 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
         Act::Move { to, value, .. } => s(&["settings", "set", "--", to, value]),
         Act::Use { capability, name } => s(&["settings", "use", "--", capability, name]),
         Act::Unuse { capability, name } => s(&["settings", "unuse", "--", capability, name]),
+        Act::UseAll { capability } => s(&["settings", "use", "--all", "--", capability]),
         Act::Unset { key } => s(&["settings", "unset", "--", key]),
         Act::EditDefaults => s(&["settings", "edit"]),
         Act::Edit { capability, name } => {
@@ -666,6 +667,11 @@ fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
             return;
         }
     };
+    // The way back to following your catalogue, where new repos do not: once
+    // a guard had made hooks a list, nothing on the screen led back.
+    section.follow = (now.listed || !now.left_out.is_empty()).then(|| Act::UseAll {
+        capability: cap.key().to_string(),
+    });
     // A file of yours named as one of omh's own is its feature's: `use`
     // refuses the name, so the row takes no `space` and is not counted.
     let owned = match settings::shipped_owned(cap) {
@@ -912,6 +918,7 @@ fn section(page: Page, title: &'static str) -> Section {
         import: Import::From(Vec::new()),
         about: Vec::new(),
         seeds: None,
+        follow: None,
     }
 }
 
@@ -1466,6 +1473,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A kind new repos do not follow your catalogue for — a list, or what
+    /// `[unuse]` leaves out — has the act that makes them follow it again,
+    /// `omh settings use <kind> --all`: once a guard had made hooks a list,
+    /// nothing on the screen led back.
+    #[test]
+    fn a_kind_off_your_catalogue_has_the_way_back() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("skills/tdd/SKILL.md"),
+            "---\nname: tdd\ndescription: x\n---\n",
+        );
+        write(
+            &paths.root.join("hooks/mine.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        write(&paths.root.join("rules/house.md"), "# house\n");
+        write(
+            &paths.root.join("default.toml"),
+            "[use]\nhooks = [\"mine\"]\n\n[unuse]\nskills = [\"tdd\"]\n",
+        );
+        let model = model(&paths);
+        let all = |capability: &str| {
+            Some(Act::UseAll {
+                capability: capability.into(),
+            })
+        };
+        assert_eq!(page(&model, "hooks").follow, all("hooks"));
+        assert_eq!(page(&model, "skills").follow, all("skills"));
+        assert_eq!(page(&model, "rules").follow, None, "it follows already");
+        let mut line = vec!["omh".to_string()];
+        line.extend(argv(&Act::UseAll {
+            capability: "hooks".into(),
+        }));
+        assert!(matches!(
+            Cli::try_parse_from(&line).unwrap().cmd,
+            Cmd::Settings { cmd: Some(SettingsCmd::Use { capability, name: None, all: true }) }
+                if capability == "hooks"
+        ));
     }
 
     /// Each row says how far a change to it goes, which is not "new repos"

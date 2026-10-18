@@ -2177,6 +2177,7 @@ pages are one line along the top.
 | `i` | import this kind from a harness whose adapter says where it keeps them — the pick says where each reads, and when nothing is there |
 | `space` | whether the repos `omh init` sets up after get the entry: `●` they do, `○` they do not |
 | `/` | search every page by name, description or value — the rail counts what each holds; `esc` takes it off |
+| `A` | on a page new repos do not take whole — a list, or entries left out — have them take all of it again: `omh settings use <kind> --all` |
 | `u` | undo the last change that has an exact inverse: a value set back, an unset put back, a `space` flipped back — not one that wrote a guard's kind as a list, or took a rule off the middle of its list |
 | `?` | every key, on the screen — `j` `k` scroll it where it is cut, and `esc`, `q` or `?` close it |
 | `ctrl-l` | read your catalogue again, for a file changed outside the screen |

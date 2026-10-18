@@ -64,6 +64,7 @@ fn model() -> Model {
                 import: Import::Not("your defaults are typed, not imported".into()),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
             Section {
                 title: "skills",
@@ -93,6 +94,7 @@ fn model() -> Model {
                 ]),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
             Section {
                 title: "servers",
@@ -102,6 +104,7 @@ fn model() -> Model {
                 import: Import::From(vec![]),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
             Section {
                 title: "hooks",
@@ -111,6 +114,7 @@ fn model() -> Model {
                 import: Import::Not("a hook lands in a repo".into()),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
         ],
     }
@@ -1878,6 +1882,40 @@ fn the_rail_s_marks_are_in_one_column() {
     let defaults = at("Defaults", '!');
     assert_eq!(at("Skills", '!'), defaults, "{screen}");
     assert_eq!(at("Hooks", '✗'), defaults, "{screen}");
+}
+
+/// A page new repos do not follow your catalogue on offers the way back, on
+/// `A`; and `u` with nothing to undo says so, where it did nothing at all.
+#[test]
+fn a_page_off_your_catalogue_offers_the_way_back() {
+    let mut model = model();
+    let follow = Act::UseAll {
+        capability: "skills".into(),
+    };
+    model.sections[1].follow = Some(follow.clone());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    let footer = drawn_at(&app, 160, 30)
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .to_string();
+    assert!(footer.contains("A all again"), "{footer}");
+    assert_eq!(app.key(press('A')), Next::Run(follow));
+    app.report(
+        "settings use --all -- skills".into(),
+        true,
+        "new repos take all your skills again",
+        "",
+    );
+    assert_eq!(app.key(press('u')), Next::Stay);
+    assert!(drawn(&app).contains("nothing to undo"), "{}", drawn(&app));
+    app.key(press('1'));
+    assert_eq!(
+        app.key(press('A')),
+        Next::Stay,
+        "a page that follows takes no A"
+    );
 }
 
 /// `space` flips whether the repos `omh init` sets up after get a row, by the

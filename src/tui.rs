@@ -58,6 +58,9 @@ pub struct Section {
     pub about: Vec<String>,
     /// How much of the page new repos get: "new repos get all", "… 1 of 4".
     pub seeds: Option<String>,
+    /// What has new repos follow your catalogue for this kind again, where
+    /// they do not — worked out by the caller, as a row's toggle is.
+    pub follow: Option<Act>,
 }
 
 /// Which kind of page, by what each key does on it.
@@ -205,6 +208,11 @@ pub enum Act {
         capability: String,
         name: String,
     },
+    /// Have them follow your catalogue for a kind again: its list and what
+    /// it leaves out taken away.
+    UseAll {
+        capability: String,
+    },
     /// A key nothing reads, its value moved to the key it was meant to be:
     /// that one set, this one unset.
     Move {
@@ -225,7 +233,9 @@ impl Act {
             Act::Use { name, .. } | Act::Unuse { name, .. } => Some(name.clone()),
             Act::Move { to, .. } => Some(to.clone()),
             Act::AddServer { name, .. } => Some(name.clone()),
-            Act::EditDefaults | Act::Remove { .. } | Act::Import { .. } => None,
+            Act::EditDefaults | Act::Remove { .. } | Act::Import { .. } | Act::UseAll { .. } => {
+                None
+            }
         }
     }
 }
@@ -700,11 +710,13 @@ impl App {
                 to: from.clone(),
                 value: value.clone(),
             }),
+            // Taking a list away has no one command that puts it back.
             Act::EditDefaults
             | Act::Edit { .. }
             | Act::Remove { .. }
             | Act::AddServer { .. }
-            | Act::Import { .. } => None,
+            | Act::Import { .. }
+            | Act::UseAll { .. } => None,
         }
     }
 
@@ -743,8 +755,14 @@ impl App {
                 self.rows[self.at] = 0;
             }
             KeyCode::Char('?') => self.modal = Some(Modal::Help { scroll: 0 }),
-            KeyCode::Char('u') => {
-                if let Some(act) = self.undo.take() {
+            KeyCode::Char('u') => match self.undo.take() {
+                Some(act) => return Next::Run(act),
+                // Said, where it did nothing at all: the last change may have
+                // been one no one command puts back.
+                None => self.note("nothing to undo"),
+            },
+            KeyCode::Char('A') => {
+                if let Some(act) = self.section().and_then(|s| s.follow.clone()) {
                     return Next::Run(act);
                 }
             }
@@ -2227,6 +2245,9 @@ impl App {
                 }
             }
         }
+        if self.section().is_some_and(|s| s.follow.is_some()) {
+            keys.push(("A", "all again"));
+        }
         keys.extend([("/", "filter"), ("⇥", "page"), ("↑↓", "move")]);
         keys
     }
@@ -2478,6 +2499,7 @@ impl App {
                     ("d", "unset a default · remove an entry, after asking"),
                     ("i", "import from a harness"),
                     ("space", "whether the repos `omh init` sets up after get it"),
+                    ("A", "new repos take the whole page again"),
                     ("u", "undo the last change"),
                     ("/", "search every page — esc takes it off"),
                     ("ctrl-l", "read your catalogue again"),
