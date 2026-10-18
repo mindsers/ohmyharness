@@ -770,6 +770,12 @@ fn hooks_row(paths: &crate::profile::Paths) -> Outcome {
             continue;
         }
         let name = path.file_stem().unwrap_or_default().to_string_lossy();
+        // The rule `render::merge_hooks` refuses the launch on, so this row is
+        // not green above a launch that dies on the same file.
+        if let Err(e) = crate::selection::validate_entry_name(&name, Capability::Hooks, &path) {
+            broken.push(format!("{}: {e:#}", name.escape_debug()));
+            continue;
+        }
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
                 if let Err(e) = crate::hook::Hook::parse(&raw, &path.display().to_string()) {
@@ -5064,5 +5070,20 @@ mod tests {
         let hooks = rows.iter().find(|r| r.name == "repo hooks").unwrap();
         assert!(!hooks.ok, "{rows:?}");
         assert!(hooks.detail.contains("broken"), "{}", hooks.detail);
+    }
+
+    /// A launch refuses a hook file whose name breaks a line, so this row is
+    /// red over it rather than green above a launch that dies.
+    #[test]
+    fn a_repo_hook_whose_name_breaks_a_line_is_a_red_row() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/hooks/lint\ncheck.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let rows = audit(&paths);
+        let hooks = rows.iter().find(|r| r.name == "repo hooks").unwrap();
+        assert!(!hooks.ok, "{rows:?}");
+        assert!(hooks.detail.contains("line break"), "{}", hooks.detail);
     }
 }

@@ -271,6 +271,21 @@ pub fn validate_entry_name(name: &str, cap: Capability, whence: &Path) -> Result
             whence.display()
         );
     }
+    // One line of text. A hook's name labels its handler in the JavaScript
+    // omh generates, where LF, CR, U+2028 and U+2029 all end a `//` comment,
+    // and the rest of the name became code.
+    if name
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    {
+        bail!(
+            "{}: `{}` is not a `{cap}` entry — it holds a line break or a \
+             control character, and a name is one line of plain text. Rename \
+             the file.",
+            whence.display(),
+            name.escape_debug()
+        );
+    }
     Ok(())
 }
 

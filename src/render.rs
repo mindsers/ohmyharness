@@ -554,6 +554,12 @@ pub fn merge_hooks(
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
+                // The stem is the hook's name from here on — in a `[use]` list,
+                // in the ledger, and labelling its handler in a generated
+                // module — so it is held to the rule every other name is, here
+                // where it is first read. A line break in it ended that label's
+                // comment and turned the rest of the name into code.
+                crate::selection::validate_entry_name(&name, Capability::Hooks, &path)?;
                 // A manifest name is omh's, on or off — an error naming both
                 // rather than an override. A repo that could replace
                 // `graph-refresh` could make the graph lie while looking
@@ -969,7 +975,8 @@ fn omp_one_hook(
     // hold its result. opencode needs both because its harness gives one
     // handler per moment and omh has to share it; omp does not.
     let mut b = format!(
-        "  // {name}\n  pi.on({:?}, async (event, ctx) => {{\n",
+        "  // {}\n  pi.on({:?}, async (event, ctx) => {{\n",
+        label(name),
         wired.event
     );
     if !wired.tools.is_empty() {
@@ -1106,7 +1113,7 @@ fn one_hook(
     // `return`, so a hook whose tool guard did not match would leave the whole
     // handler and cancel every hook after it — `git-unavailable` narrowing to
     // `bash` silently cancelled the rest on every call that was not bash.
-    let mut b = format!("    // {name}\n    await (async () => {{\n");
+    let mut b = format!("    // {}\n    await (async () => {{\n", label(name));
     // The catch-all fires for everything on the bus, so the type test is what
     // stops `graph-refresh` re-indexing on every message part.
     if let Slot::Bus { ty } = slot {
@@ -1236,8 +1243,32 @@ fn log_call(log: Option<&str>, name: &str, decision: ledger::Decision) -> String
 /// JSON string syntax is a subset of JavaScript's, and hand-rolling the escapes
 /// for a hook body — which holds quotes, backslashes and newlines by design —
 /// is how a generated program stops parsing.
+///
+/// U+2028 and U+2029 are escaped too. `serde_json` leaves them raw, which is
+/// legal inside a string literal since ES2019 — but they end a line anywhere
+/// else, so the literal is safe wherever it lands.
 fn js(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+    serde_json::to_string(s)
+        .unwrap_or_else(|_| "\"\"".into())
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// A hook's name as the `//` comment labelling its handler.
+///
+/// As written when it is one plain line — which every name `merge_hooks` lets
+/// through is — and as its escaped literal otherwise, so no name, however it
+/// reached the renderer, can end the comment and leave the rest of itself on a
+/// line of its own as code.
+fn label(name: &str) -> String {
+    if name
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    {
+        js(name)
+    } else {
+        name.to_string()
+    }
 }
 
 /// opencode's module shape, emitted after [`SHELL_BRIDGE`].
