@@ -740,9 +740,11 @@ pub fn render(
         // The bool marks a `fields-by-tool` override — irrelevant here: a jq
         // path is a complete expression whichever map it came from, unlike
         // the JS renderers' `event.input?.SUFFIX` template.
+        // Exported, as the plugin renderers' `env` is: a `run` that calls a
+        // script reading `$OMH_TOOL_FILE` reads the same value on every harness.
         for (field, expr, _) in &fields {
             command.push_str(&format!(
-                "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
+                "{0}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); export {0}; ",
                 field.var()
             ));
             if *field == Field::ToolFile {
@@ -763,7 +765,9 @@ pub fn render(
         ..
     } = &hook.action
     {
-        command.push_str(&format!("{CAPTURE_VAR}=$(\n{capture}\n); "));
+        command.push_str(&format!(
+            "{CAPTURE_VAR}=$(\n{capture}\n); export {CAPTURE_VAR}; "
+        ));
     }
     if let Some(when) = &hook.when {
         let silent = match log {
