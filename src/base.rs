@@ -2350,6 +2350,30 @@ command = "c"
             "  git status",
             "cd /work\ngit push origin main",
         ];
+        // The graph hooks call the indexer, so the indexer they find is a
+        // stand-in that writes down what it was asked — first on PATH, under a
+        // HOME of its own. Run with the host's PATH, each of these spawns ran
+        // the developer's real `codebase-memory-mcp` against their own cache
+        // and their running graph daemon.
+        let scratch = tempfile::tempdir().unwrap();
+        let stand_ins = scratch.path().join("bin");
+        std::fs::create_dir_all(&stand_ins).unwrap();
+        let asked = scratch.path().join("asked");
+        let indexer = stand_ins.join("codebase-memory-mcp");
+        std::fs::write(
+            &indexer,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", asked.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&indexer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths(
+            std::iter::once(stand_ins.clone())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        )
+        .unwrap();
         for ((name, r), command) in all_rendered()
             .into_iter()
             .flat_map(|h| shapes.iter().map(move |c| (h.clone(), *c)))
@@ -2417,6 +2441,13 @@ command = "c"
                 "{name} refuses `{command}`, and git is the agent's now: {said}"
             );
         }
+        let reached = std::fs::read_to_string(&asked).unwrap_or_default();
+        assert!(
+            !reached.is_empty(),
+            "the graph hooks ran an indexer that was not this test's stand-in — \
+             the host's own, against the developer's cache and daemon"
+        );
+        let _ = &path;
     }
 
     /// The other half, and the one a hook cannot reach: what the agent is told
