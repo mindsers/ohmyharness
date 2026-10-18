@@ -1831,8 +1831,11 @@ fn hook_names(
 /// renders, not what the layers declare.
 ///
 /// A server whose feature is off here is deliberately left out of that
-/// document. Demanding it makes `omh doctor` fail forever and blame the
-/// harness for obeying, which is the opposite of what this command is for.
+/// document, and so is one `[use] mcp` does not name — the same two retains
+/// `render` makes, in the same order. Demanding either makes `omh doctor` fail
+/// forever and blame the harness for obeying, which is the opposite of what
+/// this command is for. The second was missing until a repo whose `init`
+/// wrote `mcp = []` added a server and every doctor run went red over it.
 ///
 /// **A layer omh could not parse is an error, not an empty expectation.** This
 /// ended in `.unwrap_or_default()`, which spelled "every server is switched
@@ -1844,6 +1847,7 @@ fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Resu
     Ok(crate::render::parse_layers(sources)?
         .into_keys()
         .filter(|name| !repo.disabled_servers.contains(name))
+        .filter(|name| repo.selection.allows(Capability::Mcp, name))
         .collect())
 }
 
@@ -3908,6 +3912,63 @@ mod tests {
             Expect::Entries(vec![]),
             "the only skill in this profile is graphify, and this repo did not name it"
         );
+    }
+
+    /// A server this repo did not select is deliberately absent from the
+    /// document the harness is given — `render` drops it with the same two
+    /// retains it uses for a switched-off feature — so a check demanding it
+    /// fails forever and blames the harness for obeying.
+    ///
+    /// The case above carried across to directories and not to servers. It is
+    /// the ordinary configuration, not an edge: `omh init` writes `mcp = []`
+    /// when the catalogue holds only omh's own servers, so the first
+    /// `omh settings mcp add` afterwards made every `omh doctor` in that repo
+    /// fail on two rows, `mcp` and `mcp-loaded`, both `missing: linear`.
+    #[test]
+    fn a_server_this_repo_did_not_select_is_not_demanded() {
+        let fx = fixture();
+        std::fs::write(
+            fx._dir.path().join("home/mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"},"linear":{"command":"l"}}}"#,
+        )
+        .unwrap();
+        let (own, mut repo) = decided();
+        repo.selection
+            .apply(
+                &BTreeMap::from([("mcp".to_string(), Vec::new())]),
+                Path::new("settings.toml"),
+            )
+            .unwrap();
+
+        let got = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &own,
+            &repo,
+            &Default::default(),
+        )
+        .unwrap();
+        let mcp = got
+            .iter()
+            .find(|c| c.name == "mcp")
+            .expect("claude stages mcp");
+        assert_eq!(
+            mcp.expect,
+            Expect::Mentions(vec!["codegraph".to_string()]),
+            "codegraph is omh's and always goes in; linear was not selected here"
+        );
+        let loaded = got
+            .iter()
+            .find(|c| c.name == "mcp-loaded")
+            .expect("claude says how to ask it which servers it loaded");
+        match &loaded.expect {
+            Expect::Loaded { names, .. } => assert_eq!(
+                names,
+                &vec!["codegraph".to_string()],
+                "the harness is asked only about servers it was given"
+            ),
+            other => panic!("mcp-loaded asks the harness, not {other:?}"),
+        }
     }
 
     #[test]

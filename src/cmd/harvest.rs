@@ -596,13 +596,34 @@ pub(crate) fn what_to_keep(
 /// That reasoning was right, so the guard moved into the types rather than
 /// being given up: `HostRows` cannot be passed where the sandbox's rows go, and
 /// an empty one is refused below.
+///
+/// **Every check asked is a check answered.** Each prints exactly one line,
+/// and `doctor::parse` keeps the lines it can read — so a check whose line
+/// never arrived (a probe the shell could not run, a quote that swallowed the
+/// next line) was simply absent, and with the rest green the run said every
+/// check passed. Non-empty is not finished; `init`'s `fired_from` refuses a
+/// short answer for the same reason.
 pub(crate) fn every_check(
+    asked: &[&str],
     from_the_sandbox: Vec<doctor::Outcome>,
     host: doctor::HostRows,
 ) -> Result<Vec<doctor::Outcome>> {
     anyhow::ensure!(
         !from_the_sandbox.is_empty(),
         "the probe produced no output — the sandbox did not run it"
+    );
+    let unanswered: Vec<String> = asked
+        .iter()
+        .filter(|name| !from_the_sandbox.iter().any(|o| o.name == **name))
+        .map(|name| format!("`{name}`"))
+        .collect();
+    anyhow::ensure!(
+        unanswered.is_empty(),
+        "the sandbox answered {} of the {} checks it was asked — no answer for \
+         {}, so the probe did not finish, and a check that said nothing did not pass",
+        asked.len() - unanswered.len(),
+        asked.len(),
+        unanswered.join(", ")
     );
     // The other half of the guard the old shape got from not having a
     // parameter: an empty host side is a caller that gathered nothing, not a
