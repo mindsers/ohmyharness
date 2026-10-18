@@ -1253,6 +1253,23 @@ pub(crate) fn defaults_use(
     if !available.iter().any(|n| n == name) {
         return Err(crate::cmd::settings::no_such_entry(cap, name, &available));
     }
+    // A link to nothing hands every repo after a name nothing answers to:
+    // `space` on one said "new repos take skills/gone" and wrote it.
+    if cap != adapter::Capability::Mcp {
+        let source = paths.root.join(cap.source());
+        let found = crate::profile::listed(&source, cap)?
+            .into_iter()
+            .find(|(n, _)| n == name);
+        if let Some((_, at)) = found.filter(|(_, at)| at.is_symlink() && !at.exists()) {
+            let to = std::fs::read_link(&at)
+                .map(|t| t.display().to_string())
+                .unwrap_or_default();
+            anyhow::bail!(
+                "{cap}/{name} is a link to nothing — {to} — so new repos would be handed a \
+                 name nothing answers to. To take the link out:\n  omh settings rm {cap} {name}"
+            );
+        }
+    }
     let now = new_repo_takes(paths, cap, false)?;
     if now.takes.iter().any(|n| n == name) {
         ctx.say(

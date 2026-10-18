@@ -4964,6 +4964,32 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     );
 }
 
+/// A link to nothing is not taken on for new repos: `space` on one said "✓
+/// new repos take skills/gone" and wrote it into `[use]`, which hands every
+/// repo after a name nothing answers to. Refused, with the `rm` that takes
+/// the link out; and left out, it can still be taken off a list.
+#[test]
+fn a_link_to_nothing_is_not_taken_on_for_new_repos() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md"]);
+    std::os::unix::fs::symlink("/nowhere/gone", sb.home.join(".omh/skills/gone")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "[use]\nskills = [\"tdd\"]\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["settings", "use", "skills", "gone"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("link to nothing") && said.contains("omh settings rm skills gone"),
+        "{said}"
+    );
+    let file = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
+    assert!(!file.contains("gone"), "nothing written: {file}");
+}
+
 /// A feature switched back leaves no empty `[omh]` behind: `unset codegraph`
 /// took the switch and left the table with nothing under it.
 #[test]

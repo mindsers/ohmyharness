@@ -1933,9 +1933,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences
         ("src/cmd/auth.rs", 3),
         // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as
-        // the way back from a freeze, and `omh settings set <feature> off` with
-        // its `omh init` for a name omh owns.
-        ("src/cmd/catalogue.rs", 17),
+        // the way back from a guard's list, and `omh settings set <feature>
+        // off` with its `omh init` for a name omh owns. + `omh settings rm`
+        // where `use` refuses a link to nothing.
+        ("src/cmd/catalogue.rs", 18),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         ("src/cmd/init.rs", 8),     // + the `omh upgrade` redirect when a repo is already set up
         ("src/cmd/upgrade.rs", 1),  // the `omh init` redirect when a repo is not set up
