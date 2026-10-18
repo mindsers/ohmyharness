@@ -1940,8 +1940,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         // + the `omh upgrade` redirect when a repo is already set up, + `omh
         // set` in the header of the gitignored file `init` seeds, + `omh set
-        // carry_in` teaching the key in the committed file's header.
-        ("src/cmd/init.rs", 10),
+        // carry_in` teaching the key in the committed file's header, + `omh
+        // settings set account` in the refusal of an `[account]` entry.
+        ("src/cmd/init.rs", 11),
         ("src/cmd/upgrade.rs", 1), // the `omh init` redirect when a repo is not set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only
@@ -5313,6 +5314,14 @@ fn every_account_the_defaults_writer_writes_seeds_a_repo() {
             "{writes:?}: {into}"
         );
         assert!(!not.contains_key("account"), "{writes:?} is in both: {not}");
+        // And `init` says it seeded it, once.
+        let said: Vec<&String> = seed
+            .took
+            .iter()
+            .chain(&seed.took_local)
+            .filter(|t| t.contains("account"))
+            .collect();
+        assert_eq!(said, ["account"], "{writes:?}");
     }
 }
 

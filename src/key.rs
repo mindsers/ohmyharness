@@ -108,8 +108,8 @@ pub const KEYS: &[Key] = &[
     },
     // A *name*, selecting which captured login gets mounted. The credential
     // itself lives under `paths.creds()` and never passes through here, which
-    // is why this is the one value-taking key the docs show being shared on
-    // purpose: `omh set --shared account work`.
+    // is why `omh set account work` writes it into the committed file, and
+    // `omh init` seeds it there — a string or, named per harness, a table.
     Key {
         name: "account",
         does: "Which captured login a session is launched with, by name.",

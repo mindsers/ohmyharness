@@ -339,13 +339,22 @@ fn after_edit(model: &Model, capability: Option<&str>, name: Option<&str>) -> Op
 }
 
 /// Every command line an act is, in order: one, but for a move — the key it
-/// was meant to be set, then the one nothing reads unset.
+/// was meant to be set, then the one nothing reads unset — and a restore, one
+/// `set` per value.
 pub(crate) fn command_lines(act: &Act) -> Vec<Vec<String>> {
     match act {
         Act::Move { from, .. } => vec![
             argv(act),
             ["settings", "unset", "--", from].map(String::from).to_vec(),
         ],
+        Act::Restore { key, values } => values
+            .iter()
+            .map(|value| {
+                ["settings", "set", "--", key, value]
+                    .map(String::from)
+                    .to_vec()
+            })
+            .collect(),
         _ => vec![argv(act)],
     }
 }
@@ -449,6 +458,12 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
         Act::Unuse { capability, name } => s(&["settings", "unuse", "--", capability, name]),
         Act::UseAll { capability } => s(&["settings", "use", "--all", "--", capability]),
         Act::Unset { key } => s(&["settings", "unset", "--", key]),
+        Act::UnsetFor { key, harness } => s(&["settings", "unset", "--", key, harness]),
+        // The first of its lines; `command_lines` has every one.
+        Act::Restore { key, values } => {
+            let first = values.first().map(String::as_str).unwrap_or_default();
+            s(&["settings", "set", "--", key, first])
+        }
         Act::EditDefaults => s(&["settings", "edit"]),
         Act::Edit { capability, name } => {
             let mut line = s(&["settings", "edit", "--", capability]);
@@ -957,6 +972,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
         }
     };
     for k in key::KEYS {
+        let value = mine.get(k.name).cloned();
         let mut warning = None;
         let mut fallback = k.unset.to_string();
         let edit = match (k.name, &k.shape) {
@@ -972,7 +988,14 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                 };
                 match logins(paths, adapters) {
                     Ok(held) => {
-                        (fallback, warning) = unset_account(&held);
+                        // What a launch does with none chosen — said only
+                        // while none is: a chosen account still read *none
+                        // chosen*, on the screen and in the report.
+                        let unset;
+                        (fallback, unset) = unset_account(&held);
+                        if value.is_none() {
+                            warning = unset;
+                        }
                         let names: std::collections::BTreeSet<String> =
                             held.iter().flat_map(|(_, names)| names.clone()).collect();
                         let qualified = held.iter().flat_map(|(harness, names)| {
@@ -993,11 +1016,21 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
         };
         // A value omh cannot read, marked as long as it is in the file — not
         // only while it is being typed.
-        let value = mine.get(k.name).cloned();
         let warning = value
             .as_deref()
             .and_then(|v| key::quarrel(k, v))
             .or(warning);
+        // `account` named per harness is a table no one `set` writes back, so
+        // what undoes each change is worked out from the file as it stands.
+        let undo = match k.name {
+            config::ACCOUNT => match config::read_doc(&file) {
+                Ok(doc) => account_undo(&config::account_entries(&doc), &edit),
+                // Nothing to work it out from, so nothing is offered: the
+                // generic rule would `set` the row's summary back as a name.
+                Err(_) => vec![(Act::Unset { key: k.name.into() }, None)],
+            },
+            _ => Vec::new(),
+        };
         out.rows.push(Row {
             name: k.name.to_string(),
             value,
@@ -1019,6 +1052,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
                 .into(),
             ],
             edit,
+            undo,
             ..Row::default()
         });
     }
@@ -1143,6 +1177,56 @@ fn logins(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Result<Vec<(String,
         }
     }
     Ok(held)
+}
+
+/// What undoes each change the `account` row offers, from what your defaults
+/// hold now — `entries`, as [`config::account_entries`] reads them.
+///
+/// The row shows a summary — `mine · claude:work` — which no `set` takes back,
+/// so a pick is undone by the one entry it touched: the name it replaced put
+/// back, or the entry dropped where there was none. `d` takes the whole
+/// setting, and its undo sets every entry again.
+fn account_undo(entries: &[(Option<String>, String)], edit: &Edit) -> Vec<(Act, Option<Act>)> {
+    let key = config::ACCOUNT.to_string();
+    let typed = |(harness, name): &(Option<String>, String)| {
+        config::account_typed(harness.as_deref(), name)
+    };
+    let mut out = Vec::new();
+    if let Edit::Choice(offered) = edit {
+        for value in offered {
+            let (harness, _) = settings::account_target(value);
+            let was = entries.iter().find(|(h, _)| h.as_deref() == harness);
+            let back = match was {
+                Some(entry) => Act::Set {
+                    key: key.clone(),
+                    value: typed(entry),
+                },
+                None if entries.is_empty() => Act::Unset { key: key.clone() },
+                None => Act::UnsetFor {
+                    key: key.clone(),
+                    harness: harness.unwrap_or(config::ACCOUNT_DEFAULT).to_string(),
+                },
+            };
+            let done = Act::Set {
+                key: key.clone(),
+                value: value.clone(),
+            };
+            out.push((done, Some(back)));
+        }
+    }
+    let back = match entries {
+        [] => None,
+        [(None, name)] => Some(Act::Set {
+            key: key.clone(),
+            value: name.clone(),
+        }),
+        _ => Some(Act::Restore {
+            key: key.clone(),
+            values: entries.iter().map(typed).collect(),
+        }),
+    };
+    out.push((Act::Unset { key }, back));
+    out
 }
 
 /// What a launch does with `account` unset, from the logins there are — the
@@ -1826,8 +1910,33 @@ mod tests {
             moved.as_slice(),
             [
                 Cmd::Settings { cmd: Some(SettingsCmd::Set { key: set, value, .. }) },
-                Cmd::Settings { cmd: Some(SettingsCmd::Unset { key: unset }) },
+                Cmd::Settings { cmd: Some(SettingsCmd::Unset { key: unset, harness: None }) },
             ] if set == "carry_in" && value == "[\".env\"]" && unset == "carry_ins"
+        ));
+        // A restore is a line per value, each a plain set, in order.
+        let restored: Vec<Cmd> = command_lines(&Act::Restore {
+            key: "account".into(),
+            values: vec!["mine".into(), "-x:work".into()],
+        })
+        .into_iter()
+        .map(|line| {
+            let mut argv = vec!["omh".to_string()];
+            argv.extend(line);
+            Cli::try_parse_from(&argv).unwrap().cmd
+        })
+        .collect();
+        assert!(matches!(
+            restored.as_slice(),
+            [
+                Cmd::Settings { cmd: Some(SettingsCmd::Set { key: a, value: first, anyway: false }) },
+                Cmd::Settings { cmd: Some(SettingsCmd::Set { key: b, value: second, anyway: false }) },
+            ] if a == "account" && b == "account" && first == "mine" && second == "-x:work"
+        ));
+        // One harness's entry is the second word, never a flag.
+        assert!(matches!(
+            parsed(&Act::UnsetFor { key: "account".into(), harness: "-x".into() }),
+            Cmd::Settings { cmd: Some(SettingsCmd::Unset { key, harness: Some(h) }) }
+                if key == "account" && h == "-x"
         ));
         // What new repos take: `settings use` and `unuse`, by kind and name.
         assert!(matches!(
@@ -1854,7 +1963,7 @@ mod tests {
         ));
         assert!(matches!(
             parsed(&Act::Unset { key: "runtime".into() }),
-            Cmd::Settings { cmd: Some(SettingsCmd::Unset { key }) } if key == "runtime"
+            Cmd::Settings { cmd: Some(SettingsCmd::Unset { key, harness: None }) } if key == "runtime"
         ));
         assert!(matches!(
             parsed(&Act::EditDefaults),
@@ -2658,8 +2767,9 @@ mod tests {
                     }
                     settings::set(paths, &key, &value, reach(), anyway, false, &ctx)
                 }
-                SettingsCmd::Unset { key, .. } => {
-                    settings::unset(paths, &key, None, reach(), false, &ctx)
+                SettingsCmd::Unset { key, harness } => {
+                    settings::only_account_is_per_harness(&key, harness.as_deref()).unwrap();
+                    settings::unset(paths, &key, harness.as_deref(), reach(), false, &ctx)
                 }
                 _ => panic!("an account act ran `omh {}`", line.join(" ")),
             };

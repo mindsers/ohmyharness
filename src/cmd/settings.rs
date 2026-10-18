@@ -64,9 +64,9 @@ pub(crate) fn settings_report(paths: &Paths) -> Result<report::Settings> {
 }
 
 /// A table of your defaults that seeds a new repo, as `config::values` names
-/// it: `[use]`, `[unuse]`, `[omh]`, `[account]`.
+/// it — one of [`config::TEMPLATE_TABLES`], which `omh init` reads too.
 pub(crate) fn seeding_table(name: &str) -> bool {
-    [config::USE, config::UNUSE, config::OMH, "account"]
+    config::TEMPLATE_TABLES
         .iter()
         .any(|t| name == format!("[{t}]"))
 }
