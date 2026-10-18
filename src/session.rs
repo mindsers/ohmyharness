@@ -5588,4 +5588,254 @@ mod tests {
             "the worktree is back on its branch"
         );
     }
+
+    // ── hooks in a tree the agent writes ────────────────────────────────────
+
+    /// Every hook omh's git can reach on the way through a session: landing,
+    /// sync, and the reads `omh s` makes.
+    #[cfg(unix)]
+    const PLANTED: [&str; 11] = [
+        "pre-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+        "post-index-change",
+        "reference-transaction",
+        "pre-push",
+        "post-checkout",
+        "pre-rebase",
+        "post-rewrite",
+        "post-merge",
+    ];
+
+    /// Each hook in [`PLANTED`], in `dir`, appending its own name to `ran`.
+    #[cfg(unix)]
+    fn plant_hooks(dir: &Path, ran: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        for hook in PLANTED {
+            let at = dir.join(hook);
+            std::fs::write(
+                &at,
+                format!("#!/bin/sh\necho {hook} >> '{}'\n", ran.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// What fired, one hook name a line. Absent is nothing.
+    #[cfg(unix)]
+    fn fired(ran: &Path) -> String {
+        std::fs::read_to_string(ran).unwrap_or_default()
+    }
+
+    /// A session of `repo`, whose config points `core.hooksPath` at `.husky/_`
+    /// — what husky v9 writes — and a worktree holding the hooks an agent
+    /// would plant there. git resolves a relative `core.hooksPath` against the
+    /// worktree it runs in, and a session's worktree is the agent's `/work`.
+    #[cfg(unix)]
+    fn husky_session(dir: &Path, root: &Path) -> (Session, PathBuf) {
+        git(root, &["config", "core.hooksPath", ".husky/_"]).unwrap();
+        let s = Session::new(&dir.join("wt"), "s01".into());
+        s.ensure(root, "main").unwrap();
+        let ran = dir.join("ran");
+        plant_hooks(&s.worktree.join(".husky/_"), &ran);
+        // As husky's own does: the directory is not part of the work.
+        std::fs::write(s.worktree.join(".husky/_/.gitignore"), "*\n").unwrap();
+        (s, ran)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        let (s, ran) = husky_session(d.path(), &root);
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+
+        s.commit(Some("land it"), Carried::refusing(&[])).unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "`omh sNN commit -m` ran, on the host, hooks the agent wrote"
+        );
+        assert_eq!(
+            git(&root, &["log", "-1", "--format=%s", "omh/s01"])
+                .unwrap()
+                .trim(),
+            "land it",
+            "and the commit still landed"
+        );
+    }
+
+    /// The editor's commit is a `git` of its own, built where `git()` is not.
+    ///
+    /// Whether the commit lands is not this test's question, and depends on
+    /// the environment: `GIT_EDITOR` outranks `core.editor`, and an editor
+    /// that writes nothing aborts. `pre-commit` and `prepare-commit-msg` run
+    /// before any editor opens, so the answer is the same either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_through_the_editor_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        let (s, ran) = husky_session(d.path(), &root);
+        // Somewhere to end up when `GIT_EDITOR` is unset, rather than `vi`.
+        git(&root, &["config", "core.editor", "printf 'from the editor\\n' >"]).unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+
+        let _ = s.commit(None, Carried::refusing(&[]));
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "the editor's commit ran, on the host, hooks the agent wrote"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_push_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+        git(&root, &["config", "core.hooksPath", ".husky/_"]).unwrap();
+        let ran = d.path().join("ran");
+        plant_hooks(&s.worktree.join(".husky/_"), &ran);
+        std::fs::write(s.worktree.join(".husky/_/.gitignore"), "*\n").unwrap();
+
+        s.push(Some("feature")).unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "`omh sNN push` ran, on the host, hooks the agent wrote"
+        );
+    }
+
+    /// A sync replays the user's commits in a scratch checkout of the session
+    /// branch — whose files are whatever that branch holds, the agent's
+    /// included — and then resets the worktree onto the moved branch.
+    #[cfg(unix)]
+    #[test]
+    fn a_sync_runs_no_hook_the_session_branch_or_worktree_supplied() {
+        let (d, root) = repo();
+        let (s, ran) = husky_session(d.path(), &root);
+        // On the branch, so the scratch checkout has them too: the agent's
+        // files reach the branch with every `omh sNN commit -m`.
+        std::fs::write(s.worktree.join("mine.rs"), "fn mine() {}\n").unwrap();
+        git(&s.worktree, &["-c", "core.hooksPath=/dev/null", "add", "-f", "-A"]).unwrap();
+        git(
+            &s.worktree,
+            &["-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "mine"],
+        )
+        .unwrap();
+        std::fs::write(root.join("trunk.rs"), "fn trunk() {}\n").unwrap();
+        git(&root, &["add", "trunk.rs"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "trunk moved"]).unwrap();
+        let _ = std::fs::remove_file(&ran);
+
+        let old_baseline = s.merge_base("main").unwrap();
+        let onto = head_of(&root, "main").unwrap();
+        let tip = head_of(&root, "omh/s01").unwrap();
+        s.move_baseline(&root, &onto, &old_baseline, &tip).unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "a sync ran, on the host, hooks from the session's branch or worktree"
+        );
+        assert_ne!(
+            head_of(&root, "omh/s01").unwrap(),
+            tip,
+            "and the branch did move"
+        );
+    }
+
+    /// Not only landing: `git status` writes the index when it refreshes it,
+    /// and that runs `post-index-change`. `omh s` asks every session.
+    #[cfg(unix)]
+    #[test]
+    fn reading_a_session_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        std::fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(&root, &["add", "tracked.txt"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "tracked"]).unwrap();
+        let (s, ran) = husky_session(d.path(), &root);
+        std::fs::write(s.worktree.join("tracked.txt"), "the agent's edit\n").unwrap();
+
+        let changed = s.changed().unwrap();
+        let paths = crate::profile::Paths {
+            root: d.path().join("omh"),
+            repo: root.clone(),
+        };
+        let at_stake = crate::cmd::harvest::at_stake(&paths, &s);
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "reading a session ran, on the host, hooks the agent wrote"
+        );
+        assert!(changed.contains(&"tracked.txt".to_string()), "{changed:?}");
+        assert!(
+            !matches!(at_stake, crate::cmd::harvest::AtStake::Nothing),
+            "and the edit is still something `rm` asks about: {at_stake:?}"
+        );
+    }
+
+    /// `rm` keeps a branch that holds work, so a session can be reopened on a
+    /// branch the agent committed to — and checking it out runs
+    /// `post-checkout` from the files it brings.
+    #[cfg(unix)]
+    #[test]
+    fn reopening_a_kept_branch_runs_no_hook_it_carries() {
+        let (d, root) = repo();
+        let (s, ran) = husky_session(d.path(), &root);
+        git(&s.worktree, &["-c", "core.hooksPath=/dev/null", "add", "-f", "-A"]).unwrap();
+        git(
+            &s.worktree,
+            &["-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "hooks"],
+        )
+        .unwrap();
+        let path = s.worktree.to_string_lossy().into_owned();
+        git(&root, &["worktree", "remove", "--force", &path]).unwrap();
+        let _ = std::fs::remove_file(&ran);
+
+        Session::new(&d.path().join("wt"), "s01".into())
+            .ensure(&root, "main")
+            .unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "reopening the session ran, on the host, a hook its branch carried"
+        );
+    }
+
+    /// The other half of the rule: hooks that live where the agent cannot
+    /// write are the user's, and landing still runs them.
+    #[cfg(unix)]
+    #[test]
+    fn your_own_hooks_still_run_when_you_land() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, root) = repo_with_origin();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let ran = d.path().join("ran");
+        let hooks = root.join(".git/hooks");
+        for hook in ["pre-commit", "pre-push"] {
+            let at = hooks.join(hook);
+            std::fs::write(
+                &at,
+                format!("#!/bin/sh\necho {hook} >> '{}'\n", ran.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(s.worktree.join("work.rs"), "fn work() {}\n").unwrap();
+
+        s.commit(Some("land it"), Carried::refusing(&[])).unwrap();
+        s.push(Some("feature")).unwrap();
+
+        assert_eq!(fired(&ran), "pre-commit\npre-push\n");
+    }
 }
