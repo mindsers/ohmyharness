@@ -5843,9 +5843,8 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
 ///       carry_in  []  ← shared
 ///
 /// which reads as a decision somebody made. Nobody made it. The file already
-/// carries the commented example that teaches the key — `# carry_in =
-/// [".env.local", "certs/"]` — and a commented line is the honest way to show
-/// a setting you are not setting.
+/// teaches the key, by the command that sets it — `omh set carry_in …`, which
+/// writes the gitignored file, not this one.
 ///
 /// Ignored because `init` builds an image.
 #[test]
@@ -5863,16 +5862,15 @@ fn a_repo_nobody_has_configured_reports_nothing_configured() {
         .unwrap_or_else(|| panic!("no settings section: {said}"));
     assert!(
         !settings.contains("carry_in"),
-        "nobody set this — the template teaches the key with a commented \
-         example, which is what a setting you are not setting looks like: {said}"
+        "nobody set this — the template teaches the key in a comment: {said}"
     );
 
-    // The teaching line survives, because dropping the value must not drop the
+    // The teaching survives, because dropping the value must not drop the
     // explanation with it.
     let file = sb.settings();
     assert!(
-        file.contains("# carry_in"),
-        "the commented example is how somebody learns the key exists: {file}"
+        file.contains("omh set carry_in"),
+        "the header is how somebody learns the key exists: {file}"
     );
 }
 
@@ -10012,7 +10010,7 @@ fn init_writes_the_selection_expanded() {
     // The comment block init writes is what explains the file. A selection
     // appended by a serializer round trip would have deleted all of it.
     assert!(
-        written.contains("# carry_in"),
+        written.contains("# What this repo decided") && written.contains("omh set carry_in"),
         "init's own explanation has to survive its own write: {written}"
     );
 
