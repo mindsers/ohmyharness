@@ -414,8 +414,12 @@ pub const GRAPH_BIN: &str = "codebase-memory-mcp";
 /// server's scope to its data's scope removes the duplication, survives
 /// sessions starting and stopping, and lets the container mount *only* the
 /// index: no worktree, no credentials, no profile.
+///
+/// `repo` is the repo id, respelled by [`crate::profile::runtime_id`] here
+/// rather than by every caller, because docker refuses a name outside its
+/// charset.
 pub fn ui_container(repo: &str) -> String {
-    format!("omh-graph-{repo}")
+    format!("omh-graph-{}", crate::profile::runtime_id(repo))
 }
 
 /// A stable loopback port for the graph UI.
@@ -522,8 +526,12 @@ pub const PROJECT_ENV: &str = "OMH_GRAPH_PROJECT";
 
 /// A graph is per-session, because a session's worktree is not the checkout the
 /// agent started from — it holds whatever the agent has since written.
+///
+/// Respelled by [`crate::profile::runtime_id`], because the name is quoted
+/// into a shell line in the sandbox (`drop_graph_command`) and a `'` in a
+/// checkout's directory name would end the quote.
 pub fn project_name(repo: &str, session: &str) -> String {
-    format!("{repo}-{session}")
+    format!("{}-{session}", crate::profile::runtime_id(repo))
 }
 
 /// Read a note and take it away in one command.
@@ -2350,6 +2358,29 @@ command = "c"
             "  git status",
             "cd /work\ngit push origin main",
         ];
+        // The graph hooks call the indexer, so the indexer they find is a
+        // stand-in that writes down what it was asked — first on PATH, under a
+        // HOME of its own. Run with the host's PATH, each of these spawns ran
+        // the developer's real `codebase-memory-mcp` against their own cache
+        // and their running graph daemon.
+        let scratch = tempfile::tempdir().unwrap();
+        let stand_ins = scratch.path().join("bin");
+        std::fs::create_dir_all(&stand_ins).unwrap();
+        let asked = scratch.path().join("asked");
+        let indexer = stand_ins.join("codebase-memory-mcp");
+        std::fs::write(
+            &indexer,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", asked.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&indexer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths(std::iter::once(stand_ins.clone()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
         for ((name, r), command) in all_rendered()
             .into_iter()
             .flat_map(|h| shapes.iter().map(move |c| (h.clone(), *c)))
@@ -2357,6 +2388,8 @@ command = "c"
             let mut child = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&r.command)
+                .env("PATH", &path)
+                .env("HOME", scratch.path())
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -2417,6 +2450,12 @@ command = "c"
                 "{name} refuses `{command}`, and git is the agent's now: {said}"
             );
         }
+        let reached = std::fs::read_to_string(&asked).unwrap_or_default();
+        assert!(
+            !reached.is_empty(),
+            "the graph hooks ran an indexer that was not this test's stand-in — \
+             the host's own, against the developer's cache and daemon"
+        );
     }
 
     /// The other half, and the one a hook cannot reach: what the agent is told

@@ -15,7 +15,6 @@ use crate::{
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::process::Command;
 
 /// What to do next, in the order somebody does it.
 ///
@@ -234,9 +233,10 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
     for k in key::KEYS {
         if let Some(item) = doc.get(k.name) {
             // No `is_value()` check here. `refuse_what_cannot_be_seeded` has
-            // already refused every table but `[use]`, `[unuse]` and `[omh]`, so
+            // already refused every table but `config::TEMPLATE_TABLES`, so
             // `[carry_in]` never reaches this loop — a second guard for it
             // could not fire, and a check nothing can reach is decoration.
+            // `[account]` does, and goes where a string `account` goes.
             match k.default_layer() {
                 config::Layer::Local => {
                     local.insert(k.name, item.clone());
@@ -262,8 +262,12 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
     // `[unuse]` travel too, but as what they come to — `init` writes every
     // kind's list from them (`catalogue::new_repo_lists`) once the file is
     // there. Copied as they stood, a kind `[use]` did not list had no list in
-    // the repo, which is every entry: guards too.
-    for table in [config::USE, config::UNUSE, config::OMH] {
+    // the repo, which is every entry: guards too. A table that is a key's —
+    // `[account]` — went with the keys above.
+    for table in config::TEMPLATE_TABLES {
+        if key::describes(table).is_some() {
+            continue;
+        }
         let Some(item) = doc.get(table) else { continue };
         let Some(t) = item.as_table_like() else {
             continue;
@@ -412,6 +416,26 @@ pub(crate) fn refuse_what_cannot_be_seeded(
         }
     }
 
+    // `account` per harness: each entry a login's name. A launch reads past
+    // one that is not, as though no account were named, so it is refused here
+    // rather than seeded into every repo.
+    if let Some(table) = doc
+        .get(config::ACCOUNT)
+        .and_then(toml_edit::Item::as_table_like)
+    {
+        for (harness, value) in table.iter() {
+            let own = (harness != config::ACCOUNT_DEFAULT).then_some(harness);
+            anyhow::ensure!(
+                value.as_str().is_some(),
+                "{}: `[{}] {harness}` is not a login's name — `omh settings set \
+                 account {}` writes one",
+                at.display(),
+                config::ACCOUNT,
+                config::account_typed(own, "<name>")
+            );
+        }
+    }
+
     // Anything else omh does not read. Named, because a table nobody seeds and
     // nobody warns about is a setting you believe is in force.
     for (name, item) in doc.iter() {
@@ -419,15 +443,16 @@ pub(crate) fn refuse_what_cannot_be_seeded(
             continue;
         }
         anyhow::ensure!(
-            [config::USE, config::UNUSE, config::OMH].contains(&name),
+            config::TEMPLATE_TABLES.contains(&name),
             "{}: `[{name}]` is read by nobody and is not seeded into a repo. \
              This file holds settings at the top level, `[{}]` for omh's own \
-             features, and `[{}]` and `[{}]` for what a new repo takes from \
-             your catalogue and leaves out.",
+             features, `[{}]` and `[{}]` for what a new repo takes from your \
+             catalogue and leaves out, and `[{}]` for a login per harness.",
             at.display(),
             config::OMH,
             config::USE,
-            config::UNUSE
+            config::UNUSE,
+            config::ACCOUNT
         );
     }
     Ok(())
@@ -959,8 +984,14 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             true,
         )
         .and_then(|tag| {
-            let args = base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_id());
-            Command::new(backend.program())
+            let args = base::index_args(
+                &tag,
+                &paths.cache_volume(),
+                &paths.repo,
+                &paths.runtime_id(),
+            );
+            backend
+                .command()
                 .args(&args)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

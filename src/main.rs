@@ -575,7 +575,8 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                         ctx,
                     )
                 }
-                Some(SettingsCmd::Unset { key }) => {
+                Some(SettingsCmd::Unset { key, harness }) => {
+                    cmd::settings::only_account_is_per_harness(key, harness.as_deref())?;
                     if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
                         return cmd::settings::feature_forget(
                             &paths,
@@ -589,7 +590,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     cmd::settings::unset(
                         &paths,
                         key,
-                        None,
+                        harness.as_deref(),
                         cmd::settings::Reach::named(config::Layer::Personal),
                         cli.dry_run,
                         ctx,

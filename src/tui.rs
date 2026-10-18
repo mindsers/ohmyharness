@@ -147,6 +147,12 @@ pub struct Row {
     /// The key one nothing reads was probably meant to be: Enter moves its
     /// value there.
     pub meant: Option<String>,
+    /// What undoes each change this row offers, worked out by the caller where
+    /// setting back what the row shows would not put the file back — a value
+    /// no one `set` writes, as `account` named per harness is. Empty leaves
+    /// that rule in force; listed, the list is the whole answer, and a change
+    /// it does not name has no undo.
+    pub undo: Vec<(Act, Option<Act>)>,
 }
 
 /// How `enter` sets a default.
@@ -176,6 +182,19 @@ pub enum Act {
     },
     Unset {
         key: String,
+    },
+    /// One harness's own entry of a setting that holds one per harness —
+    /// `account`'s — dropped, and the rest left: `settings unset account
+    /// codex`.
+    UnsetFor {
+        key: String,
+        harness: String,
+    },
+    /// A setting `d` took whole, set again value by value, in the order that
+    /// builds it back: `account`'s name for every harness, then each one's own.
+    Restore {
+        key: String,
+        values: Vec<String>,
     },
     /// `$EDITOR` on your defaults file.
     EditDefaults,
@@ -226,9 +245,11 @@ impl Act {
     /// The row this act changes, when it leaves one to point at.
     fn subject(&self) -> Option<String> {
         match self {
-            Act::Set { key, .. } | Act::SetAnyway { key, .. } | Act::Unset { key } => {
-                Some(key.clone())
-            }
+            Act::Set { key, .. }
+            | Act::SetAnyway { key, .. }
+            | Act::Unset { key }
+            | Act::UnsetFor { key, .. }
+            | Act::Restore { key, .. } => Some(key.clone()),
             Act::Edit { name, .. } => name.clone(),
             Act::Use { name, .. } | Act::Unuse { name, .. } => Some(name.clone()),
             Act::Move { to, .. } => Some(to.clone()),
@@ -672,12 +693,25 @@ impl App {
     /// inverse to run — a removal, which takes the file with it, and a flip
     /// no one command puts back.
     fn inverse(&self, act: &Act) -> Option<Act> {
-        let had = |key: &str| {
+        let defaults = || {
             self.model
                 .sections
                 .iter()
                 .filter(|s| s.page == Page::Defaults)
                 .flat_map(|s| &s.rows)
+        };
+        // The caller's, for a row whose value no one `set` puts back.
+        if let Some(row) = defaults()
+            .find(|r| !r.undo.is_empty() && act.subject().as_deref() == Some(r.name.as_str()))
+        {
+            return row
+                .undo
+                .iter()
+                .find(|(done, _)| done == act)
+                .and_then(|(_, back)| back.clone());
+        }
+        let had = |key: &str| {
+            defaults()
                 .find(|r| r.name == key)
                 .and_then(|r| r.value.clone())
         };
@@ -710,13 +744,16 @@ impl App {
                 to: from.clone(),
                 value: value.clone(),
             }),
-            // Taking a list away has no one command that puts it back.
+            // Taking a list away has no one command that puts it back. And the
+            // two only a row's own `undo` runs are undone by that row, above.
             Act::EditDefaults
             | Act::Edit { .. }
             | Act::Remove { .. }
             | Act::AddServer { .. }
             | Act::Import { .. }
-            | Act::UseAll { .. } => None,
+            | Act::UseAll { .. }
+            | Act::UnsetFor { .. }
+            | Act::Restore { .. } => None,
         }
     }
 
@@ -2128,6 +2165,8 @@ impl App {
                 format!("{key} back to {}", ellipsized(value, 16))
             }
             Act::Unset { key } => format!("{key} unset again"),
+            Act::UnsetFor { key, harness } => format!("{key} {harness} unset again"),
+            Act::Restore { key, .. } => format!("{key} back as it was"),
             Act::Use { capability, name } => format!("{capability}/{name} back to new repos"),
             Act::Unuse { capability, name } => format!("{capability}/{name} left out again"),
             Act::Move { to, .. } => format!("{to} back where it was"),

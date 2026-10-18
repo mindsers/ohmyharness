@@ -1940,8 +1940,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         // + the `omh upgrade` redirect when a repo is already set up, + `omh
         // set` in the header of the gitignored file `init` seeds, + `omh set
-        // carry_in` teaching the key in the committed file's header.
-        ("src/cmd/init.rs", 10),
+        // carry_in` teaching the key in the committed file's header, + `omh
+        // settings set account` in the refusal of an `[account]` entry.
+        ("src/cmd/init.rs", 11),
         ("src/cmd/upgrade.rs", 1), // the `omh init` redirect when a repo is not set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only
@@ -2808,6 +2809,63 @@ fn a_sync_preserves_committed_and_uncommitted_session_work() {
     );
 }
 
+/// **A sync that refuses has changed nothing — and the way out it names runs.**
+///
+/// The user's own commit on the session branch does not replay onto trunk,
+/// which the sync refuses over, saying *Nothing was changed*. It had already
+/// written trunk's tree into the worktree by then: conflict markers in the
+/// user's file, trunk's files beside it, and `diff` reporting them as session
+/// work. And the command it offered — `git -C <repo> rebase … omh/sNN` — fails
+/// on its own, because that branch is checked out in the session's worktree.
+#[test]
+fn a_sync_that_refuses_has_changed_nothing() {
+    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    // The user's own commit on the session branch (`omh s01 commit -m`)…
+    std::fs::write(session.worktree.join("f.txt"), "mine\n").unwrap();
+    git(&session.worktree, &["add", "f.txt"]);
+    git(&session.worktree, &["commit", "-qm", "mine"]);
+    // …and trunk writing the same file, plus one of its own.
+    std::fs::write(paths.repo.join("f.txt"), "trunk\n").unwrap();
+    std::fs::write(paths.repo.join("from-trunk.rs"), "fn trunk() {}\n").unwrap();
+    git(&paths.repo, &["add", "-A"]);
+    git(&paths.repo, &["commit", "-qm", "trunk"]);
+
+    let err = cmd::harvest::sync_session(&paths, &session, "main")
+        .expect_err("the branch's own commit does not replay onto trunk");
+    let said = format!("{err:#}");
+    assert!(said.contains("Nothing was changed"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(session.worktree.join("f.txt")).unwrap(),
+        "mine\n",
+        "omh said nothing was changed: {said}"
+    );
+    assert!(
+        !session.worktree.join("from-trunk.rs").exists(),
+        "omh said nothing was changed, and trunk's file is in the worktree: {said}"
+    );
+
+    // The remedy, run as written.
+    let remedy = said
+        .split('`')
+        .find(|part| part.starts_with("git -C ") && part.contains(" rebase "))
+        .unwrap_or_else(|| panic!("the refusal names a command: {said}"));
+    let words: Vec<&str> = remedy.split_whitespace().collect();
+    let ran = Command::new(words[0]).args(&words[1..]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        !stderr.contains("already used by worktree") && !stderr.contains("already checked out"),
+        "the command omh offered cannot run: `{remedy}`: {stderr}"
+    );
+}
+
 /// **Three behaviours, one value.** `force` and `terminal` were adjacent
 /// `bool`s meaning opposite things — *the user said delete it anyway* and
 /// *there is somebody at a keyboard*. Swapping them compiles, and the two
@@ -3174,12 +3232,12 @@ fn what_the_seed_record_settles_on_its_own() {
     let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
 
     assert!(
-        cmd::harvest::from_the_seed_record(Ok(()), true, &shadow).is_none(),
+        cmd::harvest::from_the_seed_record(Ok(()), Ok(()), &shadow).is_none(),
         "a record omh can read settles nothing on its own — the repository decides"
     );
     assert!(
         matches!(
-            cmd::harvest::from_the_seed_record(Err(missing()), false, &shadow),
+            cmd::harvest::from_the_seed_record(Err(missing()), Err(missing()), &shadow),
             Some(cmd::harvest::AtStake::Nothing)
         ),
         "no record and no repository: nothing ever ran here"
@@ -3188,19 +3246,39 @@ fn what_the_seed_record_settles_on_its_own() {
     // the seed file goes anyway. `log` refuses to show this one.
     assert!(
         matches!(
-            cmd::harvest::from_the_seed_record(Err(missing()), true, &shadow),
+            cmd::harvest::from_the_seed_record(Err(missing()), Ok(()), &shadow),
             Some(cmd::harvest::AtStake::Unknown(_))
         ),
         "a repository with no record of its start is not an empty session"
     );
     // The arm that mattered.
     let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-    match cmd::harvest::from_the_seed_record(Err(denied), true, &shadow) {
+    match cmd::harvest::from_the_seed_record(Err(denied), Ok(()), &shadow) {
         Some(cmd::harvest::AtStake::Unknown(why)) => assert!(
             why.contains("denied"),
             "the reason reaches the user rather than being read as absence: {why}"
         ),
         other => panic!("a record omh could not read is not an empty session: {other:?}"),
+    }
+}
+
+/// **A repository omh could not stat is not one that is not there.** With no
+/// seed record, the repository's presence is all that separates *nothing ever
+/// ran here* from *a sandbox with no record of its start* — and `exists()`
+/// answered `false` for a permissions error exactly as for absence, so the
+/// second read as the first and `rm` asked nothing.
+#[test]
+fn a_sandbox_repository_omh_could_not_stat_is_not_one_that_never_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    let shadow = shadow::Shadow::new(dir.path(), "s01");
+    let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+    let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+    match cmd::harvest::from_the_seed_record(Err(missing()), Err(denied), &shadow) {
+        Some(cmd::harvest::AtStake::Unknown(why)) => assert!(
+            why.contains("denied"),
+            "the reason reaches the user rather than being read as absence: {why}"
+        ),
+        other => panic!("a repository omh could not stat read as: {other:?}"),
     }
 }
 
@@ -3427,6 +3505,170 @@ fn one_of_a_thing_is_said_in_the_singular() {
     );
 }
 
+/// **The agent's index is not asked whether its work is there.** It writes
+/// that index, and `update-index --assume-unchanged` or `--skip-worktree` on a
+/// file it edited makes `status` pass over the edit. `omh s` — which asks the
+/// session's own index — said the path was uncommitted while `omh sNN rm`
+/// found nothing at stake, asked nothing, and deleted it.
+#[test]
+fn work_the_agent_told_its_index_to_ignore_is_still_at_stake() {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let sandbox_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("--git-dir")
+            .arg(&shadow.gitdir)
+            .arg("--work-tree")
+            .arg(&session.worktree)
+            .current_dir(&session.worktree)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Everything committed so far has been handed over, so only what follows
+    // is at stake.
+    std::fs::write(&shadow.landed_record, sandbox_git(&["rev-parse", "HEAD"])).unwrap();
+    assert!(
+        matches!(
+            cmd::harvest::at_stake(&paths, &session),
+            cmd::harvest::AtStake::Nothing
+        ),
+        "precondition: nothing at stake before the edits"
+    );
+
+    std::fs::write(session.worktree.join("one.rs"), "fn an_afternoon() {}\n").unwrap();
+    std::fs::write(session.worktree.join("two.rs"), "fn and_a_morning() {}\n").unwrap();
+    sandbox_git(&["update-index", "--assume-unchanged", "one.rs"]);
+    sandbox_git(&["update-index", "--skip-worktree", "two.rs"]);
+
+    assert_eq!(
+        session.changed().unwrap(),
+        ["one.rs", "two.rs"],
+        "precondition: `omh s` counts both edits"
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(&stake, cmd::harvest::AtStake::Work(what) if what == "2 uncommitted paths"),
+        "rm would delete both edits without asking: {stake:?}"
+    );
+}
+
+/// `git` over the sandbox's repository, as the agent runs it inside.
+fn agent_git(shadow: &shadow::Shadow, session: &Session, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(&shadow.gitdir)
+        .arg("--work-tree")
+        .arg(&session.worktree)
+        .current_dir(&session.worktree)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A session whose every commit has been handed over, so only what follows
+/// is at stake.
+fn a_session_with_nothing_unkept() -> (Paths, Session, shadow::Shadow) {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            cmd::harvest::at_stake(&paths, &session),
+            cmd::harvest::AtStake::Nothing
+        ),
+        "precondition: nothing at stake"
+    );
+    (paths, session, shadow)
+}
+
+/// **Nor are the agent's ignore rules asked whether its work is there.** The
+/// sandbox's `info/exclude` is in the gitdir the agent writes — omh writes it
+/// at launch and the agent can append `*` afterwards — and a `.gitignore` the
+/// agent creates is its own too, one that can name itself. Either hides a new
+/// file from `status`, and `rm` deleted it without asking.
+#[test]
+fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
+    let (paths, session, shadow) = a_session_with_nothing_unkept();
+    std::fs::write(session.worktree.join("afternoon.rs"), "fn work() {}\n").unwrap();
+    let exclude = shadow.gitdir.join("info").join("exclude");
+    let mut rules = std::fs::read_to_string(&exclude).unwrap_or_default();
+    rules.push_str("*\n");
+    std::fs::write(&exclude, rules).unwrap();
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "an exclude the agent appended hid afternoon.rs from rm: {stake:?}"
+    );
+
+    let (paths, session, _shadow) = a_session_with_nothing_unkept();
+    std::fs::create_dir_all(session.worktree.join("sub")).unwrap();
+    std::fs::write(session.worktree.join("sub/.gitignore"), "*\n").unwrap();
+    std::fs::write(session.worktree.join("sub/morning.rs"), "fn more() {}\n").unwrap();
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a .gitignore the agent wrote hid sub/morning.rs from rm: {stake:?}"
+    );
+}
+
+/// What omh and the repository themselves ignore stays out of the count: a
+/// file omh carried in and excluded, and a build directory a committed
+/// `.gitignore` names. Counting them would make `rm` ask about every session.
+#[test]
+fn what_omh_and_the_repository_ignore_is_not_at_stake() {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::write(session.worktree.join(".gitignore"), "target/\n").unwrap();
+    agent_git(&shadow, &session, &["add", ".gitignore"]);
+    agent_git(
+        &shadow,
+        &session,
+        &["commit", "-q", "--no-verify", "-m", "ignore"],
+    );
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    // A relaunch: the fast path rewrites the exclude list from omh's own view.
+    shadow
+        .ensure(&session.worktree, &[".env".to_string()])
+        .unwrap();
+    std::fs::write(session.worktree.join(".env"), "TOKEN=carried\n").unwrap();
+    std::fs::create_dir_all(session.worktree.join("target/debug")).unwrap();
+    std::fs::write(session.worktree.join("target/debug/omh"), "built\n").unwrap();
+
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a carried file and a build directory are not work: {stake:?}"
+    );
+}
+
+/// **A HEAD omh cannot read the tree of is not a clean one.** The agent owns
+/// the gitdir and can point HEAD at a branch with no commits; the count then
+/// has nothing to compare the worktree with, which is *cannot tell*.
+#[test]
+fn a_sandbox_head_with_no_commit_is_not_read_as_nothing_at_stake() {
+    let (paths, session, shadow) = a_session_with_nothing_unkept();
+    agent_git(
+        &shadow,
+        &session,
+        &["symbolic-ref", "HEAD", "refs/heads/unborn"],
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(stake, cmd::harvest::AtStake::Unknown(_)),
+        "an unborn HEAD read as: {stake:?}"
+    );
+}
+
 /// Naming checkpoints needs a git that can drop an already-applied
 /// commit, and says so rather than handing over a usage dump.
 ///
@@ -3511,17 +3753,22 @@ fn host_checks_never_stand_in_for_a_probe_that_did_not_run() {
 
     let host = || doctor::HostRows(doctor::git_checks());
 
-    let err = cmd::harvest::every_check(Vec::new(), host())
+    let err = cmd::harvest::every_check(&["rules"], Vec::new(), host())
         .expect_err("a sandbox that ran nothing is not a pass");
     assert!(err.to_string().contains("did not run it"), "{err}");
 
+    // Something, but not everything: a check asked and never answered.
+    let err = cmd::harvest::every_check(&["rules", "skills"], sandbox.clone(), host())
+        .expect_err("a probe that answered one check of two did not finish");
+    assert!(err.to_string().contains("no answer for `skills`"), "{err}");
+
     // The half the type cannot carry: a caller that gathered no host rows
     // would report the sandbox as fine and say nothing about the machine.
-    let err = cmd::harvest::every_check(sandbox.clone(), doctor::HostRows(Vec::new()))
+    let err = cmd::harvest::every_check(&["rules"], sandbox.clone(), doctor::HostRows(Vec::new()))
         .expect_err("no host rows is a caller mistake, not a quiet host");
     assert!(err.to_string().contains("host checks"), "{err}");
 
-    let both = cmd::harvest::every_check(sandbox, host()).unwrap();
+    let both = cmd::harvest::every_check(&["rules"], sandbox, host()).unwrap();
     assert!(
         both.iter().any(|o| o.name == "git on the host"),
         "the host's answers are there: {both:?}"
@@ -4890,9 +5137,15 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let (paths, adapter) = measurement_fixture(dir.path());
     // Exits non-zero for everything, so the image "exists" is false and the
-    // probe fails — the shape of a daemon that is refusing.
+    // probe fails — the shape of a daemon that is refusing. It writes down
+    // what it was asked, because the build in between is a spawn of its own.
     let bin = dir.path().join("failing-runtime");
-    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+    let asked = dir.path().join("asked");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", asked.display()),
+    )
+    .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -4905,6 +5158,17 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
         &base::Own::default(),
         &settings::RepoPolicy::default(),
         &out::Ctx::plain(),
+    );
+
+    // **The build went to the shim, not to the host's docker.** It is the
+    // one runner that spawns a `Child` instead of going through `output`,
+    // and a shim that covered only `output` sent this test's `docker build`
+    // to whatever `docker` was on PATH — a real image build on any machine
+    // that ran the default suite.
+    let said = std::fs::read_to_string(&asked).unwrap_or_default();
+    assert!(
+        said.lines().any(|l| l.starts_with("build ")),
+        "the build skipped the shim and ran the host's docker; the shim heard: {said:?}"
     );
 
     assert_eq!(
@@ -5269,6 +5533,100 @@ fn a_seeded_key_lands_where_omh_set_would_put_it() {
     )
     .unwrap();
     assert_eq!(cmd::init::seed_settings(&paths).unwrap().local, None);
+}
+
+/// Every account `omh settings set account` writes, a new repo takes — into
+/// the file `omh set account` writes, as it stood.
+///
+/// `omh settings set account claude:work` wrote an `[account]` table, said
+/// `(seeds new repos)`, and every `omh init` after refused the template:
+/// "`[account]` is read by nobody". The writer is the one the command uses,
+/// so a shape it learns to write is a shape this asks the seeder about.
+#[test]
+fn every_account_the_defaults_writer_writes_seeds_a_repo() {
+    let writes: &[&[(Option<&str>, &str)]] = &[
+        &[(None, "mine")],
+        &[(Some("claude"), "work")],
+        &[(None, "mine"), (Some("codex"), "work")],
+        &[(Some("claude"), "work"), (Some("codex"), "other")],
+    ];
+    for writes in writes {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home").join(".omh"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        for (harness, name) in *writes {
+            config::set_account(&paths, *harness, name, config::Layer::Personal).unwrap();
+        }
+        let template = config::Layer::Personal.file(&paths);
+        let template: toml::Table = std::fs::read_to_string(template).unwrap().parse().unwrap();
+        let seed = cmd::init::seed_settings(&paths)
+            .unwrap_or_else(|e| panic!("{writes:?} is refused: {e:#}"));
+        let local = seed.local.clone().unwrap_or_default();
+        let (into, not) = match key::describes("account").unwrap().default_layer() {
+            config::Layer::Local => (&local, &seed.shared),
+            _ => (&seed.shared, &local),
+        };
+        let into: toml::Table = into.parse().expect(into);
+        let not: toml::Table = not.parse().expect(not);
+        assert_eq!(
+            into.get("account"),
+            template.get("account"),
+            "{writes:?}: {into}"
+        );
+        assert!(!not.contains_key("account"), "{writes:?} is in both: {not}");
+        // And `init` says it seeded it, once.
+        let said: Vec<&String> = seed
+            .took
+            .iter()
+            .chain(&seed.took_local)
+            .filter(|t| t.contains("account"))
+            .collect();
+        assert_eq!(said, ["account"], "{writes:?}");
+    }
+}
+
+/// What `omh settings` calls a table that seeds a new repo, `omh init`
+/// seeds — and what it does not, init refuses. The report listed `[account]`
+/// under "also seeded into a new repo" while init refused it by name.
+#[test]
+fn what_the_report_says_seeds_a_repo_is_what_init_seeds() {
+    for (table, body) in [
+        ("use", "skills = [\"tdd\"]"),
+        ("unuse", "hooks = [\"lint\"]"),
+        ("omh", "codegraph = false"),
+        ("account", "claude = \"work\""),
+        ("mcp", "x = 1"),
+        ("provision", "\"go/toolchain\" = true"),
+        ("carry_in", "x = 1"),
+        ("typo_table", "x = 1"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home").join(".omh"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        std::fs::write(
+            config::Layer::Personal.file(&paths),
+            format!("[{table}]\n{body}\n"),
+        )
+        .unwrap();
+        let reported = cmd::settings::seeding_table(&format!("[{table}]"));
+        let seeded = cmd::init::seed_settings(&paths);
+        assert_eq!(
+            reported,
+            seeded.is_ok(),
+            "[{table}]: the report says {}, init {}",
+            if reported { "it seeds" } else { "it does not" },
+            match &seeded {
+                Ok(_) => "seeds it".to_string(),
+                Err(e) => format!("refuses it: {e:#}"),
+            }
+        );
+    }
 }
 
 /// The committed file's header teaches `carry_in` without a line that would
@@ -7036,6 +7394,156 @@ fn materialise_never_removes_the_placeholders_omh_mounts_over() {
     );
 }
 
+/// A launch leaves your own checkout ignoring exactly what it ignored before.
+///
+/// `info/exclude` lives in the common git dir, so it is your checkout's file
+/// as much as the session's. Writing omh's placeholder names into it meant
+/// that after one launch an `AGENTS.md` you created in your checkout was
+/// missing from `git status`, `git add -A` stepped over it, and
+/// `git add AGENTS.md` called it ignored — and nothing ever took the lines
+/// back out.
+#[test]
+fn a_launch_changes_nothing_about_what_your_checkout_ignores() {
+    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
+
+    for name in carry::hidden_in_the_worktree() {
+        std::fs::write(paths.repo.join(name), "the user's own\n").unwrap();
+    }
+    let out = Command::new("git")
+        .current_dir(&paths.repo)
+        .args(["status", "--porcelain", "-uall"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let status = String::from_utf8_lossy(&out.stdout);
+    for name in carry::hidden_in_the_worktree() {
+        assert!(
+            status.lines().any(|l| l == format!("?? {name}")),
+            "{name} in your checkout is invisible to git status after a launch: {status:?}"
+        );
+    }
+}
+
+/// What a launch leaves in the worktree is nobody's work, on every host read
+/// that asks the worktree what changed.
+///
+/// A bind mount lands on an empty file omh creates in `/work`, one per name
+/// in `carry::hidden_in_the_worktree`. `omh s`, `diff`, `rm`'s question and
+/// `commit` all read the worktree from the host, and each has to leave those
+/// files out without an exclude file shared with your checkout.
+///
+/// No sandbox repository here, on purpose: that is the state in which `rm`
+/// asks the worktree itself rather than the sandbox's index.
+#[test]
+fn an_untouched_session_holds_nothing_but_omhs_placeholders() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    std::fs::write(paths.repo.join("kept.rs"), "fn kept() {}\n").unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "trunk"],
+    ] {
+        let out = Command::new("git")
+            .current_dir(&paths.repo)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    }
+    let session = Session::new(&paths.worktrees().join("s01"), "s01".to_string());
+    session.ensure(&paths.repo, "main").unwrap();
+    cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
+    // What `container::place_destination` leaves: an empty file, made new.
+    for name in carry::hidden_in_the_worktree() {
+        std::fs::write(session.worktree.join(name), "").unwrap();
+    }
+
+    assert_eq!(
+        session.changed().unwrap(),
+        Vec::<String>::new(),
+        "`omh s` counts omh's placeholders as uncommitted work"
+    );
+    let review = session.diff("main", session::What::Summary).unwrap();
+    for name in carry::hidden_in_the_worktree() {
+        assert!(
+            !review.contains(name),
+            "`omh s01 diff` shows omh's {name} as the session's work: {review:?}"
+        );
+    }
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(stake, cmd::harvest::AtStake::Nothing),
+        "`omh s01 rm` would ask about work nobody did: {stake:?}"
+    );
+    let refused = session
+        .commit(Some("nothing"), session::Carried::refusing(&[]))
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("nothing to commit"),
+        "`omh s01 commit` found work in omh's placeholders: {refused:#}"
+    );
+}
+
+/// Only the files omh placed are left out. An `AGENTS.md` the agent writes
+/// for one package is the agent's work, and a pattern in `info/exclude`
+/// matched that name at every depth.
+#[test]
+fn a_rules_file_the_agent_writes_below_the_root_is_its_work() {
+    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
+    std::fs::create_dir_all(session.worktree.join("pkg")).unwrap();
+    for name in carry::hidden_in_the_worktree() {
+        std::fs::write(session.worktree.join("pkg").join(name), "# pkg\n").unwrap();
+    }
+
+    let changed = session.changed().unwrap();
+    for name in carry::hidden_in_the_worktree() {
+        assert!(
+            changed.contains(&format!("pkg/{name}")),
+            "pkg/{name} is the agent's work and `omh s` does not count it: {changed:?}"
+        );
+    }
+}
+
+/// The exclude file is yours. omh may add a line to it and nothing else.
+///
+/// It read the file as UTF-8 and wrote back what it had read plus its own
+/// lines. One byte outside UTF-8 — a Latin-1 pattern written years ago —
+/// read as an empty file, and the write replaced every rule in it with
+/// omh's, so files you kept out of `git add -A` privately were swept up by
+/// the next one.
+#[test]
+fn the_users_own_exclude_rules_survive_a_launch() {
+    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let exclude = carry::exclude_path(&session.worktree).unwrap();
+    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    let theirs: &[u8] = b"caf\xe9.local\nprivate-notes.txt\n";
+    std::fs::write(&exclude, theirs).unwrap();
+    std::fs::write(paths.repo.join(".env.local"), "SECRET=1\n").unwrap();
+
+    // Carried the way `omh new` carries it: the one writer of this file.
+    carry::apply(&paths.repo, &session.worktree, &[".env.local".to_string()]).unwrap();
+    let after = std::fs::read(&exclude).unwrap();
+    assert!(
+        after.starts_with(theirs),
+        "your exclude rules are gone: {:?}",
+        String::from_utf8_lossy(&after)
+    );
+    assert!(
+        after.split(|b| *b == b'\n').any(|l| l == b".env.local"),
+        "the carried file is not excluded: {:?}",
+        String::from_utf8_lossy(&after)
+    );
+
+    // A second launch has nothing to add, so it writes nothing.
+    carry::apply(&paths.repo, &session.worktree, &[".env.local".to_string()]).unwrap();
+    assert_eq!(std::fs::read(&exclude).unwrap(), after);
+}
+
 /// A `Paths` under a throwaway home, with the repo initialised.
 fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
     let paths = Paths {
@@ -7890,9 +8398,26 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
     }
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().join("worktrees");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let nowhere = dir.path().join("nowhere");
+    let at = |worktrees: &std::path::Path| {
+        crate::session::next_id(&crate::session::Claimed {
+            worktrees,
+            repo: &repo,
+            shadows: &nowhere,
+            runs: &nowhere,
+        })
+    };
 
     assert_eq!(
-        crate::session::next_id(&dir.path().join("never-made-one")).unwrap(),
+        at(&dir.path().join("never-made-one")).unwrap(),
         "s01",
         "a checkout with no sessions yet starts at s01"
     );
@@ -7900,13 +8425,13 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
     std::fs::create_dir_all(wt.join("s01")).unwrap();
     std::fs::create_dir_all(wt.join("s02")).unwrap();
     assert_eq!(
-        crate::session::next_id(&wt).unwrap(),
+        at(&wt).unwrap(),
         "s03",
         "the highest id plus one, when omh can see them"
     );
 
     let _restore = Restore::unreadable(&wt).unwrap();
-    let err = crate::session::next_id(&wt)
+    let err = at(&wt)
         .expect_err("an unreadable worktrees directory answered with an id a live session holds");
     assert!(
         format!("{err:#}").contains("worktrees"),

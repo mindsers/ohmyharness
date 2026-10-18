@@ -73,8 +73,9 @@ $ cargo test --features e2e --test e2e -- --exact omp  # one
 
 It needs Docker, and builds the images it lacks. It is behind a feature so the
 default build and `--include-ignored` leave it out; the nightly workflow runs it
-once per harness. A turn that fails prints the last two messages the model
-was sent.
+once per harness, and every push lints and builds it (`--features e2e` on the
+clippy and msrv jobs, and in `scripts/check.sh`). A turn that fails prints the
+last two messages the model was sent.
 
 It is stronger than `omh doctor` where doctor only checks a file is there:
 moving omp's MCP config to a path omp never reads passes doctor and fails both

@@ -397,6 +397,13 @@ pub struct Shadow {
     /// latest one, so one stale line could mask a hook that had since gone
     /// quiet for good.
     pub events_ledger: PathBuf,
+    /// The exclude list omh last wrote into the gitdir's `info/exclude`, kept
+    /// where only omh writes — the copy `unkept` believes.
+    ///
+    /// A sibling for the reason the records above are: the `info/exclude` in
+    /// the gitdir is the agent's to append to, so a rule found there is only
+    /// omh's if it is also here.
+    pub exclude_record: PathBuf,
     /// Named for the session so the user can tell which sandbox an editor
     /// window is showing, and `-scratch` because that is what it is: the
     /// history the user curates before any of it becomes the branch's.
@@ -498,6 +505,7 @@ impl Shadow {
             seed_record: shadow_dir.join(format!("{session_id}.seed")),
             landed_record: shadow_dir.join(format!("{session_id}.landed")),
             events_ledger: shadow_dir.join(format!("{session_id}.ledger")),
+            exclude_record: shadow_dir.join(format!("{session_id}.exclude")),
             branch: format!("{session_id}-scratch"),
         }
     }
@@ -546,7 +554,7 @@ impl Shadow {
             // those, and would also keep an entry omh has since dropped —
             // leaving a path silently untracked in the one repository whose
             // job is to show the agent its own work.
-            Self::write_exclude(&self.gitdir, excluded)?;
+            self.exclude(&self.gitdir, excluded)?;
             Self::write_config(&self.gitdir)?;
             return Ok(());
         }
@@ -636,7 +644,7 @@ impl Shadow {
         // Inside the gitdir, so nothing omh does appears in the user's tree —
         // the exclude file `carry` writes lives in the *worktree's* git dir and
         // is a different mechanism for a different repository.
-        Self::write_exclude(&building, excluded)?;
+        self.exclude(&building, excluded)?;
         Self::write_pre_push(&building)?;
 
         // And deliberately no `core.hooksPath`, for the same reason as
@@ -1126,15 +1134,108 @@ impl Shadow {
             // inside one, which `omh sNN rm` believes. A pointer omh will not
             // follow is work at stake, not work that is absent. One `status`
             // did report is already in the count.
+            //
+            // **And `status` is asked of an index of omh's own, read from
+            // HEAD — never the agent's.** The agent writes that index, and
+            // `update-index --assume-unchanged` or `--skip-worktree` on a file
+            // it edited makes `status` pass over the edit: `omh s` counted it
+            // while this said nothing was at stake, and `rm` deleted it. A
+            // fresh index carries neither bit, so every path that differs from
+            // HEAD is counted, whether the agent staged it or not.
+            //
+            // **Nor are the agent's ignore rules.** `status` reads the gitdir's
+            // `info/exclude`, which the agent can append `*` to, and a
+            // `.gitignore` the agent wrote, which can name itself; either hid a
+            // new file from this count. So what is ignored is listed too, and
+            // stays out of the count only when a rule omh believes ignores it.
             {
-                let status = git(&self.gitdir, worktree, &["status", "--porcelain"])?;
+                let scratch = tempfile::tempdir().context("making an index omh owns")?;
+                let index = scratch.path().join("index");
+                git_with_index(&self.gitdir, worktree, &index, &["read-tree", "HEAD"], None)?;
+                let status = git_with_index(
+                    &self.gitdir,
+                    worktree,
+                    &index,
+                    &["status", "--porcelain", "-z", "--ignored"],
+                    None,
+                )?;
+                let (mut seen, ignored) = porcelain_paths(&status);
+                seen.extend(self.hidden(worktree, &index, &ignored)?);
                 let unseen = nested(&self.gitdir, worktree)?
                     .iter()
-                    .filter(|path| !status.lines().any(|l| l.ends_with(path.as_str())))
+                    .filter(|path| {
+                        !seen
+                            .iter()
+                            .any(|s| s.trim_end_matches('/') == path.as_str())
+                    })
                     .count();
-                lines(status) + unseen
+                seen.len() + unseen
             },
         ))
+    }
+
+    /// The ignored paths no rule omh believes accounts for.
+    ///
+    /// Believed: a `.gitignore` HEAD tracks — the worktree's copy of one the
+    /// agent changed is already counted as a change; a line of the
+    /// `info/exclude` omh wrote, per [`Self::exclude_record`]; and anything
+    /// outside both repositories, which is the user's own (`core.excludesFile`).
+    /// Not believed: a `.gitignore` HEAD does not track, and a line of
+    /// `info/exclude` omh did not write. A record omh cannot find believes
+    /// nothing in that file; one it cannot read is an error.
+    fn hidden(&self, worktree: &Path, index: &Path, ignored: &[String]) -> Result<Vec<String>> {
+        if ignored.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ours: Option<Vec<String>> = match std::fs::read_to_string(&self.exclude_record) {
+            Ok(body) => Some(body.lines().map(str::to_string).collect()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("reading {}", self.exclude_record.display()))
+            }
+        };
+        let tracked: Vec<String> =
+            git_with_index(&self.gitdir, worktree, index, &["ls-files", "-z"], None)?
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect();
+        let exclude = self.gitdir.join("info").join("exclude");
+        let mut paths = Vec::new();
+        for path in ignored {
+            paths.extend_from_slice(path.as_bytes());
+            paths.push(0);
+        }
+        let answer = git_with_index(
+            &self.gitdir,
+            worktree,
+            index,
+            &["check-ignore", "-v", "-z", "--stdin"],
+            Some(&paths),
+        )?;
+        let fields: Vec<&str> = answer.split('\0').collect();
+        let mut believed: Vec<&str> = Vec::new();
+        // `source NUL line NUL pattern NUL path NUL`, one per path.
+        for record in fields.chunks_exact(4) {
+            let [source, _line, pattern, path] = [record[0], record[1], record[2], record[3]];
+            let trusted = if std::path::Path::new(source) == exclude {
+                ours.as_ref()
+                    .is_some_and(|ours| ours.iter().any(|o| o == pattern))
+            } else if std::path::Path::new(source).is_absolute() {
+                true
+            } else {
+                tracked.iter().any(|t| t == source)
+            };
+            if trusted {
+                believed.push(path);
+            }
+        }
+        Ok(ignored
+            .iter()
+            .filter(|path| !believed.contains(&path.as_str()))
+            .cloned()
+            .collect())
     }
 
     /// Commit the worktree as it stands, so a sync has a point to undo from.
@@ -2281,6 +2382,7 @@ impl Shadow {
         // back around, and a replay point inherited by a stranger says a branch
         // has already been given commits it has never seen.
         let _ = std::fs::remove_file(&self.landed_record);
+        let _ = std::fs::remove_file(&self.exclude_record);
         match crate::session::still_there(&self.gitdir) {
             // A session that never built one is not a failed removal.
             Ok(false) => crate::session::Gone::Yes,
@@ -2292,6 +2394,14 @@ impl Shadow {
                 None => "it is still there".to_string(),
             }),
         }
+    }
+
+    /// The exclude list, where the agent's git reads it and, beside the
+    /// gitdir, where only omh does.
+    fn exclude(&self, gitdir: &Path, excluded: &[String]) -> Result<()> {
+        Self::write_exclude(gitdir, excluded)?;
+        let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
+        replace_record(&self.exclude_record, body)
     }
 
     /// Keep the agent's own `git status` clean at launch.
@@ -3133,8 +3243,31 @@ fn git_owned(gitdir: &Path, worktree: &Path, args: &[String]) -> Result<String> 
 }
 
 fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
-    let out = host_git(gitdir)
-        .args(before_the_verb(args))
+    git_over(host_git(gitdir), worktree, args, None)
+}
+
+/// [`git`], over the index at `index` instead of the one the agent writes,
+/// with `input` on stdin when there is any.
+fn git_with_index(
+    gitdir: &Path,
+    worktree: &Path,
+    index: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<String> {
+    let mut cmd = host_git(gitdir);
+    cmd.env("GIT_INDEX_FILE", index);
+    git_over(cmd, worktree, args, input)
+}
+
+fn git_over(
+    mut cmd: Command,
+    worktree: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<String> {
+    use std::process::Stdio;
+    cmd.args(before_the_verb(args))
         // Explicitly, because a child inherits omh's cwd and `add -A .` is
         // resolved against it: invoked from inside the session's worktree, git
         // computes a prefix and seeds only that subtree, silently leaving the
@@ -3142,9 +3275,32 @@ fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
         .current_dir(worktree)
         .arg("--work-tree")
         .arg(worktree)
-        .args(guarded(args))
-        .output()
-        .context("running git")?;
+        .args(guarded(args));
+    let out = match input {
+        None => cmd.output().context("running git")?,
+        Some(input) => {
+            let mut child = cmd
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("running git")?;
+            // Written from a thread of its own: a child that fills its stdout
+            // pipe while this is still writing stdin would wait forever on us.
+            let mut stdin = child.stdin.take().context("git's stdin")?;
+            let input = input.to_vec();
+            let writer = std::thread::spawn(move || {
+                use std::io::Write as _;
+                stdin.write_all(&input)
+            });
+            let out = child.wait_with_output().context("running git")?;
+            writer
+                .join()
+                .map_err(|_| anyhow::anyhow!("writing to git's stdin panicked"))?
+                .context("writing to git's stdin")?;
+            out
+        }
+    };
     if !out.status.success() {
         anyhow::bail!(
             "git {}: {}",
@@ -3232,6 +3388,29 @@ pub(crate) fn before_the_verb(args: &[&str]) -> Vec<&'static str> {
         Some(&"add") => vec!["-c", NO_NESTED_STATUS],
         _ => Vec::new(),
     }
+}
+
+/// What a `status --porcelain -z --ignored` names: the paths it reports as
+/// changed or untracked, and the ones it reports as ignored, apart.
+///
+/// A rename or copy carries the name it came from as the next record, which
+/// is not a second path.
+fn porcelain_paths(status: &str) -> (Vec<String>, Vec<String>) {
+    let mut records = status.split('\0').filter(|r| !r.is_empty());
+    let (mut seen, mut ignored) = (Vec::new(), Vec::new());
+    while let Some(record) = records.next() {
+        let Some((xy, path)) = record.split_at_checked(3) else {
+            continue;
+        };
+        if xy.contains('R') || xy.contains('C') {
+            records.next();
+        }
+        match xy {
+            "!! " => ignored.push(path.to_string()),
+            _ => seen.push(path.to_string()),
+        }
+    }
+    (seen, ignored)
 }
 
 /// The paths the sandbox's index records as repositories of their own.

@@ -206,7 +206,7 @@ pub(crate) fn session_up(
     // caller can sample it too early.
     let mut opts = opts;
     match memory::deliver::ensure(
-        backend.program(),
+        &backend.spawned().to_string_lossy(),
         paths,
         memory::deliver::sources_at(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
@@ -286,7 +286,8 @@ pub(crate) fn session_up(
     // whatever the agent has since written. Index it now; the Stop hook keeps
     // it current from here.
     let project = base::project_name(&paths.repo_id(), &session.id);
-    let _ = Command::new(backend.program())
+    let _ = backend
+        .command()
         .args(backend.exec_args(
             &name,
             &[
@@ -1992,11 +1993,8 @@ pub(crate) fn remember_hooks(record: Option<notice::Record>, ctx: &out::Ctx) {
 /// happened — a `.env` you thought you were carrying and are not is exactly the
 /// failure that wastes an hour inside the sandbox.
 pub(crate) fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
-    // The rules themselves are mounted, not written here — this covers the
-    // empty placeholder each mount lands on, and any backend that cannot mount
-    // a single file. It must run before `plan` places those placeholders.
-    carry::hide_staged_rules(&session.worktree)?;
-
+    // Nothing here for omh's own placeholders: the host reads in `session.rs`
+    // leave them out, so your checkout's `info/exclude` is not asked to.
     let patterns = config::policy_list(paths, "carry_in");
     if patterns.is_empty() {
         return Ok(());
@@ -2167,7 +2165,15 @@ pub(crate) fn run(
     if let session::Start::Named(explicit) = start {
         session::validate_id(explicit)?;
     }
-    let id = session::pick(&paths.worktrees(), start)?;
+    let id = session::pick(
+        &session::Claimed {
+            worktrees: &paths.worktrees(),
+            repo: &paths.repo,
+            shadows: &paths.shadows(),
+            runs: &paths.runs(),
+        },
+        start,
+    )?;
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
@@ -2307,7 +2313,8 @@ pub(crate) fn run(
     }
     remember_hooks(hooks_seen, ctx);
     ctx.announce(&status_line);
-    let status = Command::new(backend.program())
+    let status = backend
+        .command()
         .args(backend.exec_args(&name, &plan.argv, true))
         .status()?;
     // `omh s01 diff`, not `omh diff`. There is no top-level `diff` — the name

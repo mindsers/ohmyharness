@@ -305,9 +305,13 @@ fn copy_dir(root: &Path, src: &Path, dst: &Path) -> Result<Action> {
 /// `info/exclude` from the **common** git dir, not the per-worktree one, so
 /// writing to `.git/worktrees/<id>/info/exclude` silently does nothing.
 ///
-/// Consequence worth naming: this file is shared with the main checkout. It is
-/// never committed, and carried paths are untracked there by definition, so the
-/// effect is invisible — but it is not scoped to the worktree.
+/// Consequence worth naming: this file is **your checkout's** as much as the
+/// worktree's, so whatever omh writes here your own `git status` obeys too. It
+/// holds the `carry_in` entries — files you keep out of git anyway, which is
+/// why you carry them — and nothing else of omh's. It used to hold the names of
+/// omh's mount placeholders as well, and after one launch an `AGENTS.md` you
+/// created in your checkout was invisible to git; the host reads in
+/// `session.rs` leave those out themselves now.
 pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
     let out = std::process::Command::new("git")
         .current_dir(worktree)
@@ -324,29 +328,17 @@ pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
 /// The filenames omh stages its rules onto, inside `/work`.
 ///
 /// Named once because three things have to agree about them, in three modules:
-/// the `concat` targets the adapters declare, `hide_staged_rules` here, and
-/// `Session::commit`'s backstop.
+/// the `concat` targets the adapters declare, `hidden_in_the_worktree` here,
+/// and `Session::commit`'s backstop.
 pub const STAGED_RULES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
 
-/// Hide the rules filenames from the agent's `git status`.
-///
-/// omh mounts its rules rather than writing them, so the content is never here
-/// to hide. What this covers is the placeholder: a bind mount needs its
-/// destination to exist, and docker will not create one inside `/work`, so
-/// `container::place_destination` puts an empty file there before every launch.
-///
-/// It cannot cover the tracked case at all — `info/exclude` is gitignore
-/// semantics, silent about a file git already has — which is why the mount, not
-/// this, is what keeps omh's staging out of the user's commit.
-pub fn hide_staged_rules(worktree: &Path) -> Result<()> {
-    let names: Vec<String> = hidden_in_the_worktree()
-        .into_iter()
-        .map(String::from)
-        .collect();
-    exclude(worktree, &names)
-}
-
 /// Every name a launch may leave in the worktree as a mount destination.
+///
+/// A bind mount needs its destination to exist, and docker will not create one
+/// inside `/work`, so `container::place_destination` puts an empty file there
+/// before every launch. Those files are omh's, and every host read that asks
+/// the worktree what changed leaves them out: `Session::changed`, the staging
+/// behind `diff` and `commit`, `rm`'s question and `materialise`.
 ///
 /// **Checked against the mounts, not remembered.** This was `STAGED_RULES`
 /// alone — two names kept by hand under a doc comment asking the next person to
@@ -355,44 +347,80 @@ pub fn hide_staged_rules(worktree: &Path) -> Result<()> {
 /// `omh s` reported `1 uncommitted`, `omh sNN diff` showed `.mcp.json | 0` as
 /// the session's work, and `omh sNN commit` put omh's own plumbing onto the
 /// user's branch, where `omh sNN push` would publish it.
+/// `every_placeholder_a_launch_leaves_in_the_worktree_is_one_omh_leaves_out`
+/// walks the plan's `/work` mounts and fails if any name is missing here, so
+/// the list cannot fall behind the mounts the way it did.
 ///
-/// A list is still the right shape: `hide_staged_rules` runs where there is no
-/// plan to read, and a launch has to hide these *before* it builds one. What
-/// changed is that `every_placeholder_a_launch_leaves_in_the_worktree_is_one_git_ignores`
-/// now walks the plan's `/work` mounts and fails if any name is missing here,
-/// so the list cannot fall behind the mounts the way it did.
-///
-/// Silent about a file git already tracks — this is `info/exclude`, which is
-/// gitignore semantics. A repo carrying its own `.mcp.json` is unaffected; the
-/// mount hides it for the length of the session and nothing else.
+/// **At the worktree's root, and only while untracked** — what
+/// `place_destination` makes, since it creates a file and never writes one. A
+/// repo carrying its own `.mcp.json` keeps it: the mount hides it for the
+/// length of the session and nothing else. An `AGENTS.md` the agent writes for
+/// one package is its work. These used to be patterns in `info/exclude`, which
+/// matched at every depth and, being your checkout's file too, hid your own.
 pub fn hidden_in_the_worktree() -> Vec<&'static str> {
     STAGED_RULES.into_iter().chain([".mcp.json"]).collect()
 }
 
-/// Keep carried files out of the agent's `git status`, so they never show up as
-/// untracked noise or get committed onto the session branch.
+/// Keep carried files out of every host-side `git status` of the worktree, so
+/// they never show up as the session's work or get committed onto its branch.
+///
+/// The sandbox's own repository has its own list, built from the mounts; this
+/// one is what `omh s`, `diff` and `commit` read on the host.
+///
+/// **Lines added, never a file rewritten.** It is your file, and it read as
+/// UTF-8 and was written back whole: one byte outside UTF-8 read as an empty
+/// file, and the write replaced every rule in it with omh's. So the bytes are
+/// read as bytes, only a missing file is an empty one, and a launch with
+/// nothing to add writes nothing.
 fn exclude(worktree: &Path, patterns: &[String]) -> Result<()> {
     let Some(path) = exclude_path(worktree) else {
         // A scratch directory has no git at all; nothing to keep clean.
         return Ok(());
     };
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let missing = missing_lines(&body, patterns);
+    if missing.is_empty() {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.write_all(&missing)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// What `exclude` appends: each pattern the file does not already hold as a
+/// line of its own, newline-terminated — after a newline of its own first when
+/// the file's last line has none, so a pattern is never glued onto yours.
+fn missing_lines(body: &[u8], patterns: &[String]) -> Vec<u8> {
+    let held = |line: &str| {
+        body.split(|b| *b == b'\n')
+            .any(|l| l.trim_ascii() == line.as_bytes())
+    };
+    let mut out: Vec<u8> = Vec::new();
     for pattern in patterns {
         let line = pattern.trim();
-        if body.lines().any(|l| l.trim() == line) {
+        let already_added = out.split(|b| *b == b'\n').any(|l| l == line.as_bytes());
+        if line.is_empty() || held(line) || already_added {
             continue;
         }
-        if !body.is_empty() && !body.ends_with('\n') {
-            body.push('\n');
+        if out.is_empty() && !body.is_empty() && !body.ends_with(b"\n") {
+            out.push(b'\n');
         }
-        body.push_str(line);
-        body.push('\n');
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
     }
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    out
 }
 
 #[cfg(test)]
@@ -702,19 +730,12 @@ mod tests {
         );
     }
 
-    /// The rules filenames stay out of `git status` whatever put them there —
-    /// a mount placeholder, or a backend that had to fall back to writing.
-    #[test]
-    fn omhs_own_staged_files_are_hidden_too() {
-        let (_d, _repo, wt) = worktree_repo();
-        std::fs::write(wt.join("CLAUDE.md"), "rules").unwrap();
-        std::fs::write(wt.join("AGENTS.md"), "rules").unwrap();
-
-        hide_staged_rules(&wt).unwrap();
-        let st = status(&wt);
-        assert!(!st.contains("CLAUDE.md"), "got:\n{st}");
-        assert!(!st.contains("AGENTS.md"), "got:\n{st}");
-    }
+    // omh's own mount placeholders are not this file's to hide any more: it is
+    // your checkout's exclude file too, and hiding them here hid your own
+    // `AGENTS.md`. The host reads leave them out themselves, which
+    // `an_untouched_session_holds_nothing_but_omhs_placeholders` holds; that
+    // this file gets only the carried entries is
+    // `a_launch_changes_nothing_about_what_your_checkout_ignores`.
 
     // ── escaping the repo ───────────────────────────────────────────────────
 

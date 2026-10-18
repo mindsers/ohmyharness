@@ -667,18 +667,37 @@ fn transcript(s: &Session) {
 /// probes a person runs, against the same catalogue and image.
 fn doctor(s: &Session) {
     let out = s.omh(&["doctor", "--harness", s.harness.name, "--json"]);
-    let report: Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|_| panic!("omh doctor --json: {}", crate::sandbox::text(&out)));
-    let failed: Vec<&Value> = report["checks"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    // Every document, not one: a failed run once printed two, and parsing
+    // stdout as a single value then panicked on "trailing characters" with
+    // the failed checks buried in the dump. The checks come first, then the
+    // count, so a failure names what failed.
+    let documents: Vec<Value> = serde_json::Deserializer::from_slice(&out.stdout)
+        .into_iter::<Value>()
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| {
+            panic!(
+                "omh doctor --json is not JSON ({e}): {}",
+                crate::sandbox::text(&out)
+            )
+        });
+    let failed: Vec<&Value> = documents
+        .iter()
+        .flat_map(|d| d["checks"].as_array().into_iter().flatten())
         .filter(|c| c["ok"] != true)
         .collect();
     assert!(
-        report["ok"] == true && failed.is_empty(),
-        "omh doctor failed on {}: {failed:#?}",
-        s.harness.name
+        failed.is_empty() && documents.iter().all(|d| d["ok"] == true),
+        "omh doctor failed on {}: {failed:#?}\n{}",
+        s.harness.name,
+        crate::sandbox::text(&out)
+    );
+    assert_eq!(
+        documents.len(),
+        1,
+        "omh doctor --json printed {} documents on {}: {}",
+        documents.len(),
+        s.harness.name,
+        crate::sandbox::text(&out)
     );
 }
 

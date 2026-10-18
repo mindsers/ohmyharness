@@ -1089,7 +1089,9 @@ fn prune(dst: &Path, cap: Capability, repo: &crate::settings::RepoPolicy) -> Res
 /// `create_new`, never a write: a branch that carries its own `CLAUDE.md` must
 /// find it byte-for-byte intact. The mount hides that file for the length of the
 /// session; it does not replace it. The placeholder is kept out of the agent's
-/// `git status` by `carry::hide_staged_rules`, which runs before this.
+/// `git status` by the sandbox repository's own exclude list, built from these
+/// mounts, and out of every host read of the worktree by
+/// `session::is_placeholder` and the staging behind `diff` and `commit`.
 fn place_destination(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1588,7 +1590,7 @@ mod tests {
         );
     }
 
-    /// Every placeholder omh puts in the worktree is one git ignores.
+    /// Every placeholder omh puts in the worktree is one omh leaves out.
     ///
     /// A bind mount needs its destination to exist, and for a destination under
     /// `/work` the runtime will not make one — `/work` is the host worktree, so
@@ -1607,9 +1609,11 @@ mod tests {
     /// - `omh s01 commit` committed it, and `omh s01 push` would publish it
     ///
     /// The invariant, so the hand-maintained list cannot fall behind the mounts
-    /// again: whatever `place_destination` writes, `carry` hides.
+    /// again: whatever `place_destination` writes,
+    /// `carry::hidden_in_the_worktree` names — and every host read of the
+    /// worktree leaves out what that names.
     #[test]
-    fn every_placeholder_a_launch_leaves_in_the_worktree_is_one_git_ignores() {
+    fn every_placeholder_a_launch_leaves_in_the_worktree_is_one_omh_leaves_out() {
         let fx = fixture();
         for harness in ["claude", "opencode"] {
             let plan = plan_for(&fx, harness);

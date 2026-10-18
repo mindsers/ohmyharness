@@ -130,7 +130,7 @@ fi
 # same fail-open shape this file exists to close, one level up — and this is
 # the second time that lesson has had to be applied here, after the
 # `$status` fix above.
-for want in "fmt --check" "clippy --locked --all-targets -- -D warnings" "test --locked"; do
+for want in "fmt --check" "clippy --locked --all-targets --features e2e -- -D warnings" "test --locked"; do
   if grep -qF -- "$want" "$work/argv.log"; then
     ok "runs cargo $want"
   else

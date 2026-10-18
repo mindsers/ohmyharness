@@ -15,9 +15,13 @@ use std::path::{Path, PathBuf};
 
 pub const INCLUDE_LINE: &str = "Include ~/.ssh/config.d/omh";
 
-/// SSH host alias for a session.
+/// SSH host alias for a session: the session's container name.
+///
+/// Respelled by [`crate::profile::runtime_id`], because a space in a `Host`
+/// line is two patterns and in `HostKeyAlias` a parse error — and the block is
+/// included from `~/.ssh/config`, so the error stops every ssh on the machine.
 pub fn host_alias(repo: &str, session: &str) -> String {
-    format!("omh-{repo}-{session}")
+    format!("omh-{}-{session}", crate::profile::runtime_id(repo))
 }
 
 /// Loopback port for a session's sshd.
@@ -123,9 +127,33 @@ pub fn config_block(alias: &str, port: u16, key: &Path, known_hosts: &Path) -> S
          StrictHostKeyChecking yes\n  \
          UserKnownHostsFile {}\n  \
          LogLevel ERROR\n",
-        key.display(),
-        known_hosts.display()
+        config_path(key),
+        config_path(known_hosts)
     )
+}
+
+/// A path as one `ssh_config` argument.
+///
+/// Quoted, because the paths are under `~/.omh/keys` and a home directory may
+/// have a space in it, which ssh reads as a second argument — OpenSSH 10.3
+/// then refuses the whole config, and this block is included from
+/// `~/.ssh/config`. Inside the quotes ssh's tokeniser takes `\` as an escape,
+/// so `\` and `"` are escaped; `%` is doubled because both keywords expand
+/// `%` tokens, and a lone one is `unknown key` at the next connection.
+fn config_path(path: &Path) -> String {
+    let mut out = String::from('"');
+    for c in path.display().to_string().chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '%' => out.push_str("%%"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The known_hosts entry for one alias: `alias type key`, without the comment
@@ -418,13 +446,55 @@ mod tests {
         assert!(block.contains("StrictHostKeyChecking yes"), "got: {block}");
         assert!(block.contains("HostKeyAlias omh-x-s01"), "got: {block}");
         assert!(
-            block.contains("UserKnownHostsFile /k/known_hosts"),
+            block.contains("UserKnownHostsFile \"/k/known_hosts\""),
             "got: {block}"
         );
         assert!(
             !block.contains("/dev/null"),
             "nothing is thrown away: {block}"
         );
+    }
+
+    /// A key path with a space in it is one argument to ssh, and a `%` in it is
+    /// a percent sign rather than a token.
+    ///
+    /// The block reaches ssh through the `Include` in `~/.ssh/config`, so a
+    /// line ssh cannot parse is not omh's alone to suffer: OpenSSH 10.3 stops
+    /// every connection on the machine — `github.com` included — with
+    /// `keyword identityfile extra arguments at end of line … terminating`. A
+    /// home directory with a space in it was enough, since the paths are under
+    /// `~/.omh/keys`.
+    #[test]
+    fn a_key_path_with_a_space_or_a_percent_is_one_path_to_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("John Smith 100%/keys");
+        let key = keys.join("id_ed25519");
+        let known_hosts = keys.join("known_hosts");
+        let block = config_block("omh-x-s01", 49200, &key, &known_hosts);
+        let cfg = dir.path().join("config");
+        std::fs::write(&cfg, &block).unwrap();
+        let out = std::process::Command::new("ssh")
+            .arg("-G")
+            .arg("-F")
+            .arg(&cfg)
+            .arg("omh-x-s01")
+            .output()
+            .expect("ssh must be installed to run this test");
+        assert!(
+            out.status.success(),
+            "ssh refused the block: {}\n{block}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // `-G` prints each value unquoted and before `%` expansion, which is
+        // when `%%` becomes `%` — measured with OpenSSH 10.3.
+        let read = String::from_utf8_lossy(&out.stdout);
+        for (keyword, path) in [("identityfile", &key), ("userknownhostsfile", &known_hosts)] {
+            let want = format!("{keyword} {}", path.display());
+            assert!(
+                read.lines().any(|l| l.replace("%%", "%") == want),
+                "ssh did not read `{want}` back:\n{read}"
+            );
+        }
     }
 
     /// One line per alias, carrying the key and not the comment ssh-keygen

@@ -342,6 +342,12 @@ pub(crate) fn doctor_cmd(
     // A host row found inside the run below, kept here too so a run that fails
     // after finding it still reports it.
     let mut found: Option<doctor::Outcome> = None;
+    // Whether the run below got as far as saying its report. Past that point
+    // a failure *is* the report — it carries the host's rows already — and
+    // saying them again was a second report: two documents under `--json`,
+    // the second `"ok": true` whenever the host was healthy, so a consumer
+    // keeping the last one read a failed run as passed.
+    let mut reported = false;
     let ran = (|| -> Result<()> {
         let mut host = doctor::HostRows(host_rows);
         let adapter = Adapter::find(&paths.adapters(), &name)?;
@@ -517,7 +523,7 @@ pub(crate) fn doctor_cmd(
         let memory_bin = match dry_run {
             true => memory::deliver::available(&paths, ctx),
             false => match memory::deliver::ensure(
-                backend.program(),
+                &backend.spawned().to_string_lossy(),
                 &paths,
                 memory::deliver::sources_at(
                     std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
@@ -613,12 +619,14 @@ pub(crate) fn doctor_cmd(
         // explanation to a cause — with an empty stderr rendering as a bare
         // `omh:` and nothing after it. The sentence omh wrote stays first, and
         // what the container said follows it, sanitised: it is not omh's text.
-        let outcomes = crate::cmd::harvest::every_check(from_the_sandbox, host).map_err(|e| {
-            match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
-                said if said.is_empty() => e,
-                said => anyhow::anyhow!("{e}\n{said}"),
-            }
-        })?;
+        let asked: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        let outcomes =
+            crate::cmd::harvest::every_check(&asked, from_the_sandbox, host).map_err(|e| {
+                match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
+                    said if said.is_empty() => e,
+                    said => anyhow::anyhow!("{e}\n{said}"),
+                }
+            })?;
 
         let report = report::Doctor {
             sandbox: Some(report::DoctorSandbox {
@@ -630,6 +638,7 @@ pub(crate) fn doctor_cmd(
             outcomes,
         };
         ctx.say(&report);
+        reported = true;
         if !report.passed() {
             anyhow::bail!(
                 "{} of {} checks failed",
@@ -642,6 +651,7 @@ pub(crate) fn doctor_cmd(
 
     match ran {
         Ok(()) => Ok(()),
+        Err(e) if reported => Err(e),
         Err(e) => {
             // **The host's answers survive the failure that hid them.** A
             // build that dies on an unknown issuer, a probe that produced

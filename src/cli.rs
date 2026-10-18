@@ -695,6 +695,10 @@ pub(crate) enum SettingsCmd {
     Unset {
         /// Which setting to drop.
         key: String,
+        /// For `account`: the harness whose own account to drop, leaving the
+        /// one for every other harness — as `omh unset account codex` does in
+        /// a repo. Only `account` accepts it.
+        harness: Option<String>,
     },
     /// Have the repos `omh init` sets up after take an entry of your catalogue.
     ///

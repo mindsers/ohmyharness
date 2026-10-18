@@ -740,9 +740,11 @@ pub fn render(
         // The bool marks a `fields-by-tool` override — irrelevant here: a jq
         // path is a complete expression whichever map it came from, unlike
         // the JS renderers' `event.input?.SUFFIX` template.
+        // Exported, as the plugin renderers' `env` is: a `run` that calls a
+        // script reading `$OMH_TOOL_FILE` reads the same value on every harness.
         for (field, expr, _) in &fields {
             command.push_str(&format!(
-                "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
+                "{0}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); export {0}; ",
                 field.var()
             ));
             if *field == Field::ToolFile {
@@ -752,12 +754,20 @@ pub fn render(
     }
 
     // Before `when`, so a predicate can test what was captured.
+    //
+    // `capture` and `when` are the hook author's own shell, and each sits on
+    // lines of its own — the rule `codex_guard` already follows — so a
+    // trailing `# comment` in one ends at its newline. On one line with the
+    // rest, a comment in `when` swallowed the decline and the action, and a
+    // `refuse` written that way allowed every call.
     if let Action::Inject {
         capture: Some(capture),
         ..
     } = &hook.action
     {
-        command.push_str(&format!("{CAPTURE_VAR}=$({capture}); "));
+        command.push_str(&format!(
+            "{CAPTURE_VAR}=$(\n{capture}\n); export {CAPTURE_VAR}; "
+        ));
     }
     if let Some(when) = &hook.when {
         let silent = match log {
@@ -767,7 +777,7 @@ pub fn render(
             ),
             None => "exit 0".to_string(),
         };
-        command.push_str(&format!("{when} || {silent}; "));
+        command.push_str(&format!("{{ {when}\n}} || {silent}; "));
     }
     // Right before the action, regardless of whether `when` was present: a
     // hook with no `when` always reaches its action, and that decision is as
@@ -2021,6 +2031,102 @@ mod tests {
             assert!(
                 !cmd.contains("printf") || !cmd.contains("decision"),
                 "an unlogged render must carry no log statement: {cmd}"
+            );
+        }
+    }
+
+    // ── a hook's own text, spliced into one shell program ───────────────────
+
+    /// A comment at the end of a `when` cannot comment out what follows it.
+    ///
+    /// `when`, the decline and the action were one line, so `# …` after the
+    /// predicate swallowed the rest of it: the guard below rendered for Claude
+    /// Code exited 0 with nothing on stdout — *allow* — while the same file
+    /// blocked on omp and opencode, which run `when` as a script of its own.
+    #[test]
+    fn a_comment_in_when_cannot_swallow_the_refusal() {
+        let guard = Hook::parse(
+            r#"{"on":"before-tool","tools":["edit"],"when":"case \"$OMH_TOOL_FILE\" in /work/.omh/*) ;; *) false ;; esac # omh's own config","refuse":"that file is omh's"}"#,
+            "guard.json",
+        )
+        .unwrap();
+        let cmd = rendered("guard", &guard, hooks_binding()).command;
+        let (out, _, err) = run_logged(
+            &cmd,
+            &serde_json::json!({ "tool_input": { "file_path": "/work/.omh/settings.toml" } }),
+        );
+        assert!(
+            out.contains(r#""permissionDecision":"deny""#),
+            "the guard allowed the call: {out:?}\n{err}\n{cmd}"
+        );
+    }
+
+    /// The same for a `run`, whose action a trailing comment silently skipped.
+    #[test]
+    fn a_comment_in_when_cannot_swallow_the_run() {
+        let hook = Hook::parse(
+            r#"{"on":"turn-end","when":"true # always","run":"echo FIRED"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let cmd = rendered("h", &hook, hooks_binding()).command;
+        let (out, _, err) = run_logged(&cmd, &serde_json::json!({}));
+        assert!(
+            out.contains("FIRED"),
+            "the run never ran: {out:?}\n{err}\n{cmd}"
+        );
+    }
+
+    /// A comment in `capture` left its `$(` unterminated — a syntax error, so
+    /// the hook never ran at all.
+    #[test]
+    fn a_comment_in_capture_cannot_break_the_hook() {
+        let hook = Hook::parse(
+            r#"{"on":"session-start","capture":"echo captured # trailing","inject":"got $OMH_CAPTURE"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let cmd = rendered("h", &hook, hooks_binding()).command;
+        let (out, _, err) = run_logged(&cmd, &serde_json::json!({}));
+        assert!(
+            out.contains("got captured"),
+            "the capture broke the hook: {out:?}\n{err}\n{cmd}"
+        );
+    }
+
+    /// What a hook binds, a program it runs can read.
+    ///
+    /// The plugin renderers hand `$OMH_*` to every child through `env`; this
+    /// render bound them as shell variables only, so a `run` calling a script
+    /// that reads `$OMH_TOOL_FILE` from its environment saw an empty string on
+    /// Claude Code and Codex and the path on opencode and omp — one hook file,
+    /// two behaviours.
+    #[test]
+    fn what_a_hook_binds_reaches_what_it_runs() {
+        let cases = [
+            (
+                r#"{"on":"before-tool","tools":["read"],"run":"sh -c 'printf %s \"$OMH_TOOL_FILE\"'"}"#,
+                serde_json::json!({ "tool_input": { "file_path": "/work/x" } }),
+                "/work/x",
+            ),
+            (
+                r#"{"on":"before-tool","tools":["shell"],"run":"sh -c 'printf %s \"$OMH_TOOL_COMMAND\"'"}"#,
+                serde_json::json!({ "tool_input": { "command": "ls -la" } }),
+                "ls -la",
+            ),
+            (
+                r#"{"on":"session-start","capture":"echo bound","when":"sh -c '[ \"$OMH_CAPTURE\" = bound ]'","inject":"seen $OMH_CAPTURE"}"#,
+                serde_json::json!({}),
+                "seen bound",
+            ),
+        ];
+        for (raw, payload, want) in cases {
+            let hook = Hook::parse(raw, "h.json").unwrap();
+            let cmd = rendered("h", &hook, hooks_binding()).command;
+            let (out, _, err) = run_logged(&cmd, &payload);
+            assert!(
+                out.contains(want),
+                "a child of the hook did not see what it bound: {out:?}\n{err}\n{cmd}"
             );
         }
     }

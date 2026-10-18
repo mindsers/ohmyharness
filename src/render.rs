@@ -554,6 +554,12 @@ pub fn merge_hooks(
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
+                // The stem is the hook's name from here on — in a `[use]` list,
+                // in the ledger, and labelling its handler in a generated
+                // module — so it is held to the rule every other name is, here
+                // where it is first read. A line break in it ended that label's
+                // comment and turned the rest of the name into code.
+                crate::selection::validate_entry_name(&name, Capability::Hooks, &path)?;
                 // A manifest name is omh's, on or off — an error naming both
                 // rather than an override. A repo that could replace
                 // `graph-refresh` could make the graph lie while looking
@@ -969,7 +975,8 @@ fn omp_one_hook(
     // hold its result. opencode needs both because its harness gives one
     // handler per moment and omh has to share it; omp does not.
     let mut b = format!(
-        "  // {name}\n  pi.on({:?}, async (event, ctx) => {{\n",
+        "  // {}\n  pi.on({:?}, async (event, ctx) => {{\n",
+        label(name),
         wired.event
     );
     if !wired.tools.is_empty() {
@@ -1106,7 +1113,7 @@ fn one_hook(
     // `return`, so a hook whose tool guard did not match would leave the whole
     // handler and cancel every hook after it — `git-unavailable` narrowing to
     // `bash` silently cancelled the rest on every call that was not bash.
-    let mut b = format!("    // {name}\n    await (async () => {{\n");
+    let mut b = format!("    // {}\n    await (async () => {{\n", label(name));
     // The catch-all fires for everything on the bus, so the type test is what
     // stops `graph-refresh` re-indexing on every message part.
     if let Slot::Bus { ty } = slot {
@@ -1164,9 +1171,31 @@ fn one_hook(
     }
     if let Some(when) = &hook.when {
         b.push_str(&format!(
-            "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n      if (p.code !== 0) {{ {}return }}\n",
+            "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n",
             js(when),
             js(name),
+        ));
+        // Fails closed, as `omp_one_hook` does and for its reason: a shell
+        // that never started leaves `p.code` at 1, the same as a guard that
+        // declined, and returning from `tool.execute.before` lets the call
+        // through. Only a refusal blocks; an `inject` or a `run` still falls
+        // through to silence.
+        if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
+            b.push_str(&format!(
+                "      if (!p.ran) {{ {}{} }}\n",
+                log_call(log, name, ledger::Decision::Unevaluated),
+                t.template
+                    .replace(
+                        "{{text}}",
+                        &js(&format!(
+                            "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
+                        )),
+                    )
+                    .replace("{{event}}", wired.event),
+            ));
+        }
+        b.push_str(&format!(
+            "      if (p.code !== 0) {{ {}return }}\n",
             log_call(log, name, ledger::Decision::Silent),
         ));
     }
@@ -1236,8 +1265,32 @@ fn log_call(log: Option<&str>, name: &str, decision: ledger::Decision) -> String
 /// JSON string syntax is a subset of JavaScript's, and hand-rolling the escapes
 /// for a hook body — which holds quotes, backslashes and newlines by design —
 /// is how a generated program stops parsing.
+///
+/// U+2028 and U+2029 are escaped too. `serde_json` leaves them raw, which is
+/// legal inside a string literal since ES2019 — but they end a line anywhere
+/// else, so the literal is safe wherever it lands.
 fn js(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+    serde_json::to_string(s)
+        .unwrap_or_else(|_| "\"\"".into())
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+/// A hook's name as the `//` comment labelling its handler.
+///
+/// As written when it is one plain line — which every name `merge_hooks` lets
+/// through is — and as its escaped literal otherwise, so no name, however it
+/// reached the renderer, can end the comment and leave the rest of itself on a
+/// line of its own as code.
+fn label(name: &str) -> String {
+    if name
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    {
+        js(name)
+    } else {
+        name.to_string()
+    }
 }
 
 /// opencode's module shape, emitted after [`SHELL_BRIDGE`].
@@ -1837,6 +1890,30 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap()
+    }
+
+    /// A comment at the end of a `when` cannot comment out the action inside
+    /// Codex's wrapper either.
+    ///
+    /// `codex_guard` puts the command on lines of its own so a comment cannot
+    /// swallow the status handling — but inside it, `when` and the action
+    /// still shared a line, so `true # always` skipped the `run`.
+    #[test]
+    fn a_comment_in_when_cannot_swallow_the_run_on_codex() {
+        let doc = codex_document(&[(
+            "tests",
+            r#"{"on":"turn-end","when":"true # always","run":"echo FIRED"}"#,
+        )]);
+        let stop = codex_commands(&doc.body, "Stop");
+        assert_eq!(stop.len(), 1, "{}", doc.body);
+        let out = run_codex_hook(&stop[0].1);
+        // At `Stop` a run's stdout goes to stderr — Codex would parse it as a
+        // verdict otherwise.
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("FIRED"),
+            "the run never ran: {out:?}\n{}",
+            stop[0].1
+        );
     }
 
     /// `[[hooks.<Event>]]` tables, a `matcher` only where the hook narrows —
@@ -3250,6 +3327,31 @@ template = 'return { block: true, reason: {{text}} }'
         );
     }
 
+    /// opencode's twin, which did not have it: its handler returned on any
+    /// non-zero `p.code`, and the bridge's `code` is `1` for a shell that
+    /// never started — so the same guard blocked on omp and allowed here.
+    #[test]
+    fn an_opencode_refusal_whose_guard_cannot_be_evaluated_blocks() {
+        let doc = plugin(&[(
+            "guard",
+            r#"{"on":"before-tool","tools":["shell"],"when":"test -x /nope","refuse":"use omh commit"}"#,
+        )]);
+        assert!(
+            doc.body.contains("if (!p.ran) { throw new Error("),
+            "an unevaluable guard on a refusal must block, not fall through: {}",
+            doc.body
+        );
+        let advisory = plugin(&[(
+            "nudge",
+            r#"{"on":"after-tool","tools":["read"],"when":"test -x /nope","inject":"noted"}"#,
+        )]);
+        assert!(
+            !advisory.body.contains("throw new Error("),
+            "an advisory hook must still degrade to silence: {}",
+            advisory.body
+        );
+    }
+
     /// `warn` says which of the three things happened.
     ///
     /// It hard-coded "did not run" and fired for any non-zero exit, so a
@@ -3445,6 +3547,189 @@ template = 'return { block: true, reason: {{text}} }'
             doc.body.contains("// graph-read"),
             "the hook is not labelled in the module at all: {}",
             doc.body
+        );
+    }
+
+    /// A hook file whose name breaks a line is refused, by file, before
+    /// anything renders it.
+    ///
+    /// The name is the file's stem, and git commits `lint\ncheck.json` from a
+    /// repo you clone as readily as any other. Nothing between `read_dir` and
+    /// the renderer asked what the name was; `validate_entry_name` was called
+    /// where `[use]` lists and catalogue listings mint names, and not here.
+    #[test]
+    fn a_hook_file_whose_name_breaks_a_line_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/lint\nomh_planted_suffix.json",
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let err = document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .map(|d| d.body)
+        .expect_err("a name that breaks a line must not render");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("lint\\nomh_planted_suffix.json"),
+            "the refusal names the file it refused: {said}"
+        );
+        assert!(
+            !said.contains('\n'),
+            "the refusal breaks where the name does: {said}"
+        );
+    }
+
+    /// No hook name can end the comment that labels it.
+    ///
+    /// The refusal above is where names are read; this is the renderer not
+    /// relying on it. JavaScript ends a `//` comment at LF, CR, U+2028 and
+    /// U+2029, and `serde_json` leaves the last two raw — so neither the raw
+    /// name nor its JSON form is safe on that line.
+    #[test]
+    fn a_hook_name_cannot_end_the_comment_that_labels_it() {
+        let mut hooks = BTreeMap::new();
+        for name in [
+            "lint\nomh_planted_suffix",
+            "lint\romh_planted_suffix",
+            "lint\u{2028}omh_planted_suffix",
+            "lint\u{2029}omh_planted_suffix",
+        ] {
+            hooks.insert(
+                name.to_string(),
+                hook::Hook::parse(r#"{"on":"before-tool","tools":["read"],"run":"true"}"#, "h")
+                    .unwrap(),
+            );
+        }
+        let bodies = [
+            omp_plugin(&hooks, omp_hooks(), &omp().tools, None)
+                .unwrap()
+                .body,
+            opencode_plugin(&hooks, opencode_hooks(), &opencode().tools, None)
+                .unwrap()
+                .body,
+        ];
+        for body in bodies {
+            let loose: Vec<&str> = body
+                .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .filter(|l| l.trim_start().starts_with("omh_planted_suffix"))
+                .collect();
+            assert!(
+                loose.is_empty(),
+                "a name's tail landed on a line of its own, as code: {loose:?}\n{body}"
+            );
+        }
+    }
+
+    /// The same, asked of a JavaScript runtime: a module carrying such a name
+    /// still loads, and every hook in it registers.
+    ///
+    /// Measured before the fix: node threw `omh_planted_suffix is not defined`
+    /// when omp called the factory, so not one hook registered — the guard
+    /// below included.
+    #[test]
+    #[ignore]
+    fn a_hook_name_cannot_take_an_omp_module_down() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "lint\nomh_planted_suffix".to_string(),
+            hook::Hook::parse(r#"{"on":"turn-end","run":"true"}"#, "h").unwrap(),
+        );
+        hooks.insert(
+            "z-guard".to_string(),
+            hook::Hook::parse(
+                r#"{"on":"before-tool","tools":["shell"],"refuse":"no"}"#,
+                "h",
+            )
+            .unwrap(),
+        );
+        let body = omp_plugin(&hooks, omp_hooks(), &omp().tools, None)
+            .unwrap()
+            .body;
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, &body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import plugin from "file://{}"
+const handlers = {{}}
+plugin({{ on: (event, f) => {{ (handlers[event] ??= []).push(f) }} }})
+console.log(JSON.stringify(Object.fromEntries(Object.entries(handlers).map(([k, v]) => [k, v.length]))))
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .output()
+            .expect("node is required to check the program omh generates");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.trim() == r#"{"turn_end":1,"tool_call":1}"#
+                || said.trim() == r#"{"tool_call":1,"turn_end":1}"#,
+            "both hooks have to register: {said}{}\n{body}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// opencode's twin: a tool call the broken name's hook is about still
+    /// goes through rather than throwing.
+    ///
+    /// Measured before the fix: every `tool.execute.before` threw
+    /// `omh_planted_suffix is not defined`, which opencode reads as a block —
+    /// so every tool call was refused, reads included.
+    #[test]
+    #[ignore]
+    fn a_hook_name_cannot_take_an_opencode_module_down() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "lint\nomh_planted_suffix".to_string(),
+            hook::Hook::parse(r#"{"on":"before-tool","tools":["read"],"run":"true"}"#, "h")
+                .unwrap(),
+        );
+        let body = opencode_plugin(&hooks, opencode_hooks(), &opencode().tools, None)
+            .unwrap()
+            .body;
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, &body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import plugin from "file://{}"
+const hooks = await plugin({{}})
+try {{
+  await hooks["tool.execute.before"]({{ tool: "read" }}, {{ args: {{ filePath: "/work/x" }} }})
+  console.log("ALLOWED")
+}} catch (e) {{ console.log("THREW " + e.message) }}
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .output()
+            .expect("node is required to check the program omh generates");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("ALLOWED"),
+            "a read must go through: {said}{}\n{body}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 
@@ -4232,6 +4517,47 @@ try {{
             .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
         assert_eq!(obs.hook, "guard");
         assert_eq!(obs.decision.wire(), "unevaluated", "omp: {written}");
+    }
+
+    /// The same, run on opencode's module: a predicate whose shell dies blocks
+    /// the call and records `unevaluated`, rather than letting it through as a
+    /// guard that declined.
+    #[test]
+    #[ignore]
+    fn opencodes_unevaluated_guard_blocks_and_says_so() {
+        let hook = r#"{"on":"before-tool","tools":["shell"],"when":"kill -9 $$","refuse":"no"}"#;
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("opencode.jsonl");
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/guard.json", hook);
+        let doc = document(
+            Capability::Hooks,
+            opencode_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &opencode().tools,
+                resolves: &Default::default(),
+                log: Some(log.to_str().unwrap()),
+            },
+        )
+        .unwrap();
+        let said = drive(
+            &doc.body,
+            "tool.execute.before",
+            r#"{ tool: "bash" }"#,
+            r#"{ args: { command: "ls" } }"#,
+        );
+        assert!(
+            said.contains("THREW"),
+            "a predicate that could not be evaluated blocks, fails closed: {said}"
+        );
+        let written = std::fs::read_to_string(&log).expect("opencode must have written a line");
+        let obs = crate::ledger::Observation::parse(written.trim())
+            .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
+        assert_eq!(obs.hook, "guard");
+        assert_eq!(obs.decision.wire(), "unevaluated", "opencode: {written}");
     }
 
     /// A hook that could not run must not look like a hook that said nothing.

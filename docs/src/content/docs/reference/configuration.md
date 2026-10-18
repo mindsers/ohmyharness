@@ -493,6 +493,17 @@ default = "mine"
 codex   = "work"
 ```
 
+`omh unset account codex` takes codex's entry back out, leaving the rest. Your
+defaults take the same two lines — `omh settings set account codex:work`,
+`omh settings unset account codex` — and `omh init` seeds the table into a new
+repo's `settings.toml`, where `omh set account` writes it. `omh settings` says
+it as one line:
+
+```text
+your defaults ~/.omh/default.toml
+  account       mine · claude:work
+```
+
 **With no `account` set**, a harness with one captured login uses it, one with
 several refuses to launch until you pick one with `omh set account <name>`, and
 one with none starts logged out. [Accounts](/guides/accounts/) has the rest.
@@ -890,10 +901,16 @@ not copy it, and `omh sNN commit` refuses to publish it if a running session got
 one before the list was fixed.
 
 **The host's exclude list is shared with your main checkout.** git reads
-`info/exclude` from the *common* git dir, not the per-worktree one. It is never
-committed, and carried paths are untracked there by definition, so the effect is
-invisible; but it is not scoped to the worktree, and that is a fact rather than
-an intention.
+`info/exclude` from the *common* git dir, not the per-worktree one, so your own
+`git status` obeys it too: after a launch, a `carry_in` entry is ignored in your
+checkout as well as in the session's worktree. omh only ever adds lines to that
+file, and only the `carry_in` entries.
+
+**Earlier releases also added `CLAUDE.md`, `AGENTS.md` and `.mcp.json`** — the
+files omh mounts over — and with them there, a file by any of those names you
+create in your checkout is invisible to `git status` and `git add -A`. omh
+leaves those lines alone, because nothing marks them as omh's rather than
+yours; if you did not write them, delete them from `.git/info/exclude`.
 
 <details>
 <summary>Two traps in hiding a file from git, both found by running it rather than reasoning about it</summary>
@@ -1382,6 +1399,11 @@ anywhere — which is where omh's own conventional ones live.
 **Exactly one of `run`, `inject` or `refuse`.** `capture` needs `inject` —
 collecting output nobody reads says nothing, and a refusal is a fixed reason.
 
+**The file's name is the hook's name**, and it is one line of plain text: a
+name holding a line break or a control character is refused, naming the file,
+because the name labels the hook in the programs omh generates for opencode and
+omp. A `# comment` at the end of `when` or `capture` is fine.
+
 **Not every harness has a word for every tool.** No adapter spells `search`
 today, so a hook narrowed to it is dropped by name wherever it runs, and Codex
 has no `read` either. An adapter's `[tools]` map is what it can spell.
@@ -1426,7 +1448,9 @@ that quietly became a nudge would let through the call it existed to stop.
 `$OMH_TOOL_FILE` and `$OMH_TOOL_COMMAND` are the tool call, in omh's words.
 Mention one in any body and omh reads it for you — `${OMH_TOOL_FILE:-none}`
 counts too. Mention neither and your hook pays for nothing, which matters:
-`before-tool` on `read` fires on the most frequent tool there is.
+`before-tool` on `read` fires on the most frequent tool there is. What a hook
+binds, `$OMH_CAPTURE` included, is in the environment of every program it
+runs, on every harness — a script your `run` calls reads `$OMH_TOOL_FILE` too.
 
 Three more are set in every sandbox, whatever the tool call:
 
