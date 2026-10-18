@@ -1831,8 +1831,11 @@ fn hook_names(
 /// renders, not what the layers declare.
 ///
 /// A server whose feature is off here is deliberately left out of that
-/// document. Demanding it makes `omh doctor` fail forever and blame the
-/// harness for obeying, which is the opposite of what this command is for.
+/// document, and so is one `[use] mcp` does not name — the same two retains
+/// `render` makes, in the same order. Demanding either makes `omh doctor` fail
+/// forever and blame the harness for obeying, which is the opposite of what
+/// this command is for. The second was missing until a repo whose `init`
+/// wrote `mcp = []` added a server and every doctor run went red over it.
 ///
 /// **A layer omh could not parse is an error, not an empty expectation.** This
 /// ended in `.unwrap_or_default()`, which spelled "every server is switched
@@ -1844,6 +1847,7 @@ fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Resu
     Ok(crate::render::parse_layers(sources)?
         .into_keys()
         .filter(|name| !repo.disabled_servers.contains(name))
+        .filter(|name| repo.selection.allows(Capability::Mcp, name))
         .collect())
 }
 

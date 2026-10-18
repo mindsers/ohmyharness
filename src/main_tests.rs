@@ -3511,17 +3511,22 @@ fn host_checks_never_stand_in_for_a_probe_that_did_not_run() {
 
     let host = || doctor::HostRows(doctor::git_checks());
 
-    let err = cmd::harvest::every_check(Vec::new(), host())
+    let err = cmd::harvest::every_check(&["rules"], Vec::new(), host())
         .expect_err("a sandbox that ran nothing is not a pass");
     assert!(err.to_string().contains("did not run it"), "{err}");
 
+    // Something, but not everything: a check asked and never answered.
+    let err = cmd::harvest::every_check(&["rules", "skills"], sandbox.clone(), host())
+        .expect_err("a probe that answered one check of two did not finish");
+    assert!(err.to_string().contains("no answer for `skills`"), "{err}");
+
     // The half the type cannot carry: a caller that gathered no host rows
     // would report the sandbox as fine and say nothing about the machine.
-    let err = cmd::harvest::every_check(sandbox.clone(), doctor::HostRows(Vec::new()))
+    let err = cmd::harvest::every_check(&["rules"], sandbox.clone(), doctor::HostRows(Vec::new()))
         .expect_err("no host rows is a caller mistake, not a quiet host");
     assert!(err.to_string().contains("host checks"), "{err}");
 
-    let both = cmd::harvest::every_check(sandbox, host()).unwrap();
+    let both = cmd::harvest::every_check(&["rules"], sandbox, host()).unwrap();
     assert!(
         both.iter().any(|o| o.name == "git on the host"),
         "the host's answers are there: {both:?}"
