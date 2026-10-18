@@ -949,6 +949,19 @@ pub(crate) fn from_the_seed_record(
     }
 }
 
+/// Whether a session with no sandbox still has a worktree to ask about.
+///
+/// Over the stat result rather than the path, for the reason
+/// [`from_the_seed_record`] gives: the permission arm is the one a test
+/// running as root cannot produce.
+pub(crate) fn worktree_to_ask(
+    is_dir: std::io::Result<bool>,
+    worktree: &std::path::Path,
+) -> Result<bool, AtStake> {
+    let _ = worktree;
+    Ok(is_dir.unwrap_or(false))
+}
+
 pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
     let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
     if let Some(answer) = from_the_seed_record(
@@ -956,8 +969,13 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
         shadow.gitdir.exists(),
         &shadow,
     ) {
-        return match answer {
-            AtStake::Nothing if session.worktree.is_dir() => {
+        let asked = worktree_to_ask(
+            std::fs::metadata(&session.worktree).map(|m| m.is_dir()),
+            &session.worktree,
+        );
+        return match (answer, asked) {
+            (AtStake::Nothing, Err(unknown)) => unknown,
+            (AtStake::Nothing, Ok(true)) => {
                 let out = std::process::Command::new("git")
                     .current_dir(&session.worktree)
                     // The worktree's files are the agent's, and a `status`
@@ -996,7 +1014,7 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
                     )),
                 }
             }
-            other => other,
+            (other, _) => other,
         };
     }
 
@@ -1806,6 +1824,25 @@ mod tests {
         assert_eq!(
             checks(&hooks, &[]),
             vec![("test".to_string(), "cargo test".to_string())]
+        );
+    }
+
+    /// **A worktree omh could not stat is not a worktree that is not there.**
+    /// `is_dir` answers `false` for both, so a permissions error under `~/.omh`
+    /// read as *nothing at stake* and `rm` asked nothing.
+    #[test]
+    fn a_worktree_omh_could_not_stat_is_not_one_with_nothing_in_it() {
+        let at = std::path::Path::new("/nowhere/s01");
+        assert!(matches!(worktree_to_ask(Ok(true), at), Ok(true)));
+        assert!(matches!(worktree_to_ask(Ok(false), at), Ok(false)));
+        assert!(matches!(
+            worktree_to_ask(Err(std::io::ErrorKind::NotFound.into()), at),
+            Ok(false)
+        ));
+        let denied = worktree_to_ask(Err(std::io::ErrorKind::PermissionDenied.into()), at);
+        assert!(
+            matches!(&denied, Err(AtStake::Unknown(why)) if why.contains("/nowhere/s01")),
+            "a stat that failed must read as could-not-tell: {denied:?}"
         );
     }
 }
