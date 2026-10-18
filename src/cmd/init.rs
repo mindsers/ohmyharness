@@ -201,15 +201,19 @@ pub(crate) fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
 /// Returns the files to write and what each took, so `init` can report it —
 /// a seed nobody is told about is indistinguishable from a default.
 pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
+    // `carry_in` is taught by the command that sets it, not by a line to
+    // uncomment: uncommented here, it would be in the file git carries, where
+    // `omh set` and `init` never put it.
     const HEADER: &str = "# What this repo decided. Settings at the top level; `[omh]` switches\n\
          # omh's own features off here without uninstalling anything.\n\
          #\n\
          # Untracked files the worktree needs — a worktree holds only tracked\n\
-         # files, so without this the agent lands somewhere that cannot run your\n\
-         # app. This is the ONLY path by which a secret reaches the agent, so\n\
-         # keep it short and explicit. node_modules belongs in the image, not here.\n\
+         # files, so without them the agent lands somewhere that cannot run your\n\
+         # app — are `carry_in`, the ONLY path by which a secret reaches the\n\
+         # agent. It lives in settings.local.toml beside this file, which git\n\
+         # ignores; keep it short and explicit. node_modules belongs in the image.\n\
          #\n\
-         # carry_in = [\".env.local\", \"certs/\"]\n";
+         #   omh set carry_in '[\".env.local\", \"certs/\"]'\n";
 
     let template = config::Layer::Personal.file(paths);
     let doc = config::read_doc(&template)?;
@@ -248,8 +252,7 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
     // **No empty `carry_in`.** Seeding `carry_in = []` made the first thing
     // `omh info --repo` said about a fresh repo a setting nobody had set —
     // `carry_in  []  ← shared`, which reads as somebody's decision. The header
-    // above already carries the commented example that teaches the key, and a
-    // commented line is what a setting you are not setting looks like.
+    // above already teaches the key, by the command that sets it.
     //
     // A template that *does* name `carry_in` still travels: the loop above
     // takes it, because then somebody did choose it.

@@ -1939,8 +1939,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/catalogue.rs", 18),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         // + the `omh upgrade` redirect when a repo is already set up, + `omh
-        // set` in the header of the gitignored file `init` seeds.
-        ("src/cmd/init.rs", 9),
+        // set` in the header of the gitignored file `init` seeds, + `omh set
+        // carry_in` teaching the key in the committed file's header.
+        ("src/cmd/init.rs", 10),
         ("src/cmd/upgrade.rs", 1), // the `omh init` redirect when a repo is not set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only
@@ -5268,6 +5269,33 @@ fn a_seeded_key_lands_where_omh_set_would_put_it() {
     )
     .unwrap();
     assert_eq!(cmd::init::seed_settings(&paths).unwrap().local, None);
+}
+
+/// The committed file's header teaches `carry_in` without a line that would
+/// set it there: it showed `# carry_in = [".env.local", "certs/"]` to
+/// uncomment, in the file git carries, while `omh set carry_in` and `init`
+/// keep the key in the gitignored one.
+#[test]
+fn the_committed_header_teaches_carry_in_without_a_line_to_uncomment() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let shared = cmd::init::seed_settings(&paths).unwrap().shared;
+    for line in shared.lines().filter(|l| l.starts_with('#')) {
+        let uncommented = line.trim_start_matches('#').trim();
+        let parsed = uncommented.parse::<toml::Table>().unwrap_or_default();
+        assert!(
+            !parsed.contains_key("carry_in"),
+            "uncommented, `{line}` commits it"
+        );
+    }
+    assert!(
+        shared.contains("omh set carry_in") && shared.contains("settings.local.toml"),
+        "and it still teaches the key: {shared}"
+    );
 }
 
 /// The template hands on what omh reads, and refuses what it must not.
