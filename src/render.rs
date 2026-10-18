@@ -3305,6 +3305,31 @@ template = 'return { block: true, reason: {{text}} }'
         );
     }
 
+    /// opencode's twin, which did not have it: its handler returned on any
+    /// non-zero `p.code`, and the bridge's `code` is `1` for a shell that
+    /// never started — so the same guard blocked on omp and allowed here.
+    #[test]
+    fn an_opencode_refusal_whose_guard_cannot_be_evaluated_blocks() {
+        let doc = plugin(&[(
+            "guard",
+            r#"{"on":"before-tool","tools":["shell"],"when":"test -x /nope","refuse":"use omh commit"}"#,
+        )]);
+        assert!(
+            doc.body.contains("if (!p.ran) { throw new Error("),
+            "an unevaluable guard on a refusal must block, not fall through: {}",
+            doc.body
+        );
+        let advisory = plugin(&[(
+            "nudge",
+            r#"{"on":"after-tool","tools":["read"],"when":"test -x /nope","inject":"noted"}"#,
+        )]);
+        assert!(
+            !advisory.body.contains("throw new Error("),
+            "an advisory hook must still degrade to silence: {}",
+            advisory.body
+        );
+    }
+
     /// `warn` says which of the three things happened.
     ///
     /// It hard-coded "did not run" and fired for any non-zero exit, so a
@@ -4466,6 +4491,47 @@ try {{
             .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
         assert_eq!(obs.hook, "guard");
         assert_eq!(obs.decision.wire(), "unevaluated", "omp: {written}");
+    }
+
+    /// The same, run on opencode's module: a predicate whose shell dies blocks
+    /// the call and records `unevaluated`, rather than letting it through as a
+    /// guard that declined.
+    #[test]
+    #[ignore]
+    fn opencodes_unevaluated_guard_blocks_and_says_so() {
+        let hook = r#"{"on":"before-tool","tools":["shell"],"when":"kill -9 $$","refuse":"no"}"#;
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("opencode.jsonl");
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/guard.json", hook);
+        let doc = document(
+            Capability::Hooks,
+            opencode_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &opencode().tools,
+                resolves: &Default::default(),
+                log: Some(log.to_str().unwrap()),
+            },
+        )
+        .unwrap();
+        let said = drive(
+            &doc.body,
+            "tool.execute.before",
+            r#"{ tool: "bash" }"#,
+            r#"{ args: { command: "ls" } }"#,
+        );
+        assert!(
+            said.contains("THREW"),
+            "a predicate that could not be evaluated blocks, fails closed: {said}"
+        );
+        let written = std::fs::read_to_string(&log).expect("opencode must have written a line");
+        let obs = crate::ledger::Observation::parse(written.trim())
+            .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
+        assert_eq!(obs.hook, "guard");
+        assert_eq!(obs.decision.wire(), "unevaluated", "opencode: {written}");
     }
 
     /// A hook that could not run must not look like a hook that said nothing.
