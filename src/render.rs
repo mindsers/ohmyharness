@@ -1870,6 +1870,30 @@ mod tests {
             .unwrap()
     }
 
+    /// A comment at the end of a `when` cannot comment out the action inside
+    /// Codex's wrapper either.
+    ///
+    /// `codex_guard` puts the command on lines of its own so a comment cannot
+    /// swallow the status handling — but inside it, `when` and the action
+    /// still shared a line, so `true # always` skipped the `run`.
+    #[test]
+    fn a_comment_in_when_cannot_swallow_the_run_on_codex() {
+        let doc = codex_document(&[(
+            "tests",
+            r#"{"on":"turn-end","when":"true # always","run":"echo FIRED"}"#,
+        )]);
+        let stop = codex_commands(&doc.body, "Stop");
+        assert_eq!(stop.len(), 1, "{}", doc.body);
+        let out = run_codex_hook(&stop[0].1);
+        // At `Stop` a run's stdout goes to stderr — Codex would parse it as a
+        // verdict otherwise.
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("FIRED"),
+            "the run never ran: {out:?}\n{}",
+            stop[0].1
+        );
+    }
+
     /// `[[hooks.<Event>]]` tables, a `matcher` only where the hook narrows —
     /// the shape Codex was measured running from `/etc/codex/config.toml`.
     #[test]

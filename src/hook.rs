@@ -2024,4 +2024,63 @@ mod tests {
             );
         }
     }
+
+    // ── a hook's own text, spliced into one shell program ───────────────────
+
+    /// A comment at the end of a `when` cannot comment out what follows it.
+    ///
+    /// `when`, the decline and the action were one line, so `# …` after the
+    /// predicate swallowed the rest of it: the guard below rendered for Claude
+    /// Code exited 0 with nothing on stdout — *allow* — while the same file
+    /// blocked on omp and opencode, which run `when` as a script of its own.
+    #[test]
+    fn a_comment_in_when_cannot_swallow_the_refusal() {
+        let guard = Hook::parse(
+            r#"{"on":"before-tool","tools":["edit"],"when":"case \"$OMH_TOOL_FILE\" in /work/.omh/*) ;; *) false ;; esac # omh's own config","refuse":"that file is omh's"}"#,
+            "guard.json",
+        )
+        .unwrap();
+        let cmd = rendered("guard", &guard, hooks_binding()).command;
+        let (out, _, err) = run_logged(
+            &cmd,
+            &serde_json::json!({ "tool_input": { "file_path": "/work/.omh/settings.toml" } }),
+        );
+        assert!(
+            out.contains(r#""permissionDecision":"deny""#),
+            "the guard allowed the call: {out:?}\n{err}\n{cmd}"
+        );
+    }
+
+    /// The same for a `run`, whose action a trailing comment silently skipped.
+    #[test]
+    fn a_comment_in_when_cannot_swallow_the_run() {
+        let hook = Hook::parse(
+            r#"{"on":"turn-end","when":"true # always","run":"echo FIRED"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let cmd = rendered("h", &hook, hooks_binding()).command;
+        let (out, _, err) = run_logged(&cmd, &serde_json::json!({}));
+        assert!(
+            out.contains("FIRED"),
+            "the run never ran: {out:?}\n{err}\n{cmd}"
+        );
+    }
+
+    /// A comment in `capture` left its `$(` unterminated — a syntax error, so
+    /// the hook never ran at all.
+    #[test]
+    fn a_comment_in_capture_cannot_break_the_hook() {
+        let hook = Hook::parse(
+            r#"{"on":"session-start","capture":"echo captured # trailing","inject":"got $OMH_CAPTURE"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let cmd = rendered("h", &hook, hooks_binding()).command;
+        let (out, _, err) = run_logged(&cmd, &serde_json::json!({}));
+        assert!(
+            out.contains("got captured"),
+            "the capture broke the hook: {out:?}\n{err}\n{cmd}"
+        );
+    }
 }
