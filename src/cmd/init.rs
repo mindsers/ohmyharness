@@ -959,7 +959,12 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             true,
         )
         .and_then(|tag| {
-            let args = base::index_args(&tag, &paths.cache_volume(), &paths.repo, &paths.repo_id());
+            let args = base::index_args(
+                &tag,
+                &paths.cache_volume(),
+                &paths.repo,
+                &paths.runtime_id(),
+            );
             Command::new(backend.program())
                 .args(&args)
                 .stdout(std::process::Stdio::null())

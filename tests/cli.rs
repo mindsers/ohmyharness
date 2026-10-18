@@ -9196,9 +9196,12 @@ fn attach_pins_the_sandboxes_host_key() {
 
     let block = std::fs::read_to_string(sb.home.join(".ssh/config.d/omh")).unwrap();
     assert!(block.contains("StrictHostKeyChecking yes"), "{block}");
+    // Quoted in the block, because the path may hold a space; this sandbox's
+    // does not, so no escape needs undoing.
     let known = block
         .lines()
         .find_map(|l| l.trim().strip_prefix("UserKnownHostsFile "))
+        .map(|p| p.trim_matches('"'))
         .expect("the block names a known_hosts");
     let pinned = std::fs::read_to_string(known).expect("omh wrote it");
     let key_dir = std::path::Path::new(known).parent().unwrap().join("host");
