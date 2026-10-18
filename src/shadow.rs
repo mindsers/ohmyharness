@@ -1163,7 +1163,11 @@ impl Shadow {
                 seen.extend(self.hidden(worktree, &index, &ignored)?);
                 let unseen = nested(&self.gitdir, worktree)?
                     .iter()
-                    .filter(|path| !seen.iter().any(|s| s.trim_end_matches('/') == path.as_str()))
+                    .filter(|path| {
+                        !seen
+                            .iter()
+                            .any(|s| s.trim_end_matches('/') == path.as_str())
+                    })
                     .count();
                 seen.len() + unseen
             },
@@ -1193,10 +1197,10 @@ impl Shadow {
         };
         let tracked: Vec<String> =
             git_with_index(&self.gitdir, worktree, index, &["ls-files", "-z"], None)?
-            .split('\0')
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .collect();
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect();
         let exclude = self.gitdir.join("info").join("exclude");
         let mut paths = Vec::new();
         for path in ignored {
@@ -1216,7 +1220,8 @@ impl Shadow {
         for record in fields.chunks_exact(4) {
             let [source, _line, pattern, path] = [record[0], record[1], record[2], record[3]];
             let trusted = if std::path::Path::new(source) == exclude {
-                ours.as_ref().is_some_and(|ours| ours.iter().any(|o| o == pattern))
+                ours.as_ref()
+                    .is_some_and(|ours| ours.iter().any(|o| o == pattern))
             } else if std::path::Path::new(source).is_absolute() {
                 true
             } else {

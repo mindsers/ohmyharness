@@ -6106,7 +6106,8 @@ mod tests {
         let old_baseline = s.merge_base("main").unwrap();
         let onto = head_of(&root, "main").unwrap();
         let tip = head_of(&root, "omh/s01").unwrap();
-        s.move_baseline(&root, &onto, &old_baseline, &tip).unwrap();
+        let replayed = s.replayed_onto(&root, &onto, &old_baseline).unwrap();
+        s.move_baseline(&root, &replayed, &tip).unwrap();
 
         assert_eq!(
             fired(&ran),
