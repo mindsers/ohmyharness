@@ -2073,7 +2073,8 @@ launch.
 omh settings                          at a terminal, a screen; anywhere else, the report
 omh settings set <key> <value> [--anyway]
                                       → ~/.omh/default.toml
-omh settings unset <key>              remove one of your defaults
+omh settings unset <key> [harness]    remove one of your defaults — for `account`,
+                                      one harness's own
 omh settings set <feature> on|off     switch one of omh's features, for new repos
 omh settings use <capability> <name>  have new repos take an entry of your catalogue
 omh settings unuse <capability> <name>

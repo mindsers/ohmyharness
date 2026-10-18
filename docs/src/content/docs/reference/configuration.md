@@ -493,6 +493,17 @@ default = "mine"
 codex   = "work"
 ```
 
+`omh unset account codex` takes codex's entry back out, leaving the rest. Your
+defaults take the same two lines — `omh settings set account codex:work`,
+`omh settings unset account codex` — and `omh init` seeds the table into a new
+repo's `settings.toml`, where `omh set account` writes it. `omh settings` says
+it as one line:
+
+```text
+your defaults ~/.omh/default.toml
+  account       mine · claude:work
+```
+
 **With no `account` set**, a harness with one captured login uses it, one with
 several refuses to launch until you pick one with `omh set account <name>`, and
 one with none starts logged out. [Accounts](/guides/accounts/) has the rest.

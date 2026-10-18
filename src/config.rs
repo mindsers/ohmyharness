@@ -203,7 +203,47 @@ pub fn account_for(paths: &Paths, harness: &str) -> Result<Option<String>> {
     Ok(own.or(default))
 }
 
-const ACCOUNT: &str = "account";
+pub const ACCOUNT: &str = "account";
+
+/// One layer's `account`, entry by entry: the name for every harness first,
+/// then each harness's own, as `omh set account` takes them. In that order it
+/// builds the setting back, since a harness's name written over a string
+/// keeps the string as the default.
+///
+/// An entry that is not a name is left out: `omh init` refuses one in your
+/// defaults by name, and a launch reads past it.
+pub fn account_entries(doc: &toml_edit::DocumentMut) -> Vec<(Option<String>, String)> {
+    let Some(item) = doc.get(ACCOUNT) else {
+        return Vec::new();
+    };
+    if let Some(name) = item.as_str() {
+        return vec![(None, name.to_string())];
+    }
+    let Some(table) = item.as_table_like() else {
+        return Vec::new();
+    };
+    let default = table
+        .get(ACCOUNT_DEFAULT)
+        .and_then(|i| i.as_str())
+        .map(|name| (None, name.to_string()));
+    let own = table
+        .iter()
+        .filter(|(harness, _)| *harness != ACCOUNT_DEFAULT)
+        .filter_map(|(harness, item)| {
+            item.as_str()
+                .map(|name| (Some(harness.to_string()), name.to_string()))
+        });
+    default.into_iter().chain(own).collect()
+}
+
+/// An entry as `omh set account` takes it: `mine`, or `codex:work`.
+pub fn account_typed(harness: Option<&str>, name: &str) -> String {
+    match harness {
+        Some(h) => format!("{h}:{name}"),
+        None => name.to_string(),
+    }
+}
+
 /// The table entry for every harness without its own. No harness is called
 /// `default`: `Adapter::find` would have to load `default.toml`, which omh
 /// ships as your settings template, not an adapter.
@@ -543,6 +583,14 @@ pub const OMH: &str = "omh";
 pub const UNUSE: &str = "unuse";
 /// The resolution `init` records: which provides applied here.
 pub const PROVISION: &str = "provision";
+/// The tables your defaults may hold, each seeded into a new repo: what new
+/// repos take and leave out, omh's features, and `account` once it names a
+/// login per harness. `omh init` refuses any other by name.
+///
+/// One list for the refusal, the seeder and the report `omh settings` gives,
+/// because three lists disagreed: the report called `[account]` seeded while
+/// `init` refused every template that held it.
+pub const TEMPLATE_TABLES: [&str; 4] = [USE, UNUSE, OMH, ACCOUNT];
 
 /// Write one capability's `[use]` list, or several.
 ///
@@ -654,14 +702,26 @@ pub fn values(paths: &Paths, layer: Layer) -> Result<BTreeMap<String, String>> {
     // every new repo — or to name a mistyped table, which is precisely the
     // "a typo looks exactly like a setting that took" case the caller's
     // *unread* list exists for.
+    //
+    // Except `account`, which is one setting whichever shape it takes: as a
+    // table it was `[account]`, so the screen and the report read it as unset
+    // and offered a second row for the same thing.
+    let account = account_entries(
+        &raw.parse::<toml_edit::DocumentMut>()
+            .with_context(|| format!("parsing {}", path.display()))?,
+    );
     Ok(table
         .into_iter()
-        .map(|(k, v)| {
-            if v.is_table() {
-                (format!("[{k}]"), String::new())
-            } else {
-                (k, repr(&v))
+        .map(|(k, v)| match v.is_table() {
+            true if k == ACCOUNT && !account.is_empty() => {
+                let said: Vec<String> = account
+                    .iter()
+                    .map(|(harness, name)| account_typed(harness.as_deref(), name))
+                    .collect();
+                (k, said.join(" · "))
             }
+            true => (format!("[{k}]"), String::new()),
+            false => (k, repr(&v)),
         })
         .collect())
 }
