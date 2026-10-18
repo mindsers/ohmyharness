@@ -1038,6 +1038,9 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
                             .stdout
                             .split(|b| *b == 0)
                             .filter(|p| !p.is_empty())
+                            .filter(|p| {
+                                !crate::session::is_placeholder(&String::from_utf8_lossy(p))
+                            })
                             .count();
                         match files {
                             0 => AtStake::Nothing,
