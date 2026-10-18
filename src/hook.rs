@@ -2089,4 +2089,41 @@ mod tests {
             "the capture broke the hook: {out:?}\n{err}\n{cmd}"
         );
     }
+
+    /// What a hook binds, a program it runs can read.
+    ///
+    /// The plugin renderers hand `$OMH_*` to every child through `env`; this
+    /// render bound them as shell variables only, so a `run` calling a script
+    /// that reads `$OMH_TOOL_FILE` from its environment saw an empty string on
+    /// Claude Code and Codex and the path on opencode and omp — one hook file,
+    /// two behaviours.
+    #[test]
+    fn what_a_hook_binds_reaches_what_it_runs() {
+        let cases = [
+            (
+                r#"{"on":"before-tool","tools":["read"],"run":"sh -c 'printf %s \"$OMH_TOOL_FILE\"'"}"#,
+                serde_json::json!({ "tool_input": { "file_path": "/work/x" } }),
+                "/work/x",
+            ),
+            (
+                r#"{"on":"before-tool","tools":["shell"],"run":"sh -c 'printf %s \"$OMH_TOOL_COMMAND\"'"}"#,
+                serde_json::json!({ "tool_input": { "command": "ls -la" } }),
+                "ls -la",
+            ),
+            (
+                r#"{"on":"session-start","capture":"echo bound","when":"sh -c '[ \"$OMH_CAPTURE\" = bound ]'","inject":"seen $OMH_CAPTURE"}"#,
+                serde_json::json!({}),
+                "seen bound",
+            ),
+        ];
+        for (raw, payload, want) in cases {
+            let hook = Hook::parse(raw, "h.json").unwrap();
+            let cmd = rendered("h", &hook, hooks_binding()).command;
+            let (out, _, err) = run_logged(&cmd, &payload);
+            assert!(
+                out.contains(want),
+                "a child of the hook did not see what it bound: {out:?}\n{err}\n{cmd}"
+            );
+        }
+    }
 }
