@@ -2064,6 +2064,24 @@ pub struct Settings {
     /// Keys in your file that omh reads nothing from. Named rather than
     /// hidden: a typo looks exactly like a setting that took.
     pub unread: Vec<Setting>,
+    /// The key each unread one was probably meant to be, where one is near.
+    pub meant: std::collections::BTreeMap<String, String>,
+    /// Your catalogue, page by page: what the screen shows, said where there
+    /// is no screen. Empty when nobody filled it in.
+    pub catalogue: Vec<CataloguePage>,
+}
+
+/// One kind of your catalogue: how many, what new repos get, and every entry
+/// that is wrong.
+#[derive(Debug, Clone)]
+pub struct CataloguePage {
+    pub kind: String,
+    /// `None` where omh could not look — could not look is not none.
+    pub count: Option<usize>,
+    pub seeds: Option<String>,
+    pub problem: Option<String>,
+    /// `(name, what is wrong)`.
+    pub warnings: Vec<(String, String)>,
 }
 
 impl Report for Settings {
@@ -2123,9 +2141,48 @@ impl Report for Settings {
             ));
             let mut t = Table::new();
             for u in &self.unread {
-                t = t.row(vec![Cell::styled(&u.key, out::NAME), Cell::plain(&u.value)]);
+                let mut row = vec![Cell::styled(&u.key, out::NAME), Cell::plain(&u.value)];
+                if let Some(meant) = self.meant.get(&u.key) {
+                    row.push(Cell::styled(format!("did you mean `{meant}`?"), out::DIM));
+                }
+                t = t.row(row);
             }
             s.push_str(&t.render(p));
+        }
+
+        if !self.catalogue.is_empty() {
+            s.push('\n');
+            s.push_str(&format!("{}\n", p.paint(out::HEAD, "your catalogue")));
+            // Lined up by hand: a page's warnings sit under it, and one table
+            // for both would widen the counts to the warnings' width.
+            let kind = self
+                .catalogue
+                .iter()
+                .map(|c| c.kind.chars().count())
+                .max()
+                .unwrap_or(0);
+            for page in &self.catalogue {
+                let count = page.count.map_or("—".into(), |n| n.to_string());
+                let line = format!(
+                    "  {}  {count:>3}  {}",
+                    p.paint(out::NAME, &format!("{:<kind$}", page.kind)),
+                    p.paint(out::DIM, page.seeds.as_deref().unwrap_or_default()),
+                );
+                s.push_str(line.trim_end());
+                s.push('\n');
+                if let Some(problem) = &page.problem {
+                    s.push_str(&format!("    ✗ could not look — {problem}\n"));
+                }
+                let name = page
+                    .warnings
+                    .iter()
+                    .map(|(n, _)| n.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                for (n, wrong) in &page.warnings {
+                    s.push_str(&format!("    ! {n:<name$}  {wrong}\n"));
+                }
+            }
         }
         s
     }
@@ -2142,6 +2199,17 @@ impl Report for Settings {
             "unread": self.unread.iter().map(|u| json!({
                 "key": u.key,
                 "value": u.value,
+                "meant": self.meant.get(&u.key),
+            })).collect::<Vec<_>>(),
+            "catalogue": self.catalogue.iter().map(|page| json!({
+                "kind": page.kind,
+                "count": page.count,
+                "seeds": page.seeds,
+                "problem": page.problem,
+                "warnings": page.warnings.iter().map(|(name, wrong)| json!({
+                    "name": name,
+                    "warning": wrong,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })
     }
