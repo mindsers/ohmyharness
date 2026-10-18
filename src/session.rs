@@ -587,10 +587,10 @@ impl Session {
     /// Remove the session: its worktree, the repository the sandbox had, and
     /// the branch only when keeping it would preserve nothing.
     ///
-    /// The shadow goes because session ids come back around — `next_id` is the
-    /// highest `sNN` among the worktrees plus one — and a shadow that outlives
-    /// its session is adopted by whoever inherits the name, opening a new agent
-    /// on someone else's history against a seed naming a tree it never had.
+    /// The shadow goes with the session. One left behind holds its id —
+    /// `next_id` steps past it — and a session later opened under that id
+    /// would start the agent on someone else's history, against a seed naming
+    /// a tree it never had.
     ///
     /// Taken as an argument rather than reached for, so that removing a session
     /// and forgetting its shadow is not something a caller can express.
@@ -897,10 +897,7 @@ impl Session {
                         branch,
                     ],
                 )?;
-                let replayed = git(
-                    &scratch,
-                    &["rebase", "-q", "--onto", onto, old_baseline],
-                )
+                let replayed = git(&scratch, &["rebase", "-q", "--onto", onto, old_baseline])
                     .and_then(|_| git(&scratch, &["rev-parse", "HEAD"]))
                     .map(|tip| tip.trim().to_string())
                     .with_context(|| {
@@ -1560,7 +1557,7 @@ pub struct Claimed<'a> {
 pub fn pick(claimed: &Claimed, start: Start) -> Result<String> {
     match start {
         Start::Named(id) => Ok(id.to_string()),
-        Start::Fresh => next_unclaimed(claimed),
+        Start::Fresh => next_id(claimed),
     }
 }
 
@@ -1687,20 +1684,15 @@ pub enum Start<'a> {
 ///
 /// `NotFound` stays zero: a checkout that has never made a session has no
 /// worktrees directory, and `s01` is the right answer there.
-pub fn next_id(worktrees_dir: &Path) -> Result<String> {
-    Ok(format!("s{:02}", highest_in(worktrees_dir)? + 1))
-}
-
-/// The id after every one anything still holds — the worktrees directory,
-/// `omh/sNN` branches, sandbox repositories and run directories alike.
 ///
-/// The worktrees directory alone forgot an id the moment `rm` took its
-/// worktree, while `rm` keeps a branch that holds work: the next `omh new`
-/// reused the id and `ensure` reattached it to that branch. The highest of
-/// all four rather than the first gap, so ids stay monotonic the way
-/// [`next_id`] already made them. A place omh could not look is an error,
-/// never "nothing there" — the rule [`next_id`] states for its directory.
-fn next_unclaimed(claimed: &Claimed) -> Result<String> {
+/// **Past every id anything still holds** — the worktrees directory, `omh/sNN`
+/// branches, sandbox repositories and run directories alike. The worktrees
+/// directory alone forgot an id the moment `rm` took its worktree, while `rm`
+/// keeps a branch that holds work: the next `omh new` reused the id and
+/// `ensure` reattached it to that branch. The highest of all four rather than
+/// the first gap, so ids stay monotonic, and a branch list git could not
+/// produce is an error like an unreadable directory.
+pub fn next_id(claimed: &Claimed) -> Result<String> {
     let mut used = highest_in(claimed.worktrees)?;
     used = used.max(highest_in(claimed.shadows)?);
     used = used.max(highest_in(claimed.runs)?);
@@ -1715,7 +1707,10 @@ fn next_unclaimed(claimed: &Claimed) -> Result<String> {
             claimed.repo.display()
         )
     })?;
-    for name in refs.lines().filter_map(|r| r.strip_prefix("refs/heads/omh/")) {
+    for name in refs
+        .lines()
+        .filter_map(|r| r.strip_prefix("refs/heads/omh/"))
+    {
         used = used.max(session_number(name).unwrap_or(0));
     }
     Ok(format!("s{:02}", used + 1))
@@ -2496,12 +2491,13 @@ mod tests {
         );
     }
 
-    /// Session ids are reused: `next_id` is the highest `sNN` among the
-    /// worktrees plus one, so removing `s01` hands the next session that name
-    /// back. A shadow left behind is then adopted by a session that has nothing
-    /// to do with it — the new agent opens on someone else's scratch history,
-    /// and the seed recorded for it names a tree this worktree never had, so
-    /// everything measured from that seed is measured from a fiction.
+    /// Session ids are reused once nothing holds them: `next_id` is the highest
+    /// `sNN` anything still holds plus one, so removing all of `s01` hands the
+    /// next session that name back. A shadow left behind is then adopted by a
+    /// session that has nothing to do with it — the new agent opens on someone
+    /// else's scratch history, and the seed recorded for it names a tree this
+    /// worktree never had, so everything measured from that seed is measured
+    /// from a fiction.
     ///
     /// Deterministic rather than a race, and invisible: the shadow looks
     /// perfectly well-formed, it just belongs to a session that is gone.
@@ -2519,7 +2515,14 @@ mod tests {
         s.remove(&root, "main", &shadows).unwrap();
 
         // the id comes back around
-        assert_eq!(next_id(&dir.path().join("wt")).unwrap(), "s01");
+        let nowhere = dir.path().join("nowhere");
+        let at = Claimed {
+            worktrees: &dir.path().join("wt"),
+            repo: &root,
+            shadows: &shadows,
+            runs: &nowhere,
+        };
+        assert_eq!(next_id(&at).unwrap(), "s01");
         let reborn = Session::new(&dir.path().join("wt"), "s01".into());
         reborn.ensure(&root, "main").unwrap();
         std::fs::write(reborn.worktree.join("different.rs"), "fn new() {}").unwrap();
@@ -4513,13 +4516,14 @@ mod tests {
 
     #[test]
     fn ids_increment_and_list_in_order() {
-        let d = tempfile::tempdir().unwrap();
+        let (d, root) = repo();
         let wt = d.path().join("wt");
+        let nowhere = d.path().join("nowhere");
         std::fs::create_dir_all(&wt).unwrap();
-        assert_eq!(next_id(&wt).unwrap(), "s01");
+        assert_eq!(next_id(&claimed(&wt, &root, &nowhere)).unwrap(), "s01");
         std::fs::create_dir_all(wt.join("s01")).unwrap();
         std::fs::create_dir_all(wt.join("s02")).unwrap();
-        assert_eq!(next_id(&wt).unwrap(), "s03");
+        assert_eq!(next_id(&claimed(&wt, &root, &nowhere)).unwrap(), "s03");
         assert_eq!(list(&wt).unwrap(), ["s01", "s02"]);
     }
 

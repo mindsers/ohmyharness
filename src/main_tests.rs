@@ -3625,7 +3625,11 @@ fn what_omh_and_the_repository_ignore_is_not_at_stake() {
     let (paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::write(session.worktree.join(".gitignore"), "target/\n").unwrap();
     agent_git(&shadow, &session, &["add", ".gitignore"]);
-    agent_git(&shadow, &session, &["commit", "-q", "--no-verify", "-m", "ignore"]);
+    agent_git(
+        &shadow,
+        &session,
+        &["commit", "-q", "--no-verify", "-m", "ignore"],
+    );
     std::fs::write(
         &shadow.landed_record,
         agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
@@ -3652,7 +3656,11 @@ fn what_omh_and_the_repository_ignore_is_not_at_stake() {
 #[test]
 fn a_sandbox_head_with_no_commit_is_not_read_as_nothing_at_stake() {
     let (paths, session, shadow) = a_session_with_nothing_unkept();
-    agent_git(&shadow, &session, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+    agent_git(
+        &shadow,
+        &session,
+        &["symbolic-ref", "HEAD", "refs/heads/unborn"],
+    );
     let stake = cmd::harvest::at_stake(&paths, &session);
     assert!(
         matches!(stake, cmd::harvest::AtStake::Unknown(_)),
@@ -8123,9 +8131,26 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
     }
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().join("worktrees");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let nowhere = dir.path().join("nowhere");
+    let at = |worktrees: &std::path::Path| {
+        crate::session::next_id(&crate::session::Claimed {
+            worktrees,
+            repo: &repo,
+            shadows: &nowhere,
+            runs: &nowhere,
+        })
+    };
 
     assert_eq!(
-        crate::session::next_id(&dir.path().join("never-made-one")).unwrap(),
+        at(&dir.path().join("never-made-one")).unwrap(),
         "s01",
         "a checkout with no sessions yet starts at s01"
     );
@@ -8133,13 +8158,13 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
     std::fs::create_dir_all(wt.join("s01")).unwrap();
     std::fs::create_dir_all(wt.join("s02")).unwrap();
     assert_eq!(
-        crate::session::next_id(&wt).unwrap(),
+        at(&wt).unwrap(),
         "s03",
         "the highest id plus one, when omh can see them"
     );
 
     let _restore = Restore::unreadable(&wt).unwrap();
-    let err = crate::session::next_id(&wt)
+    let err = at(&wt)
         .expect_err("an unreadable worktrees directory answered with an id a live session holds");
     assert!(
         format!("{err:#}").contains("worktrees"),
