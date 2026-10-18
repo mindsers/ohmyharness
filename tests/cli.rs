@@ -11922,12 +11922,7 @@ fn doctor_without_adapters_reports_the_host_and_fails_honestly() {
     sb.git_init();
     sb.seed_catalogue(&["base", "editors", "stacks"]);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
-        .args(["doctor", "--json"])
-        .current_dir(&sb.repo)
-        .env("HOME", &sb.home)
-        .output()
-        .expect("the binary under test must run");
+    let out = sb.omh(&["doctor", "--json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     assert!(!out.status.success(), "no adapter is a failure: {stdout}");
