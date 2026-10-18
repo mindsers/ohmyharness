@@ -52,5 +52,15 @@ jobs:
         uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
+      # `--exact` with a name no test carries runs nothing and passes:
+      # `0 passed; 4 filtered out`, exit 0. A harness renamed in `adapters/`
+      # and not here would go green every night having run nothing, so the
+      # name is asked for first.
       - name: run every scenario against ${{ matrix.harness }}
-        run: cargo test --locked --features e2e --test e2e -- --exact ${{ matrix.harness }}
+        env:
+          HARNESS: ${{ matrix.harness }}
+        run: |
+          cargo test --locked --features e2e --test e2e -- --list --exact "$HARNESS" \
+            | grep -qx "$HARNESS: test" \
+            || { echo "no e2e test is called $HARNESS"; exit 1; }
+          cargo test --locked --features e2e --test e2e -- --exact "$HARNESS"
