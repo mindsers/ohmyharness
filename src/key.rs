@@ -259,6 +259,10 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                     "`{}` names nothing at `{bare}` on this machine",
                     key.name
                 ))
+            } else if key.name == "ca_cert" {
+                // What the build would refuse, asked of the one place every
+                // refusal of this setting lives: `/etc/hosts` passed as a PEM.
+                crate::image::Root::refusal(std::path::Path::new(bare))
             } else {
                 None
             }
@@ -273,21 +277,11 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
             let number = !digits.is_empty()
                 && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
                 && digits.parse::<f64>().is_ok();
+            // A unit, as the message says: bare, a number is bytes to Docker,
+            // below the least a container runs with — `4096` was let through.
             let unit_ok = matches!(
                 unit.as_str(),
-                "" | "b"
-                    | "k"
-                    | "m"
-                    | "g"
-                    | "t"
-                    | "kb"
-                    | "mb"
-                    | "gb"
-                    | "tb"
-                    | "kib"
-                    | "mib"
-                    | "gib"
-                    | "tib"
+                "k" | "m" | "g" | "t" | "kb" | "mb" | "gb" | "tb" | "kib" | "mib" | "gib" | "tib"
             );
             (!(number && unit_ok)).then(|| {
                 format!(
@@ -333,17 +327,29 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
         // A list, as the file holds one: `.env` alone was written as a string,
         // which the launch's reader refuses as not a list of strings.
         Shape::Paths => {
-            let listed = toml::from_str::<toml::Table>(&format!("v = {value}"))
-                .ok()
-                .and_then(|t| t.get("v").cloned())
-                .is_some_and(|v| v.as_array().is_some_and(|a| a.iter().all(|p| p.is_str())));
-            (!listed).then(|| {
-                format!(
+            let listed: Option<Vec<String>> =
+                toml::from_str::<toml::Table>(&format!("v = {value}"))
+                    .ok()
+                    .and_then(|t| t.get("v").cloned())
+                    .and_then(|v| {
+                        v.as_array()?
+                            .iter()
+                            .map(|p| p.as_str().map(str::to_string))
+                            .collect()
+                    });
+            let Some(paths) = listed else {
+                return Some(format!(
                     "`{}` takes a list of paths, as `[\".env\", \".env.local\"]` — `{}` is not one",
                     key.name,
                     value.trim()
-                )
-            })
+                ));
+            };
+            // As every launch checks them: `["../.ssh"]` was written, seeded
+            // into a committed file, and refused at each launch after.
+            paths
+                .iter()
+                .find_map(|p| crate::carry::validate_pattern(p).err())
+                .map(|e| format!("{e:#}"))
         }
         Shape::Text => None,
     }
@@ -392,7 +398,11 @@ mod tests {
         // same string to a person — `Choice` already learned that lesson.
         let dir = tempfile::tempdir().unwrap();
         let pem = dir.path().join("corp.pem");
-        std::fs::write(&pem, "x").unwrap();
+        std::fs::write(
+            &pem,
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
         let at = pem.display().to_string();
         for absolute in [at.clone(), format!("\"{at}\"")] {
             assert_eq!(
@@ -406,6 +416,30 @@ mod tests {
         let missing = dir.path().join("nope.pem").display().to_string();
         let said = quarrel(ca, &missing).expect("a missing certificate is said");
         assert!(said.contains("nothing at"), "{said}");
+        // There, and not a certificate: `/etc/hosts` was taken as a PEM.
+        let hosts = dir.path().join("hosts");
+        std::fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
+        let said = quarrel(ca, &hosts.display().to_string()).expect("not a certificate");
+        assert!(said.contains("certificate"), "{said}");
+    }
+
+    /// A list of paths is checked as every launch checks it: `["../.ssh"]`
+    /// was written with exit 0 — on the screen, with a ✓ — seeded into a new
+    /// repo's committed file, and refused by every launch after. It is the
+    /// one key that carries secrets.
+    #[test]
+    fn a_list_of_paths_is_checked_as_a_launch_checks_it() {
+        let carry = KEYS.iter().find(|k| k.name == "carry_in").unwrap();
+        assert_eq!(quarrel(carry, "[\".env\", \"certs/\"]"), None);
+        for bad in [
+            "[\"../.ssh\"]",
+            "[\".env\", \"/etc/passwd\"]",
+            "[\"~/.aws\"]",
+            "[\"\"]",
+        ] {
+            let said = quarrel(carry, bad).unwrap_or_else(|| panic!("`{bad}` passed"));
+            assert!(said.contains("carry_in"), "{said}");
+        }
     }
 
     /// A size and a CPU count are checked as loosely as the runtime reads
@@ -417,12 +451,12 @@ mod tests {
     fn a_size_and_a_cpu_count_are_checked_as_a_runtime_reads_them() {
         let key = |name: &str| KEYS.iter().find(|k| k.name == name).unwrap();
         let (memory, cpus) = (key("sandbox_memory"), key("sandbox_cpus"));
-        for ok in [
-            "4g", "512m", "1.5g", "1024", "2GiB", "512mb", "4G", "\"4g\"",
-        ] {
+        for ok in ["4g", "512m", "1.5g", "2GiB", "512mb", "4G", "\"4g\""] {
             assert_eq!(quarrel(memory, ok), None, "`{ok}` is a size");
         }
-        for bad in ["banana", "g4", "", "4x", "-1g", "4 gigs"] {
+        // A bare number is bytes to Docker, below the least it runs with:
+        // the message said "a number and a unit" and let `4096` through.
+        for bad in ["banana", "g4", "", "4x", "-1g", "4 gigs", "4096", "4096b"] {
             let said = quarrel(memory, bad).unwrap_or_else(|| panic!("`{bad}` is not a size"));
             assert!(said.contains("sandbox_memory"), "{said}");
         }
