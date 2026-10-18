@@ -1938,8 +1938,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // where `use` refuses a link to nothing.
         ("src/cmd/catalogue.rs", 18),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
-        ("src/cmd/init.rs", 8),     // + the `omh upgrade` redirect when a repo is already set up
-        ("src/cmd/upgrade.rs", 1),  // the `omh init` redirect when a repo is not set up
+        // + the `omh upgrade` redirect when a repo is already set up, + `omh
+        // set` in the header of the gitignored file `init` seeds.
+        ("src/cmd/init.rs", 9),
+        ("src/cmd/upgrade.rs", 1), // the `omh init` redirect when a repo is not set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only
         // next step is the command it names, so a spelling omh does not
@@ -5215,6 +5217,59 @@ fn a_selection_your_defaults_cannot_mean_is_refused_before_init_writes() {
     assert!(said.contains("[use] skills"), "{said}");
 }
 
+/// Each key your defaults hand a new repo lands where `omh set` would put
+/// it: `carry_in`, which can name a secret, in the gitignored
+/// `settings.local.toml`; the rest in the committed file. `init` wrote every
+/// key into the committed file, so `omh set carry_in` kept out of git what
+/// `init` had committed.
+#[test]
+fn a_seeded_key_lands_where_omh_set_would_put_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let template: String = key::KEYS
+        .iter()
+        .map(|k| format!("{} = \"x\"\n", k.name))
+        .collect();
+    std::fs::write(config::Layer::Personal.file(&paths), &template).unwrap();
+    let seed = cmd::init::seed_settings(&paths).unwrap();
+    let local = seed.local.clone().unwrap_or_default();
+    let read = |body: &str| body.parse::<toml::Table>().expect(body);
+    let (shared, local) = (read(&seed.shared), read(&local));
+    for k in key::KEYS {
+        let (into, not) = match k.default_layer() {
+            config::Layer::Local => (&local, &shared),
+            _ => (&shared, &local),
+        };
+        assert!(
+            into.contains_key(k.name),
+            "{} is not where `omh set` puts it",
+            k.name
+        );
+        assert!(!not.contains_key(k.name), "{} is in both", k.name);
+    }
+    assert!(
+        seed.took_local.contains(&"carry_in".to_string()),
+        "{:?}",
+        seed.took_local
+    );
+    assert!(
+        !seed.took.contains(&"carry_in".to_string()),
+        "{:?}",
+        seed.took
+    );
+    // A template with no such key makes no local file.
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "idle_timeout = \"45m\"\n",
+    )
+    .unwrap();
+    assert_eq!(cmd::init::seed_settings(&paths).unwrap().local, None);
+}
+
 /// The template hands on what omh reads, and refuses what it must not.
 ///
 /// `init` builds an image, so the end-to-end half of this runs only where a
@@ -5238,7 +5293,8 @@ fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
          [omh]\ncodegraph = false\n",
     )
     .unwrap();
-    let (body, took) = cmd::init::seed_settings(&paths).unwrap();
+    let seed = cmd::init::seed_settings(&paths).unwrap();
+    let (body, took) = (seed.shared, seed.took);
 
     assert!(body.contains("45m"), "a key omh reads travels: {body}");
     assert!(
