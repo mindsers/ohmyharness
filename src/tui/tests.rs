@@ -79,7 +79,16 @@ fn model() -> Model {
                     },
                 ],
                 problem: None,
-                import: Import::From(vec!["claude".into(), "codex".into()]),
+                import: Import::From(vec![
+                    Source {
+                        harness: "claude".into(),
+                        from: "~/.claude/skills".into(),
+                    },
+                    Source {
+                        harness: "codex".into(),
+                        from: "~/.codex/skills — nothing there".into(),
+                    },
+                ]),
                 about: Vec::new(),
                 seeds: None,
             },
@@ -1110,11 +1119,22 @@ fn a_new_entry_is_opened_in_the_editor_by_name() {
     );
 }
 
+/// Import picks from the harnesses that keep this kind, each beside where it
+/// reads — the pick was the bare list `claude codex omp opencode`, and where a
+/// harness keeps its servers is the checkout omh was started in.
 #[test]
 fn import_picks_from_the_harnesses_that_keep_this_kind() {
     let mut app = App::new(model(), true);
     app.key(press('2'));
     app.key(press('i'));
+    let screen = drawn(&app);
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains("claude") && l.contains("~/.claude/skills")),
+        "{screen}"
+    );
+    assert!(screen.contains("nothing there"), "{screen}");
     app.key(press('j'));
     assert_eq!(
         app.key(code(KeyCode::Enter)),

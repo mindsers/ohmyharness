@@ -2173,7 +2173,7 @@ pages are one line along the top.
 | `e` | `$EDITOR` on the entry, or on the file a page lives in |
 | `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |
 | `d` | unset a default; remove an entry or a server, after asking |
-| `i` | import this kind from a harness whose adapter says where it keeps them |
+| `i` | import this kind from a harness whose adapter says where it keeps them — the pick says where each reads, and when nothing is there |
 | `space` | whether the repos `omh init` sets up after get the entry: `●` they do, `○` they do not |
 | `/` | search every page by name, description or value — the rail counts what each holds; `esc` takes it off |
 | `u` | undo the last change that has an exact inverse: a value set back, an unset put back, a `space` flipped back — not one that wrote a guard's kind as a list, or took a rule off the middle of its list |

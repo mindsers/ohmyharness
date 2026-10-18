@@ -90,9 +90,17 @@ impl Page {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Import {
     /// Pick one of these harnesses to import from.
-    From(Vec<String>),
+    From(Vec<Source>),
     /// Nothing, for this reason.
     Not(String),
+}
+
+/// A harness to import from, and where it reads — said beside it in the pick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub harness: String,
+    /// The place, as the caller says it: `~/.claude/skills — nothing there`.
+    pub from: String,
 }
 
 /// One default, one server, or one entry.
@@ -358,6 +366,8 @@ struct Pick {
     fallback: Option<usize>,
     /// What is being set, as the row says it.
     about: Vec<String>,
+    /// A line beside each option — where an import reads — or none.
+    notes: Vec<String>,
     then: Chosen,
 }
 
@@ -868,6 +878,7 @@ impl App {
             current,
             fallback,
             about: row.about.clone(),
+            notes: Vec::new(),
             options,
             then: match typed {
                 true => Chosen::ValueOrTyped {
@@ -965,7 +976,8 @@ impl App {
             (Some(capability), Import::From(harnesses)) if !harnesses.is_empty() => {
                 self.modal = Some(Modal::Pick(Pick {
                     title: format!("import {} from", section.title),
-                    options: harnesses.clone(),
+                    options: harnesses.iter().map(|h| h.harness.clone()).collect(),
+                    notes: harnesses.iter().map(|h| h.from.clone()).collect(),
                     at: 0,
                     current: None,
                     fallback: None,
@@ -2161,6 +2173,18 @@ impl App {
             if pick.fallback == Some(i) {
                 spans.push(Span::styled("  default", self.look.dim()));
             }
+            if let Some(note) = pick.notes.get(i) {
+                let widest = pick
+                    .options
+                    .iter()
+                    .map(|o| Span::raw(o.as_str()).width())
+                    .max();
+                let pad = widest.unwrap_or(0) - Span::raw(option.as_str()).width();
+                spans.push(Span::styled(
+                    format!("{}  {note}", " ".repeat(pad)),
+                    self.look.dim(),
+                ));
+            }
             Line::from(spans)
         }));
         self.popup(f, &pick.title, Text::from(lines), Popup::Showing);
@@ -2468,7 +2492,15 @@ fn cleaned(mut model: Model) -> Model {
     for section in &mut model.sections {
         section.problem = section.problem.as_deref().map(clean_lines);
         section.import = match &section.import {
-            Import::From(harnesses) => Import::From(all(harnesses)),
+            Import::From(harnesses) => Import::From(
+                harnesses
+                    .iter()
+                    .map(|h| Source {
+                        harness: clean(&h.harness),
+                        from: clean(&h.from),
+                    })
+                    .collect(),
+            ),
             Import::Not(why) => Import::Not(clean(why)),
         };
         for row in &mut section.rows {

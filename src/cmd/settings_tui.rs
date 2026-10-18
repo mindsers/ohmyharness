@@ -531,8 +531,13 @@ pub(crate) fn model(paths: &Paths) -> Model {
             (Ok(adapters), _) => Import::From(
                 adapters
                     .iter()
-                    .filter(|a| a.supports(cap).is_some_and(|b| b.import.is_some()))
-                    .map(|a| a.name.to_string())
+                    .filter_map(|a| {
+                        let template = a.supports(cap)?.import.as_deref()?;
+                        Some(crate::tui::Source {
+                            harness: a.name.to_string(),
+                            from: import_from(paths, template),
+                        })
+                    })
                     .collect(),
             ),
             (Err(e), _) => Import::Not(format!("could not read the adapters: {e:#}")),
@@ -714,6 +719,28 @@ fn feature_switches(paths: &Paths) -> std::collections::BTreeMap<String, bool> {
         .unwrap_or_default()
 }
 
+/// Where an import reads, as the pick says it: the adapter's path on this
+/// host — from where omh was started, for `$REPO` — and whether there is
+/// anything there. The bare list of harness names said neither.
+fn import_from(paths: &Paths, template: &str) -> String {
+    let home = dirs::home_dir();
+    let at = crate::adapter::expand_host(
+        template,
+        home.as_deref().unwrap_or(std::path::Path::new("~")),
+        &paths.repo,
+    );
+    // `$REPO` is where omh was started, so it is said from there: `./`.
+    let shown = match template.contains("$REPO") {
+        true => format!("{}, where omh was started", template.replace("$REPO", ".")),
+        false => tilde(&at, home.as_deref()),
+    };
+    match at.try_exists() {
+        Ok(true) => shown,
+        Ok(false) => format!("{shown} — nothing there"),
+        Err(e) => format!("{shown} — could not look: {e}"),
+    }
+}
+
 /// What belongs on a page, for one with nothing on it yet: what the kind is,
 /// where one lives in your catalogue, and how to get one.
 fn belongs(cap: Capability, import: &Import) -> Vec<String> {
@@ -752,7 +779,8 @@ fn belongs(cap: Capability, import: &Import) -> Vec<String> {
     });
     if let Import::From(harnesses) = import {
         if !harnesses.is_empty() {
-            out.push(format!("i imports from {}", harnesses.join(", ")));
+            let names: Vec<&str> = harnesses.iter().map(|h| h.harness.as_str()).collect();
+            out.push(format!("i imports from {}", names.join(", ")));
         }
     }
     out
@@ -1922,6 +1950,36 @@ mod tests {
             !unused.contains("will warn") && !unused.contains("skills/gone"),
             "{unused}"
         );
+    }
+
+    /// An import says where each harness reads: the adapter's path on this
+    /// host, and for a server Claude Code keeps per project, that it is read
+    /// from where omh was started.
+    #[test]
+    fn an_import_says_where_each_harness_reads() {
+        let (_dir, paths) = paths();
+        seed_adapters(&paths);
+        let model = model(&paths);
+        let from = |title: &str, harness: &str| match &page(&model, title).import {
+            Import::From(sources) => sources
+                .iter()
+                .find(|s| s.harness == harness)
+                .map(|s| s.from.clone())
+                .unwrap_or_else(|| panic!("no {harness} for {title}")),
+            Import::Not(why) => panic!("{title}: {why}"),
+        };
+        assert!(
+            from("skills", "claude").contains(".claude/skills"),
+            "{}",
+            from("skills", "claude")
+        );
+        let servers = from("servers", "claude");
+        assert!(
+            servers.contains("./.mcp.json") && servers.contains("where omh was started"),
+            "{servers}"
+        );
+        // The checkout here has none, and says so rather than looking empty.
+        assert!(servers.contains("nothing there"), "{servers}");
     }
 
     /// **Could not look is not none.** A catalogue directory omh cannot read
