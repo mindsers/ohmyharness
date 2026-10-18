@@ -276,9 +276,15 @@ impl Paths {
 
     /// A `Paths` that works outside a repository.
     ///
-    /// `repo` is the cwd when there is no repo, which is honest: the caller
-    /// that needs this — `omh settings` — touches only `root`, and a command
-    /// that reaches for `repo` here would be asking a question with no answer.
+    /// `repo` is the cwd when there is no repo, which is honest: its callers —
+    /// `omh settings`, and `omh import` for everything but hooks — work on
+    /// `root`, and reach `repo` for two things. One is an adapter's `$REPO` —
+    /// claude's servers import from `$REPO/.mcp.json`, which outside a repo is
+    /// the directory you are in. The other is `config::servers` refusing a
+    /// repo that declares a server in `<repo>/.omh/mcp.json` — which, from
+    /// `~`, is the catalogue's own file, and is told apart from one. A command
+    /// that needed a real `repo` here would be asking a question with no
+    /// answer.
     pub fn anywhere(cwd: &Path) -> Result<Self> {
         Ok(Self {
             root: Self::home()?,
@@ -1017,34 +1023,46 @@ impl Profile {
                 out.extend(crate::render::parse_layers(&[source])?.into_keys());
                 continue;
             }
-            let entries = std::fs::read_dir(&source)
-                .with_context(|| format!("reading {}", source.display()))?;
-            for entry in entries {
-                // Not `.flatten()`, the rule this codebase follows for every
-                // directory it lists: a `readdir` failing part-way through would
-                // silently shorten the catalogue, and the report built from it
-                // would say an entry is not selected because it was never seen.
-                let entry = entry.with_context(|| format!("reading {}", source.display()))?;
-                let name = entry_name(&entry.file_name());
-                // A name omh mints has to be a name a `[use]` list can hold, or
-                // `init` writes something every later read refuses. `.DS_Store`
-                // is the one that actually happens: Finder creates it in any
-                // directory somebody opens, and it bricked the repo.
-                //
-                // Skipped rather than reported, because it is not an entry that
-                // went missing — it is a file that was never a catalogue entry,
-                // and a launch that named it would be telling the user about
-                // their operating system.
-                if crate::selection::validate_entry_name(&name, cap, &source).is_err() {
-                    continue;
-                }
-                out.push(name);
-            }
+            out.extend(listed(&source, cap)?.into_iter().map(|(name, _)| name));
         }
         out.sort();
         out.dedup();
         Ok(out)
     }
+}
+
+/// One catalogue directory's entries, by name and by where each one is.
+///
+/// `entries`' reading of a directory, lifted out for the screen `omh settings`
+/// draws, which has to open and remove what it lists — so a name it shows is
+/// a name `omh info` shows, and the same files are skipped for the same reason.
+pub fn listed(source: &Path, cap: Capability) -> Result<Vec<(String, PathBuf)>> {
+    let mut out = Vec::new();
+    let entries =
+        std::fs::read_dir(source).with_context(|| format!("reading {}", source.display()))?;
+    for entry in entries {
+        // Not `.flatten()`, the rule this codebase follows for every
+        // directory it lists: a `readdir` failing part-way through would
+        // silently shorten the catalogue, and the report built from it
+        // would say an entry is not selected because it was never seen.
+        let entry = entry.with_context(|| format!("reading {}", source.display()))?;
+        let name = entry_name(&entry.file_name());
+        // A name omh mints has to be a name a `[use]` list can hold, or
+        // `init` writes something every later read refuses. `.DS_Store`
+        // is the one that actually happens: Finder creates it in any
+        // directory somebody opens, and it bricked the repo.
+        //
+        // Skipped rather than reported, because it is not an entry that
+        // went missing — it is a file that was never a catalogue entry,
+        // and a launch that named it would be telling the user about
+        // their operating system.
+        if crate::selection::validate_entry_name(&name, cap, source).is_err() {
+            continue;
+        }
+        out.push((name, entry.path()));
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// The catalogue name of one directory entry.

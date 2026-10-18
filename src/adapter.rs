@@ -103,6 +103,20 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// The name a command line gives it — `omh use skills`, `[use] mcp = […]`.
+    /// A `&'static str` for the callers that keep it, which `Display` cannot
+    /// hand out.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Rules => "rules",
+            Self::Skills => "skills",
+            Self::Mcp => "mcp",
+            Self::Commands => "commands",
+            Self::Subagents => "subagents",
+            Self::Hooks => "hooks",
+        }
+    }
+
     /// Where this capability lives inside the catalogue.
     ///
     /// `rules` is a **directory of named files** rather than one `AGENTS.md`,
@@ -138,14 +152,7 @@ impl Capability {
 /// lives, not what it is, and the two stop matching the moment either moves.
 impl std::fmt::Display for Capability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Rules => "rules",
-            Self::Skills => "skills",
-            Self::Mcp => "mcp",
-            Self::Commands => "commands",
-            Self::Subagents => "subagents",
-            Self::Hooks => "hooks",
-        })
+        f.write_str(self.key())
     }
 }
 

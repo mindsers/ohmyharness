@@ -36,7 +36,7 @@ yours in the table, then follow it to its entry.
 | **Configure** | |
 | [`omh set` · `omh unset`](#omh-set--omh-unset) | Change a setting in this repo, or switch one of omh's features. |
 | [`omh use` · `omh unuse`](#omh-use--omh-unuse) | Choose which catalogue entries this repo takes. |
-| [`omh settings`](#omh-settings) | Your defaults for new repos, and your MCP servers. |
+| [`omh settings`](#omh-settings) | Your defaults for new repos, and your catalogue. |
 | [`omh import`](#omh-import-capability-harness) | Bring a setup you already have into omh. |
 | [`omh eject`](#omh-eject-harness---to-dir) | Write the config out as ordinary files, and step aside. |
 | **Memory** | |
@@ -60,7 +60,7 @@ file is left alone.
 
 | Previews | Refuses `--dry-run` |
 |---|---|
-| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset` and `mcp` verbs, `memory rm` | `init`, `auth`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
+| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `rm` and `mcp` verbs, `memory rm` | `init`, `auth`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
 
 <details>
 <summary>Why a command refuses the flag rather than guessing, or ignoring it</summary>
@@ -108,7 +108,7 @@ A flag learned on one command is true on the next, or it is not there.
 |---|---|
 | `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
 | `--to <dir>` | Write here: `omh eject`. |
-| `--yes` `-y` | *Yes, I have read the warning — answer the prompt in advance.* `omh sNN rm`, for runs with nobody to ask. It does not force the removal, only the answer. |
+| `--yes` `-y` | *Yes, I have read the warning — answer the prompt in advance.* `omh sNN rm` and `omh settings rm`, for runs with nobody to ask. It does not force the removal, only the answer. |
 | `--all` | Every one, not the one named: `omh use --all`. Session verbs have no `--all` — for `sync` and `down`, naming no session already means every session. |
 | `--session <id>` `-s` | The session to act on. `omh s01 <verb>` says the same — see [`omh sessions`](#omh-sessions---s). |
 | `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
@@ -1891,7 +1891,7 @@ Change a setting, or switch one of omh's features. **Which file it lands in
 follows from the key**, not from a flag you have to remember.
 
 ```
-omh set <key> <value> [--local|--save]
+omh set <key> <value> [--local|--save] [--anyway]
 omh set account <harness>:<name>      an account for one harness alone
 omh set <feature> on|off
 omh unset <key> [--local|--save]
@@ -2070,23 +2070,26 @@ seeds a new repo's `settings.toml` from — read once, at `init`, and never at
 launch.
 
 ```
-omh settings                          your defaults, and what omh reads
-omh settings set <key> <value>        → ~/.omh/default.toml
+omh settings                          at a terminal, a screen; anywhere else, the report
+omh settings set <key> <value> [--anyway]
+                                      → ~/.omh/default.toml
 omh settings unset <key>              remove one of your defaults
 omh settings edit [<capability> [name]]
                                       $EDITOR on your defaults, or on one entry
+omh settings rm <capability> <name> [--yes]
+                                      take one entry out of your catalogue
 
 omh settings mcp ls
-omh settings mcp add <name> <cmd> [args…] [--env K=V]
-omh settings mcp rm <name>
+omh settings mcp add [--replace] <name> <cmd> [args…] [--env K=V]
 omh settings mcp import <harness> [--from <path>] [--replace]
 ```
 
 | | |
 |---|---|
+| `--yes` `-y` | remove without asking. Off a terminal there is nobody to ask, so `rm` refuses without it |
 | `--env K=V` | an environment variable the server runs with. Repeat for several |
 | `--from <path>` | read this file instead of where the adapter says the harness keeps its servers |
-| `--replace` | overwrite a catalogue entry of the same name that differs. Without it yours is kept and the difference reported |
+| `--replace` | overwrite a server of the same name. Without it `mcp add` refuses one, naming what it runs, and `mcp import` keeps yours and reports the difference. omh's own servers are refused either way |
 
 ```console
 $ omh settings set idle_timeout 45m
@@ -2097,14 +2100,128 @@ your defaults /Users/you/.omh/default.toml
   idle_timeout  45m
 
 omh also reads
-  carry_in     Untracked files a session needs — a worktree holds tracked files only. The one path by which a secret reaches the agent, so keep it short.
-  account      Which captured login a session is launched with, by name.
-  runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
-  persistence  How a session's terminal survives detaching. Unset means `dtach`.
+  carry_in        Untracked files a session needs — a worktree holds tracked files only. The one path by which a secret reaches the agent, so keep it short.
+  account         Which captured login a session is launched with, by name.
+  sandbox_memory  How much memory a session's sandbox may use, as the runtime spells it (`4g`, `512m`). Unset means the runtime's default.
+  sandbox_cpus    How many CPUs a session's sandbox may use, as the runtime spells it (`2`, `1.5`). Unset means the runtime's default.
+  runtime         Which runtime builds and runs the sandbox. Unset means `auto`.
+  ca_cert         A CA certificate the sandbox must trust, as a path to a PEM — for a network that inspects TLS and signs it with its own root.
+  persistence     How a session's terminal survives detaching. Unset means `dtach`.
 ```
 
 **The second list is the useful half**: every key omh reads, which no settings
 file can show.
+
+**At a terminal, `omh settings` is a screen** over the same `~/.omh`: your
+defaults, then one page per kind of catalogue entry — rules, skills, servers,
+commands, subagents, hooks. Piped, redirected, or with `--json` or `--dry-run`,
+it is the report above.
+
+From 100 columns it is three: the pages, the list, and what the selected row
+is. From 70, what the row is sits under the list, as below; narrower, the
+pages are one line along the top.
+
+```
+ omh settings  ~/.omh
+▌ 1 Defaults      │ Defaults  8
+  2 Rules       1 │
+  3 Skills      2 │   carry_in        default: nothing carried
+  4 Servers     1 │   account         default: no login captured — `omh auth <…
+  5 Commands    0 │ ✓ idle_timeout    45m
+  6 Subagents   0 │   sandbox_memory  default: the runtime's own
+  7 Hooks       0 │   sandbox_cpus    default: the runtime's own
+                  │   runtime         default: auto
+                  │   ca_cert         default: no extra CA
+                  │   persistence     default: dtach
+                  │
+                  │
+                  ├─────────────────────────────────────────────────────────────
+                  │ idle_timeout
+                  │
+                  │ How long a session may sit unused before omh stops it.
+                  │
+                  │ now     45m
+                  │ a duration: 90s, 30m, 2h, 1d
+                  │
+ ✓ wrote → /Users/you/.omh/default.toml (seeds new repos)
+   $ omh settings set idle_timeout 45m
+ ↵ set  d unset  e edit the file  / filter  ⇥ page  ↑↓ move       ? help  q quit
+```
+
+| | |
+|---|---|
+| `↓` `↑` (`j` `k`), `home` `end` (`g` `G`) | move in the list |
+| `⇥` `⇧⇥` or `→` `←` (`l` `h`), `1`–`7` | change page |
+| a letter, in a list to pick from | go to the option it starts; `esc` or `q` closes it, and no other key does |
+| `enter` | set a default — picked from its choices where it has them, typed where it does not; open a rule, skill, command, subagent or hook in `$EDITOR` |
+| `e` | `$EDITOR` on the entry, or on the file a page lives in |
+| `a` | a new entry, opened in `$EDITOR`; a new server, asked for in one form |
+| `d` | unset a default; remove an entry or a server, after asking |
+| `i` | import this kind from a harness whose adapter says where it keeps them |
+| `/` | filter the page by name, description or value; `esc` takes it off |
+| `?` | every key, on the screen |
+| `q` `esc` `ctrl-d` `ctrl-c` | leave |
+
+**A letter held with Ctrl or Alt is not that letter**: Ctrl-D leaves, as it
+leaves a shell, and does not unset the default under the cursor. In a line
+being typed, Ctrl-A, Ctrl-E and Ctrl-U go to its start, go to its end, and
+clear what is before the cursor.
+
+**The mouse selects a row, opens it with a second click, scrolls the list and
+changes page.** The screen holds the mouse while it is drawn, and gives it back
+before `$EDITOR` runs and when it ends — so selecting text to copy takes the
+key your terminal uses to get past a program's mouse: Shift in most, Option in
+iTerm2.
+
+**A row says what it is**: a default, its value or, unset, what applies
+instead; an entry, its description; a hook, when it runs — as a column of its
+own — and what it does; a server, what it runs, its arguments counted and its
+environment named. Hooks and servers are yours first, then omh's own, under a
+heading each. A key nothing reads is under one of its own, naming the key it was
+probably meant to be, and a skill with no `SKILL.md` or a link to nothing is
+marked on its row.
+
+**The rail says what a page holds before you go to it**: its number, how many,
+`!` where an entry has a warning and `✗` where omh could not look — whose
+count is `—`, not `0`. **The foot lists the keys that act here**, the row's
+first: one that would only be refused is not there — no `d` on omh's own,
+no `i` where nothing imports — and while a box is open, the box's own. `?`
+lists every key. A list longer than its room has a thumb at its edge, and keeps
+the heading of the group you are in at the top.
+
+**Every change is a command, run as one.** The screen has no write of its
+own: a key becomes the line you would have typed — `omh settings set`,
+`omh settings rm`, `omh settings mcp add`, `omh import` — which omh runs, and
+the screen shows what it said marked ✓, `!` or ✗, with the line beside it or,
+where there is no room, after it, and marks the row it changed until the next
+key. So its refusals, warnings and
+wording are that command's, and anything you did there you can script.
+Removing previews first, and asks in the preview's words, with the preview's
+warnings; a hook omh ships is refused before the question rather than after
+it. The one exception is `$EDITOR`, which the screen runs itself through
+`omh settings edit`'s own steps — a refusal printed by a child would land on
+the terminal just handed to the editor, behind the screen drawn back over it.
+
+**Your catalogue, and nothing of this checkout's.** A hook in a repo's
+`.omh/hooks/` is not on the hooks page, and the screen does not import hooks:
+a hook lands in a repo, so `omh import hooks <harness>` is run in one. A
+server is drawn by its command, as `omh settings mcp ls` prints it, with its
+environment named and its arguments counted — never a value of either, since
+those are where a token goes — and the line shown after adding one hides the
+same.
+
+**Nothing read is drawn as a control sequence.** A skill's description, a
+hook's `does` and a command's output are drawn with every control character
+as `�` — a line break stays one — so text somebody else wrote, an entry `i`
+just imported, cannot drive your terminal. A value typed into a new server's
+env is drawn as `•`, as it is hidden everywhere else.
+
+**What an edit left is read back.** When `$EDITOR` closes, the entry is read
+again, and one that no longer parses is said, not reported done. A hook omh
+ships can be opened, and the screen says what `omh upgrade` does to an edit:
+puts its own back and keeps yours as `<name>.json.yours`. A link to nothing is
+refused before any editor runs — opened, an editor writes through it, out of
+the catalogue — and the refusal names the `rm` that takes it out.
 
 **Not `omh set`.** `omh set` is this checkout; `omh settings` is what a new one
 starts from. `omh setting` is refused rather than guessed at.
@@ -2119,12 +2236,47 @@ is committed. It already has a home — `omh settings mcp add <name> <command>
 live in your catalogue; a repo overrides a server's environment without
 redeclaring it. See [Configuration](/reference/configuration/).
 
-**Your catalogue is `omh info`.** This command is your *defaults* — the four
-verbs above all act on `~/.omh`, and what you have in it is part of what
-`omh info` means by *what you have here*.
+**Your defaults and your catalogue.** The five verbs above all act on `~/.omh`;
+the screen is that catalogue listed for changing it. `omh info` is where the
+machine is described, and what you have in `~/.omh` is part of what it means
+by *what you have here*.
 
-**`edit` takes a name, so it validates one**: `omh settings edit skills
-../../.ssh/id_rsa` is refused before `$EDITOR` sees it.
+**`edit` and `rm` take a name, so they validate one**: `omh settings edit
+skills ../../.ssh/id_rsa` is refused before `$EDITOR` sees it, and the same
+name is refused before `rm` deletes anything.
+
+**An entry opens as the file it is, and a new one is made the shape its kind
+is read in.** `omh settings edit rules house` opens `house.md`, the file
+`omh info` lists as `house`. A new rule, command or subagent is made `.md`, a
+new hook `.json`, and a new skill a directory — a skill is mounted as a
+directory holding a `SKILL.md`, and that file is what opens, for a new skill as
+for one you have. A new skill nothing was saved into is taken back rather than
+left as an empty directory. A name is a name whole:
+`omh settings edit rules v1.2` opens `v1.2.md`. A server has no file of its
+own, so `omh settings edit mcp` takes no name and opens `mcp.json`.
+
+**`$EDITOR` runs as a shell would run it**, as git runs it:
+`EDITOR='code --wait'` works, a path with a space in it is quoted inside the
+value, and an empty `EDITOR` is no editor set, which is `vi`. Its status is the
+command's: an editor that fails fails the edit, naming it, and one `sh` cannot
+find is said in words, since `sh`'s own are behind the screen.
+
+**One `rm` for every kind of entry**, servers included — `omh settings rm mcp
+linear` and `omh settings rm skills review-diff` are the same act. At a
+terminal it asks; anywhere else it needs `--yes`. A name two files answer to
+(`house.md` and `house.txt`) is refused rather than guessed at, and so is a
+hook omh ships: `omh upgrade` would put it back, so the refusal names
+`omh unuse hooks <name>`, which stops a repo running it. A server omh ships —
+`codegraph`, `memory` — is refused too: it is one of omh's features, switched
+off whole with `omh set <feature> off` rather than taken apart, and the screen
+does not offer to remove it.
+
+```console
+$ omh settings rm skills review-diff
+remove /Users/you/.omh/skills/review-diff? (y/N)
+  > y
+removed /Users/you/.omh/skills/review-diff
+```
 
 <details>
 <summary>Why <code>omh setting</code> is refused, why the key list lives in the binary, and why <code>edit</code> draws no fence past the name</summary>
@@ -2204,7 +2356,8 @@ import from claude skills (~/.claude/skills)
 **Hooks land in the repo, not the catalogue** — a hook binds to a project's
 own commands, so `cargo test` here and `pnpm test` next door is one name and
 two bodies. They go to `<repo>/.omh/hooks/` and into `[use]`, or they would
-arrive dead. Everything else is yours across projects and goes to `~/.omh`.
+arrive dead. Everything else is yours across projects and goes to `~/.omh` —
+so it needs no repo, and `omh import skills claude` works from anywhere.
 
 **A symlink is refused at any depth, as is a name that is a path** — an
 imported entry is content omh will mount read-only into a sandbox, and neither

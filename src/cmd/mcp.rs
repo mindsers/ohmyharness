@@ -27,7 +27,27 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
             command,
             args,
             env,
+            replace,
         } => {
+            // omh's own: `omh upgrade` puts its definition back over yours,
+            // and `rm` refuses it for the same reason.
+            if let Some(feature) = crate::cmd::settings::shipped_servers()?.get(name) {
+                anyhow::bail!(
+                    "the `{name}` server is omh's own — the {feature} feature, and \
+                     `omh upgrade` puts its definition back. To switch it off in a repo:\n  \
+                     omh set {feature} off"
+                );
+            }
+            // Written over in silence, a second `linear` took the first one's
+            // arguments and its token with it.
+            let held = config::held_server(paths, name)?;
+            if let (Some(held), false) = (&held, replace) {
+                anyhow::bail!(
+                    "your catalogue already has a `{name}` server — {}. To write over it:\n  \
+                     omh settings mcp add --replace {name} <command> [args…]",
+                    described(held)
+                );
+            }
             let server = render::Server {
                 command: command.clone(),
                 args: args.clone(),
@@ -37,9 +57,13 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
             // only the write is withheld. `mcp_import` in the same enum has
             // read `dry_run` since it was written, and these two did not.
             if dry_run {
+                let verb = match &held {
+                    Some(held) => format!("would replace {name} ({})", described(held)),
+                    None => format!("would add {name}"),
+                };
                 ctx.say(&report::Action::new(
                     "mcp-planned",
-                    format!("would add {name} → {}", config::mcp_path(paths).display()),
+                    format!("{verb} → {}", config::mcp_path(paths).display()),
                 ));
                 return Ok(());
             }
@@ -59,46 +83,6 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                 ));
             }
             ctx.say(&action);
-            Ok(())
-        }
-
-        McpCmd::Rm { name } => {
-            // **Refused, not reported.** A name that was not there is a typo
-            // far more often than a plan, and this arm used to exit 0 saying so
-            // — the one command in the group that did. `use`, `unuse`,
-            // `memory rm` and `memory promote` all refuse the same mistake, and
-            // a script cannot tell a removal from a misspelling when both come
-            // back green.
-            if dry_run {
-                let known = config::servers(paths)?;
-                anyhow::ensure!(
-                    known.iter().any(|s| s.key == *name),
-                    "no server `{name}` in your catalogue."
-                );
-                ctx.say(&report::Action::new(
-                    "mcp-planned",
-                    format!("would remove {name} from your catalogue"),
-                ));
-                return Ok(());
-            }
-            if !config::mcp_remove(paths, name)? {
-                let known = config::servers(paths)?
-                    .into_iter()
-                    .map(|s| s.key)
-                    .collect::<Vec<_>>();
-                anyhow::bail!(
-                    "no server `{name}` in your catalogue.\n  servers: {}",
-                    if known.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        known.join(", ")
-                    }
-                );
-            }
-            ctx.say(
-                &report::Action::new("mcp-removed", format!("removed {name} from your catalogue"))
-                    .data(serde_json::json!({ "server": name, "removed": true })),
-            );
             Ok(())
         }
 
@@ -198,4 +182,25 @@ pub(crate) fn show_servers(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
             .collect(),
     });
     Ok(())
+}
+
+/// A server in words a screen can carry: what it runs, its arguments counted
+/// and its environment named — never a value of either, which is where a
+/// token goes.
+fn described(server: &render::Server) -> String {
+    let mut out = format!("runs {}", server.command);
+    if !server.args.is_empty() {
+        out.push_str(&format!(
+            ", with {} argument{}",
+            server.args.len(),
+            crate::cmd::harvest::plural(server.args.len())
+        ));
+    }
+    if !server.env.is_empty() {
+        out.push_str(&format!(
+            ", env {}",
+            server.env.keys().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out
 }

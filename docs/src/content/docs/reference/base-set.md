@@ -160,8 +160,8 @@ took all three with it.
 
 Removal did not always take the whole feature. Before, it left the hooks behind,
 nudging the agent toward something that was gone — and for a release the field
-named `omh settings mcp rm codegraph`, which removes the server alone and leaves
-the feature on.
+named the server's removal, which removed the server alone and left the feature
+on.
 
 The grouping lived as a comment header in the manifest — the one claim in that
 file no test could check, while every other claim an entry makes is a field

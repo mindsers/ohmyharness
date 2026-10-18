@@ -324,6 +324,23 @@ omh: and the committed file is COMMITTED — `carry_ins` went into a file git ca
 A test fails the build if a key omh's own code reads is missing from the table,
 which is what stops omh's own keys ever taking that path.
 
+**A value omh cannot read is refused**, where it was typed rather than at the
+next launch, minutes later and in another command. `--anyway` writes it — for
+a value only a newer omh takes — and still names it:
+
+```console
+$ omh set persistence tmux
+omh: `persistence` does not take `tmux` — only dtach, none. Nothing was written. For a value only a newer omh reads:
+  omh set --anyway persistence <value>
+
+$ omh set --anyway persistence tmux
+omh: `persistence` does not take `tmux` — only dtach, none — written anyway
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+```
+
+`omh settings set` is the same `set`, for your defaults. A list key takes a
+list: `carry_in .env` is refused, and `carry_in '[".env"]'` is the spelling.
+
 **Asking for the committed file still says what that means**, and names the key
 when the key is one that reaches a credential:
 
@@ -613,7 +630,7 @@ There are three ways to take a feature away, at different reaches:
 |---|---|---|
 | switch it off in this repo | `omh set codegraph off` | this repo — the server, its hooks and its rules section together |
 | hand the decision back to omh's own default | `omh unset codegraph` | this repo |
-| take the server out of your catalogue | `omh settings mcp rm codegraph` | every repo |
+| switch it off in every repo `init` sets up after | `omh settings edit`, and `[omh] codegraph = false` in it | every new repo |
 
 **Feature names only.** `graph-first = false` is refused, naming the feature it
 belongs to — keeping the graph while dropping one of the things that make it
@@ -1177,12 +1194,15 @@ and one `[tools]` map per adapter.
 
 ## MCP servers
 
-Your MCP servers live in your catalogue, and `omh settings mcp` manages them:
+Your MCP servers live in your catalogue. `omh settings mcp` lists and adds
+them, and `omh settings rm mcp` takes one out, as it takes out any other entry
+— except omh's own, `codegraph` and `memory`, which are features and are
+switched off with [`[omh]`](#omh--omhs-own-features):
 
 ```console
 $ omh settings mcp ls
 $ omh settings mcp add linear npx -- -y mcp-remote https://mcp.linear.app/sse
-$ omh settings mcp rm linear
+$ omh settings rm mcp linear
 ```
 
 MCP lives under `omh settings` because MCP servers **are** configuration. They

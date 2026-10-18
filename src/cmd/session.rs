@@ -2334,9 +2334,9 @@ pub(crate) fn run(
 pub(crate) fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy)> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let repo = settings::resolve(paths, &manifest)?;
-    // What the catalogue still declares, so removing a server takes its feature
-    // with it. `omh settings mcp rm codegraph` edits `mcp.json` and nothing
-    // else, so this read is where that instruction is kept or broken.
+    // What the catalogue still declares, so a server gone takes its feature
+    // with it. A server taken out of `mcp.json` by hand changed nothing else,
+    // so this read is where the feature is kept whole or broken.
     let installed = config::servers(paths)?.into_iter().map(|s| s.key).collect();
     Ok((base::own(&manifest, &repo.off, &installed)?, repo))
 }
