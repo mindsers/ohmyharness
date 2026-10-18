@@ -849,38 +849,25 @@ impl Session {
         Ok(())
     }
 
-    /// Move what `diff` measures against, so a sync does not read as the
-    /// agent's work.
+    /// Where the session's branch goes when its base moves to `onto`.
     ///
-    /// Without this the session's branch still points at the old trunk, and
-    /// every review from here on shows trunk's changes as though the agent had
-    /// made them — which is the same lie a harvest would then replay onto the
-    /// branch.
-    ///
-    /// `--create-reflog` and an expected old value, because this is a ref move
-    /// on the user's own branch: if anything else moved it since the sync
-    /// began, omh refuses rather than winning the race. Commits the branch
-    /// already carries are the user's, so they are replayed onto the new base
-    /// first, in a scratch worktree — and a conflict there refuses, since
+    /// `onto` itself, when the branch carries nothing beyond its old base. Its
+    /// own commits are the user's — `omh sNN commit` put them there — and
+    /// pointing the branch at the new base would delete them, so they are
+    /// replayed onto it in a scratch worktree, and a conflict there refuses:
     /// resolving someone's committed work is not omh's to do.
-    pub fn move_baseline(
-        &self,
-        repo: &Path,
-        onto: &str,
-        old_baseline: &str,
-        expected_tip: &str,
-    ) -> Result<()> {
+    ///
+    /// **Asked before anything is written**, which is what makes the refusal's
+    /// *Nothing was changed* true. A sync used to write trunk's tree into the
+    /// worktree first and replay second, so a refused replay left conflict
+    /// markers in the user's files and trunk's files beside them, under a
+    /// message saying nothing had changed. The answer is a commit; nothing on
+    /// the branch or in the worktree moves until [`Self::move_baseline`].
+    pub fn replayed_onto(&self, repo: &Path, onto: &str, old_baseline: &str) -> Result<String> {
         let branch = self
             .branch
             .as_deref()
             .context("a scratch session has no branch to move")?;
-
-        // Commits the branch already carries are the user's — `omh sNN commit`
-        // put them there. Pointing the branch at the new base would delete
-        // them, so they are replayed onto it first and a conflict refuses:
-        // resolving someone's committed work is not omh's to do, and the
-        // sandbox's files are not at risk either way because nothing has been
-        // written yet when this runs.
         let mine = git(
             repo,
             &["rev-list", "--count", &format!("{old_baseline}..{branch}")],
@@ -919,10 +906,11 @@ impl Session {
                     .with_context(|| {
                         format!(
                             "{branch} carries {mine} commit{} of your own and they do not \
-                             replay onto the new base cleanly. Nothing was changed — resolve \
-                             it yourself with `git -C {} rebase --onto {onto} {old_baseline} {branch}`",
+                             replay onto the new base cleanly. Nothing was changed — rebase \
+                             them yourself where {branch} is checked out, with \
+                             `git -C {} rebase --onto {onto} {old_baseline}`, then sync again",
                             if mine == 1 { "" } else { "s" },
-                            repo.display()
+                            self.worktree.display()
                         )
                     });
                 let _ = git(
@@ -932,19 +920,40 @@ impl Session {
                 replayed?
             }
         };
+        Ok(tip)
+    }
 
+    /// Move what `diff` measures against to `tip`, so a sync does not read as
+    /// the agent's work.
+    ///
+    /// Without this the session's branch still points at the old trunk, and
+    /// every review from here on shows trunk's changes as though the agent had
+    /// made them — which is the same lie a harvest would then replay onto the
+    /// branch. `tip` is what [`Self::replayed_onto`] answered.
+    ///
+    /// `--create-reflog` and an expected old value, because this is a ref move
+    /// on the user's own branch: if anything else moved it since the sync
+    /// began, omh refuses rather than winning the race.
+    pub fn move_baseline(&self, repo: &Path, tip: &str, expected_tip: &str) -> Result<()> {
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch to move")?;
         git(
             repo,
             &[
                 "update-ref",
                 "--create-reflog",
                 &format!("refs/heads/{branch}"),
-                &tip,
+                tip,
                 expected_tip,
             ],
         )
         .with_context(|| {
-            format!("{branch} moved while omh was syncing — nothing was changed on it")
+            format!(
+                "{branch} moved while omh was syncing, so omh left it where it is — \
+                 the worktree already holds the merged files"
+            )
         })?;
         // The worktree's files are already the merged ones; this makes the
         // index agree with the branch it now sits on, so `status` shows the

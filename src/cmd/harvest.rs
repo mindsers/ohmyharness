@@ -149,8 +149,11 @@ pub(crate) fn sync_session(paths: &Paths, session: &Session, base: &str) -> Resu
     let _ = session::unname_tree(&paths.repo, &ours);
     let merged = merged?;
 
+    // Replayed before anything is written, so a refusal there leaves the
+    // worktree as the agent left it — which is what it says.
+    let replayed = session.replayed_onto(&paths.repo, &onto, &old_baseline)?;
     session.materialise(&tree, &merged.tree)?;
-    session.move_baseline(&paths.repo, &onto, &old_baseline, &tip)?;
+    session.move_baseline(&paths.repo, &replayed, &tip)?;
     shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
     let moved = session.commits_between(&paths.repo, &old_baseline, &onto)?;
     // Deliberately not `?`. The sync is done — the tree is merged, the baseline
