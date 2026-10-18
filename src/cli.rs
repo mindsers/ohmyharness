@@ -324,8 +324,8 @@ pub(crate) enum Cmd {
     /// change it.
     ///
     /// Not `omh set`, which is this checkout. The two are one letter apart
-    /// with opposite scopes, and clap is deliberately not told to accept
-    /// unambiguous prefixes: `omh setting` is refused rather than guessed at.
+    /// with opposite scopes, and omh never takes a shortened command for a
+    /// whole one: `omh setting` is refused rather than guessed at.
     Settings {
         #[command(subcommand)]
         cmd: Option<SettingsCmd>,

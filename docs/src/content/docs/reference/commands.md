@@ -2164,12 +2164,15 @@ pages are one line along the top.
 | `d` | unset a default; remove an entry or a server, after asking |
 | `i` | import this kind from a harness whose adapter says where it keeps them |
 | `space` | whether the repos `omh init` sets up after get the entry: `●` they do, `○` they do not |
-| `/` | filter the page by name, description or value; `esc` takes it off |
+| `/` | search every page by name, description or value — the rail counts what each holds; `esc` takes it off |
+| `u` | undo the last change that has an exact inverse: a value set back, an unset put back, a `space` flipped back — not one that wrote a guard's kind as a list, or took a rule off the middle of its list |
 | `?` | every key, on the screen |
+| `ctrl-l` | read your catalogue again, for a file changed outside the screen |
 | `q` `esc` `ctrl-d` `ctrl-c` | leave |
 
 **A letter held with Ctrl or Alt is not that letter**: Ctrl-D leaves, as it
-leaves a shell, and does not unset the default under the cursor. In a line
+leaves a shell, and does not unset the default under the cursor; Ctrl-L reads
+again, as it redraws one. In a line
 being typed, Ctrl-A, Ctrl-E and Ctrl-U go to its start, go to its end, and
 clear what is before the cursor.
 
@@ -2196,6 +2199,11 @@ first: one that would only be refused is not there — no `d` on omh's own,
 no `i` where nothing imports — and while a box is open, the box's own. `?`
 lists every key. A list longer than its room has a thumb at its edge, and keeps
 the heading of the group you are in at the top.
+
+**When it closes, the screen says what it ran** — each command, as it showed
+it — where scrollback keeps them: to read back, or to paste into a script. A
+key nothing reads that was probably meant to be another moves its value there
+on Enter, `omh settings set` then `omh settings unset`.
 
 **Every change is a command, run as one.** The screen has no write of its
 own: a key becomes the line you would have typed — `omh settings set`,
@@ -2282,7 +2290,12 @@ left as an empty directory. A name is a name whole:
 `omh settings edit rules v1.2` opens `v1.2.md`. A server has no file of its
 own, so `omh settings edit mcp` takes no name and opens `mcp.json`.
 
-**`$EDITOR` runs as a shell would run it**, as git runs it:
+**A new entry opens as its kind's shape** — front matter for a skill, a
+subagent or a command, a hook's JSON, a rule's heading — and one saved untouched
+is taken back.
+
+**`$EDITOR` runs as a shell would run it**, as git runs it — `$VISUAL` first,
+then `$EDITOR`:
 `EDITOR='code --wait'` works, a path with a space in it is quoted inside the
 value, and an empty `EDITOR` is no editor set, which is `vi`. Its status is the
 command's: an editor that fails fails the edit, naming it, and one `sh` cannot

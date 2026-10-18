@@ -1040,6 +1040,32 @@ fn an_env_value_is_not_drawn_as_it_is_typed() {
     );
 }
 
+/// Esc in a form with something typed in it asks first: one Esc threw away
+/// three fields. An empty form closes at once, and typing again un-asks.
+#[test]
+fn esc_in_a_form_with_something_typed_asks_first() {
+    let mut app = App::new(model(), true);
+    app.key(press('3'));
+    app.key(press('a'));
+    app.key(code(KeyCode::Esc));
+    assert_eq!(app.modal, None, "an empty form closes at once");
+    app.key(press('a'));
+    for c in "linear".chars() {
+        app.key(press(c));
+    }
+    app.key(code(KeyCode::Esc));
+    assert!(
+        matches!(app.modal, Some(Modal::Form(_))),
+        "it threw them away"
+    );
+    assert!(drawn(&app).contains("esc again"), "{}", drawn(&app));
+    app.key(press('x'));
+    app.key(code(KeyCode::Esc));
+    assert!(matches!(app.modal, Some(Modal::Form(_))), "typing un-asks");
+    app.key(code(KeyCode::Esc));
+    assert_eq!(app.modal, None);
+}
+
 /// A name already taken is said on the name field, not after three fields:
 /// `mcp add` refuses to write over a server, and omh's own are never yours to
 /// replace.
@@ -1103,7 +1129,7 @@ fn import_picks_from_the_harnesses_that_keep_this_kind() {
 }
 
 /// `/` narrows the page as you type; what is selected and acted on is the row
-/// shown, `esc` takes the filter off, and another page starts clear.
+/// shown, `esc` takes the filter off, and it stays as you change page.
 #[test]
 fn a_filter_narrows_the_page_and_acts_on_what_it_shows() {
     let mut app = App::new(model(), true);
@@ -1132,7 +1158,40 @@ fn a_filter_narrows_the_page_and_acts_on_what_it_shows() {
     assert!(drawn(&app).contains("nothing matches"));
     app.key(code(KeyCode::Enter));
     app.key(press('1'));
-    assert!(app.filter.is_none(), "another page starts clear");
+    assert!(app.filter.is_some(), "a filter is a search, across pages");
+}
+
+/// The filter searches every page: the rail says how many on each match, so
+/// "which page was that hook on" is answered without going to each — and the
+/// page you go to is already narrowed.
+#[test]
+fn a_filter_searches_every_page() {
+    let mut app = App::new(model(), true);
+    app.key(press('/'));
+    for c in "keep".chars() {
+        app.key(press(c));
+    }
+    app.key(code(KeyCode::Enter));
+    let screen = drawn_at(&app, 120, 30);
+    let rail = |title: &str| {
+        screen
+            .lines()
+            .find_map(|l| {
+                l.split('│')
+                    .next()
+                    .filter(|r| r.contains(title))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    };
+    assert!(rail("Skills").contains("1/2"), "{}", rail("Skills"));
+    assert!(rail("Defaults").contains("0/4"), "{}", rail("Defaults"));
+    app.key(press('2'));
+    let screen = drawn_at(&app, 120, 30);
+    assert!(
+        screen.contains("keep what works") && !screen.contains("read a diff"),
+        "{screen}"
+    );
 }
 
 /// `?` shows every key, and any key closes it.
@@ -1384,6 +1443,135 @@ fn space_flips_what_new_repos_get() {
     );
 }
 
+/// `u` undoes the last change that has an inverse — a value set back, an
+/// unset put back, a `use` left out again — once the command said it worked.
+/// Every change is already a command, so its inverse is one too. One that
+/// failed leaves nothing to undo; and undoing is itself undone by `u`.
+#[test]
+fn u_undoes_the_last_change() {
+    let mut app = App::new(model(), true);
+    // idle_timeout is 30m: set it to 45m.
+    app.key(code(KeyCode::Enter));
+    app.key(with('u', KeyModifiers::CONTROL));
+    let set = typed(&mut app, "45m");
+    assert!(matches!(set, Next::Run(Act::Set { .. })));
+    assert_eq!(
+        app.key(press('u')),
+        Next::Stay,
+        "nothing until it is said to have worked"
+    );
+    app.report("settings set idle_timeout 45m".into(), true, "wrote", "");
+    assert!(drawn(&app).contains("u undoes"), "{}", drawn(&app));
+    let undo = app.key(press('u'));
+    assert_eq!(
+        undo,
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "30m".into()
+        })
+    );
+    // An unset is undone by setting it back.
+    let mut app = App::new(model(), true);
+    assert!(matches!(app.key(press('d')), Next::Run(Act::Unset { .. })));
+    app.report("settings unset idle_timeout".into(), true, "removed", "");
+    assert_eq!(
+        app.key(press('u')),
+        Next::Run(Act::Set {
+            key: "idle_timeout".into(),
+            value: "30m".into()
+        })
+    );
+    // A change that failed leaves nothing to undo.
+    let mut app = App::new(model(), true);
+    app.key(press('d'));
+    app.report("settings unset idle_timeout".into(), false, "", "omh: no");
+    assert_eq!(app.key(press('u')), Next::Stay);
+}
+
+/// `space` is undone by what the caller says undoes it, not by the opposite
+/// verb: `use` on a guard of a kind with no list writes the kind as a list,
+/// and `unuse` after it left the list standing — the rest of the kind frozen,
+/// where `u` promised the file back. Where nothing undoes a flip exactly,
+/// `u` is not offered.
+#[test]
+fn space_is_undone_by_what_the_caller_says_undoes_it() {
+    let mut model = model();
+    let unuse = Act::Unuse {
+        capability: "skills".into(),
+        name: "keep".into(),
+    };
+    let back = Act::Use {
+        capability: "skills".into(),
+        name: "keep".into(),
+    };
+    model.sections[1].rows[0].seeded = Some(true);
+    model.sections[1].rows[0].toggle = Some(unuse.clone());
+    model.sections[1].rows[0].untoggle = Some(back.clone());
+    let guard = Act::Use {
+        capability: "skills".into(),
+        name: "review-diff".into(),
+    };
+    model.sections[1].rows[1].seeded = Some(false);
+    model.sections[1].rows[1].toggle = Some(guard.clone());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    assert_eq!(app.key(press(' ')), Next::Run(unuse.clone()));
+    app.report("settings unuse -- skills keep".into(), true, "", "");
+    assert_eq!(app.key(press('u')), Next::Run(back));
+
+    app.key(press('j'));
+    assert_eq!(app.key(press(' ')), Next::Run(guard));
+    app.report("settings use -- skills review-diff".into(), true, "", "");
+    assert_eq!(app.key(press('u')), Next::Stay);
+    assert!(!drawn(&app).contains("u undoes"), "{}", drawn(&app));
+}
+
+/// Enter on a key that was probably meant to be another moves its value
+/// there, the typo with it: fixing `carry_ins` was two acts on two rows, and
+/// the value was retyped in between. Where the meant key has a value already,
+/// that is said, and nothing is written over it.
+#[test]
+fn enter_on_a_typo_moves_it_to_the_key_it_meant() {
+    let mut model = model();
+    model.sections[0].rows.push(Row {
+        value: Some("[\".env\"]".into()),
+        warning: Some("nothing omh reads — did you mean `carry_in`?".into()),
+        meant: Some("carry_in".into()),
+        ..row("carry_ins")
+    });
+    model.sections[0].rows.push(row("carry_in"));
+    let mut app = App::new(model.clone(), true);
+    for _ in 0..4 {
+        app.key(press('j'));
+    }
+    assert_eq!(app.row().map(|r| r.name.as_str()), Some("carry_ins"));
+    // The row names the key it meant; the foot says what Enter does with it.
+    assert!(drawn(&app)
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .contains("↵ move it"));
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Run(Act::Move {
+            from: "carry_ins".into(),
+            to: "carry_in".into(),
+            value: "[\".env\"]".into()
+        })
+    );
+    model.sections[0].rows.last_mut().unwrap().value = Some("[\".env.local\"]".into());
+    let mut app = App::new(model, true);
+    for _ in 0..4 {
+        app.key(press('j'));
+    }
+    assert_eq!(app.key(code(KeyCode::Enter)), Next::Stay);
+    assert!(
+        drawn(&app).contains("carry_in is set already"),
+        "{}",
+        drawn(&app)
+    );
+}
+
 /// The row an act changed is marked once the page is read again, until the
 /// next key.
 #[test]
@@ -1529,7 +1717,8 @@ fn a_key_never_writes_without_being_asked_to() {
 /// crossterm reports Ctrl-D as `d` with CONTROL, and the page matched the
 /// letter alone: Ctrl-D — what a hand does to leave a terminal program — unset
 /// the selected default on the spot, and Ctrl-E opened `$EDITOR`. Ctrl-D
-/// leaves; every other held letter does nothing.
+/// leaves and Ctrl-L reads again, as in a shell; every other held letter does
+/// nothing.
 #[test]
 fn a_letter_held_with_ctrl_or_alt_is_not_that_letter() {
     for page in 0..model().sections.len() {
@@ -1541,6 +1730,10 @@ fn a_letter_held_with_ctrl_or_alt_is_not_that_letter() {
                 let next = app.key(with(c, held));
                 if c == 'd' && held == KeyModifiers::CONTROL {
                     assert_eq!(next, Next::Quit, "Ctrl-D leaves");
+                    continue;
+                }
+                if c == 'l' && held == KeyModifiers::CONTROL {
+                    assert_eq!(next, Next::Reload, "Ctrl-L reads again");
                     continue;
                 }
                 assert_eq!(next, Next::Stay, "{held:?}-{c} on page {page}");
@@ -1562,6 +1755,15 @@ fn only_a_plain_y_says_yes() {
         app.confirm(vec!["would remove it".into()], vec![], act.clone());
         assert_eq!(app.key(with('y', held)), Next::Stay);
     }
+}
+
+/// Ctrl-L reads your catalogue again, for a file changed outside the screen
+/// — as Ctrl-L redraws in a shell.
+#[test]
+fn ctrl_l_reads_the_catalogue_again() {
+    let mut app = App::new(model(), true);
+    assert_eq!(app.key(with('l', KeyModifiers::CONTROL)), Next::Reload);
+    assert_eq!(app.key(press('l')), Next::Stay, "a plain l changes page");
 }
 
 #[test]
