@@ -4964,6 +4964,52 @@ fn settings_use_and_unuse_change_what_new_repos_take() {
     );
 }
 
+/// A link to nothing is not taken on for new repos: `space` on one said "✓
+/// new repos take skills/gone" and wrote it into `[use]`, which hands every
+/// repo after a name nothing answers to. Refused, with the `rm` that takes
+/// the link out; and left out, it can still be taken off a list.
+#[test]
+fn a_link_to_nothing_is_not_taken_on_for_new_repos() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/tdd/SKILL.md"]);
+    std::os::unix::fs::symlink("/nowhere/gone", sb.home.join(".omh/skills/gone")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "[use]\nskills = [\"tdd\"]\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["settings", "use", "skills", "gone"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("link to nothing") && said.contains("omh settings rm skills gone"),
+        "{said}"
+    );
+    let file = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
+    assert!(!file.contains("gone"), "nothing written: {file}");
+}
+
+/// A feature switched back leaves no empty `[omh]` behind: `unset codegraph`
+/// took the switch and left the table with nothing under it.
+#[test]
+fn a_feature_unset_leaves_no_empty_table() {
+    let sb = sandbox();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["settings", "set", "codegraph", "off"])
+        .status
+        .success());
+    let out = sb.omh(&["settings", "unset", "codegraph"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
+    assert!(!file.contains("[omh]"), "{file:?}");
+}
+
 /// Your defaults are said as your defaults: `unset` said "removed … from the
 /// personal layer", a word for a file `config.rs` calls a template; `mcp ls`
 /// called omh's own servers "your catalogue"; and a feature given neither on
@@ -7652,12 +7698,29 @@ fn the_report_says_of_your_defaults_what_the_screen_says() {
 fn a_kind_spelled_nearly_right_is_named() {
     let sb = sandbox();
     sb.seed_base();
-    for (typed, meant) in [("skill", "skills"), ("hook", "hooks"), ("rule", "rules")] {
+    // And the screen's word for a page: it says "servers", the verbs `mcp`.
+    for (typed, meant) in [
+        ("skill", "skills"),
+        ("hook", "hooks"),
+        ("rule", "rules"),
+        ("servers", "mcp"),
+        ("server", "mcp"),
+    ] {
         let out = sb.omh(&["settings", "rm", typed, "x", "--yes"]);
         let said = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success());
         assert!(said.contains(&format!("did you mean `{meant}`")), "{said}");
     }
+    // A hook omh ships is refused with the verb for your defaults too: it
+    // named only `omh unuse`, the repo's.
+    sb.catalogue(&["hooks/rust-test.json"]);
+    let out = sb.omh(&["settings", "rm", "hooks", "rust-test", "--yes"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("omh settings unuse hooks rust-test"),
+        "{said}"
+    );
 }
 
 /// `$VISUAL` is read before `$EDITOR`, as git reads them: with `VISUAL` set

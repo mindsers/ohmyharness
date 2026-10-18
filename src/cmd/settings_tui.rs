@@ -379,15 +379,21 @@ fn ran_lines(act: &Act) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// An act's lines as the status says them, after its `$ omh `: one, or a
+/// move's two joined.
+fn shown_lines(lines: &[Vec<String>]) -> String {
+    lines
+        .iter()
+        .map(|l| shown(l))
+        .collect::<Vec<_>>()
+        .join(" && omh ")
+}
+
 /// Run an act's lines in order, stopping at the first that fails, and say
 /// what they said as one: what ran, joined, and every line's output. Answers
 /// whether every line worked.
 fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) -> bool {
-    let shown_all = lines
-        .iter()
-        .map(|l| shown(l))
-        .collect::<Vec<_>>()
-        .join(" && ");
+    let shown_all = shown_lines(lines);
     let (mut out, mut err) = (String::new(), String::new());
     for line in lines {
         match omh(exe, line) {
@@ -441,6 +447,7 @@ pub(crate) fn argv(act: &Act) -> Vec<String> {
         Act::Move { to, value, .. } => s(&["settings", "set", "--", to, value]),
         Act::Use { capability, name } => s(&["settings", "use", "--", capability, name]),
         Act::Unuse { capability, name } => s(&["settings", "unuse", "--", capability, name]),
+        Act::UseAll { capability } => s(&["settings", "use", "--all", "--", capability]),
         Act::Unset { key } => s(&["settings", "unset", "--", key]),
         Act::EditDefaults => s(&["settings", "edit"]),
         Act::Edit { capability, name } => {
@@ -666,6 +673,11 @@ fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
             return;
         }
     };
+    // The way back to following your catalogue, where new repos do not: once
+    // a guard had made hooks a list, nothing on the screen led back.
+    section.follow = (now.listed || !now.left_out.is_empty()).then(|| Act::UseAll {
+        capability: cap.key().to_string(),
+    });
     // A file of yours named as one of omh's own is its feature's: `use`
     // refuses the name, so the row takes no `space` and is not counted.
     let owned = match settings::shipped_owned(cap) {
@@ -733,6 +745,8 @@ fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
     let mut said = match (now.listed, total - got, left, guards) {
         (true, ..) => format!("new repos get {got} of {total}"),
         (false, 0, ..) => "new repos get all".to_string(),
+        // All but every one is none.
+        (false, ..) if got == 0 => "new repos get none".to_string(),
         (false, _, 0, _) => "new repos get all but the guards".to_string(),
         (false, _, n, 0) => format!("new repos get all but {n}"),
         (false, _, n, _) => format!("new repos get all but {n}, and no guards"),
@@ -912,6 +926,7 @@ fn section(page: Page, title: &'static str) -> Section {
         import: Import::From(Vec::new()),
         about: Vec::new(),
         seeds: None,
+        follow: None,
     }
 }
 
@@ -1468,6 +1483,62 @@ mod tests {
         }
     }
 
+    /// "All but 1" of one is none, and says so.
+    #[test]
+    fn all_but_every_one_is_said_as_none() {
+        let (_dir, paths) = paths();
+        write(&paths.root.join("rules/house.md"), "# house\n");
+        write(
+            &paths.root.join("default.toml"),
+            "[unuse]\nrules = [\"house\"]\n",
+        );
+        let model = model(&paths);
+        assert_eq!(
+            page(&model, "rules").seeds.as_deref(),
+            Some("new repos get none")
+        );
+    }
+
+    /// A kind new repos do not follow your catalogue for — a list, or what
+    /// `[unuse]` leaves out — has the act that makes them follow it again,
+    /// `omh settings use <kind> --all`: once a guard had made hooks a list,
+    /// nothing on the screen led back.
+    #[test]
+    fn a_kind_off_your_catalogue_has_the_way_back() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("skills/tdd/SKILL.md"),
+            "---\nname: tdd\ndescription: x\n---\n",
+        );
+        write(
+            &paths.root.join("hooks/mine.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        write(&paths.root.join("rules/house.md"), "# house\n");
+        write(
+            &paths.root.join("default.toml"),
+            "[use]\nhooks = [\"mine\"]\n\n[unuse]\nskills = [\"tdd\"]\n",
+        );
+        let model = model(&paths);
+        let all = |capability: &str| {
+            Some(Act::UseAll {
+                capability: capability.into(),
+            })
+        };
+        assert_eq!(page(&model, "hooks").follow, all("hooks"));
+        assert_eq!(page(&model, "skills").follow, all("skills"));
+        assert_eq!(page(&model, "rules").follow, None, "it follows already");
+        let mut line = vec!["omh".to_string()];
+        line.extend(argv(&Act::UseAll {
+            capability: "hooks".into(),
+        }));
+        assert!(matches!(
+            Cli::try_parse_from(&line).unwrap().cmd,
+            Cmd::Settings { cmd: Some(SettingsCmd::Use { capability, name: None, all: true }) }
+                if capability == "hooks"
+        ));
+    }
+
     /// Each row says how far a change to it goes, which is not "new repos"
     /// alone: an entry reaches every repo that takes it, at its next launch,
     /// and a default lands in a new repo's committed settings file. The screen
@@ -1551,6 +1622,23 @@ mod tests {
         assert!(refusal("idle_timeout", "soon").is_some());
         let unread = refusal("my_new_key", "1").unwrap_or_default();
         assert!(unread.contains("nothing in omh reads"), "{unread:?}");
+    }
+
+    /// A move's two lines, as the status says them, are both `omh`'s: it read
+    /// `$ omh settings set … && settings unset carry_ins`.
+    #[test]
+    fn a_moves_status_says_omh_before_each_line() {
+        let moved = command_lines(&Act::Move {
+            from: "carry_ins".into(),
+            to: "carry_in".into(),
+            value: "[\".env\"]".into(),
+        });
+        let said = shown_lines(&moved);
+        assert!(said.contains("&& omh settings unset carry_ins"), "{said}");
+        assert!(
+            !said.starts_with("omh "),
+            "the status adds the first: {said}"
+        );
     }
 
     /// A move undone writes the typo back, which is a key nothing reads — so

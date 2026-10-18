@@ -1933,9 +1933,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences
         ("src/cmd/auth.rs", 3),
         // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as
-        // the way back from a freeze, and `omh settings set <feature> off` with
-        // its `omh init` for a name omh owns.
-        ("src/cmd/catalogue.rs", 17),
+        // the way back from a guard's list, and `omh settings set <feature>
+        // off` with its `omh init` for a name omh owns. + `omh settings rm`
+        // where `use` refuses a link to nothing.
+        ("src/cmd/catalogue.rs", 18),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         ("src/cmd/init.rs", 8),     // + the `omh upgrade` redirect when a repo is already set up
         ("src/cmd/upgrade.rs", 1),  // the `omh init` redirect when a repo is not set up
@@ -1976,8 +1977,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // entry of your catalogue. + `omh init` and `omh settings unuse` where
         // rm takes an entry your defaults' `[use]` names. + a feature given
         // neither on nor off names the verb it was typed as: `omh settings
-        // set` and `omh set`, where one line said `omh set` for both.
-        ("src/cmd/settings.rs", 30),
+        // set` and `omh set`, where one line said `omh set` for both. + `omh
+        // init` and `omh settings unuse hooks` where rm refuses a hook omh
+        // ships.
+        ("src/cmd/settings.rs", 32),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
@@ -5151,6 +5154,28 @@ fn a_new_repo_gets_your_lists_your_exclusions_and_no_guard_unnamed() {
             .cloned()
             .unwrap_or_default(),
         ["my-guard", "mine"]
+    );
+    // A list is narrowed to this repo's stacks, as no list is: `use hooks
+    // <guard>` wrote every stack's hooks into the list, and `init` put go's
+    // and python's into a rust repo's committed `[use]`.
+    hook(
+        "go-check",
+        r#"{"on":"turn-end","run":"go vet ./...","stack":"go"}"#,
+    );
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "[use]\nhooks = [\"mine\", \"go-check\", \"gone\"]\n",
+    )
+    .unwrap();
+    let lists = cmd::catalogue::new_repo_lists(&paths).unwrap();
+    assert_eq!(
+        lists
+            .get(&adapter::Capability::Hooks)
+            .cloned()
+            .unwrap_or_default(),
+        ["mine", "gone"],
+        "a repo with no go in it — and a name the catalogue lacks stays, for \
+         `init` to warn about"
     );
 }
 

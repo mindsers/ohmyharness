@@ -1138,7 +1138,16 @@ pub(crate) fn new_repo_takes(
         _ => BTreeSet::new(),
     };
     let layer = config::Layer::Personal;
-    if let Some(takes) = config::list_in(paths, layer, config::USE, cap)? {
+    if let Some(mut takes) = config::list_in(paths, layer, config::USE, cap)? {
+        // Narrowed to this repo's stacks, as no list is: `use hooks <guard>`
+        // writes every stack's hooks into the list, and `init` put go's and
+        // python's into a rust repo. A name the catalogue does not have stays,
+        // for `init` to warn about.
+        if in_repo && cap == adapter::Capability::Hooks {
+            let known = catalogue_names_unfiltered(paths, cap)?;
+            let applicable = catalogue_names(paths, cap)?;
+            takes.retain(|n| !known.contains(n) || applicable.contains(n));
+        }
         return Ok(NewRepo {
             listed: true,
             takes,
@@ -1243,6 +1252,23 @@ pub(crate) fn defaults_use(
     let available = defaults_catalogue(paths, cap)?;
     if !available.iter().any(|n| n == name) {
         return Err(crate::cmd::settings::no_such_entry(cap, name, &available));
+    }
+    // A link to nothing hands every repo after a name nothing answers to:
+    // `space` on one said "new repos take skills/gone" and wrote it.
+    if cap != adapter::Capability::Mcp {
+        let source = paths.root.join(cap.source());
+        let found = crate::profile::listed(&source, cap)?
+            .into_iter()
+            .find(|(n, _)| n == name);
+        if let Some((_, at)) = found.filter(|(_, at)| at.is_symlink() && !at.exists()) {
+            let to = std::fs::read_link(&at)
+                .map(|t| t.display().to_string())
+                .unwrap_or_default();
+            anyhow::bail!(
+                "{cap}/{name} is a link to nothing — {to} — so new repos would be handed a \
+                 name nothing answers to. To take the link out:\n  omh settings rm {cap} {name}"
+            );
+        }
     }
     let now = new_repo_takes(paths, cap, false)?;
     if now.takes.iter().any(|n| n == name) {

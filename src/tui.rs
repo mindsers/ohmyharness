@@ -58,6 +58,9 @@ pub struct Section {
     pub about: Vec<String>,
     /// How much of the page new repos get: "new repos get all", "… 1 of 4".
     pub seeds: Option<String>,
+    /// What has new repos follow your catalogue for this kind again, where
+    /// they do not — worked out by the caller, as a row's toggle is.
+    pub follow: Option<Act>,
 }
 
 /// Which kind of page, by what each key does on it.
@@ -205,6 +208,11 @@ pub enum Act {
         capability: String,
         name: String,
     },
+    /// Have them follow your catalogue for a kind again: its list and what
+    /// it leaves out taken away.
+    UseAll {
+        capability: String,
+    },
     /// A key nothing reads, its value moved to the key it was meant to be:
     /// that one set, this one unset.
     Move {
@@ -225,7 +233,9 @@ impl Act {
             Act::Use { name, .. } | Act::Unuse { name, .. } => Some(name.clone()),
             Act::Move { to, .. } => Some(to.clone()),
             Act::AddServer { name, .. } => Some(name.clone()),
-            Act::EditDefaults | Act::Remove { .. } | Act::Import { .. } => None,
+            Act::EditDefaults | Act::Remove { .. } | Act::Import { .. } | Act::UseAll { .. } => {
+                None
+            }
         }
     }
 }
@@ -465,11 +475,18 @@ impl App {
         let mut rest = line;
         while let Some(at) = rest.find(home.as_str()) {
             let after = &rest[at + home.len()..];
+            // Only the home itself, as a path of its own: `/Users/you` is not
+            // in `/Users/young`, nor in `/private/Users/you`, which became
+            // `/private~` — a path begins where the text before it is not one.
+            let starts = rest[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || "/._-~".contains(c)));
+            let ends = matches!(after.chars().next(), None | Some('/'));
             out.push_str(&rest[..at]);
-            // Only the home itself: `/Users/you` in `/Users/young` is not it.
-            match after.chars().next() {
-                None | Some('/') => out.push('~'),
-                Some(_) => out.push_str(home),
+            match starts && ends {
+                true => out.push('~'),
+                false => out.push_str(home),
             }
             rest = after;
         }
@@ -693,11 +710,13 @@ impl App {
                 to: from.clone(),
                 value: value.clone(),
             }),
+            // Taking a list away has no one command that puts it back.
             Act::EditDefaults
             | Act::Edit { .. }
             | Act::Remove { .. }
             | Act::AddServer { .. }
-            | Act::Import { .. } => None,
+            | Act::Import { .. }
+            | Act::UseAll { .. } => None,
         }
     }
 
@@ -736,8 +755,14 @@ impl App {
                 self.rows[self.at] = 0;
             }
             KeyCode::Char('?') => self.modal = Some(Modal::Help { scroll: 0 }),
-            KeyCode::Char('u') => {
-                if let Some(act) = self.undo.take() {
+            KeyCode::Char('u') => match self.undo.take() {
+                Some(act) => return Next::Run(act),
+                // Said, where it did nothing at all: the last change may have
+                // been one no one command puts back.
+                None => self.note("nothing to undo"),
+            },
+            KeyCode::Char('A') => {
+                if let Some(act) = self.section().and_then(|s| s.follow.clone()) {
                     return Next::Run(act);
                 }
             }
@@ -1513,7 +1538,8 @@ impl App {
                 (true, _) => Span::raw(pad_left("", 3)),
                 // What a search finds here, of how many.
                 (false, _) if searching => Span::styled(
-                    pad_left(&format!("{}/{}", self.shown(i).len(), s.rows.len()), 5),
+                    // The mark's column and the count's, four between them.
+                    pad_left(&format!("{}/{}", self.shown(i).len(), s.rows.len()), 4),
                     match self.shown(i).is_empty() {
                         true => self.look.dim(),
                         false => self.look.accent(),
@@ -1530,8 +1556,9 @@ impl App {
             let used: usize = right.iter().map(Span::width).sum();
             let number = Span::styled(format!("{} ", i + 1), self.look.dim());
             let width = usize::from(area.width).saturating_sub(2 + 2 + used + 1);
+            // Cut rather than run into the border: `6 Subagents  0/1│`.
             let title = Span::styled(
-                pad(&capitalised(s.title), width),
+                pad(&ellipsized(&capitalised(s.title), width), width),
                 match here {
                     true => self.look.title(),
                     false => Style::default(),
@@ -2220,6 +2247,9 @@ impl App {
                 }
             }
         }
+        if self.section().is_some_and(|s| s.follow.is_some()) {
+            keys.push(("A", "all again"));
+        }
         keys.extend([("/", "filter"), ("⇥", "page"), ("↑↓", "move")]);
         keys
     }
@@ -2349,11 +2379,7 @@ impl App {
                 .iter()
                 .map(|l| Line::from(Span::styled(l.clone(), self.look.tone(Tone::Warn)))),
         );
-        lines.push(Line::default());
-        lines.push(Line::from(vec![
-            Span::styled("y", self.look.key()),
-            Span::styled(" remove · any other key keeps it", self.look.dim()),
-        ]));
+        // The keys are the footer's: said here too, they were said twice.
         self.popup(f, &title, Text::from(lines), Popup::Removing);
     }
 
@@ -2471,6 +2497,7 @@ impl App {
                     ("d", "unset a default · remove an entry, after asking"),
                     ("i", "import from a harness"),
                     ("space", "whether the repos `omh init` sets up after get it"),
+                    ("A", "new repos take the whole page again"),
                     ("u", "undo the last change"),
                     ("/", "search every page — esc takes it off"),
                     ("ctrl-l", "read your catalogue again"),

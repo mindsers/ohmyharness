@@ -64,6 +64,7 @@ fn model() -> Model {
                 import: Import::Not("your defaults are typed, not imported".into()),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
             Section {
                 title: "skills",
@@ -93,6 +94,7 @@ fn model() -> Model {
                 ]),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
             Section {
                 title: "servers",
@@ -102,6 +104,7 @@ fn model() -> Model {
                 import: Import::From(vec![]),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
             Section {
                 title: "hooks",
@@ -111,6 +114,7 @@ fn model() -> Model {
                 import: Import::Not("a hook lands in a repo".into()),
                 about: Vec::new(),
                 seeds: None,
+                follow: None,
             },
         ],
     }
@@ -860,6 +864,31 @@ fn a_box_says_its_keys_once_and_what_enter_does() {
         footer(&app).contains("↵ open in $EDITOR"),
         "{}",
         footer(&app)
+    );
+}
+
+/// The question before a removal says its keys once, in the footer: the box
+/// said `y remove · any other key keeps it` above a footer that said it too.
+#[test]
+fn the_removal_question_says_its_keys_once() {
+    let mut app = App::new(model(), true);
+    app.confirm(
+        vec!["would remove ~/.omh/skills/keep".into()],
+        vec![],
+        Act::Remove {
+            capability: "skills".into(),
+            name: "keep".into(),
+        },
+    );
+    let screen = drawn_at(&app, 120, 30);
+    assert_eq!(screen.matches("keeps it").count(), 1, "{screen}");
+    assert!(
+        screen
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .contains("keeps it"),
+        "{screen}"
     );
 }
 
@@ -1659,12 +1688,14 @@ fn what_a_command_printed_says_your_home_as_tilde() {
     app.report(
         "settings set idle_timeout 45m".into(),
         true,
-        "wrote → /Users/you/.omh/default.toml\nkept /Users/young/notes",
+        "wrote → /Users/you/.omh/default.toml\nkept /Users/young/notes\nfrom (/private/Users/you/repo)",
         "",
     );
     let screen = drawn_at(&app, 120, 30);
     assert!(screen.contains("wrote → ~/.omh/default.toml"), "{screen}");
     assert!(screen.contains("/Users/young/notes"), "{screen}");
+    // Nor a path that only has your home inside it: `/private~/repo`.
+    assert!(screen.contains("(/private/Users/you/repo)"), "{screen}");
 }
 
 /// A page's heading keeps the filter in sight and says when it is cut: at
@@ -1876,6 +1907,62 @@ fn the_rail_s_marks_are_in_one_column() {
     let defaults = at("Defaults", '!');
     assert_eq!(at("Skills", '!'), defaults, "{screen}");
     assert_eq!(at("Hooks", '✗'), defaults, "{screen}");
+}
+
+/// A page new repos do not follow your catalogue on offers the way back, on
+/// `A`; and `u` with nothing to undo says so, where it did nothing at all.
+#[test]
+fn a_page_off_your_catalogue_offers_the_way_back() {
+    let mut model = model();
+    let follow = Act::UseAll {
+        capability: "skills".into(),
+    };
+    model.sections[1].follow = Some(follow.clone());
+    let mut app = App::new(model, true);
+    app.key(press('2'));
+    let footer = drawn_at(&app, 160, 30)
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .to_string();
+    assert!(footer.contains("A all again"), "{footer}");
+    assert_eq!(app.key(press('A')), Next::Run(follow));
+    app.report(
+        "settings use --all -- skills".into(),
+        true,
+        "new repos take all your skills again",
+        "",
+    );
+    assert_eq!(app.key(press('u')), Next::Stay);
+    assert!(drawn(&app).contains("nothing to undo"), "{}", drawn(&app));
+    app.key(press('1'));
+    assert_eq!(
+        app.key(press('A')),
+        Next::Stay,
+        "a page that follows takes no A"
+    );
+}
+
+/// The rail keeps a gap before its border, whatever it counts: under a
+/// search `6 Subagents  0/1│` touched it.
+#[test]
+fn the_rail_keeps_a_gap_before_its_border() {
+    let mut model = model();
+    model.sections[1].title = "subagents";
+    let mut app = App::new(model, true);
+    app.key(press('/'));
+    for c in "keep".chars() {
+        app.key(press(c));
+    }
+    let screen = drawn_at(&app, 120, 30);
+    for line in screen.lines().skip(1).take(4) {
+        let rail: Vec<char> = line.chars().take_while(|c| *c != '│').collect();
+        assert_eq!(rail.last(), Some(&' '), "{line}");
+    }
+    // And by keeping the count in its four columns, not by cutting the name.
+    let rail = screen.lines().nth(2).unwrap_or_default();
+    let rail = &rail[..rail.find('│').unwrap()];
+    assert!(rail.contains("Subagents"), "{rail}");
 }
 
 /// `space` flips whether the repos `omh init` sets up after get a row, by the

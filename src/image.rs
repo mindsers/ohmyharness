@@ -182,6 +182,12 @@ pub struct Root {
 }
 
 impl Root {
+    /// What [`Root::read`] would refuse the file at `at` for, asked where
+    /// `ca_cert` is typed rather than at the build, minutes later.
+    pub(crate) fn refusal(at: &std::path::Path) -> Option<String> {
+        Self::read(at.to_path_buf()).err().map(|e| format!("{e:#}"))
+    }
+
     /// Read the file `ca_cert` names, refusing anything that is not exactly
     /// certificates. **Every refusal this setting makes lives here**, which is
     /// the point: there is no other constructor.
