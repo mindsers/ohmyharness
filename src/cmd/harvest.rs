@@ -149,8 +149,11 @@ pub(crate) fn sync_session(paths: &Paths, session: &Session, base: &str) -> Resu
     let _ = session::unname_tree(&paths.repo, &ours);
     let merged = merged?;
 
+    // Replayed before anything is written, so a refusal there leaves the
+    // worktree as the agent left it — which is what it says.
+    let replayed = session.replayed_onto(&paths.repo, &onto, &old_baseline)?;
     session.materialise(&tree, &merged.tree)?;
-    session.move_baseline(&paths.repo, &onto, &old_baseline, &tip)?;
+    session.move_baseline(&paths.repo, &replayed, &tip)?;
     shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
     let moved = session.commits_between(&paths.repo, &old_baseline, &onto)?;
     // Deliberately not `?`. The sync is done — the tree is merged, the baseline
@@ -945,27 +948,52 @@ pub(crate) enum AtStake {
 /// arm does: `log` cannot show you the repository and says so; `rm` would
 /// delete it, so it asks first.
 ///
-/// Over the metadata result rather than the path, so all four answers are a
+/// Over the stat results rather than the paths, so every answer is a
 /// table. The permission arm cannot be produced by a test that might run as
 /// root — `chmod 000` does not stop uid 0 — which is exactly the arm that
 /// silently deleted a sandbox before this.
 pub(crate) fn from_the_seed_record(
     metadata: std::io::Result<()>,
-    gitdir_exists: bool,
+    gitdir: std::io::Result<()>,
     shadow: &shadow::Shadow,
 ) -> Option<AtStake> {
     match metadata {
         Ok(()) => None,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !gitdir_exists => {
-            Some(AtStake::Nothing)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(AtStake::Unknown(format!(
-            "a sandbox repository at {} and no record of where it started",
-            shadow.gitdir.display()
-        ))),
+        // Only `NotFound` is absent, for the repository as for the record: a
+        // stat that failed otherwise is a repository omh could not see.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match gitdir {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(AtStake::Nothing),
+            Ok(()) => Some(AtStake::Unknown(format!(
+                "a sandbox repository at {} and no record of where it started",
+                shadow.gitdir.display()
+            ))),
+            Err(e) => Some(AtStake::Unknown(format!(
+                "a sandbox repository omh could not look at, at {}: {e}",
+                shadow.gitdir.display()
+            ))),
+        },
         Err(e) => Some(AtStake::Unknown(format!(
             "a sandbox omh could not read at {}: {e}",
             shadow.seed_record.display()
+        ))),
+    }
+}
+
+/// Whether a session with no sandbox still has a worktree to ask about.
+///
+/// Over the stat result rather than the path, for the reason
+/// [`from_the_seed_record`] gives: the permission arm is the one a test
+/// running as root cannot produce.
+pub(crate) fn worktree_to_ask(
+    is_dir: std::io::Result<bool>,
+    worktree: &std::path::Path,
+) -> Result<bool, AtStake> {
+    match is_dir {
+        Ok(is_dir) => Ok(is_dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(AtStake::Unknown(format!(
+            "the worktree at {} could not be inspected: {e}",
+            worktree.display()
         ))),
     }
 }
@@ -974,11 +1002,16 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
     let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
     if let Some(answer) = from_the_seed_record(
         std::fs::metadata(&shadow.seed_record).map(|_| ()),
-        shadow.gitdir.exists(),
+        std::fs::metadata(&shadow.gitdir).map(|_| ()),
         &shadow,
     ) {
-        return match answer {
-            AtStake::Nothing if session.worktree.is_dir() => {
+        let asked = worktree_to_ask(
+            std::fs::metadata(&session.worktree).map(|m| m.is_dir()),
+            &session.worktree,
+        );
+        return match (answer, asked) {
+            (AtStake::Nothing, Err(unknown)) => unknown,
+            (AtStake::Nothing, Ok(true)) => {
                 let out = std::process::Command::new("git")
                     .current_dir(&session.worktree)
                     // A `status` can write the index, which runs
@@ -1020,7 +1053,7 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
                     )),
                 }
             }
-            other => other,
+            (other, _) => other,
         };
     }
 
@@ -1848,6 +1881,25 @@ mod tests {
         assert_eq!(
             checks(&hooks, &[]),
             vec![("test".to_string(), "cargo test".to_string())]
+        );
+    }
+
+    /// **A worktree omh could not stat is not a worktree that is not there.**
+    /// `is_dir` answers `false` for both, so a permissions error under `~/.omh`
+    /// read as *nothing at stake* and `rm` asked nothing.
+    #[test]
+    fn a_worktree_omh_could_not_stat_is_not_one_with_nothing_in_it() {
+        let at = std::path::Path::new("/nowhere/s01");
+        assert!(matches!(worktree_to_ask(Ok(true), at), Ok(true)));
+        assert!(matches!(worktree_to_ask(Ok(false), at), Ok(false)));
+        assert!(matches!(
+            worktree_to_ask(Err(std::io::ErrorKind::NotFound.into()), at),
+            Ok(false)
+        ));
+        let denied = worktree_to_ask(Err(std::io::ErrorKind::PermissionDenied.into()), at);
+        assert!(
+            matches!(&denied, Err(AtStake::Unknown(why)) if why.contains("/nowhere/s01")),
+            "a stat that failed must read as could-not-tell: {denied:?}"
         );
     }
 }

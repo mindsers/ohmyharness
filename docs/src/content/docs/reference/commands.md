@@ -1574,6 +1574,11 @@ removed session s01; branch omh/s01 kept (3 commits to review)
 The summary is the answer and goes to stdout; the two commands are next steps
 and go to stderr, so they reach you here and stay out of anything you redirect.
 
+**A kept branch keeps its id.** The next `omh new` takes the id after the
+highest one a worktree, an `omh/sNN` branch, a sandbox repository or a run
+directory still holds, so a fresh session never starts on the old commits of a
+branch an earlier one left behind.
+
 **A branch whose work is already on trunk is dropped too, and says where.** omh
 compares the branch's tree against trunk's commits since it forked and, when
 the trees settle nothing, the branch's whole change against each of trunk's

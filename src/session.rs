@@ -592,10 +592,10 @@ impl Session {
     /// Remove the session: its worktree, the repository the sandbox had, and
     /// the branch only when keeping it would preserve nothing.
     ///
-    /// The shadow goes because session ids come back around — `next_id` is the
-    /// highest `sNN` among the worktrees plus one — and a shadow that outlives
-    /// its session is adopted by whoever inherits the name, opening a new agent
-    /// on someone else's history against a seed naming a tree it never had.
+    /// The shadow goes with the session. One left behind holds its id —
+    /// `next_id` steps past it — and a session later opened under that id
+    /// would start the agent on someone else's history, against a seed naming
+    /// a tree it never had.
     ///
     /// Taken as an argument rather than reached for, so that removing a session
     /// and forgetting its shadow is not something a caller can express.
@@ -854,38 +854,25 @@ impl Session {
         Ok(())
     }
 
-    /// Move what `diff` measures against, so a sync does not read as the
-    /// agent's work.
+    /// Where the session's branch goes when its base moves to `onto`.
     ///
-    /// Without this the session's branch still points at the old trunk, and
-    /// every review from here on shows trunk's changes as though the agent had
-    /// made them — which is the same lie a harvest would then replay onto the
-    /// branch.
-    ///
-    /// `--create-reflog` and an expected old value, because this is a ref move
-    /// on the user's own branch: if anything else moved it since the sync
-    /// began, omh refuses rather than winning the race. Commits the branch
-    /// already carries are the user's, so they are replayed onto the new base
-    /// first, in a scratch worktree — and a conflict there refuses, since
+    /// `onto` itself, when the branch carries nothing beyond its old base. Its
+    /// own commits are the user's — `omh sNN commit` put them there — and
+    /// pointing the branch at the new base would delete them, so they are
+    /// replayed onto it in a scratch worktree, and a conflict there refuses:
     /// resolving someone's committed work is not omh's to do.
-    pub fn move_baseline(
-        &self,
-        repo: &Path,
-        onto: &str,
-        old_baseline: &str,
-        expected_tip: &str,
-    ) -> Result<()> {
+    ///
+    /// **Asked before anything is written**, which is what makes the refusal's
+    /// *Nothing was changed* true. A sync used to write trunk's tree into the
+    /// worktree first and replay second, so a refused replay left conflict
+    /// markers in the user's files and trunk's files beside them, under a
+    /// message saying nothing had changed. The answer is a commit; nothing on
+    /// the branch or in the worktree moves until [`Self::move_baseline`].
+    pub fn replayed_onto(&self, repo: &Path, onto: &str, old_baseline: &str) -> Result<String> {
         let branch = self
             .branch
             .as_deref()
             .context("a scratch session has no branch to move")?;
-
-        // Commits the branch already carries are the user's — `omh sNN commit`
-        // put them there. Pointing the branch at the new base would delete
-        // them, so they are replayed onto it first and a conflict refuses:
-        // resolving someone's committed work is not omh's to do, and the
-        // sandbox's files are not at risk either way because nothing has been
-        // written yet when this runs.
         let mine = git(
             repo,
             &["rev-list", "--count", &format!("{old_baseline}..{branch}")],
@@ -919,19 +906,17 @@ impl Session {
                         branch,
                     ],
                 )?;
-                let replayed = git_in(
-                    &scratch,
-                    &["rebase", "-q", "--onto", onto, old_baseline],
-                )
+                let replayed = git_in(&scratch, &["rebase", "-q", "--onto", onto, old_baseline])
                     .and_then(|_| git_in(&scratch, &["rev-parse", "HEAD"]))
                     .map(|tip| tip.trim().to_string())
                     .with_context(|| {
                         format!(
                             "{branch} carries {mine} commit{} of your own and they do not \
-                             replay onto the new base cleanly. Nothing was changed — resolve \
-                             it yourself with `git -C {} rebase --onto {onto} {old_baseline} {branch}`",
+                             replay onto the new base cleanly. Nothing was changed — rebase \
+                             them yourself where {branch} is checked out, with \
+                             `git -C {} rebase --onto {onto} {old_baseline}`, then sync again",
                             if mine == 1 { "" } else { "s" },
-                            repo.display()
+                            self.worktree.display()
                         )
                     });
                 let _ = git(
@@ -941,19 +926,40 @@ impl Session {
                 replayed?
             }
         };
+        Ok(tip)
+    }
 
+    /// Move what `diff` measures against to `tip`, so a sync does not read as
+    /// the agent's work.
+    ///
+    /// Without this the session's branch still points at the old trunk, and
+    /// every review from here on shows trunk's changes as though the agent had
+    /// made them — which is the same lie a harvest would then replay onto the
+    /// branch. `tip` is what [`Self::replayed_onto`] answered.
+    ///
+    /// `--create-reflog` and an expected old value, because this is a ref move
+    /// on the user's own branch: if anything else moved it since the sync
+    /// began, omh refuses rather than winning the race.
+    pub fn move_baseline(&self, repo: &Path, tip: &str, expected_tip: &str) -> Result<()> {
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch to move")?;
         git(
             repo,
             &[
                 "update-ref",
                 "--create-reflog",
                 &format!("refs/heads/{branch}"),
-                &tip,
+                tip,
                 expected_tip,
             ],
         )
         .with_context(|| {
-            format!("{branch} moved while omh was syncing — nothing was changed on it")
+            format!(
+                "{branch} moved while omh was syncing, so omh left it where it is — \
+                 the worktree already holds the merged files"
+            )
         })?;
         // The worktree's files are already the merged ones; this makes the
         // index agree with the branch it now sits on, so `status` shows the
@@ -1569,13 +1575,25 @@ pub fn default_branch(repo: &Path) -> String {
         .unwrap_or_else(|_| "HEAD".into())
 }
 
+/// Everywhere a session id can still be held once its worktree is gone.
+///
+/// `rm` keeps a branch that holds work, and a removal that could not finish
+/// leaves the sandbox repository or the run directory behind — each of them
+/// something the next session under that id would inherit.
+pub struct Claimed<'a> {
+    pub worktrees: &'a Path,
+    pub repo: &'a Path,
+    pub shadows: &'a Path,
+    pub runs: &'a Path,
+}
+
 /// Resolve which session to use. Creating a fresh one on every launch would
 /// defeat persistence entirely — you would never reattach to the agent you left
 /// running — so a new session is something you ask for.
-pub fn pick(worktrees_dir: &Path, start: Start) -> Result<String> {
+pub fn pick(claimed: &Claimed, start: Start) -> Result<String> {
     match start {
         Start::Named(id) => Ok(id.to_string()),
-        Start::Fresh => next_id(worktrees_dir),
+        Start::Fresh => next_id(claimed),
     }
 }
 
@@ -1702,32 +1720,66 @@ pub enum Start<'a> {
 ///
 /// `NotFound` stays zero: a checkout that has never made a session has no
 /// worktrees directory, and `s01` is the right answer there.
-pub fn next_id(worktrees_dir: &Path) -> Result<String> {
-    let entries = match std::fs::read_dir(worktrees_dir) {
+///
+/// **Past every id anything still holds** — the worktrees directory, `omh/sNN`
+/// branches, sandbox repositories and run directories alike. The worktrees
+/// directory alone forgot an id the moment `rm` took its worktree, while `rm`
+/// keeps a branch that holds work: the next `omh new` reused the id and
+/// `ensure` reattached it to that branch. The highest of all four rather than
+/// the first gap, so ids stay monotonic, and a branch list git could not
+/// produce is an error like an unreadable directory.
+pub fn next_id(claimed: &Claimed) -> Result<String> {
+    let mut used = highest_in(claimed.worktrees)?;
+    used = used.max(highest_in(claimed.shadows)?);
+    used = used.max(highest_in(claimed.runs)?);
+    let refs = git(
+        claimed.repo,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/omh/"],
+    )
+    .with_context(|| {
+        format!(
+            "listing the session branches in {}, to start a session none of \
+             them holds",
+            claimed.repo.display()
+        )
+    })?;
+    for name in refs
+        .lines()
+        .filter_map(|r| r.strip_prefix("refs/heads/omh/"))
+    {
+        used = used.max(session_number(name).unwrap_or(0));
+    }
+    Ok(format!("s{:02}", used + 1))
+}
+
+/// The highest session number named in `dir`: `s07` for a worktree or a run
+/// directory, `s07.git` / `s07.seed` for what a sandbox repository leaves.
+///
+/// Absent is zero; unreadable is an error, entry by entry.
+fn highest_in(dir: &Path) -> Result<u32> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok("s01".to_string());
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => {
-            return Err(anyhow::Error::new(e))
-                .with_context(|| format!("reading {}", worktrees_dir.display()))
+            return Err(anyhow::Error::new(e)).with_context(|| format!("reading {}", dir.display()))
         }
     };
     let mut used = 0;
     for entry in entries {
         // Not `.flatten()`: an entry dropped there lowers the maximum, and the
         // id that comes back is then one another session is already using.
-        let entry = entry.with_context(|| format!("reading {}", worktrees_dir.display()))?;
-        if let Some(n) = entry
-            .file_name()
-            .to_string_lossy()
-            .strip_prefix('s')
-            .and_then(|rest| rest.parse::<u32>().ok())
-        {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        if let Some(n) = session_number(&entry.file_name().to_string_lossy()) {
             used = used.max(n);
         }
     }
-    Ok(format!("s{:02}", used + 1))
+    Ok(used)
+}
+
+/// `s07` and `s07.<anything>` → 7; any other name → nothing.
+fn session_number(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('s')?;
+    rest.split('.').next()?.parse().ok()
 }
 
 /// Every session of this checkout, in id order.
@@ -2591,12 +2643,13 @@ mod tests {
         );
     }
 
-    /// Session ids are reused: `next_id` is the highest `sNN` among the
-    /// worktrees plus one, so removing `s01` hands the next session that name
-    /// back. A shadow left behind is then adopted by a session that has nothing
-    /// to do with it — the new agent opens on someone else's scratch history,
-    /// and the seed recorded for it names a tree this worktree never had, so
-    /// everything measured from that seed is measured from a fiction.
+    /// Session ids are reused once nothing holds them: `next_id` is the highest
+    /// `sNN` anything still holds plus one, so removing all of `s01` hands the
+    /// next session that name back. A shadow left behind is then adopted by a
+    /// session that has nothing to do with it — the new agent opens on someone
+    /// else's scratch history, and the seed recorded for it names a tree this
+    /// worktree never had, so everything measured from that seed is measured
+    /// from a fiction.
     ///
     /// Deterministic rather than a race, and invisible: the shadow looks
     /// perfectly well-formed, it just belongs to a session that is gone.
@@ -2614,7 +2667,14 @@ mod tests {
         s.remove(&root, "main", &shadows).unwrap();
 
         // the id comes back around
-        assert_eq!(next_id(&dir.path().join("wt")).unwrap(), "s01");
+        let nowhere = dir.path().join("nowhere");
+        let at = Claimed {
+            worktrees: &dir.path().join("wt"),
+            repo: &root,
+            shadows: &shadows,
+            runs: &nowhere,
+        };
+        assert_eq!(next_id(&at).unwrap(), "s01");
         let reborn = Session::new(&dir.path().join("wt"), "s01".into());
         reborn.ensure(&root, "main").unwrap();
         std::fs::write(reborn.worktree.join("different.rs"), "fn new() {}").unwrap();
@@ -4608,13 +4668,14 @@ mod tests {
 
     #[test]
     fn ids_increment_and_list_in_order() {
-        let d = tempfile::tempdir().unwrap();
+        let (d, root) = repo();
         let wt = d.path().join("wt");
+        let nowhere = d.path().join("nowhere");
         std::fs::create_dir_all(&wt).unwrap();
-        assert_eq!(next_id(&wt).unwrap(), "s01");
+        assert_eq!(next_id(&claimed(&wt, &root, &nowhere)).unwrap(), "s01");
         std::fs::create_dir_all(wt.join("s01")).unwrap();
         std::fs::create_dir_all(wt.join("s02")).unwrap();
-        assert_eq!(next_id(&wt).unwrap(), "s03");
+        assert_eq!(next_id(&claimed(&wt, &root, &nowhere)).unwrap(), "s03");
         assert_eq!(list(&wt).unwrap(), ["s01", "s02"]);
     }
 
@@ -5128,10 +5189,108 @@ mod tests {
         (d, wt)
     }
 
+    /// Where `pick` looks, with nothing held anywhere but `wt` and `root`.
+    fn claimed<'a>(wt: &'a Path, root: &'a Path, nowhere: &'a Path) -> Claimed<'a> {
+        Claimed {
+            worktrees: wt,
+            repo: root,
+            shadows: nowhere,
+            runs: nowhere,
+        }
+    }
+
     #[test]
     fn a_new_session_is_something_you_ask_for() {
-        let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, Start::Fresh).unwrap(), "s03");
+        let (d, wt) = worktrees(&["s01", "s02"]);
+        let (_r, root) = repo();
+        let nowhere = d.path().join("nowhere");
+        assert_eq!(
+            pick(&claimed(&wt, &root, &nowhere), Start::Fresh).unwrap(),
+            "s03"
+        );
+    }
+
+    /// A fresh session starts on trunk, never on what an earlier one left.
+    ///
+    /// `rm` keeps a branch that holds work — every multi-commit landing omh
+    /// cannot match ends that way — and the worktrees directory forgets the
+    /// id. Counted from that directory alone, the next `omh new` was `s01`
+    /// again, and `ensure` reattached it to the kept `omh/s01`: the agent
+    /// started on the old tip, `diff` showed the old commits as this session's
+    /// work, and `push` followed the surviving upstream into the old PR.
+    #[test]
+    fn a_fresh_session_is_never_handed_a_branch_an_earlier_session_kept() {
+        let (d, root) = repo();
+        let wt = d.path().join("wt");
+        let shadows = d.path().join("shadows");
+        let runs = d.path().join("run");
+        let old = Session::new(&wt, "s01".into());
+        old.ensure(&root, "main").unwrap();
+        std::fs::write(old.worktree.join("old.rs"), "fn old() {}\n").unwrap();
+        git(&old.worktree, &["add", "-A"]).unwrap();
+        git(&old.worktree, &["commit", "-q", "-m", "old, unreviewed"]).unwrap();
+        let removed = old.remove(&root, "main", &shadows).unwrap();
+        assert!(
+            matches!(removed.branch, Removed::BranchKept(_)),
+            "precondition: rm kept the branch: {removed:?}"
+        );
+
+        let at = Claimed {
+            worktrees: &wt,
+            repo: &root,
+            shadows: &shadows,
+            runs: &runs,
+        };
+        let id = pick(&at, Start::Fresh).unwrap();
+        let fresh = Session::new(&wt, id.clone());
+        fresh.ensure(&root, "main").unwrap();
+        assert!(
+            !fresh.worktree.join("old.rs").exists(),
+            "a fresh session ({id}) opened on the old session's unreviewed commit"
+        );
+    }
+
+    /// What a removal that could not finish leaves behind holds its id too.
+    ///
+    /// A sandbox repository's records and a run directory both carry state the
+    /// next session under that id would take for its own — a landed record is
+    /// a replay point, a harness marker says what to rejoin as.
+    #[test]
+    fn a_fresh_session_steps_past_what_a_removal_left_behind() {
+        let (d, root) = repo();
+        let wt = d.path().join("wt");
+        let shadows = d.path().join("shadows");
+        let runs = d.path().join("run");
+        for dir in [&wt, &shadows, &runs] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(shadows.join("s03.landed"), "abc\n").unwrap();
+        std::fs::create_dir_all(runs.join("s05")).unwrap();
+        // Not ids: what `omh doctor` and `omh auth` stage under the same tree.
+        std::fs::create_dir_all(runs.join("doctor")).unwrap();
+        let at = Claimed {
+            worktrees: &wt,
+            repo: &root,
+            shadows: &shadows,
+            runs: &runs,
+        };
+        assert_eq!(pick(&at, Start::Fresh).unwrap(), "s06");
+    }
+
+    /// **A branch list omh could not read is not an empty one.** Answering
+    /// `s01` there is answering with the one id most likely to be held.
+    #[test]
+    fn a_fresh_session_is_refused_when_the_branches_cannot_be_listed() {
+        let d = tempfile::tempdir().unwrap();
+        let not_a_repo = d.path().join("plain");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        let nowhere = d.path().join("nowhere");
+        let err = pick(&claimed(&nowhere, &not_a_repo, &nowhere), Start::Fresh)
+            .expect_err("an unreadable branch list must not read as none");
+        assert!(
+            format!("{err:#}").contains("listing the session branches"),
+            "the refusal says what omh could not look at: {err:#}"
+        );
     }
 
     /// What was recorded reads back; what was not is not invented; and what
@@ -5199,8 +5358,13 @@ mod tests {
     /// line is gone rather than rewritten.
     #[test]
     fn an_explicit_id_always_wins() {
-        let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, Start::Named("s01")).unwrap(), "s01");
+        let (d, wt) = worktrees(&["s01", "s02"]);
+        let (_r, root) = repo();
+        let nowhere = d.path().join("nowhere");
+        assert_eq!(
+            pick(&claimed(&wt, &root, &nowhere), Start::Named("s01")).unwrap(),
+            "s01"
+        );
     }
 
     /// Regression: git can lose a worktree's registration while the directory

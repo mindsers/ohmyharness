@@ -2809,6 +2809,63 @@ fn a_sync_preserves_committed_and_uncommitted_session_work() {
     );
 }
 
+/// **A sync that refuses has changed nothing — and the way out it names runs.**
+///
+/// The user's own commit on the session branch does not replay onto trunk,
+/// which the sync refuses over, saying *Nothing was changed*. It had already
+/// written trunk's tree into the worktree by then: conflict markers in the
+/// user's file, trunk's files beside it, and `diff` reporting them as session
+/// work. And the command it offered — `git -C <repo> rebase … omh/sNN` — fails
+/// on its own, because that branch is checked out in the session's worktree.
+#[test]
+fn a_sync_that_refuses_has_changed_nothing() {
+    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    // The user's own commit on the session branch (`omh s01 commit -m`)…
+    std::fs::write(session.worktree.join("f.txt"), "mine\n").unwrap();
+    git(&session.worktree, &["add", "f.txt"]);
+    git(&session.worktree, &["commit", "-qm", "mine"]);
+    // …and trunk writing the same file, plus one of its own.
+    std::fs::write(paths.repo.join("f.txt"), "trunk\n").unwrap();
+    std::fs::write(paths.repo.join("from-trunk.rs"), "fn trunk() {}\n").unwrap();
+    git(&paths.repo, &["add", "-A"]);
+    git(&paths.repo, &["commit", "-qm", "trunk"]);
+
+    let err = cmd::harvest::sync_session(&paths, &session, "main")
+        .expect_err("the branch's own commit does not replay onto trunk");
+    let said = format!("{err:#}");
+    assert!(said.contains("Nothing was changed"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(session.worktree.join("f.txt")).unwrap(),
+        "mine\n",
+        "omh said nothing was changed: {said}"
+    );
+    assert!(
+        !session.worktree.join("from-trunk.rs").exists(),
+        "omh said nothing was changed, and trunk's file is in the worktree: {said}"
+    );
+
+    // The remedy, run as written.
+    let remedy = said
+        .split('`')
+        .find(|part| part.starts_with("git -C ") && part.contains(" rebase "))
+        .unwrap_or_else(|| panic!("the refusal names a command: {said}"));
+    let words: Vec<&str> = remedy.split_whitespace().collect();
+    let ran = Command::new(words[0]).args(&words[1..]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        !stderr.contains("already used by worktree") && !stderr.contains("already checked out"),
+        "the command omh offered cannot run: `{remedy}`: {stderr}"
+    );
+}
+
 /// **Three behaviours, one value.** `force` and `terminal` were adjacent
 /// `bool`s meaning opposite things — *the user said delete it anyway* and
 /// *there is somebody at a keyboard*. Swapping them compiles, and the two
@@ -3175,12 +3232,12 @@ fn what_the_seed_record_settles_on_its_own() {
     let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
 
     assert!(
-        cmd::harvest::from_the_seed_record(Ok(()), true, &shadow).is_none(),
+        cmd::harvest::from_the_seed_record(Ok(()), Ok(()), &shadow).is_none(),
         "a record omh can read settles nothing on its own — the repository decides"
     );
     assert!(
         matches!(
-            cmd::harvest::from_the_seed_record(Err(missing()), false, &shadow),
+            cmd::harvest::from_the_seed_record(Err(missing()), Err(missing()), &shadow),
             Some(cmd::harvest::AtStake::Nothing)
         ),
         "no record and no repository: nothing ever ran here"
@@ -3189,19 +3246,39 @@ fn what_the_seed_record_settles_on_its_own() {
     // the seed file goes anyway. `log` refuses to show this one.
     assert!(
         matches!(
-            cmd::harvest::from_the_seed_record(Err(missing()), true, &shadow),
+            cmd::harvest::from_the_seed_record(Err(missing()), Ok(()), &shadow),
             Some(cmd::harvest::AtStake::Unknown(_))
         ),
         "a repository with no record of its start is not an empty session"
     );
     // The arm that mattered.
     let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-    match cmd::harvest::from_the_seed_record(Err(denied), true, &shadow) {
+    match cmd::harvest::from_the_seed_record(Err(denied), Ok(()), &shadow) {
         Some(cmd::harvest::AtStake::Unknown(why)) => assert!(
             why.contains("denied"),
             "the reason reaches the user rather than being read as absence: {why}"
         ),
         other => panic!("a record omh could not read is not an empty session: {other:?}"),
+    }
+}
+
+/// **A repository omh could not stat is not one that is not there.** With no
+/// seed record, the repository's presence is all that separates *nothing ever
+/// ran here* from *a sandbox with no record of its start* — and `exists()`
+/// answered `false` for a permissions error exactly as for absence, so the
+/// second read as the first and `rm` asked nothing.
+#[test]
+fn a_sandbox_repository_omh_could_not_stat_is_not_one_that_never_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    let shadow = shadow::Shadow::new(dir.path(), "s01");
+    let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+    let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+    match cmd::harvest::from_the_seed_record(Err(missing()), Err(denied), &shadow) {
+        Some(cmd::harvest::AtStake::Unknown(why)) => assert!(
+            why.contains("denied"),
+            "the reason reaches the user rather than being read as absence: {why}"
+        ),
+        other => panic!("a repository omh could not stat read as: {other:?}"),
     }
 }
 
@@ -3425,6 +3502,170 @@ fn one_of_a_thing_is_said_in_the_singular() {
     assert!(
         matches!(cmd::harvest::at_stake(&paths, &session), cmd::harvest::AtStake::Work(what) if what == "1 commit"),
         "and one commit, said once"
+    );
+}
+
+/// **The agent's index is not asked whether its work is there.** It writes
+/// that index, and `update-index --assume-unchanged` or `--skip-worktree` on a
+/// file it edited makes `status` pass over the edit. `omh s` — which asks the
+/// session's own index — said the path was uncommitted while `omh sNN rm`
+/// found nothing at stake, asked nothing, and deleted it.
+#[test]
+fn work_the_agent_told_its_index_to_ignore_is_still_at_stake() {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let sandbox_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("--git-dir")
+            .arg(&shadow.gitdir)
+            .arg("--work-tree")
+            .arg(&session.worktree)
+            .current_dir(&session.worktree)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Everything committed so far has been handed over, so only what follows
+    // is at stake.
+    std::fs::write(&shadow.landed_record, sandbox_git(&["rev-parse", "HEAD"])).unwrap();
+    assert!(
+        matches!(
+            cmd::harvest::at_stake(&paths, &session),
+            cmd::harvest::AtStake::Nothing
+        ),
+        "precondition: nothing at stake before the edits"
+    );
+
+    std::fs::write(session.worktree.join("one.rs"), "fn an_afternoon() {}\n").unwrap();
+    std::fs::write(session.worktree.join("two.rs"), "fn and_a_morning() {}\n").unwrap();
+    sandbox_git(&["update-index", "--assume-unchanged", "one.rs"]);
+    sandbox_git(&["update-index", "--skip-worktree", "two.rs"]);
+
+    assert_eq!(
+        session.changed().unwrap(),
+        ["one.rs", "two.rs"],
+        "precondition: `omh s` counts both edits"
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(&stake, cmd::harvest::AtStake::Work(what) if what == "2 uncommitted paths"),
+        "rm would delete both edits without asking: {stake:?}"
+    );
+}
+
+/// `git` over the sandbox's repository, as the agent runs it inside.
+fn agent_git(shadow: &shadow::Shadow, session: &Session, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(&shadow.gitdir)
+        .arg("--work-tree")
+        .arg(&session.worktree)
+        .current_dir(&session.worktree)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A session whose every commit has been handed over, so only what follows
+/// is at stake.
+fn a_session_with_nothing_unkept() -> (Paths, Session, shadow::Shadow) {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            cmd::harvest::at_stake(&paths, &session),
+            cmd::harvest::AtStake::Nothing
+        ),
+        "precondition: nothing at stake"
+    );
+    (paths, session, shadow)
+}
+
+/// **Nor are the agent's ignore rules asked whether its work is there.** The
+/// sandbox's `info/exclude` is in the gitdir the agent writes — omh writes it
+/// at launch and the agent can append `*` afterwards — and a `.gitignore` the
+/// agent creates is its own too, one that can name itself. Either hides a new
+/// file from `status`, and `rm` deleted it without asking.
+#[test]
+fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
+    let (paths, session, shadow) = a_session_with_nothing_unkept();
+    std::fs::write(session.worktree.join("afternoon.rs"), "fn work() {}\n").unwrap();
+    let exclude = shadow.gitdir.join("info").join("exclude");
+    let mut rules = std::fs::read_to_string(&exclude).unwrap_or_default();
+    rules.push_str("*\n");
+    std::fs::write(&exclude, rules).unwrap();
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "an exclude the agent appended hid afternoon.rs from rm: {stake:?}"
+    );
+
+    let (paths, session, _shadow) = a_session_with_nothing_unkept();
+    std::fs::create_dir_all(session.worktree.join("sub")).unwrap();
+    std::fs::write(session.worktree.join("sub/.gitignore"), "*\n").unwrap();
+    std::fs::write(session.worktree.join("sub/morning.rs"), "fn more() {}\n").unwrap();
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a .gitignore the agent wrote hid sub/morning.rs from rm: {stake:?}"
+    );
+}
+
+/// What omh and the repository themselves ignore stays out of the count: a
+/// file omh carried in and excluded, and a build directory a committed
+/// `.gitignore` names. Counting them would make `rm` ask about every session.
+#[test]
+fn what_omh_and_the_repository_ignore_is_not_at_stake() {
+    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::write(session.worktree.join(".gitignore"), "target/\n").unwrap();
+    agent_git(&shadow, &session, &["add", ".gitignore"]);
+    agent_git(
+        &shadow,
+        &session,
+        &["commit", "-q", "--no-verify", "-m", "ignore"],
+    );
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    // A relaunch: the fast path rewrites the exclude list from omh's own view.
+    shadow
+        .ensure(&session.worktree, &[".env".to_string()])
+        .unwrap();
+    std::fs::write(session.worktree.join(".env"), "TOKEN=carried\n").unwrap();
+    std::fs::create_dir_all(session.worktree.join("target/debug")).unwrap();
+    std::fs::write(session.worktree.join("target/debug/omh"), "built\n").unwrap();
+
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a carried file and a build directory are not work: {stake:?}"
+    );
+}
+
+/// **A HEAD omh cannot read the tree of is not a clean one.** The agent owns
+/// the gitdir and can point HEAD at a branch with no commits; the count then
+/// has nothing to compare the worktree with, which is *cannot tell*.
+#[test]
+fn a_sandbox_head_with_no_commit_is_not_read_as_nothing_at_stake() {
+    let (paths, session, shadow) = a_session_with_nothing_unkept();
+    agent_git(
+        &shadow,
+        &session,
+        &["symbolic-ref", "HEAD", "refs/heads/unborn"],
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        matches!(stake, cmd::harvest::AtStake::Unknown(_)),
+        "an unborn HEAD read as: {stake:?}"
     );
 }
 
@@ -8007,9 +8248,26 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
     }
     let dir = tempfile::tempdir().unwrap();
     let wt = dir.path().join("worktrees");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let nowhere = dir.path().join("nowhere");
+    let at = |worktrees: &std::path::Path| {
+        crate::session::next_id(&crate::session::Claimed {
+            worktrees,
+            repo: &repo,
+            shadows: &nowhere,
+            runs: &nowhere,
+        })
+    };
 
     assert_eq!(
-        crate::session::next_id(&dir.path().join("never-made-one")).unwrap(),
+        at(&dir.path().join("never-made-one")).unwrap(),
         "s01",
         "a checkout with no sessions yet starts at s01"
     );
@@ -8017,13 +8275,13 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
     std::fs::create_dir_all(wt.join("s01")).unwrap();
     std::fs::create_dir_all(wt.join("s02")).unwrap();
     assert_eq!(
-        crate::session::next_id(&wt).unwrap(),
+        at(&wt).unwrap(),
         "s03",
         "the highest id plus one, when omh can see them"
     );
 
     let _restore = Restore::unreadable(&wt).unwrap();
-    let err = crate::session::next_id(&wt)
+    let err = at(&wt)
         .expect_err("an unreadable worktrees directory answered with an id a live session holds");
     assert!(
         format!("{err:#}").contains("worktrees"),
