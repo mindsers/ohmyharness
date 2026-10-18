@@ -1005,9 +1005,18 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             warning,
             about: vec![
                 k.does.to_string(),
-                "seeds a new repo's .omh/settings.toml, which is committed — a repo that \
-                 exists keeps its own"
-                    .into(),
+                // Where `init` puts it, which is where `omh set` would.
+                match k.default_layer() {
+                    config::Layer::Local => {
+                        "seeds a new repo's .omh/settings.local.toml, which \
+                                             git ignores — a repo that exists keeps its own"
+                    }
+                    _ => {
+                        "seeds a new repo's .omh/settings.toml, which is committed — a repo \
+                          that exists keeps its own"
+                    }
+                }
+                .into(),
             ],
             edit,
             ..Row::default()
@@ -1577,6 +1586,13 @@ mod tests {
             said.contains("settings.toml") && said.contains("committed"),
             "{said}"
         );
+        // Where `omh set` keeps it out of git, so does `init`.
+        let said = about("defaults", "carry_in");
+        assert!(
+            said.contains("settings.local.toml") && said.contains("git ignores"),
+            "{said}"
+        );
+        assert!(!said.contains("committed"), "{said}");
     }
 
     /// A skill or a subagent with no description in its front matter is

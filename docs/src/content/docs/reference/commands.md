@@ -2278,7 +2278,10 @@ starts from. `omh setting` is refused rather than guessed at.
 
 **Keys omh reads and `[omh]` are seeded, and `[use]` and `[unuse]` come to a
 new repo's lists**; anything else in the file is refused by name rather than
-left behind, and so is a kind in those lists that is not one. `[mcp.<name>.env]` is
+left behind, and so is a kind in those lists that is not one. Each key lands
+where `omh set` would write it: `carry_in`, which can name a secret, in the
+gitignored `settings.local.toml`, once git ignores it; the rest in the
+committed `settings.toml`. `[mcp.<name>.env]` is
 **refused**: a server's environment can be a token and the file `init` writes
 is committed. It already has a home — `omh settings mcp add <name> <command>
 --env KEY=value` puts it on the server in `~/.omh/mcp.json`, where servers live.

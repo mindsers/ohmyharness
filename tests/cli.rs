@@ -5202,6 +5202,51 @@ fn init_seeds_the_repo_from_your_template_and_says_so() {
     );
 }
 
+/// A seeded `carry_in` lands where `omh set carry_in` puts it: the gitignored
+/// `settings.local.toml`, and only once git ignores it. `init` committed it
+/// with every other key. Ignored because `init` builds an image.
+#[test]
+#[ignore]
+fn init_seeds_carry_in_where_git_does_not_carry_it() {
+    let sb = real_sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "idle_timeout = \"45m\"\ncarry_in = [\".env.local\"]\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    let shared = sb.settings();
+    let local =
+        std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap_or_default();
+    // Parsed: the committed file's header carries a commented `carry_in`.
+    let shared: toml::Table = shared.parse().unwrap();
+    let local: toml::Table = local.parse().unwrap_or_default();
+    assert!(
+        shared.contains_key("idle_timeout") && !shared.contains_key("carry_in"),
+        "{shared}"
+    );
+    assert!(local.contains_key("carry_in"), "{local}");
+    let ignored = std::process::Command::new("git")
+        .args(["check-ignore", "-q", ".omh/settings.local.toml"])
+        .current_dir(&sb.repo)
+        .status()
+        .unwrap();
+    assert!(ignored.success(), "git would carry it");
+    assert!(
+        said.contains("carry_in") && said.contains("settings.local.toml"),
+        "said: {said}"
+    );
+}
+
 /// A new repo's lists are what your defaults come to, and a guard is in one
 /// only where somebody named it.
 ///

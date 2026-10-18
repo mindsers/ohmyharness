@@ -198,9 +198,9 @@ pub(crate) fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
 /// deleted a file nothing had told them about. `toml_edit` was already in hand
 /// and round-trips every one of those shapes.
 ///
-/// Returns the file to write and what it took, so `init` can report it — a
-/// seed nobody is told about is indistinguishable from a default.
-pub(crate) fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
+/// Returns the files to write and what each took, so `init` can report it —
+/// a seed nobody is told about is indistinguishable from a default.
+pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
     const HEADER: &str = "# What this repo decided. Settings at the top level; `[omh]` switches\n\
          # omh's own features off here without uninstalling anything.\n\
          #\n\
@@ -217,17 +217,32 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
 
     let mut out = toml_edit::DocumentMut::new();
     let mut took = Vec::new();
+    let mut local = toml_edit::DocumentMut::new();
+    let mut took_local = Vec::new();
 
     // Keys omh reads, and nothing else. A typo in your template is one you get
     // told about once, rather than one propagated into every repo you start.
+    //
+    // Each into the file `omh set` would write it to: a key that can name a
+    // secret — `carry_in` — into the gitignored one. All went into the
+    // committed file, so `omh set carry_in` kept out of git what `init` had
+    // already committed.
     for k in key::KEYS {
         if let Some(item) = doc.get(k.name) {
             // No `is_value()` check here. `refuse_what_cannot_be_seeded` has
             // already refused every table but `[use]`, `[unuse]` and `[omh]`, so
             // `[carry_in]` never reaches this loop — a second guard for it
             // could not fire, and a check nothing can reach is decoration.
-            out.insert(k.name, item.clone());
-            took.push(k.name.to_string());
+            match k.default_layer() {
+                config::Layer::Local => {
+                    local.insert(k.name, item.clone());
+                    took_local.push(k.name.to_string());
+                }
+                _ => {
+                    out.insert(k.name, item.clone());
+                    took.push(k.name.to_string());
+                }
+            }
         }
     }
     // **No empty `carry_in`.** Seeding `carry_in = []` made the first thing
@@ -273,7 +288,33 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
             template.display()
         )
     })?;
-    Ok((assembled, took))
+    let local = (!took_local.is_empty()).then(|| {
+        format!(
+            "# Yours alone in this checkout, and kept out of git: what `omh set`\n\
+             # writes here, seeded from your defaults.\n{local}"
+        )
+    });
+    Ok(Seed {
+        shared: assembled,
+        took,
+        local,
+        took_local,
+    })
+}
+
+/// A new repo's settings, from your defaults: the committed file, and the
+/// gitignored one where a key `omh set` keeps out of git goes.
+#[derive(Debug)]
+pub(crate) struct Seed {
+    /// `.omh/settings.toml`, committed.
+    pub(crate) shared: String,
+    /// What went into it, by name.
+    pub(crate) took: Vec<String>,
+    /// `.omh/settings.local.toml`, which git ignores — `None` when no such
+    /// key travels, so the file is not made empty.
+    pub(crate) local: Option<String>,
+    /// What went into that one, by name.
+    pub(crate) took_local: Vec<String>,
 }
 
 /// What a template may not hand on, refused by name.
@@ -465,12 +506,11 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))?
             + "\n";
     write_if_absent(&config::mcp_path(&paths), &base_mcp)?;
-    let (contents, from_template) = seeded;
     // Only when this run actually created the file. Reporting a seed over a
     // settings.toml that was already there would claim an effect the template
     // did not have — `write_if_absent` never revisits.
-    if write_if_absent(&repo_omh.join("settings.toml"), &contents)? {
-        summary.seeded = from_template;
+    if write_if_absent(&repo_omh.join("settings.toml"), &seeded.shared)? {
+        summary.seeded = seeded.took.clone();
     }
     // No hooks are seeded into the repo. omh's own are generated from the
     // manifest at launch, which is the only arrangement in which omh can ship a
@@ -595,6 +635,20 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // different omh versions would otherwise overwrite each other's line.
     for name in IGNORED {
         ensure_line(&gitignore, name)?;
+    }
+
+    // The gitignored half of your defaults — what `omh set` keeps out of git —
+    // only now that git ignores it: the rule at the top of this file, *make
+    // sure the gitignored layer is actually gitignored before writing it*.
+    if let Some(local) = &seeded.local {
+        if write_if_absent(&config::Layer::Local.file(&paths), local)? {
+            summary.seeded.extend(
+                seeded
+                    .took_local
+                    .iter()
+                    .map(|k| format!("{k} into settings.local.toml")),
+            );
+        }
     }
 
     // **After the ignore line, and after everything that can fail.** This was
