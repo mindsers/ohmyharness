@@ -5271,6 +5271,92 @@ fn a_seeded_key_lands_where_omh_set_would_put_it() {
     assert_eq!(cmd::init::seed_settings(&paths).unwrap().local, None);
 }
 
+/// Every account `omh settings set account` writes, a new repo takes — into
+/// the file `omh set account` writes, as it stood.
+///
+/// `omh settings set account claude:work` wrote an `[account]` table, said
+/// `(seeds new repos)`, and every `omh init` after refused the template:
+/// "`[account]` is read by nobody". The writer is the one the command uses,
+/// so a shape it learns to write is a shape this asks the seeder about.
+#[test]
+fn every_account_the_defaults_writer_writes_seeds_a_repo() {
+    let writes: &[&[(Option<&str>, &str)]] = &[
+        &[(None, "mine")],
+        &[(Some("claude"), "work")],
+        &[(None, "mine"), (Some("codex"), "work")],
+        &[(Some("claude"), "work"), (Some("codex"), "other")],
+    ];
+    for writes in writes {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home").join(".omh"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        for (harness, name) in *writes {
+            config::set_account(&paths, *harness, name, config::Layer::Personal).unwrap();
+        }
+        let template = config::Layer::Personal.file(&paths);
+        let template: toml::Table = std::fs::read_to_string(template).unwrap().parse().unwrap();
+        let seed = cmd::init::seed_settings(&paths)
+            .unwrap_or_else(|e| panic!("{writes:?} is refused: {e:#}"));
+        let local = seed.local.clone().unwrap_or_default();
+        let (into, not) = match key::describes("account").unwrap().default_layer() {
+            config::Layer::Local => (&local, &seed.shared),
+            _ => (&seed.shared, &local),
+        };
+        let into: toml::Table = into.parse().expect(into);
+        let not: toml::Table = not.parse().expect(not);
+        assert_eq!(
+            into.get("account"),
+            template.get("account"),
+            "{writes:?}: {into}"
+        );
+        assert!(!not.contains_key("account"), "{writes:?} is in both: {not}");
+    }
+}
+
+/// What `omh settings` calls a table that seeds a new repo, `omh init`
+/// seeds — and what it does not, init refuses. The report listed `[account]`
+/// under "also seeded into a new repo" while init refused it by name.
+#[test]
+fn what_the_report_says_seeds_a_repo_is_what_init_seeds() {
+    for (table, body) in [
+        ("use", "skills = [\"tdd\"]"),
+        ("unuse", "hooks = [\"lint\"]"),
+        ("omh", "codegraph = false"),
+        ("account", "claude = \"work\""),
+        ("mcp", "x = 1"),
+        ("provision", "\"go/toolchain\" = true"),
+        ("carry_in", "x = 1"),
+        ("typo_table", "x = 1"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home").join(".omh"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        std::fs::write(
+            config::Layer::Personal.file(&paths),
+            format!("[{table}]\n{body}\n"),
+        )
+        .unwrap();
+        let reported = cmd::settings::seeding_table(&format!("[{table}]"));
+        let seeded = cmd::init::seed_settings(&paths);
+        assert_eq!(
+            reported,
+            seeded.is_ok(),
+            "[{table}]: the report says {}, init {}",
+            if reported { "it seeds" } else { "it does not" },
+            match &seeded {
+                Ok(_) => "seeds it".to_string(),
+                Err(e) => format!("refuses it: {e:#}"),
+            }
+        );
+    }
+}
+
 /// The committed file's header teaches `carry_in` without a line that would
 /// set it there: it showed `# carry_in = [".env.local", "certs/"]` to
 /// uncomment, in the file git carries, while `omh set carry_in` and `init`

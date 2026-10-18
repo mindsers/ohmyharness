@@ -2615,6 +2615,187 @@ mod tests {
         assert!(fallback.contains("none chosen"), "{fallback}");
     }
 
+    /// A login captured for a harness, the way `omh auth` leaves it.
+    fn login(paths: &Paths, harness: &str, name: &str) {
+        let token = paths
+            .creds(harness)
+            .join(name)
+            .join(".claude/.credentials.json");
+        std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+        // Not `{}`, which `auth` reads as a placeholder and not a login.
+        std::fs::write(&token, r#"{"token":"seeded"}"#).unwrap();
+    }
+
+    fn account_row(model: &Model) -> Row {
+        page(model, "defaults")
+            .rows
+            .iter()
+            .find(|r| r.name == "account")
+            .unwrap()
+            .clone()
+    }
+
+    /// What `account` holds in your defaults: a string, a table, or nothing.
+    fn account_in(paths: &Paths) -> Option<toml::Value> {
+        let raw = std::fs::read_to_string(paths.root.join("default.toml")).unwrap_or_default();
+        raw.parse::<toml::Table>().unwrap().get("account").cloned()
+    }
+
+    /// An act's lines, run through the steps `omh settings` runs them through.
+    fn apply(paths: &Paths, act: &Act) {
+        let ctx = crate::out::Ctx::plain();
+        let reach = || settings::Reach::named(config::Layer::Personal);
+        for line in command_lines(act) {
+            let mut argv = vec!["omh".to_string()];
+            argv.extend(line.clone());
+            let Cmd::Settings { cmd: Some(cmd) } = Cli::try_parse_from(&argv).unwrap().cmd else {
+                panic!("not a settings line: {line:?}");
+            };
+            let done = match cmd {
+                SettingsCmd::Set { key, value, anyway } => {
+                    if key == "account" {
+                        settings::check_account(paths, &value, &ctx).unwrap();
+                    }
+                    settings::set(paths, &key, &value, reach(), anyway, false, &ctx)
+                }
+                SettingsCmd::Unset { key, .. } => {
+                    settings::unset(paths, &key, None, reach(), false, &ctx)
+                }
+                _ => panic!("an account act ran `omh {}`", line.join(" ")),
+            };
+            done.unwrap_or_else(|e| panic!("`omh {}`: {e:#}", line.join(" ")));
+        }
+    }
+
+    /// Onto `name`'s row on the defaults page, by searching for it.
+    fn to_row(app: &mut App, name: &str) {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        app.key(key(KeyCode::Char('/')));
+        for c in name.chars() {
+            app.key(key(KeyCode::Char(c)));
+        }
+        app.key(key(KeyCode::Enter));
+    }
+
+    /// An account named per harness — `[account]`, a table — is set, and says
+    /// so: the row read it as unset, `d` said there was nothing to unset, and
+    /// the report said nothing was set. And a chosen account is not *none
+    /// chosen*, whichever shape it is in.
+    #[test]
+    fn an_account_set_is_shown_set_whatever_its_shape() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for (body, said) in [
+            (
+                "[account]\ndefault = \"mine\"\nclaude = \"work\"\n",
+                &["mine", "claude:work"][..],
+            ),
+            ("[account]\nclaude = \"work\"\n", &["claude:work"][..]),
+            ("account = \"mine\"\n", &["mine"][..]),
+        ] {
+            let (_dir, paths) = paths();
+            seed_adapters(&paths);
+            login(&paths, "claude", "mine");
+            login(&paths, "claude", "work");
+            write(&paths.root.join("default.toml"), body);
+            let model = model(&paths);
+            let row = account_row(&model);
+            let value = row.value.clone().unwrap_or_default();
+            assert!(
+                said.iter().all(|s| value.contains(s)),
+                "{body}: {:?}",
+                row.value
+            );
+            assert_eq!(
+                row.warning, None,
+                "{body}: a chosen account is not none chosen"
+            );
+            assert!(
+                !page(&model, "defaults")
+                    .rows
+                    .iter()
+                    .any(|r| r.name == "[account]"),
+                "{body}: one setting, one row"
+            );
+            let report = settings::settings_report(&paths).unwrap();
+            let known = report.known.iter().find(|k| k.key == "account").unwrap();
+            assert_eq!(
+                known.value, row.value,
+                "{body}: the report says what the screen does"
+            );
+
+            let mut app = App::new(model, false);
+            to_row(&mut app, "account");
+            assert_eq!(
+                app.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+                Next::Run(Act::Unset {
+                    key: "account".into()
+                }),
+                "{body}: d unsets what is set"
+            );
+        }
+    }
+
+    /// Undo puts `account` back as it was — a string, a table, or nothing —
+    /// whatever was picked, and after `d`. It ran `unset account` for an
+    /// account it had read as unset, which a table always was: the whole
+    /// `[account]` went, every other harness's login with it.
+    #[test]
+    fn undoing_an_account_change_puts_back_what_was_there() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        for prior in [
+            "",
+            "account = \"mine\"\n",
+            "[account]\ndefault = \"mine\"\nclaude = \"work\"\n",
+            "[account]\nclaude = \"work\"\n",
+        ] {
+            let (_dir, paths) = paths();
+            seed_adapters(&paths);
+            login(&paths, "claude", "mine");
+            login(&paths, "claude", "work");
+            let Edit::Choice(offered) = account_row(&model(&paths)).edit else {
+                panic!("the logins are offered");
+            };
+            let picks = offered.into_iter().map(Some).chain([None]);
+            for pick in picks {
+                write(&paths.root.join("default.toml"), prior);
+                let before = account_in(&paths);
+                let mut app = App::new(model(&paths), false);
+                to_row(&mut app, "account");
+                let next = match &pick {
+                    Some(value) => {
+                        app.key(key(KeyCode::Enter));
+                        for c in value.chars() {
+                            app.key(key(KeyCode::Char(c)));
+                        }
+                        app.key(key(KeyCode::Enter))
+                    }
+                    None => app.key(key(KeyCode::Char('d'))),
+                };
+                let Next::Run(act) = next else {
+                    assert!(
+                        prior.is_empty() && pick.is_none(),
+                        "{prior:?} {pick:?}: {next:?}"
+                    );
+                    continue;
+                };
+                apply(&paths, &act);
+                app.report(String::new(), true, "", "");
+                app.reload(model(&paths));
+                let Next::Run(undo) = app.key(key(KeyCode::Char('u'))) else {
+                    panic!("{prior:?} {pick:?}: nothing to undo after {act:?}");
+                };
+                apply(&paths, &undo);
+                assert_eq!(
+                    account_in(&paths),
+                    before,
+                    "{prior:?}, then {act:?}, undone by {undo:?}"
+                );
+            }
+        }
+    }
+
     /// Logins omh could not list are said on the row, not taken for none:
     /// the row is still typed into, and says why it offers nothing.
     #[test]

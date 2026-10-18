@@ -5808,6 +5808,9 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
         ("[provision]\n\"go/toolchain\" = true\n", "machine"),
         ("[mcp.linear.env]\nTOKEN = \"secret\"\n", "mcp"),
         ("[typo_table]\nx = 1\n", "typo_table"),
+        // A table `account` takes, holding something that is not a login's
+        // name: a launch would read past it as no account at all.
+        ("[account]\nclaude = 1\n", "is not a login's name"),
     ] {
         std::fs::write(sb.home.join(".omh/default.toml"), template).unwrap();
         let out = sb.omh(&["init"]);
@@ -6376,6 +6379,51 @@ fn an_account_can_be_set_for_one_harness() {
         "codex is back to the shared `mine`"
     );
     ok(&["s01", "--dry-run", "resume", "claude"]);
+}
+
+/// Your defaults name an account per harness the way a repo does, and drop
+/// one harness's the way a repo does: `omh settings set account codex:work`
+/// wrote the table, and nothing could take codex's entry back out of it —
+/// `omh settings unset account codex` was a usage error.
+#[test]
+fn your_default_account_is_dropped_for_one_harness_as_a_repos_is() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "mine");
+    sb.account("codex", "work");
+    let ok = |args: &[&str]| {
+        let out = sb.omh(args);
+        assert!(
+            out.status.success(),
+            "`omh {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    let account = || -> Option<toml::Value> {
+        let raw = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
+        raw.parse::<toml::Table>().unwrap().get("account").cloned()
+    };
+    ok(&["settings", "set", "account", "mine"]);
+    ok(&["settings", "set", "account", "codex:work"]);
+    let table = account().unwrap();
+    assert_eq!(table["default"].as_str(), Some("mine"), "{table}");
+    assert_eq!(table["codex"].as_str(), Some("work"), "{table}");
+
+    let unset = ok(&["settings", "unset", "account", "codex"]);
+    let said = String::from_utf8_lossy(&unset.stdout).to_string();
+    assert!(said.contains("codex"), "says whose account went: {said}");
+    assert_eq!(account(), Some(toml::Value::String("mine".into())));
+
+    // Only `account` takes a harness, here as in a repo.
+    let other = sb.omh(&["settings", "unset", "idle_timeout", "codex"]);
+    let said = String::from_utf8_lossy(&other.stderr).to_string();
+    assert!(
+        !other.status.success(),
+        "`idle_timeout` has no harness: {said}"
+    );
+    assert!(said.contains("one setting for every harness"), "{said}");
 }
 
 /// A session scopes a session verb, and nothing else.
@@ -16364,6 +16412,13 @@ const EXERCISES: &[Exercise] = &[
     },
     Exercise {
         argv: &["settings", "unset", "idle_timeout"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // One harness's own account, as `omh unset account codex` drops a repo's.
+    Exercise {
+        argv: &["settings", "unset", "account", "codex"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: false,
