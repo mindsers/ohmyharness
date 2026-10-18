@@ -2167,7 +2167,15 @@ pub(crate) fn run(
     if let session::Start::Named(explicit) = start {
         session::validate_id(explicit)?;
     }
-    let id = session::pick(&paths.worktrees(), start)?;
+    let id = session::pick(
+        &session::Claimed {
+            worktrees: &paths.worktrees(),
+            repo: &paths.repo,
+            shadows: &paths.shadows(),
+            runs: &paths.runs(),
+        },
+        start,
+    )?;
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;

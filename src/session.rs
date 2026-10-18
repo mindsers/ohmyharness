@@ -1533,13 +1533,25 @@ pub fn default_branch(repo: &Path) -> String {
         .unwrap_or_else(|_| "HEAD".into())
 }
 
+/// Everywhere a session id can still be held once its worktree is gone.
+///
+/// `rm` keeps a branch that holds work, and a removal that could not finish
+/// leaves the sandbox repository or the run directory behind — each of them
+/// something the next session under that id would inherit.
+pub struct Claimed<'a> {
+    pub worktrees: &'a Path,
+    pub repo: &'a Path,
+    pub shadows: &'a Path,
+    pub runs: &'a Path,
+}
+
 /// Resolve which session to use. Creating a fresh one on every launch would
 /// defeat persistence entirely — you would never reattach to the agent you left
 /// running — so a new session is something you ask for.
-pub fn pick(worktrees_dir: &Path, start: Start) -> Result<String> {
+pub fn pick(claimed: &Claimed, start: Start) -> Result<String> {
     match start {
         Start::Named(id) => Ok(id.to_string()),
-        Start::Fresh => next_id(worktrees_dir),
+        Start::Fresh => next_id(claimed.worktrees),
     }
 }
 
@@ -4976,10 +4988,65 @@ mod tests {
         (d, wt)
     }
 
+    /// Where `pick` looks, with nothing held anywhere but `wt` and `root`.
+    fn claimed<'a>(wt: &'a Path, root: &'a Path, nowhere: &'a Path) -> Claimed<'a> {
+        Claimed {
+            worktrees: wt,
+            repo: root,
+            shadows: nowhere,
+            runs: nowhere,
+        }
+    }
+
     #[test]
     fn a_new_session_is_something_you_ask_for() {
-        let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, Start::Fresh).unwrap(), "s03");
+        let (d, wt) = worktrees(&["s01", "s02"]);
+        let (_r, root) = repo();
+        let nowhere = d.path().join("nowhere");
+        assert_eq!(
+            pick(&claimed(&wt, &root, &nowhere), Start::Fresh).unwrap(),
+            "s03"
+        );
+    }
+
+    /// A fresh session starts on trunk, never on what an earlier one left.
+    ///
+    /// `rm` keeps a branch that holds work — every multi-commit landing omh
+    /// cannot match ends that way — and the worktrees directory forgets the
+    /// id. Counted from that directory alone, the next `omh new` was `s01`
+    /// again, and `ensure` reattached it to the kept `omh/s01`: the agent
+    /// started on the old tip, `diff` showed the old commits as this session's
+    /// work, and `push` followed the surviving upstream into the old PR.
+    #[test]
+    fn a_fresh_session_is_never_handed_a_branch_an_earlier_session_kept() {
+        let (d, root) = repo();
+        let wt = d.path().join("wt");
+        let shadows = d.path().join("shadows");
+        let runs = d.path().join("run");
+        let old = Session::new(&wt, "s01".into());
+        old.ensure(&root, "main").unwrap();
+        std::fs::write(old.worktree.join("old.rs"), "fn old() {}\n").unwrap();
+        git(&old.worktree, &["add", "-A"]).unwrap();
+        git(&old.worktree, &["commit", "-q", "-m", "old, unreviewed"]).unwrap();
+        let removed = old.remove(&root, "main", &shadows).unwrap();
+        assert!(
+            matches!(removed.branch, Removed::BranchKept(_)),
+            "precondition: rm kept the branch: {removed:?}"
+        );
+
+        let at = Claimed {
+            worktrees: &wt,
+            repo: &root,
+            shadows: &shadows,
+            runs: &runs,
+        };
+        let id = pick(&at, Start::Fresh).unwrap();
+        let fresh = Session::new(&wt, id.clone());
+        fresh.ensure(&root, "main").unwrap();
+        assert!(
+            !fresh.worktree.join("old.rs").exists(),
+            "a fresh session ({id}) opened on the old session's unreviewed commit"
+        );
     }
 
     /// What was recorded reads back; what was not is not invented; and what
@@ -5047,8 +5114,13 @@ mod tests {
     /// line is gone rather than rewritten.
     #[test]
     fn an_explicit_id_always_wins() {
-        let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, Start::Named("s01")).unwrap(), "s01");
+        let (d, wt) = worktrees(&["s01", "s02"]);
+        let (_r, root) = repo();
+        let nowhere = d.path().join("nowhere");
+        assert_eq!(
+            pick(&claimed(&wt, &root, &nowhere), Start::Named("s01")).unwrap(),
+            "s01"
+        );
     }
 
     /// Regression: git can lose a worktree's registration while the directory
