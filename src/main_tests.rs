@@ -3231,12 +3231,12 @@ fn what_the_seed_record_settles_on_its_own() {
     let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
 
     assert!(
-        cmd::harvest::from_the_seed_record(Ok(()), true, &shadow).is_none(),
+        cmd::harvest::from_the_seed_record(Ok(()), Ok(()), &shadow).is_none(),
         "a record omh can read settles nothing on its own — the repository decides"
     );
     assert!(
         matches!(
-            cmd::harvest::from_the_seed_record(Err(missing()), false, &shadow),
+            cmd::harvest::from_the_seed_record(Err(missing()), Err(missing()), &shadow),
             Some(cmd::harvest::AtStake::Nothing)
         ),
         "no record and no repository: nothing ever ran here"
@@ -3245,19 +3245,39 @@ fn what_the_seed_record_settles_on_its_own() {
     // the seed file goes anyway. `log` refuses to show this one.
     assert!(
         matches!(
-            cmd::harvest::from_the_seed_record(Err(missing()), true, &shadow),
+            cmd::harvest::from_the_seed_record(Err(missing()), Ok(()), &shadow),
             Some(cmd::harvest::AtStake::Unknown(_))
         ),
         "a repository with no record of its start is not an empty session"
     );
     // The arm that mattered.
     let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-    match cmd::harvest::from_the_seed_record(Err(denied), true, &shadow) {
+    match cmd::harvest::from_the_seed_record(Err(denied), Ok(()), &shadow) {
         Some(cmd::harvest::AtStake::Unknown(why)) => assert!(
             why.contains("denied"),
             "the reason reaches the user rather than being read as absence: {why}"
         ),
         other => panic!("a record omh could not read is not an empty session: {other:?}"),
+    }
+}
+
+/// **A repository omh could not stat is not one that is not there.** With no
+/// seed record, the repository's presence is all that separates *nothing ever
+/// ran here* from *a sandbox with no record of its start* — and `exists()`
+/// answered `false` for a permissions error exactly as for absence, so the
+/// second read as the first and `rm` asked nothing.
+#[test]
+fn a_sandbox_repository_omh_could_not_stat_is_not_one_that_never_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    let shadow = shadow::Shadow::new(dir.path(), "s01");
+    let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+    let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+    match cmd::harvest::from_the_seed_record(Err(missing()), Err(denied), &shadow) {
+        Some(cmd::harvest::AtStake::Unknown(why)) => assert!(
+            why.contains("denied"),
+            "the reason reaches the user rather than being read as absence: {why}"
+        ),
+        other => panic!("a repository omh could not stat read as: {other:?}"),
     }
 }
 

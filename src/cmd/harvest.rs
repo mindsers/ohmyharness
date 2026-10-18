@@ -933,9 +933,10 @@ pub(crate) enum AtStake {
 /// silently deleted a sandbox before this.
 pub(crate) fn from_the_seed_record(
     metadata: std::io::Result<()>,
-    gitdir_exists: bool,
+    gitdir: std::io::Result<()>,
     shadow: &shadow::Shadow,
 ) -> Option<AtStake> {
+    let gitdir_exists = gitdir.is_ok();
     match metadata {
         Ok(()) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !gitdir_exists => {
@@ -975,7 +976,7 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
     let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
     if let Some(answer) = from_the_seed_record(
         std::fs::metadata(&shadow.seed_record).map(|_| ()),
-        shadow.gitdir.exists(),
+        std::fs::metadata(&shadow.gitdir).map(|_| ()),
         &shadow,
     ) {
         let asked = worktree_to_ask(
