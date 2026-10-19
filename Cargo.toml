@@ -1,6 +1,6 @@
 [package]
 name = "omh"
-version = "0.14.1"
+version = "0.15.0"
 edition = "2021"
 rust-version = "1.85"
 # Resolve to versions that build on `rust-version`. Edition 2021 defaults to
