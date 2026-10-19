@@ -30,10 +30,10 @@ updates:
   # dtolnay/rust-toolchain, which publishes no tags, so it is pinned to a branch
   # and floats. Nothing here can bump that one.
   #
-  # And except the cache action in release.yml and every action in docs.yml,
-  # which are pinned by commit with the version in a trailing comment: those
-  # workflows build what ships and what readers are served. This moves those
-  # too, as a pull request that shows the new commit.
+  # And except every action in release.yml and docs.yml, which are pinned by
+  # commit with the version in a trailing comment: those workflows build what
+  # ships and what readers are served, and tests/workflows.rs holds them to it.
+  # This moves those too, as a pull request that shows the new commit.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

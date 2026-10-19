@@ -22,9 +22,9 @@ Ordered by what gates what, not by what is most fun.
 | [v3 — the unique capability](#v3--the-unique-capability) | ⬜ | — | the marketplace plugin port |
 | [v4 — memory and graph, re-justified](#v4--memory-and-graph-re-justified) | ⬜ | — | a review of both against their measured cost |
 
-**These are milestones, not crate versions.** The crate is at `0.14.1` and
+**These are milestones, not crate versions.** The crate is at `0.15.0` and
 milestone v1.5 is roughly what 0.6.0 contained. They are deliberately not kept
-in lockstep — v0 has spanned fourteen minor releases already.
+in lockstep — v0 has spanned fifteen minor releases already.
 
 <details>
 <summary>Why the crate is not called 1.0</summary>

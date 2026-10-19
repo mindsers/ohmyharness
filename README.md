@@ -13,7 +13,7 @@ $ omh s01 attach        # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.14.1`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.15.0`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -22,7 +22,43 @@ architecture is built for and not yet a thing anybody has done.
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
 
-**`0.14.1` fixes three things nobody could see.** No editor could attach to
+**`0.15.0` puts your catalogue on a screen.** At a terminal, `omh settings`
+is a screen over `~/.omh`: your defaults, then a page per kind of entry —
+rules, skills, servers, commands, subagents, hooks. Set and unset a default,
+open or create an entry in `$EDITOR`, add or remove a server, import from a
+harness, search across pages, undo. Every change is the command line you would
+have typed, run as one and shown with what it said, so there is no second write
+path. It also says what the next `omh init` hands a new repo, and
+`omh settings use` / `unuse` change it. Piped, or with `--json`, it is the
+report it always was.
+
+**The host stops running what the sandbox wrote.** Three ways it still could:
+git over the sandbox's repository ran a clean filter, a nested repository's
+config or a `post-checkout` hook the agent had left; notes and transcripts were
+written and read through links the agent had made, and its text reached your
+terminal unsanitised; and a relative `core.hooksPath` — husky's `.husky/_` —
+resolved inside the agent's worktree, so `omh sNN commit`, `push`, `sync` and
+the `git status` behind `omh s` ran hooks the agent wrote, as you. Your own
+hooks still run; ones the agent could write are set aside, and commit and push
+say so.
+
+**Things that did damage and said nothing.** `omh sNN attach` could replace
+`~/.ssh/config` with one line; two launches of one session could remove each
+other's container; `omh sNN rm` could report success with the agent's commits
+left behind, and deleted work the agent had told its index to ignore;
+`omh new` could reopen a branch an earlier `rm` kept, old commits and all; one
+launch made your own checkout ignore new `AGENTS.md`, `CLAUDE.md` and
+`.mcp.json` files; a refused `sync` said nothing had changed after rewriting
+the worktree; and a checkout whose directory has a space or an accent could not
+launch at all.
+
+Every pin moved — Claude Code 2.1.300, Codex 0.162.1, oh-my-pi 18.10.4,
+opencode 1.19.0 — so each harness image rebuilds on its first launch.
+`omh upgrade` now asks again which of a repo's provides apply before it builds.
+The docs are a site, at [docs.ohmyharness.sh](https://docs.ohmyharness.sh).
+And `cargo install omh` builds on Rust 1.85, the floor omh declares.
+
+**0.14.1 fixed three things nobody could see.** No editor could attach to
 any session — sshd dropped every connection before authentication, because
 omh's container dropped the one capability its privilege separation needs, and
 omh reported it as the editor failing to open. A fresh install's `omh doctor`

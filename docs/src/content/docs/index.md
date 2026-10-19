@@ -15,7 +15,7 @@ hero:
 ---
 
 :::caution[Early project]
-omh is at `0.14.1`. Claude Code on Docker is the path people have done real work
+omh is at `0.15.0`. Claude Code on Docker is the path people have done real work
 through; the other harnesses and runtimes pass `omh doctor` but have not been
 driven for real. The [roadmap](/project/roadmap/) says what comes next.
 :::
@@ -76,17 +76,20 @@ is kept beside the source rather than here:
 [the sandbox's repository becomes a remote](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md)
 — proposed, not built.
 
-## What's new in 0.14
+## What's new in 0.15
 
-- **Memory a second session can use.** One note store per repository, at
-  `~/.omh/memory/<repo>`, shared by every session the moment a note is written
-  and never committed. See [`omh memory`](/reference/commands/#omh-memory-).
-- **A sandbox that can merge.** The base image moved to Debian 13, whose git has
-  the `merge-tree --merge-base` that repos with modern checks rely on.
-- **Repairs in 0.14.1.** Editors can attach to a session again, a fresh
-  install's [`omh doctor`](/guides/troubleshooting/#omh-doctor) no longer fails on
-  a memory server it never built, and several session lifecycle paths no longer
-  risk losing work.
+- **Your catalogue on a screen.** At a terminal, `omh settings` shows your
+  defaults and every rule, skill, server, command, subagent and hook, changes
+  them in place, and says what a new repo gets. Each change is the command line
+  you would have typed. See [`omh settings`](/reference/commands/#omh-settings).
+- **The host stops running what the sandbox wrote.** Host-side git, note and
+  transcript reads, and hooks resolved inside the agent's worktree no longer run
+  or follow anything the agent left. See [risks](/concepts/risks/).
+- **Fewer things that failed in silence.** Session removal, launches, `sync` and
+  `attach` stop losing work or editing your files without saying so, and a
+  checkout whose name has a space or an accent can launch.
+- **Every harness at its latest release**, and `cargo install omh` builds on the
+  Rust omh declares.
 
 Earlier releases are on [GitHub](https://github.com/mindsers/ohmyharness/releases).
 
