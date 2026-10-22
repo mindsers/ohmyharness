@@ -2,11 +2,11 @@
 name = "omh"
 version = "0.15.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 # Resolve to versions that build on `rust-version`. Edition 2021 defaults to
-# resolver 2, which ignores it: `cargo install omh` reads no Cargo.lock, so on
-# rust 1.85 it picked darling 0.24 and instability 0.3.14, both 1.88, and
-# failed. The nightly `install-msrv` job installs the way a user does.
+# resolver 2, which ignores it: `cargo install omh` reads no Cargo.lock, so
+# when the floor was 1.85 it picked darling 0.24 and instability 0.3.14, both
+# 1.88, and failed. The nightly `install-msrv` job installs the way a user does.
 resolver = "3"
 description = "Launch any coding harness, in a sandbox, with your setup already there."
 license = "MIT"
@@ -42,13 +42,14 @@ tempfile = "3"
 # `omh settings` at a terminal is a screen rather than a report: your defaults,
 # your servers and every catalogue entry, changed in place. Layout, lists and
 # the terminal's own events; `crossterm` is the only backend compiled in.
-# Pinned below 0.30: 0.30.0 needs rust 1.86 and 0.30.1 needs 1.88, both past
-# this crate's rust-version. A plain `cargo update` keeps the lock on 1.85,
-# because `resolver = "3"` above resolves against it.
+# 0.30.1 and later need rust 1.88 (0.30.0 needs 1.86), and so do `as_chunks`
+# in shadow.rs and `is_multiple_of` in memory.rs: that is the floor. Since
+# ratatui-core 0.1.1 `Terminal::clear` asks the terminal where the cursor is,
+# and the screen does not call it — `settings_tui::redraw` says why.
 # `unstable-rendered-line-info` is `Paragraph::line_count`, which counts the
 # rows a paragraph wraps to with the renderer's own wrapping: a box sized by a
 # count of its own disagreed at every word that filled a row.
-ratatui = { version = "0.29", default-features = false, features = [
+ratatui = { version = "0.30", default-features = false, features = [
   "crossterm",
   "unstable-rendered-line-info",
 ] }

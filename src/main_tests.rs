@@ -537,8 +537,8 @@ fn the_whole_tree(files: &[std::path::PathBuf]) {
 /// helper it alone called became dead code and took the lint run down.
 ///
 /// Three times in two changes. Clippy refuses `duplicated attribute`, but
-/// clippy does not run on this machine — a 1.81 shim against a 1.85 crate
-/// — so CI is the only place it is caught, one push and four minutes
+/// clippy did not run on this machine — a 1.81 shim against the crate's
+/// `rust-version` — so CI is the only place it is caught, one push and four minutes
 /// later. This is the same guard, here.
 ///
 /// Two shapes: a `#[test]` that no longer sits on a function, and **any**

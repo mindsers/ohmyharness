@@ -202,7 +202,7 @@ Picks the build for your machine, checks it against the published
 if you would rather — it is [one file](install.sh), and that URL is a redirect
 to exactly that file, so there is only ever one of it. Re-run it to update.
 
-From source, which needs Rust 1.85+:
+From source, which needs Rust 1.88+:
 
 ```console
 $ git clone https://github.com/mindsers/ohmyharness && cd ohmyharness
