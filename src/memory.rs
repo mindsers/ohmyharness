@@ -304,7 +304,7 @@ fn days_in_month(year: u32, month: u32) -> u32 {
 }
 
 fn is_leap(year: u32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 // ── keys ────────────────────────────────────────────────────────────────────
@@ -1710,6 +1710,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             "26-08-07",
             "abcd-ef-gh",
             "2025-02-29",
+            "1900-02-29", // a century that is not a leap year
+            "2100-02-29",
             "2026-08-07x",
         ] {
             assert!(with(bad).is_err(), "`{bad}` is not a date");

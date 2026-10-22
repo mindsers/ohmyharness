@@ -221,7 +221,7 @@ fn drive(
             Next::Quit => return Ok(()),
             Next::Reload => {
                 app.reload(model(paths));
-                terminal.clear().context("drawing the screen")?;
+                redraw(terminal).context("drawing the screen")?;
             }
             Next::Preview(act) => {
                 let mut line = vec!["--dry-run".to_string()];
@@ -614,11 +614,28 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::terminal::EnterAlternateScreen
-    )?;
-    ratatui::crossterm::terminal::enable_raw_mode()?;
-    ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
-    terminal.clear()?;
+    )
+    .context("entering the alternate screen")?;
+    ratatui::crossterm::terminal::enable_raw_mode().context("turning raw mode on")?;
+    ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture)
+        .context("taking the mouse")?;
+    redraw(terminal).context("drawing the screen")?;
     Ok(())
+}
+
+/// Clear the terminal and draw everything on the next frame, asking it nothing.
+///
+/// Not `Terminal::clear`: since ratatui-core 0.1.1 (what ratatui 0.30.1
+/// brought) it reads the cursor position first, to put it back, and that is a
+/// question (`ESC[6n`) only the terminal can answer. One that did not answer
+/// within two seconds ended the screen with "The cursor position could not be
+/// read within a normal duration". Nothing is lost by not asking: every frame
+/// places or hides the cursor itself. And on the full-screen viewport
+/// `try_init` gives, a resize to the size the terminal already is clears the
+/// same way and asks nothing — an inline viewport would ask.
+fn redraw(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
+    let area = terminal.size()?.into();
+    terminal.resize(area)
 }
 
 /// Everything the screen shows, read fresh.

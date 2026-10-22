@@ -40,17 +40,17 @@ jobs:
   # on the oldest Rust omh declares does, and goes red the morning a release a
   # dependency published would make their install fail.
   install-msrv:
-    name: cargo install on the floor omh declares (rust 1.85)
+    name: cargo install on the floor omh declares (rust 1.88)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       # Overrides rust-toolchain.toml, which otherwise pins this to stable.
-      RUSTUP_TOOLCHAIN: "1.85"
+      RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - name: check out the repo
         uses: actions/checkout@v7
-      - name: install rust 1.85
-        run: rustup toolchain install 1.85 --profile minimal
+      - name: install rust 1.88
+        run: rustup toolchain install 1.88 --profile minimal
       - name: install omh as cargo install would, with no lockfile
         run: cargo install --path . --root "$RUNNER_TEMP/omh"
 

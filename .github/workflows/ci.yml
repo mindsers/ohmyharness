@@ -124,18 +124,18 @@ jobs:
   # claim is the thing this repo distrusts most. `build` rather than `check`,
   # because the job says "builds" and `cargo check` stops before codegen.
   msrv:
-    name: build (msrv 1.85)
+    name: build (msrv 1.88)
     runs-on: ubuntu-latest
     env:
       # Overrides rust-toolchain.toml, which otherwise pins this job to stable.
-      RUSTUP_TOOLCHAIN: "1.85"
+      RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - name: check out the repo
         uses: actions/checkout@v7
-      - name: install rust 1.85
+      - name: install rust 1.88
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: "1.88"
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: build on the floor omh declares

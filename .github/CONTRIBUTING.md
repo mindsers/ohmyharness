@@ -9,8 +9,9 @@ $ omh doctor                    # the only thing that verifies an adapter
 **Run `check.sh` rather than `cargo clippy` directly.** It checks first that the
 clippy answering you was built against the rustc you have, because that is a
 failure this project has actually had: a stale `clippy 0.1.81` shim on `PATH`
-against `rustc 1.98` refuses on `rust-version = 1.85` and prints a dependency
-wall instead of a lint, so nothing fails and the lint simply never runs.
+against `rustc 1.98` refused on the then `rust-version = 1.85` and printed a
+dependency wall instead of a lint, so nothing failed and the lint simply never
+ran.
 `rust-toolchain.toml` records the incident and cannot prevent it — rustup reads
 that file, a Homebrew or distro cargo does not.
 

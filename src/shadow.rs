@@ -1217,8 +1217,7 @@ impl Shadow {
         let fields: Vec<&str> = answer.split('\0').collect();
         let mut believed: Vec<&str> = Vec::new();
         // `source NUL line NUL pattern NUL path NUL`, one per path.
-        for record in fields.chunks_exact(4) {
-            let [source, _line, pattern, path] = [record[0], record[1], record[2], record[3]];
+        for &[source, _line, pattern, path] in fields.as_chunks::<4>().0 {
             let trusted = if std::path::Path::new(source) == exclude {
                 ours.as_ref()
                     .is_some_and(|ours| ours.iter().any(|o| o == pattern))

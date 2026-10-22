@@ -61,7 +61,7 @@ covers every distribution.
 
 ### From source
 
-You need Rust 1.85 or later.
+You need Rust 1.88 or later.
 
 ```console
 $ git clone https://github.com/mindsers/ohmyharness && cd ohmyharness
@@ -69,7 +69,7 @@ $ cargo build --release
 $ cp target/release/omh ~/.local/bin/      # or put target/release on PATH
 ```
 
-1.85 is the `rust-version` in `Cargo.toml`, and CI builds the whole tree on
+1.88 is the `rust-version` in `Cargo.toml`, and CI builds the whole tree on
 exactly that version — a floor something checks, not the version that happened
 to be on the maintainer's machine.
 

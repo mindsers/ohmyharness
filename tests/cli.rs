@@ -8335,10 +8335,16 @@ impl Tty {
                 '\r' => col = 0,
                 '\n' => row = (row + 1).min(ROWS - 1),
                 c if c.is_control() => {}
+                // Past the last column a terminal wraps, at the next character
+                // rather than the one that filled the row. Dropped instead, a
+                // line of stderr wider than this lost its end: "exited with
+                // status 3" vanished from a failing test's own report.
                 c => {
-                    if col < COLS {
-                        grid[row][col] = c;
+                    if col >= COLS {
+                        col = 0;
+                        row = (row + 1).min(ROWS - 1);
                     }
+                    grid[row][col] = c;
                     col += 1;
                 }
             }
@@ -8371,9 +8377,23 @@ impl Tty {
 
     /// Wait until `needle` is on the screen — as drawn, or as read across a
     /// wrap — or fail saying what is.
+    ///
+    /// And fail the moment omh asks the terminal where its cursor is
+    /// (`ESC[6n`). Only a terminal can answer that, this one never does, and a
+    /// screen that waits on the answer fails somewhere later — a timeout, a
+    /// key nobody reads — that names something else. Checked here so every
+    /// screen test holds it, and fails saying what happened.
     fn wait_for(&self, needle: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while !self.screen().contains(needle) && !self.read().contains(needle) {
+        loop {
+            assert!(
+                !self.raw().contains("\x1b[6n"),
+                "omh asked the terminal where its cursor is (ESC[6n). It shows:\n{}",
+                self.screen()
+            );
+            if self.screen().contains(needle) || self.read().contains(needle) {
+                return;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "`{needle}` is not on the screen. It shows:\n{}",
@@ -8659,6 +8679,12 @@ fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
     tty.wait_for("idle_timeout");
     tty.send("3");
     tty.wait_for("skills/review-diff");
+    // The top row, which no report after the editor writes to: back as it
+    // was only if the whole screen was drawn again. `closed` alone is the
+    // status row, and was on a screen otherwise left blank.
+    let top = |tty: &Tty| tty.screen().lines().next().unwrap_or_default().to_string();
+    let before = top(&tty);
+    assert!(!before.trim().is_empty(), "{}", tty.screen());
     tty.send("e");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !sb.opened_in_the_editor().contains("skills/review-diff") {
@@ -8666,6 +8692,15 @@ fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     tty.wait_for("closed");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while top(&tty) != before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the screen was not drawn again after the editor. It shows:\n{}",
+            tty.screen()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     tty.send("q");
     let (status, raw) = tty.finish();
     assert!(status.success(), "{raw}");
@@ -8701,6 +8736,46 @@ fn an_entry_opens_in_the_editor_and_the_screen_comes_back() {
     assert!(
         raw[..last_leave].rfind(release) > raw[..last_leave].rfind(capture),
         "the mouse was still captured when the shell got the terminal back"
+    );
+}
+
+/// Ctrl-L draws the screen again, and asks the terminal nothing to do it.
+///
+/// `Terminal::clear`, since ratatui-core 0.1.1, reads the cursor position
+/// first, and that is a question (`ESC[6n`) only the terminal can answer. One
+/// that does not — this one, or a slow link — kept omh waiting two seconds,
+/// then ended the screen with "The cursor position could not be read within a
+/// normal duration". Asking nothing is the invariant: `ESC[6n` is the one
+/// question checked for, because it is the one ratatui asks.
+#[test]
+fn ctrl_l_draws_the_screen_again_without_asking_the_terminal_anything() {
+    let sb = sandbox();
+    sb.seed_base();
+    let mut tty = sb.omh_on_a_terminal(&["settings"]);
+    tty.wait_for("idle_timeout");
+    // Counted from here rather than assumed once: a frame that came to show
+    // the key twice would otherwise pass without Ctrl-L drawing anything.
+    let drawn = tty.raw().matches("idle_timeout").count();
+    tty.send("\x0c");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while tty.raw().matches("idle_timeout").count() <= drawn {
+        assert!(
+            !tty.raw().contains("\x1b[6n"),
+            "omh asked the terminal where its cursor is (ESC[6n)"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the screen was not drawn again. It shows:\n{}",
+            tty.screen()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    tty.send("q");
+    let (status, raw) = tty.finish();
+    assert!(status.success(), "{raw}");
+    assert!(
+        !raw.contains("\x1b[6n"),
+        "the screen asked the terminal where its cursor is:\n{raw:?}"
     );
 }
 
