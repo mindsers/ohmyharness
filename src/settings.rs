@@ -97,7 +97,8 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut provision: BTreeMap<String, bool> = BTreeMap::new();
-    let mut selection = crate::selection::Selection::owning(manifest.owns());
+    let mut selection =
+        crate::selection::Selection::owning(manifest.owns()).retiring(manifest.retired());
     let retired = manifest.retired_servers();
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
@@ -166,27 +167,6 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         for (name, over) in file.mcp {
             let name = retired.get(&name).cloned().unwrap_or(name);
             mcp_env.entry(name).or_default().extend(over.env);
-        }
-        // A name omh's server used to have is still omh's to `[use]`: refused
-        // as the server was, rather than selecting one nobody has.
-        for (key, names) in &file.uses {
-            let Some(cap) = crate::adapter::Capability::from_key(key) else {
-                continue;
-            };
-            if let Some((name, entry)) = names
-                .iter()
-                .find_map(|n| manifest.was_named(cap, n).map(|e| (n, e)))
-            {
-                anyhow::bail!(
-                    "{}: `[use] {cap}` names `{name}`, which is omh's — `{}` now, part of \
-                     the `{}` feature. `[use]` names your entries; a feature is all or \
-                     nothing and `omh set {} off` is its switch.",
-                    path.display(),
-                    entry.name,
-                    entry.feature,
-                    entry.feature
-                );
-            }
         }
         // Wholesale per capability, which is the opposite rule and deliberately
         // so: an env override adds a variable, a selection *is* the list, and
@@ -278,7 +258,8 @@ impl RepoPolicy {
             // Empty of choices but *not* of what omh owns. A `Selection::default()`
             // here would let a fixture treat `omh-codegraph` as an ordinary catalogue
             // entry, which is the one thing this type exists to prevent.
-            selection: crate::selection::Selection::owning(manifest.owns()),
+            selection: crate::selection::Selection::owning(manifest.owns())
+                .retiring(manifest.retired()),
             provision: BTreeMap::new(),
         }
     }

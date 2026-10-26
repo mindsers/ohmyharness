@@ -116,6 +116,17 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                 )
             })?;
             let incoming = render::parse(binding.render, &raw)?;
+            // omh's names are not yours to import, under `--replace` or not —
+            // `mcp add` refuses them for the same reason. `memory` above all:
+            // the name a third-party memory server is usually installed under,
+            // and one `omh-memory` used to have, so it is still omh's.
+            let shipped = crate::cmd::settings::shipped_servers()?;
+            let (omhs, incoming): (
+                std::collections::BTreeMap<_, _>,
+                std::collections::BTreeMap<_, _>,
+            ) = incoming
+                .into_iter()
+                .partition(|(name, _)| shipped.contains_key(name));
 
             let outcome = config::mcp_import(paths, incoming, *force, dry_run)?;
             let wrote = (!dry_run && !outcome.added.is_empty())
@@ -138,6 +149,14 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                     name: name.clone(),
                     verdict: report::Verdict::Conflict,
                     detail: "differs — keeping yours; --replace to overwrite".into(),
+                }))
+                .chain(omhs.keys().map(|name| report::Considered {
+                    name: name.clone(),
+                    verdict: report::Verdict::Skipped,
+                    detail: format!(
+                        "the name is omh's — the {} feature's; import it under another",
+                        shipped[name]
+                    ),
                 }))
                 .collect();
 

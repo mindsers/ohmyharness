@@ -13734,6 +13734,89 @@ fn use_all_does_not_turn_on_a_guard() {
     assert!(!settings.contains("config-guard"), "got: {settings}");
 }
 
+/// The names omh's servers had before they were named `omh-…` stay omh's, and
+/// every door agrees. `import` was the one that did not: a `memory` server —
+/// the name the reference memory server is usually installed under — landed
+/// beside `omh-memory`, `omh use --all` and `omh init` wrote it into `[use]`,
+/// and every command after that refused the file they had just written.
+#[test]
+fn a_name_omhs_servers_used_to_have_never_reaches_a_use_list() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let catalogue = fx.home.join(".omh/mcp.json");
+    std::fs::create_dir_all(catalogue.parent().unwrap()).unwrap();
+    std::fs::write(
+        &catalogue,
+        r#"{"mcpServers":{"omh-memory":{"command":"omh","args":["memory","serve","--notes","/omh/memory"]}}}"#,
+    )
+    .unwrap();
+    let theirs = fx.home.join("theirs.mcp.json");
+    std::fs::write(
+        &theirs,
+        r#"{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"]},
+                          "linear":{"command":"npx","args":["-y","mcp-remote"]}}}"#,
+    )
+    .unwrap();
+    let held = || -> Vec<String> {
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&catalogue).unwrap()).unwrap();
+        doc["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+
+    for replace in [false, true] {
+        let mut argv = vec!["settings", "mcp", "import", "claude", "--from"];
+        argv.push(theirs.to_str().unwrap());
+        if replace {
+            argv.push("--replace");
+        }
+        let out = fx.omh(&argv);
+        assert!(
+            out.status.success(),
+            "the rest of the file still imports: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(held(), ["linear", "omh-memory"], "`omh {}`", argv.join(" "));
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("memory") && said.contains("omh's"),
+            "and it says why `memory` was left out: {said}"
+        );
+    }
+
+    // `mcp.json` is yours to edit, so the old name can still be there.
+    std::fs::write(
+        &catalogue,
+        r#"{"mcpServers":{"omh-memory":{"command":"omh"},"memory":{"command":"npx"},
+                          "linear":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nmcp = []\n").unwrap();
+    let out = fx.omh(&["use", "--all"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let settings = fx.settings();
+    assert!(
+        settings.contains("\"linear\"") && !settings.contains("\"memory\""),
+        "{settings}"
+    );
+    let out = fx.omh(&["info", "--repo"]);
+    assert!(
+        out.status.success(),
+        "the list omh wrote is one omh reads: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Excluded from automatic expansion, never from being named. `catalogue_lists`
 /// narrows what `init`/`--all` write; `catalogue_names`, which validates a
 /// name you typed, does not — a guard is a real catalogue entry and `omh use

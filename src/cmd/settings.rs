@@ -1666,22 +1666,14 @@ pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, Str
 /// rather than `~/.omh/base`: what omh owns is not a file that a stray or
 /// unreadable copy could make removable.
 ///
-/// The names an entry used to have count too. A catalogue `omh upgrade` has
-/// not yet renamed still holds omh's server under one, and a server of yours
-/// taking one would be read as omh's by every repo's `[mcp.<name>.env]`.
+/// The names an entry used to have count too — [`base::Manifest::reserved`].
 pub(crate) fn shipped_owned(
     cap: adapter::Capability,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     Ok(base::Manifest::shipped()?
-        .entries
-        .into_iter()
-        .filter(|e| e.kind.capability() == cap)
-        .flat_map(|e| {
-            std::iter::once(e.name)
-                .chain(e.was)
-                .map(move |name| (name, e.feature.clone()))
-        })
-        .collect())
+        .reserved()
+        .remove(&cap)
+        .unwrap_or_default())
 }
 
 /// omh's features, from the manifests in the binary — what `[omh]` switches.

@@ -2049,7 +2049,6 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/rules.rs", 1),
         ("src/selection.rs", 1),
         ("src/session.rs", 4),
-        ("src/settings.rs", 1),
         ("src/shadow.rs", 11),
         // The config include header and the known_hosts header, both naming
         // `omh s attach` as what rewrites them.

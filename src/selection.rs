@@ -88,6 +88,13 @@ pub struct Selection {
     /// The feature rather than a bare set, because the useful half of refusing
     /// `[use] mcp = ["omh-codegraph"]` is saying *which switch* does work.
     owned: Owned,
+    /// Names omh's entries used to have — `memory` for `omh-memory`.
+    ///
+    /// Still omh's, so refused by `read_list` and never reported as
+    /// unselected, like `owned`. Kept apart from it because `owned` is also
+    /// what `allows` lets through and what Claude and Codex run unasked, and a
+    /// server sitting under an old name in a catalogue is not omh's server.
+    retired: Owned,
 }
 
 /// Capability to entry name to the feature that owns it.
@@ -100,7 +107,15 @@ impl Selection {
         Self {
             chosen: BTreeMap::new(),
             owned,
+            retired: Owned::new(),
         }
+    }
+
+    /// The names omh's entries used to have — [`crate::base::Manifest::retired`].
+    /// Before any `apply`, which is what refuses them.
+    pub fn retiring(mut self, retired: Owned) -> Self {
+        self.retired = retired;
+        self
     }
 
     /// Apply one layer's `[use]` table. Later layers replace earlier ones **per
@@ -148,7 +163,8 @@ impl Selection {
         let mut out = Vec::with_capacity(names.len());
         for name in names {
             validate_entry_name(name, cap, whence)?;
-            if let Some(feature) = self.owner(cap, name) {
+            let retired = self.retired.get(&cap).and_then(|r| r.get(name));
+            if let Some(feature) = self.owner(cap, name).or(retired.map(String::as_str)) {
                 bail!(
                     "{}: `[use] {cap}` names `{name}`, which is omh's — part of the \
                      `{feature}` feature. `[use]` names your entries; a feature is all \
@@ -199,6 +215,7 @@ impl Selection {
             Some(Chosen::These(_)) => available
                 .iter()
                 .filter(|n| !self.allows(cap, n))
+                .filter(|n| !self.retired.get(&cap).is_some_and(|r| r.contains_key(*n)))
                 .cloned()
                 .collect(),
             _ => Vec::new(),

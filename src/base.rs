@@ -364,17 +364,6 @@ impl Manifest {
         self.entries.iter().find(|e| e.name == name)
     }
 
-    /// The entry of `cap` that used to be called `name`.
-    ///
-    /// Apart from [`Self::owns`] on purpose: what `owns` answers is also what
-    /// Claude may run unasked and Codex approves, and an old name in a
-    /// catalogue is not omh's server once `omh upgrade` has moved it.
-    pub fn was_named(&self, cap: crate::adapter::Capability, name: &str) -> Option<&Entry> {
-        self.entries
-            .iter()
-            .find(|e| e.kind.capability() == cap && e.was.iter().any(|w| w == name))
-    }
-
     /// Every name a server of omh's used to have, to the name it has now.
     pub fn retired_servers(&self) -> BTreeMap<String, String> {
         self.entries
@@ -391,12 +380,45 @@ impl Manifest {
     /// be selected. The question both ask is "is this name omh's?", and two
     /// answers to it is how a feature gets taken apart by one of them while the
     /// other still thinks it is whole.
+    ///
+    /// The names an entry *used* to have are not in here, because this is also
+    /// what Claude runs unasked and Codex approves. They are omh's all the same
+    /// — [`Self::reserved`] is both together, and it is what anything deciding
+    /// whether a name is yours reads.
     pub fn owns(&self) -> crate::selection::Owned {
         let mut out = crate::selection::Owned::new();
         for entry in &self.entries {
             out.entry(entry.kind.capability())
                 .or_default()
                 .insert(entry.name.clone(), entry.feature.clone());
+        }
+        out
+    }
+
+    /// The names entries used to have, by capability, each pointing at its
+    /// feature.
+    pub fn retired(&self) -> crate::selection::Owned {
+        let mut out = crate::selection::Owned::new();
+        for entry in &self.entries {
+            for old in &entry.was {
+                out.entry(entry.kind.capability())
+                    .or_default()
+                    .insert(old.clone(), entry.feature.clone());
+            }
+        }
+        out
+    }
+
+    /// Every name that is never yours: what omh [owns](Self::owns) and every
+    /// name it [used to have](Self::retired). `memory` stays omh's after its
+    /// server became `omh-memory` — it was never yours to add, import or
+    /// select, and a door that let it in left the others disagreeing about it:
+    /// `import` took one, `omh init` wrote it into `[use]`, and every command
+    /// after that refused the list `init` had just written.
+    pub fn reserved(&self) -> crate::selection::Owned {
+        let mut out = self.owns();
+        for (cap, names) in self.retired() {
+            out.entry(cap).or_default().extend(names);
         }
         out
     }
