@@ -705,6 +705,16 @@ mod tests {
         let m = manifest();
         let c = catalog(&m, vec![]);
 
+        // The feature, whole — not the first entry of it. A feature with a
+        // server answers as that server; one without has nothing to stand in
+        // for it, and `git-rules` alone would be a part named as the whole.
+        match c.why("git-notice") {
+            Verdict::Feature { gathers, .. } => {
+                let names: Vec<&str> = gathers.iter().map(|e| e.name.as_str()).collect();
+                assert_eq!(names, ["git-rules", "git-note", "git-turn"]);
+            }
+            other => panic!("expected the feature, got {other:?}"),
+        }
         let out = render(&c, &c.why("git-notice"), "2026.08");
         assert!(
             out.contains("git-rules"),

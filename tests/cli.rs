@@ -3696,14 +3696,17 @@ fn use_refuses_a_feature_and_set_refuses_a_catalogue_entry() {
     sb.seed_base();
     sb.catalogue(&["skills/review-diff/SKILL.md"]);
 
-    let out = sb.omh(&["use", "mcp", "codegraph"]);
-    assert!(!out.status.success(), "codegraph is omh's, not yours");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("codegraph"), "must name it: {err}");
-    assert!(
-        err.contains("omh set codegraph off"),
-        "and point at the switch that does work: {err}"
-    );
+    // The server's name, and the one it had before, which is the feature's.
+    for name in ["omh-codegraph", "codegraph"] {
+        let out = sb.omh(&["use", "mcp", name]);
+        assert!(!out.status.success(), "{name} is omh's, not yours");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(name), "must name it: {err}");
+        assert!(
+            err.contains("omh set codegraph off"),
+            "and point at the switch that does work: {err}"
+        );
+    }
 
     // And the other direction, so the distinction is not one-way.
     let out = sb.omh(&["set", "review-diff", "off"]);
@@ -7124,6 +7127,17 @@ fn mcp_add_does_not_write_over_a_server() {
     assert_eq!(held(), before);
 
     for argv in [
+        vec!["settings", "mcp", "add", "omh-codegraph", "echo"],
+        vec![
+            "settings",
+            "mcp",
+            "add",
+            "--replace",
+            "omh-codegraph",
+            "echo",
+        ],
+        vec!["settings", "mcp", "add", "omh-memory", "echo"],
+        // And the names they had before, which are omh's still.
         vec!["settings", "mcp", "add", "codegraph", "echo"],
         vec!["settings", "mcp", "add", "--replace", "codegraph", "echo"],
         vec!["settings", "mcp", "add", "memory", "echo"],

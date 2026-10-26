@@ -296,6 +296,9 @@ impl Manifest {
         if manifest.entries.is_empty() {
             anyhow::bail!("{} declares no base-set entries", path.display());
         }
+        manifest
+            .check_names()
+            .with_context(|| path.display().to_string())?;
         manifest.path = Some(path);
         Ok(manifest)
     }
@@ -314,9 +317,44 @@ impl Manifest {
                 newest = Some((version, manifest));
             }
         }
-        newest
+        let manifest = newest
             .map(|(_, m)| m)
-            .context("omh carries no usable base manifest")
+            .context("omh carries no usable base manifest")?;
+        manifest.check_names().context("omh's own base set")?;
+        Ok(manifest)
+    }
+
+    /// Refuse a name used before that is not one entry's alone.
+    ///
+    /// Such a name is read as its entry — `refresh_own_servers` moves a
+    /// catalogue key onto the entry's name and `[mcp.<old>.env]` reaches it —
+    /// so pointing at two entries, or at a name some entry has now, moves one
+    /// live server onto another and writes over it. Servers only: nothing
+    /// renames a hook or a rules section, so a `was` there would be reserved
+    /// and never read.
+    fn check_names(&self) -> Result<()> {
+        let mut seen: BTreeMap<(crate::adapter::Capability, &str), &str> = self
+            .entries
+            .iter()
+            .map(|e| ((e.kind.capability(), e.name.as_str()), e.name.as_str()))
+            .collect();
+        for entry in &self.entries {
+            for old in &entry.was {
+                anyhow::ensure!(
+                    entry.kind == Kind::Mcp,
+                    "`{}` says it was `{old}`, and only a server's name is ever moved",
+                    entry.name
+                );
+                if let Some(holder) = seen.insert((entry.kind.capability(), old), &entry.name) {
+                    anyhow::bail!(
+                        "`{}` says it was `{old}`, which is already `{holder}`'s — a name \
+                         used before belongs to one server and is nobody's now",
+                        entry.name
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Which manifest answered, and at what version.
@@ -1656,6 +1694,38 @@ command = "c"
         let err = format!("{:#}", Manifest::load_dir(dir.path()).unwrap_err());
         assert!(err.contains("2026.08.toml"), "must name the file: {err}");
         assert!(err.contains("omh init"), "must say the way out: {err}");
+    }
+
+    /// A name an entry used to have is read as that entry — a catalogue key is
+    /// moved onto it and `[mcp.<old>.env]` reaches it — so it has to point at
+    /// exactly one entry, and can be nobody's name now. A manifest saying
+    /// otherwise is refused where it is read: `refresh_own_servers` would
+    /// otherwise move one live server onto another and write over it.
+    #[test]
+    fn a_name_used_before_belongs_to_one_server_and_is_nobodys_now() {
+        let entry = |name: &str, kind: &str, was: &str| {
+            format!(
+                "[[entry]]\nname = \"{name}\"\nkind = \"{kind}\"\nfeature = \"f\"\n\
+                 since = \"2026.06\"\nbecause = \"b\"\nremove = \"r\"\ncommand = \"c\"\n\
+                 was = [{was}]\n"
+            )
+        };
+        for (body, named) in [
+            (
+                entry("omh-a", "mcp", "\"a\"") + &entry("omh-b", "mcp", "\"a\""),
+                "`a`",
+            ),
+            (
+                entry("omh-a", "mcp", "\"omh-b\"") + &entry("omh-b", "mcp", ""),
+                "`omh-b`",
+            ),
+            (entry("omh-a", "mcp", "\"omh-a\""), "`omh-a`"),
+            (entry("a-hook", "hook", "\"old-hook\""), "`old-hook`"),
+        ] {
+            let dir = manifest_dir(&[("2026.08.toml", &format!("version = \"2026.08\"\n{body}"))]);
+            let err = format!("{:#}", Manifest::load_dir(dir.path()).expect_err(&body));
+            assert!(err.contains(named), "must name it: {err}");
+        }
     }
 
     /// A stray `.toml` sorting after the real manifest used to *become* the
