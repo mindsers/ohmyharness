@@ -676,10 +676,7 @@ pub fn plan(
     // given a writable store it is never told about and a server binary
     // nothing spawns — the half-configured state the design calls
     // unrepresentable.
-    let memory_on = !opts
-        .repo
-        .disabled_servers
-        .contains(crate::memory::tools::SERVER_KEY);
+    let memory_on = !opts.repo.off.contains(crate::memory::tools::FEATURE);
 
     // The local note store, keyed by repo like the graph cache and for the
     // same reason: it must survive a container rebuild, a harness switch and
@@ -2766,7 +2763,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx.paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"omh-memory":{"command":"omh"},
                               "linear":{"command":"l"}}}"#,
         )
         .unwrap();
@@ -2778,7 +2775,7 @@ mod tests {
         let p = plan_for(&fx, "claude");
         assert_eq!(
             staged_servers(&p),
-            vec!["codegraph", "memory"],
+            vec!["omh-codegraph", "omh-memory"],
             "omh's own survive an empty list; `linear` is yours and does not"
         );
         let hooks = staged_hooks(&p);
@@ -2804,7 +2801,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx.paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"omh-memory":{"command":"omh"},
                               "linear":{"command":"l"}}}"#,
         )
         .unwrap();
@@ -2826,8 +2823,8 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
-        assert_eq!(mode("codegraph").as_deref(), Some("approve"), "{doc}");
-        assert_eq!(mode("memory").as_deref(), Some("approve"), "{doc}");
+        assert_eq!(mode("omh-codegraph").as_deref(), Some("approve"), "{doc}");
+        assert_eq!(mode("omh-memory").as_deref(), Some("approve"), "{doc}");
         assert_eq!(
             mode("linear"),
             None,
@@ -3304,6 +3301,57 @@ mod tests {
         );
     }
 
+    /// The same, against a base set an older omh wrote — one that still names
+    /// the server `memory`, which is what `~/.omh/base` holds until `omh
+    /// upgrade` refreshes it. Keyed on the server's name, the store stayed
+    /// mounted with the feature off, because the name this binary expected was
+    /// not the one that manifest switched off.
+    #[test]
+    fn a_disabled_feature_takes_its_mounts_under_an_older_base_set_too() {
+        let fx = fixture();
+        let bin = fake_server_binary(&fx);
+        let shipped = std::fs::read_to_string(Path::new(BASE).join("2026.08.toml")).unwrap();
+        let older = shipped
+            .replace("name    = \"omh-memory\"", "name    = \"memory\"")
+            .replace("was     = [\"memory\"]\n", "");
+        assert_ne!(older, shipped, "the fixture must actually rename it");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("2026.08.toml"), older).unwrap();
+        let manifest = crate::base::Manifest::load_dir(dir.path()).unwrap();
+        let off: std::collections::BTreeSet<String> = ["memory".to_string()].into();
+        let installed = manifest.servers().into_keys().collect();
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: Some(bin),
+                base: None,
+                omh: crate::base::own(&manifest, &off, &installed).unwrap(),
+                repo: crate::settings::RepoPolicy::switching_off(&manifest, off),
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY)),
+            "no note store: {:?}",
+            p.mounts
+        );
+    }
+
     /// A feature off in this repo takes its server, its hooks and its section
     /// of the rules together.
     ///
@@ -3316,7 +3364,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx.paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"codebase-memory-mcp"}}}"#,
         )
         .unwrap();
         let (own, repo) = decided_with(["codegraph".to_string()].into());

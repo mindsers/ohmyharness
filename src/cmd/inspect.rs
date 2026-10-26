@@ -475,9 +475,16 @@ pub(crate) fn doctor_cmd(
         // Not when this repo has switched the feature off: the server is left out
         // of the document on purpose, so checking for it is checking a claim omh
         // deliberately did not make.
-        if let Some(server) = declared
-            .get(memory::tools::SERVER_KEY)
-            .filter(|_| !repo.disabled_servers.contains(memory::tools::SERVER_KEY))
+        //
+        // Found by the name the base set in `~/.omh/base` gives it, which is the
+        // one the catalogue holds — `memory` until `omh upgrade` moves both.
+        let manifest = base::Manifest::load_dir(&paths.base())?;
+        if let Some(server) = manifest
+            .entries
+            .iter()
+            .find(|e| e.kind == base::Kind::Mcp && e.feature == memory::tools::FEATURE)
+            .and_then(|e| declared.get(&e.name))
+            .filter(|_| !repo.off.contains(memory::tools::FEATURE))
         {
             checks.extend(doctor::memory_checks(server));
         }

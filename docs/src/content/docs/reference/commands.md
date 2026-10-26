@@ -265,7 +265,10 @@ because it is the command that looks at that again. It:
 
 1. refreshes the managed catalogue from the binary — adapters, the base set,
    editors, stacks, hooks, markers — keeping anything you edited as `.yours`,
-   just as `init` does;
+   just as `init` does; omh's own servers in `~/.omh/mcp.json` go back to the
+   base set's definition, and one still under a name it used to have —
+   `codegraph`, `memory` — moves to its name now, `omh-codegraph`,
+   `omh-memory`, and is named on stderr;
 2. asks the sandbox again which of this repo's provides apply, and corrects
    [`[provision]`](/reference/configuration/#provision--what-your-sandbox-is-built-with)
    before it builds anything;
@@ -1836,15 +1839,14 @@ omh why <thing>
 | `<thing>` | a base-set entry, something you added, something omh rejected, or a settings key |
 
 ```console
-$ omh why codegraph
+$ omh why omh-codegraph
 ```
 
-```text title="omh why codegraph"
-codegraph — omh's choice, in the base set since 2026.06
+```text title="omh why omh-codegraph"
+omh-codegraph — omh's choice, in the base set since 2026.06
 
   because     structural queries instead of re-grepping the repo every task
   part of     codegraph
-  brings      graph-orient, graph-first, graph-read, graph-refresh, graph-rules
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
               3.4 MB on disk                   measured 2026-08-06
@@ -1852,15 +1854,15 @@ codegraph — omh's choice, in the base set since 2026.06
   instead of  gitnexus            PolyForm-Noncommercial licence
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
-  installed   this repo
-  remove      omh set codegraph off — the feature, its server and its hooks
-              together. Nothing is uninstalled and the next repo gets it back
+  installed   your catalogue
+  remove      omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings set codegraph off` does the same for every repo `omh init` sets up after
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
 
 **Everything omh ships belongs to a feature**, and removal follows the feature:
 `omh set codegraph off` takes the server and its four hooks together.
+`omh why codegraph` answers for the feature, listing everything it gathers;
 `omh why graph-first` answers "part of codegraph" from the other direction, and
 says `(off here)` when this repo has switched the feature off in
 `.omh/settings.toml`.
@@ -2056,8 +2058,8 @@ used, rather than writing the list back and reporting success for a typo.
 `omh use` refuses one your catalogue does not have, and names `omh settings
 edit` as the way to create it.
 
-**omh's own are not selectable in either direction** — `codegraph`, `memory`,
-the six generated hooks and their rules sections. `omh set <feature> on|off` is
+**omh's own are not selectable in either direction** — `omh-codegraph`,
+`omh-memory`, the six generated hooks and their rules sections. `omh set <feature> on|off` is
 their switch, because a feature is all or nothing. See
 [Configuration](/reference/configuration/#a-feature-is-not-selectable).
 
@@ -2205,7 +2207,7 @@ iTerm2.
 instead; an entry, its description; a hook, when it runs — as a column of its
 own — and what it does; a server, what it runs, its arguments counted and its
 environment named. Hooks are yours first, then omh's own, under a heading each.
-The servers page is yours alone: omh's own servers — `codegraph`, `memory` —
+The servers page is yours alone: omh's own servers — `omh-codegraph`, `omh-memory` —
 are parts of its features, switched with their hooks and rules on your defaults
 page and listed nowhere else. A key nothing reads is under one of its own, naming the key it was
 probably meant to be, and a skill with no `SKILL.md` or a link to nothing is
@@ -2332,7 +2334,7 @@ terminal it asks; anywhere else it needs `--yes`. A name two files answer to
 (`house.md` and `house.txt`) is refused rather than guessed at, and so is a
 hook omh ships: `omh upgrade` would put it back, so the refusal names
 `omh unuse hooks <name>`, which stops a repo running it. A server omh ships —
-`codegraph`, `memory` — is refused too: it is one of omh's features, switched
+`omh-codegraph`, `omh-memory` — is refused too: it is one of omh's features, switched
 off whole with `omh set <feature> off` rather than taken apart, and the screen
 does not offer to remove it. There is no trash, so before it asks it says
 what goes with the entry, that every repo taking it loses it at its next

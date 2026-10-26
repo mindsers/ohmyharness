@@ -98,6 +98,7 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut provision: BTreeMap<String, bool> = BTreeMap::new();
     let mut selection = crate::selection::Selection::owning(manifest.owns());
+    let retired = manifest.retired_servers();
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
             continue;
@@ -158,8 +159,34 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         // the one an earlier layer set. A repo overriding a server's
         // environment; the catalogue's own env lives on the server in
         // `~/.omh/mcp.json`, which is the file that owns servers.
+        //
+        // A name one of omh's servers used to have is read as that server, so
+        // a token set before the rename keeps reaching it — and `omh settings
+        // mcp add` refuses those names, so no server of yours is added under one.
         for (name, over) in file.mcp {
+            let name = retired.get(&name).cloned().unwrap_or(name);
             mcp_env.entry(name).or_default().extend(over.env);
+        }
+        // A name omh's server used to have is still omh's to `[use]`: refused
+        // as the server was, rather than selecting one nobody has.
+        for (key, names) in &file.uses {
+            let Some(cap) = crate::adapter::Capability::from_key(key) else {
+                continue;
+            };
+            if let Some((name, entry)) = names
+                .iter()
+                .find_map(|n| manifest.was_named(cap, n).map(|e| (n, e)))
+            {
+                anyhow::bail!(
+                    "{}: `[use] {cap}` names `{name}`, which is omh's — `{}` now, part of \
+                     the `{}` feature. `[use]` names your entries; a feature is all or \
+                     nothing and `omh set {} off` is its switch.",
+                    path.display(),
+                    entry.name,
+                    entry.feature,
+                    entry.feature
+                );
+            }
         }
         // Wholesale per capability, which is the opposite rule and deliberately
         // so: an env override adds a variable, a selection *is* the list, and
@@ -249,7 +276,7 @@ impl RepoPolicy {
             off,
             mcp_env: BTreeMap::new(),
             // Empty of choices but *not* of what omh owns. A `Selection::default()`
-            // here would let a fixture treat `codegraph` as an ordinary catalogue
+            // here would let a fixture treat `omh-codegraph` as an ordinary catalogue
             // entry, which is the one thing this type exists to prevent.
             selection: crate::selection::Selection::owning(manifest.owns()),
             provision: BTreeMap::new(),
@@ -454,6 +481,46 @@ mod tests {
         let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
         assert_eq!(env["TOKEN"], "t");
         assert_eq!(env["REGION"], "eu");
+    }
+
+    /// A repo that set a token for omh's graph server before it was named
+    /// `omh-codegraph` keeps it: the table under the old name is read as the
+    /// server's, and merges with one under the new name rather than becoming
+    /// an override for a server nobody has.
+    #[test]
+    fn an_override_under_a_servers_old_name_reaches_it() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[mcp.codegraph.env]\nTOKEN = \"t\"\n",
+        );
+        write(
+            paths.repo.join(".omh/settings.local.toml"),
+            "[mcp.omh-codegraph.env]\nREGION = \"eu\"\n",
+        );
+        let r = resolve(&paths, &m).unwrap();
+        assert_eq!(
+            r.mcp_env.keys().collect::<Vec<_>>(),
+            ["omh-codegraph"],
+            "{:?}",
+            r.mcp_env
+        );
+        assert_eq!(r.mcp_env["omh-codegraph"]["TOKEN"], "t");
+        assert_eq!(r.mcp_env["omh-codegraph"]["REGION"], "eu");
+    }
+
+    /// A `[use]` list naming one of omh's servers by the name it used to have
+    /// is refused as it was before the rename, rather than read as a server of
+    /// yours that nobody has.
+    #[test]
+    fn a_use_list_naming_a_servers_old_name_is_refused() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[use]\nmcp = [\"codegraph\"]\n",
+        );
+        let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+        assert!(err.contains("omh set codegraph off"), "{err}");
     }
 
     /// `[use]` is read from both repo files, and the later one replaces a

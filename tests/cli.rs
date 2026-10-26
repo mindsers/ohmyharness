@@ -764,7 +764,7 @@ fn upgrade_refreshes_omhs_own_servers() {
     std::fs::write(
         sb.home.join(".omh/mcp.json"),
         r#"{"mcpServers":{
-             "memory":{"command":"omh","args":["memory","serve","--team","/work/.omh/notes","--local","/omh/notes/local"]},
+             "omh-memory":{"command":"omh","args":["memory","serve","--team","/work/.omh/notes","--local","/omh/notes/local"]},
              "mine":{"command":"my-server","args":["--flag"]}}}"#,
     )
     .unwrap();
@@ -785,7 +785,7 @@ fn upgrade_refreshes_omhs_own_servers() {
     let doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
             .unwrap();
-    let args = doc["mcpServers"]["memory"]["args"].to_string();
+    let args = doc["mcpServers"]["omh-memory"]["args"].to_string();
     assert!(
         args.contains("--notes") && args.contains("/omh/memory") && !args.contains("--team"),
         "omh's own server follows the manifest: {args}"
@@ -802,6 +802,60 @@ fn upgrade_refreshes_omhs_own_servers() {
     assert!(
         said.contains("memory"),
         "and it says what it changed: {said}"
+    );
+}
+
+/// An install from before omh named its servers `omh-…` holds them under the
+/// old names, and `omh upgrade` moves them: a catalogue still saying `codegraph`
+/// beside a manifest saying `omh-codegraph` reads as the graph server removed by
+/// hand, which switches the whole feature off — and keeps a server named
+/// `codegraph` running as though it were yours.
+#[test]
+fn upgrade_moves_omhs_servers_onto_their_omh_names() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{
+             "codegraph":{"command":"codebase-memory-mcp"},
+             "memory":{"command":"omh","args":["memory","serve","--notes","/omh/memory"]},
+             "mine":{"command":"my-server","args":["--flag"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
+            .unwrap();
+    let names: Vec<&str> = doc["mcpServers"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        names,
+        ["mine", "omh-codegraph", "omh-memory"],
+        "every server of omh's under its new name, and only once: {doc}"
+    );
+    assert_eq!(
+        doc["mcpServers"]["omh-codegraph"]["command"],
+        "codebase-memory-mcp"
+    );
+    assert_eq!(doc["mcpServers"]["mine"]["command"], "my-server", "{doc}");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("`codegraph`") && said.contains("`omh-codegraph`"),
+        "and it says what it renamed: {said}"
     );
 }
 
@@ -6875,13 +6929,15 @@ fn settings_rm_refuses_a_hook_omh_ships_and_takes_one_of_yours() {
     assert!(!sb.home.join(".omh/hooks/mine.json").exists());
 }
 
-/// A server omh ships is refused, as a hook it ships is: `codegraph` and
-/// `memory` are omh's features, and a feature is switched off — whole, in a
-/// repo — rather than taken apart from your catalogue.
+/// A server omh ships is refused, as a hook it ships is: `omh-codegraph` and
+/// `omh-memory` are omh's features', and a feature is switched off — whole, in
+/// a repo — rather than taken apart from your catalogue.
 ///
 /// Every server a shipped manifest declares, read off `base/` rather than
 /// named here, so the next feature's server is held to it as well — and with
 /// `--yes` and `--dry-run` both, since the screen previews before it asks.
+/// Under every name it used to have too: a catalogue `omh upgrade` has not yet
+/// moved holds omh's server under one.
 #[test]
 fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
     let sb = sandbox();
@@ -6895,14 +6951,15 @@ fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
             .unwrap();
         for e in doc["entry"].as_array().unwrap() {
             if e["kind"].as_str() == Some("mcp") {
-                owned.push((
-                    e["name"].as_str().unwrap().to_string(),
-                    e["feature"].as_str().unwrap().to_string(),
-                ));
+                let feature = e["feature"].as_str().unwrap().to_string();
+                let was = e.get("was").and_then(|w| w.as_array()).cloned();
+                for name in std::iter::once(&e["name"]).chain(was.iter().flatten()) {
+                    owned.push((name.as_str().unwrap().to_string(), feature.clone()));
+                }
             }
         }
     }
-    for server in ["codegraph", "memory"] {
+    for server in ["omh-codegraph", "omh-memory", "codegraph", "memory"] {
         assert!(owned.iter().any(|(n, _)| n == server), "{owned:?}");
     }
     let mut servers = serde_json::Map::new();

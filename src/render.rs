@@ -2672,13 +2672,13 @@ mod tests {
         let owned = crate::selection::Owned::from([(
             Capability::Mcp,
             BTreeMap::from([
-                ("codegraph".to_string(), "codegraph".to_string()),
-                ("memory".to_string(), "memory".to_string()),
+                ("omh-codegraph".to_string(), "codegraph".to_string()),
+                ("omh-memory".to_string(), "memory".to_string()),
             ]),
         )]);
         let repo = crate::settings::RepoPolicy {
             selection: crate::selection::Selection::owning(owned),
-            disabled_servers: ["memory".to_string()].into(),
+            disabled_servers: ["omh-memory".to_string()].into(),
             ..Default::default()
         };
         let out = document(
@@ -2702,7 +2702,7 @@ mod tests {
         let allow: Vec<&str> = allow.iter().filter_map(|x| x.as_str()).collect();
         assert_eq!(
             allow,
-            vec!["mcp__codegraph"],
+            vec!["mcp__omh-codegraph"],
             "omh's own, and not the server whose feature is off here: {}",
             out.body
         );
@@ -4100,7 +4100,7 @@ try {{
         let said = drive_omp(
             &render(omp()),
             "tool_call",
-            r#"{ toolName: "write", input: { path: "xd://mcp__codegraph_list_projects", content: "{}" } }"#,
+            r#"{ toolName: "write", input: { path: "xd://mcp__omh_codegraph_list_projects", content: "{}" } }"#,
         );
         assert_eq!(
             said, "null",

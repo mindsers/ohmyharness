@@ -93,13 +93,14 @@ rather than the base set.
 version = "2026.08"
 
 [[entry]]
-name    = "codegraph"
+name    = "omh-codegraph"
 kind    = "mcp"                 # mcp | hook | rules
 feature = "codegraph"           # what it is part of; `[omh]` switches features, not entries
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
 remove  = "omh set codegraph off — the feature, its server and its hooks together…"
 command = "codebase-memory-mcp" # what init seeds; also the baseline `why` compares against
+was     = ["codegraph"]         # names it had before: `omh upgrade` renames them in your catalogue, and `[mcp.<old>.env]` still reaches it
 
   [[entry.measured]]
   what  = "to index this repo, cold"
@@ -207,7 +208,7 @@ authority this file exists to avoid.
 **Where a cost can be computed, it is.** `grep_nudge()` builds `graph-first`'s
 string from the same literals the hook ships, and a test recomputes it and fails
 if the manifest disagrees. The three rules sections, `git-note`'s note and the
-`memory` server's tool list are held the same way. That is the shape every
+`omh-memory` server's tool list are held the same way. That is the shape every
 in-process cost should take. The rest need a container, which is
 [`doctor`](/guides/troubleshooting/) territory — the same boundary that makes
 adapter paths unverifiable in-process.

@@ -895,11 +895,13 @@ pub(crate) fn current_list(
     let policy = settings::resolve(paths, &manifest)?;
     let file = config::Layer::Shared.file(paths);
     selection::validate_entry_name(name, cap, &file)?;
+    // Or a name one of them used to have, which is the feature's still.
     if let Some(feature) = manifest
         .owns()
         .get(&cap)
         .and_then(|owned| owned.get(name))
         .cloned()
+        .or_else(|| manifest.was_named(cap, name).map(|e| e.feature.clone()))
     {
         anyhow::bail!(
             "{cap}/{name} is omh's — part of the `{feature}` feature. `[use]` names \

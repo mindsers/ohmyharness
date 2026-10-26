@@ -2357,7 +2357,7 @@ pub struct Using {
     pub unselected: Vec<String>,
     /// What a feature supplies here, which `[use]` never names.
     ///
-    /// A feature owns its server, so `codegraph` and `memory` are excluded from
+    /// A feature owns its server, so `omh-codegraph` and `omh-memory` are excluded from
     /// the selection — and the row read `mcp  nothing` in a repo whose features
     /// block said `codegraph on` and `memory on` two lines above it, and whose
     /// `omh info` listed both in the catalogue. Three true statements, one of

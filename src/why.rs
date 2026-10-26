@@ -528,17 +528,21 @@ mod tests {
         let m = manifest();
         let c = catalog(
             &m,
-            vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
+            vec![setting(
+                "omh-codegraph",
+                "codebase-memory-mcp",
+                Layer::Shared,
+            )],
         );
-        assert!(matches!(c.why("codegraph"), Verdict::Omh { .. }));
+        assert!(matches!(c.why("omh-codegraph"), Verdict::Omh { .. }));
     }
 
     /// The state people actually want to know about after six months.
     #[test]
     fn a_changed_base_entry_reports_both_values() {
         let m = manifest();
-        let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
-        match c.why("codegraph") {
+        let c = catalog(&m, vec![setting("omh-codegraph", "my-fork", Layer::Local)]);
+        match c.why("omh-codegraph") {
             Verdict::Differs { ships, yours, .. } => {
                 assert_eq!(ships, "codebase-memory-mcp");
                 assert_eq!(yours.value, "my-fork");
@@ -554,7 +558,7 @@ mod tests {
     fn a_removed_base_entry_is_still_explained() {
         let m = manifest();
         let c = catalog(&m, vec![]);
-        assert!(matches!(c.why("codegraph"), Verdict::Removed { .. }));
+        assert!(matches!(c.why("omh-codegraph"), Verdict::Removed { .. }));
     }
 
     /// `graph-first` is not a hook that happens to mention the graph; it is
@@ -570,14 +574,18 @@ mod tests {
         for c in [
             catalog(&m, vec![setting("graph-first", "nudge", Layer::Shared)]),
             catalog(&m, vec![]),
-            catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]),
+            catalog(&m, vec![setting("omh-codegraph", "my-fork", Layer::Local)]),
             catalog(
                 &m,
-                vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
+                vec![setting(
+                    "omh-codegraph",
+                    "codebase-memory-mcp",
+                    Layer::Shared,
+                )],
             ),
         ] {
-            let name = if c.installed.iter().any(|s| s.key == "codegraph") {
-                "codegraph"
+            let name = if c.installed.iter().any(|s| s.key == "omh-codegraph") {
+                "omh-codegraph"
             } else {
                 "graph-first"
             };
@@ -764,10 +772,10 @@ mod tests {
         let m = manifest();
         let mut c = catalog(
             &m,
-            vec![setting("codegraph", "anything at all", Layer::Shared)],
+            vec![setting("omh-codegraph", "anything at all", Layer::Shared)],
         );
-        c.baselines.remove("codegraph");
-        assert!(matches!(c.why("codegraph"), Verdict::Omh { .. }));
+        c.baselines.remove("omh-codegraph");
+        assert!(matches!(c.why("omh-codegraph"), Verdict::Omh { .. }));
     }
 
     // ── rendering ────────────────────────────────────────────────────────────
@@ -777,9 +785,13 @@ mod tests {
         let m = manifest();
         let c = catalog(
             &m,
-            vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
+            vec![setting(
+                "omh-codegraph",
+                "codebase-memory-mcp",
+                Layer::Shared,
+            )],
         );
-        let out = render(&c, &c.why("codegraph"), "2026.08");
+        let out = render(&c, &c.why("omh-codegraph"), "2026.08");
 
         assert!(out.contains("omh's choice"), "{out}");
         assert!(
@@ -884,7 +896,7 @@ why = "w"
     #[test]
     fn staleness_is_measured_against_the_base_set_not_the_entrys_own_age() {
         let m = manifest();
-        let entry = m.entry("codegraph").unwrap();
+        let entry = m.entry("omh-codegraph").unwrap();
 
         let current = render(
             &catalog(&m, vec![]),
@@ -922,7 +934,7 @@ why = "w"
     #[test]
     fn the_method_is_shown_for_every_cost_not_only_stale_ones() {
         let m = manifest();
-        let entry = m.entry("codegraph").unwrap();
+        let entry = m.entry("omh-codegraph").unwrap();
         let out = render(
             &catalog(&m, vec![]),
             &Verdict::Removed { entry },
@@ -1034,8 +1046,8 @@ why = "w"
     #[test]
     fn a_differing_entry_pairs_each_value_with_its_own_label() {
         let m = manifest();
-        let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
-        let out = render(&c, &c.why("codegraph"), "2026.08");
+        let c = catalog(&m, vec![setting("omh-codegraph", "my-fork", Layer::Local)]);
+        let out = render(&c, &c.why("omh-codegraph"), "2026.08");
 
         let line = |label: &str| {
             out.lines()
@@ -1055,8 +1067,8 @@ why = "w"
     #[test]
     fn a_difference_never_claims_who_caused_it() {
         let m = manifest();
-        let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
-        let out = render(&c, &c.why("codegraph"), "2026.08");
+        let c = catalog(&m, vec![setting("omh-codegraph", "my-fork", Layer::Local)]);
+        let out = render(&c, &c.why("omh-codegraph"), "2026.08");
         assert!(
             !out.contains("modified by you") && !out.contains("you set"),
             "omh does not know who changed it:\n{out}"
@@ -1073,11 +1085,15 @@ why = "w"
         let m = manifest();
         let c = catalog(
             &m,
-            vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
+            vec![setting(
+                "omh-codegraph",
+                "codebase-memory-mcp",
+                Layer::Shared,
+            )],
         );
         let out = render_with_source(
             &c,
-            &c.why("codegraph"),
+            &c.why("omh-codegraph"),
             "2026.08",
             "/home/x/.omh/base/2026.08.toml · 2026.08",
         );
@@ -1116,7 +1132,7 @@ why = "w"
     fn a_removed_entry_says_how_to_get_it_back() {
         let m = manifest();
         let c = catalog(&m, vec![]);
-        let out = render(&c, &c.why("codegraph"), &m.version);
+        let out = render(&c, &c.why("omh-codegraph"), &m.version);
         assert!(out.contains("not installed here"), "{out}");
         assert!(out.contains("omh init"), "no way back:\n{out}");
     }

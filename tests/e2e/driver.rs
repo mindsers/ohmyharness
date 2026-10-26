@@ -152,14 +152,18 @@ pub const CODEX: Driver = Driver {
         ) } })
     },
     // Codex offers its MCP tools only through `tool_search`, which answers with
-    // each server's namespace — `mcp__codegraph` holding `list_projects` — and
-    // a call names both. Spelled flat, `mcp__codegraph__list_projects`, it is
+    // each server's namespace — `mcp__omh_codegraph` holding `list_projects` — and
+    // a call names both. Spelled flat, `mcp__omh_codegraph__list_projects`, it is
     // an `unsupported call`. Searching first is what a model would do, since
     // the search is how it learns the namespace.
+    //
+    // The namespace spells the server's `-` as `_`: `omh-memory` answers as
+    // `mcp__omh_memory`, and a call to `mcp__omh-memory` is an `unsupported
+    // call`. Measured at 0.162.1 when omh's servers took the `omh-` prefix.
     mcp: |server, tool_name, args| {
         vec![
             json!({ "item": { "type": "tool_search_call", "execution": "client", "arguments": { "query": format!("{server} {tool_name}"), "limit": 8 } } }),
-            json!({ "item": { "type": "function_call", "namespace": format!("mcp__{server}"), "name": tool_name, "arguments": args.to_string() } }),
+            json!({ "item": { "type": "function_call", "namespace": format!("mcp__{}", server.replace('-', "_")), "name": tool_name, "arguments": args.to_string() } }),
         ]
     },
     elsewhere: &[GRAPH_UPDATE_CHECK],
@@ -200,9 +204,11 @@ pub const OMP: Driver = Driver {
     },
     write: |file, contents| tool("write", json!({ "path": file, "content": contents, "i": "e2e" })),
     // omp lists MCP tools as paths: the model writes the call's arguments to
-    // `xd://mcp__<server>_<tool>`.
+    // `xd://mcp__<server>_<tool>`, with the server's `-` spelled `_` —
+    // `omh-memory`'s `recall` is mounted as `mcp__omh_memory_recall`, and
+    // `xd://mcp__omh-memory_recall` is `No such tool`. Measured at 18.10.4.
     mcp: |server, tool_name, args| {
-        vec![tool("write", json!({ "path": format!("xd://mcp__{server}_{tool_name}"), "content": args.to_string(), "i": "e2e" }))]
+        vec![tool("write", json!({ "path": format!("xd://mcp__{}_{tool_name}", server.replace('-', "_")), "content": args.to_string(), "i": "e2e" }))]
     },
     // And omp's model catalogue, which it fetches with no switch to stop it
     // and retries five minutes after a failure: there in some turns and not

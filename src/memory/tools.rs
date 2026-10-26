@@ -17,11 +17,14 @@ use std::path::PathBuf;
 /// What the server calls itself in the MCP handshake.
 pub const SERVER_NAME: &str = "omh-memory";
 
-/// What the base set and every `mcp.json` call it. Deliberately a separate
-/// constant from `SERVER_NAME`: one is a protocol identity, the other is a
-/// configuration key, and deriving one from the other by string surgery is how
-/// a rename silently stops matching.
-pub const SERVER_KEY: &str = "memory";
+/// The base-set feature this server is part of — what `[omh]` switches.
+///
+/// The feature, never the server's key in `mcp.json`: that key is whatever the
+/// manifest in `~/.omh/base` says, and it said `memory` until omh's servers
+/// were named `omh-…`. A constant naming the key matched one manifest and not
+/// the other, so a binary newer than its base set kept the note store mounted
+/// with the feature switched off.
+pub const FEATURE: &str = "memory";
 
 pub struct Server {
     /// The store: read by `recall`, written by `remember`.

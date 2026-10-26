@@ -604,9 +604,10 @@ explicit list makes, and this line is what stops it being silent.
 
 #### `mcp/codegraph is omh's`
 
-`codegraph` and `memory` are in `~/.omh/mcp.json` because `omh init` seeded them
-there, so they look exactly like servers you added. They are not selectable in
-either direction: a feature is its server, its hooks and its rules section
+`omh-codegraph` and `omh-memory` are in `~/.omh/mcp.json` because `omh init`
+seeded them there, so they look exactly like servers you added. They are not
+selectable in either direction, and neither are `codegraph` and `memory`, the
+names they had before `omh upgrade` renamed them: a feature is its server, its hooks and its rules section
 together, and keeping half of it is the one combination that manufactures
 confident wrong answers.
 

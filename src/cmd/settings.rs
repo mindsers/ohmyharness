@@ -472,9 +472,11 @@ pub(crate) fn say_what_still_switches(paths: &Paths, feature: &str, ctx: &out::C
 /// **Three vocabularies, and only one pair is disjoint.** Settings keys do not
 /// collide with feature names or entry names — `no_name_is_both_a_setting_and_a_feature`
 /// reads `key::KEYS` and every shipped manifest and fails the build if they
-/// ever do. Features and entries **overlap on purpose**: the manifest names a
-/// feature after its principal entry, so `codegraph` and `memory` are each
-/// both. That makes the order of the two manifest checks load-bearing, and
+/// ever do. Features and entries **may overlap**: a manifest can name a feature
+/// after its principal entry — the base set did, so `codegraph` and `memory`
+/// were each both until omh's servers were named `omh-…`, and a `~/.omh/base`
+/// an older omh wrote still says so. That makes the order of the two manifest
+/// checks load-bearing, and
 /// `a_feature_named_after_its_own_entry_resolves_as_the_feature` pins it —
 /// read as an entry, `omh set codegraph off` would be refused with
 /// `codegraph is part of the codegraph feature` and the feature would have no
@@ -538,11 +540,12 @@ pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
             return Names::Neither;
         }
     };
-    // Features before entries, and that order **is** load-bearing: the
-    // manifest names a feature after its principal entry, so `codegraph` and
-    // `memory` are each both. Read as an entry, `omh set codegraph off` would
-    // be refused with `codegraph is part of the codegraph feature` and the
-    // feature would have no spelling at all.
+    // Features before entries, and that order **is** load-bearing: a manifest
+    // may name a feature after its principal entry — the base set did, so
+    // `codegraph` and `memory` were each both until omh's servers were named
+    // `omh-…`, and a `~/.omh/base` an older omh wrote still does. Read as an
+    // entry, `omh set codegraph off` would be refused with `codegraph is part
+    // of the codegraph feature` and the feature would have no spelling at all.
     // `a_feature_named_after_its_own_entry_resolves_as_the_feature` pins it.
     if manifest.entries.iter().any(|e| e.feature == name) {
         return Names::AFeature;
@@ -1662,6 +1665,10 @@ pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, Str
 /// From the manifests in the binary, as [`shipped_hooks`] is from its hooks,
 /// rather than `~/.omh/base`: what omh owns is not a file that a stray or
 /// unreadable copy could make removable.
+///
+/// The names an entry used to have count too. A catalogue `omh upgrade` has
+/// not yet renamed still holds omh's server under one, and a server of yours
+/// taking one would be read as omh's by every repo's `[mcp.<name>.env]`.
 pub(crate) fn shipped_owned(
     cap: adapter::Capability,
 ) -> Result<std::collections::BTreeMap<String, String>> {
@@ -1669,7 +1676,11 @@ pub(crate) fn shipped_owned(
         .entries
         .into_iter()
         .filter(|e| e.kind.capability() == cap)
-        .map(|e| (e.name, e.feature))
+        .flat_map(|e| {
+            std::iter::once(e.name)
+                .chain(e.was)
+                .map(move |name| (name, e.feature.clone()))
+        })
         .collect())
 }
 

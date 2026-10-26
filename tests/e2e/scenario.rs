@@ -577,12 +577,15 @@ fn memory_round_trip(s: &Session) {
         "evidence": "image:current",
         "answers": ["what did the e2e suite record"],
     });
-    let wrote = s.turn("Remember it.", &(s.harness.mcp)("memory", "remember", note));
+    let wrote = s.turn(
+        "Remember it.",
+        &(s.harness.mcp)("omh-memory", "remember", note),
+    );
     ran(&wrote);
     let recalled = s.turn(
         "Recall it.",
         &(s.harness.mcp)(
-            "memory",
+            "omh-memory",
             "recall",
             serde_json::json!({ "question": "what did the e2e suite record" }),
         ),
@@ -606,7 +609,7 @@ fn code_graph_answers(s: &Session) {
     let project = format!("{}-s01", s.id);
     let turn = s.turn(
         "List the projects.",
-        &(s.harness.mcp)("codegraph", "list_projects", serde_json::json!({})),
+        &(s.harness.mcp)("omh-codegraph", "list_projects", serde_json::json!({})),
     );
     ran(&turn);
     let results = turn.results();
@@ -688,6 +691,18 @@ fn doctor(s: &Session) {
     assert!(
         failed.is_empty() && documents.iter().all(|d| d["ok"] == true),
         "omh doctor failed on {}: {failed:#?}\n{}",
+        s.harness.name,
+        crate::sandbox::text(&out)
+    );
+    // Asked, not merely not failed: doctor finds the memory server by the name
+    // the base set gives it, and one looking under another name finds nothing
+    // to probe — a row missing, which the assertion above reads as a pass.
+    assert!(
+        documents
+            .iter()
+            .flat_map(|d| d["checks"].as_array().into_iter().flatten())
+            .any(|c| c["name"] == "memory"),
+        "omh doctor never probed the memory server on {}: {}",
         s.harness.name,
         crate::sandbox::text(&out)
     );

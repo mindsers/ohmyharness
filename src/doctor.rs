@@ -3580,7 +3580,7 @@ mod tests {
         write(catalogue.join("subagents/explorer.md"), "a");
         write(
             catalogue.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"}}}"#,
         );
         Fx {
             _dir: dir,
@@ -3721,7 +3721,7 @@ mod tests {
         assert_eq!(
             mcp.expect,
             Expect::Mentions(vec![]),
-            "the only server in this profile is codegraph, and it is off here"
+            "the only server in this profile is omh-codegraph, and it is off here"
         );
     }
 
@@ -3807,7 +3807,7 @@ mod tests {
         write(paths.root.join("commands/ship.md"), "c");
         write(
             paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"}}}"#,
         );
 
         use std::os::unix::fs::PermissionsExt;
@@ -3856,7 +3856,7 @@ mod tests {
         };
         write(
             paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"}}}"#,
         );
         // A hook file that is not a hook. `render::document` parses every one
         // it is handed, so this is the readable-but-unusable case — the one a
@@ -3935,7 +3935,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx._dir.path().join("home/mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"},"linear":{"command":"l"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"linear":{"command":"l"}}}"#,
         )
         .unwrap();
         let (own, mut repo) = decided();
@@ -3960,8 +3960,8 @@ mod tests {
             .expect("claude stages mcp");
         assert_eq!(
             mcp.expect,
-            Expect::Mentions(vec!["codegraph".to_string()]),
-            "codegraph is omh's and always goes in; linear was not selected here"
+            Expect::Mentions(vec!["omh-codegraph".to_string()]),
+            "omh-codegraph is omh's and always goes in; linear was not selected here"
         );
         let loaded = got
             .iter()
@@ -3970,7 +3970,7 @@ mod tests {
         match &loaded.expect {
             Expect::Loaded { names, .. } => assert_eq!(
                 names,
-                &vec!["codegraph".to_string()],
+                &vec!["omh-codegraph".to_string()],
                 "the harness is asked only about servers it was given"
             ),
             other => panic!("mcp-loaded asks the harness, not {other:?}"),
@@ -4170,7 +4170,7 @@ mod tests {
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
 
         let mcp = cs.iter().find(|c| c.name == "mcp").unwrap();
-        assert_eq!(mcp.expect, Expect::Mentions(vec!["codegraph".into()]));
+        assert_eq!(mcp.expect, Expect::Mentions(vec!["omh-codegraph".into()]));
     }
 
     /// Regression: the check stripped `.md`, guessing at how a harness names a

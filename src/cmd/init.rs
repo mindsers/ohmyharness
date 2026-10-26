@@ -1082,7 +1082,17 @@ pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<Str
     // The catalogue's own entries, for the reason the files above are managed:
     // a shipped fix has to reach an existing install. Yours are untouched.
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    for name in config::refresh_own_servers(paths, &manifest.servers())? {
+    let refreshed =
+        config::refresh_own_servers(paths, &manifest.servers(), &manifest.retired_servers())?;
+    // `warn`, not `progress`, for the reason `say_what_moved_off_the_old_key`
+    // gives: a name in your file changed, once, and `--json` hides progress.
+    for (old, new) in &refreshed.renamed {
+        ctx.warn(&format!(
+            "renamed the `{old}` server in your catalogue to `{new}` — omh's own servers \
+             are named for omh now"
+        ));
+    }
+    for name in refreshed.changed {
         ctx.progress(&format!(
             "refreshed the `{name}` server in your catalogue — it is omh's own"
         ));

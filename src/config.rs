@@ -1108,9 +1108,27 @@ pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
 /// `--notes` — reached an existing install as a server that would not start.
 /// Adapters, the base set and the stacks are already managed this way; this is
 /// the same rule for the entries the manifest owns.
-pub fn refresh_own_servers(paths: &Paths, own: &BTreeMap<String, Server>) -> Result<Vec<String>> {
+///
+/// A server held under a name it used to have — `retired`, old to new — moves
+/// to the name it has now first, unless that name is already taken. The answer
+/// names those moves apart from the refreshes: a name in your file changed.
+pub fn refresh_own_servers(
+    paths: &Paths,
+    own: &BTreeMap<String, Server>,
+    retired: &BTreeMap<String, String>,
+) -> Result<Refreshed> {
     let path = mcp_path(paths);
     let mut all = read_servers(&path)?;
+    let mut renamed = Vec::new();
+    for (old, new) in retired {
+        if all.contains_key(new) {
+            continue;
+        }
+        if let Some(server) = all.remove(old) {
+            all.insert(new.clone(), server);
+            renamed.push((old.clone(), new.clone()));
+        }
+    }
     let mut changed = Vec::new();
     for (name, server) in own {
         // Only a server omh ships and the catalogue still holds: a name taken
@@ -1119,15 +1137,26 @@ pub fn refresh_own_servers(paths: &Paths, own: &BTreeMap<String, Server>) -> Res
             Some(theirs) if theirs == server => {}
             Some(_) => {
                 all.insert(name.clone(), server.clone());
-                changed.push(name.clone());
+                if !renamed.iter().any(|(_, new)| new == name) {
+                    changed.push(name.clone());
+                }
             }
             None => {}
         }
     }
-    if !changed.is_empty() {
+    if !changed.is_empty() || !renamed.is_empty() {
         write_servers(&path, &all)?;
     }
-    Ok(changed)
+    Ok(Refreshed { renamed, changed })
+}
+
+/// What [`refresh_own_servers`] did to the catalogue.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Refreshed {
+    /// Old name, new name.
+    pub renamed: Vec<(String, String)>,
+    /// Servers whose definition went back to the manifest's.
+    pub changed: Vec<String>,
 }
 
 pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
@@ -1963,6 +1992,46 @@ mod tests {
         let (_d, paths) = fixture();
         assert!(policy(&paths).unwrap().is_empty());
         assert!(servers(&paths).unwrap().is_empty());
+    }
+
+    /// A server under a name omh's used to have moves to the name it has now —
+    /// unless that name is already taken, in which case the file holds two
+    /// servers and moving one would write over the other.
+    #[test]
+    fn a_server_moves_off_an_old_name_only_onto_a_free_one() {
+        let (_d, paths) = fixture();
+        let server = |c: &str| Server {
+            command: c.into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        };
+        let own = BTreeMap::from([("omh-codegraph".to_string(), server("cbm"))]);
+        let retired = BTreeMap::from([("codegraph".to_string(), "omh-codegraph".to_string())]);
+
+        seed(
+            &paths,
+            Layer::Personal,
+            "mcp.json",
+            r#"{"mcpServers":{"codegraph":{"command":"cbm"}}}"#,
+        );
+        let done = refresh_own_servers(&paths, &own, &retired).unwrap();
+        assert_eq!(
+            done.renamed,
+            [("codegraph".to_string(), "omh-codegraph".to_string())]
+        );
+        let held = read_servers(&mcp_path(&paths)).unwrap();
+        assert_eq!(held.keys().collect::<Vec<_>>(), ["omh-codegraph"]);
+
+        seed(
+            &paths,
+            Layer::Personal,
+            "mcp.json",
+            r#"{"mcpServers":{"codegraph":{"command":"mine"},"omh-codegraph":{"command":"cbm"}}}"#,
+        );
+        let done = refresh_own_servers(&paths, &own, &retired).unwrap();
+        assert_eq!(done, Refreshed::default());
+        let held = read_servers(&mcp_path(&paths)).unwrap();
+        assert_eq!(held["codegraph"].command, "mine", "{held:?}");
     }
 
     #[test]

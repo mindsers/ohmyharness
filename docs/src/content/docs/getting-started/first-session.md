@@ -166,8 +166,8 @@ The full report, with its last sections:
   this repo  /Users/you/code/your-project/.omh  (committed)
 
   base set (2026.08)
-    codegraph  structural queries instead of re-grepping the repo every task
-    memory     what a session learned outlives it — a removed session leaves no transcript to grep
+    omh-codegraph  structural queries instead of re-grepping the repo every task
+    omh-memory     what a session learned outlives it — a removed session leaves no transcript to grep
 
   omh why <name>  what it costs, what was considered instead, how to remove it
 

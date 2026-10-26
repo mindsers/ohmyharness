@@ -25,7 +25,7 @@
 //! loud.
 //!
 //! **A feature is not selectable, in any capability.** `init` seeds
-//! `manifest.servers()` into `~/.omh/mcp.json`, so `codegraph` and `memory` sit
+//! `manifest.servers()` into `~/.omh/mcp.json`, so `omh-codegraph` and `omh-memory` sit
 //! there looking exactly like servers you added. Naming one in `[use].mcp`
 //! without its hooks — or quietly omitting it — is a bundle taken apart, which
 //! is the state `settings.rs` makes unrepresentable rather than warning about,
@@ -65,7 +65,7 @@ enum Chosen {
 ///
 /// **`Default` is test-only**, the arrangement `base::Own` already uses. A
 /// defaulted `Selection` knows nothing of what omh owns, so it treats
-/// `codegraph` as an ordinary catalogue entry — the one state this type exists
+/// `omh-codegraph` as an ordinary catalogue entry — the one state this type exists
 /// to prevent, and the one `settings.rs` writes a comment forbidding three
 /// lines above a struct that derived it. `owning` is the only door in.
 #[cfg_attr(test, derive(Default))]
@@ -86,7 +86,7 @@ pub struct Selection {
     ///   which is a different file and needs its own guard.
     ///
     /// The feature rather than a bare set, because the useful half of refusing
-    /// `[use] mcp = ["codegraph"]` is saying *which switch* does work.
+    /// `[use] mcp = ["omh-codegraph"]` is saying *which switch* does work.
     owned: Owned,
 }
 
@@ -311,7 +311,10 @@ mod tests {
         BTreeMap::from([
             (
                 Capability::Mcp,
-                BTreeMap::from([entry("codegraph", "codegraph"), entry("memory", "memory")]),
+                BTreeMap::from([
+                    entry("omh-codegraph", "codegraph"),
+                    entry("omh-memory", "memory"),
+                ]),
             ),
             (
                 Capability::Hooks,
@@ -457,7 +460,7 @@ mod tests {
 
     /// `[use]` names *your* entries. omh's belong to `[omh]`, and the rule holds
     /// across every capability rather than for hooks alone: `init` seeds
-    /// `codegraph` and `memory` into `~/.omh/mcp.json`, where they look exactly
+    /// `omh-codegraph` and `omh-memory` into `~/.omh/mcp.json`, where they look exactly
     /// like servers you added.
     ///
     /// Selecting one without its hooks — or omitting it from a list that names
@@ -465,7 +468,7 @@ mod tests {
     /// combination `settings.rs` refuses to let anybody express.
     #[test]
     fn a_name_omh_owns_is_not_selectable_in_any_capability() {
-        for (cap, name) in [("mcp", "codegraph"), ("hooks", "graph-first")] {
+        for (cap, name) in [("mcp", "omh-codegraph"), ("hooks", "graph-first")] {
             let err = refused(&[(cap, &[name])]);
             assert!(err.contains(name), "must name it: {err}");
             assert!(
@@ -480,8 +483,8 @@ mod tests {
     #[test]
     fn an_empty_selection_leaves_omhs_own_alone() {
         let s = selection(&[("mcp", &[]), ("hooks", &[])]);
-        assert!(s.allows(Capability::Mcp, "codegraph"));
-        assert!(s.allows(Capability::Mcp, "memory"));
+        assert!(s.allows(Capability::Mcp, "omh-codegraph"));
+        assert!(s.allows(Capability::Mcp, "omh-memory"));
         assert!(s.allows(Capability::Hooks, "graph-first"));
         assert!(
             !s.allows(Capability::Mcp, "linear"),
@@ -539,7 +542,7 @@ mod tests {
         assert!(s
             .unselected(
                 Capability::Mcp,
-                &["codegraph".into(), "memory".into(), "linear".into()]
+                &["omh-codegraph".into(), "omh-memory".into(), "linear".into()]
             )
             .is_empty());
     }

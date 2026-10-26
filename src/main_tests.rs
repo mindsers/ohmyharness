@@ -2049,6 +2049,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/rules.rs", 1),
         ("src/selection.rs", 1),
         ("src/session.rs", 4),
+        ("src/settings.rs", 1),
         ("src/shadow.rs", 11),
         // The config include header and the known_hosts header, both naming
         // `omh s attach` as what rewrites them.
@@ -4110,7 +4111,7 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
     // absence that was there before the setting was written.
     write(
         paths.root.join("mcp.json"),
-        r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"}}}"#,
+        r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"omh-memory":{"command":"omh"}}}"#,
     );
 
     let (own, _) = cmd::session::resolved(&paths).unwrap();
@@ -4126,7 +4127,7 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
 
     write(
         paths.repo.join(".omh/settings.toml"),
-        "[omh]\ncodegraph = false\n\n[mcp.memory.env]\nOMH_TEST = \"seen\"\n",
+        "[omh]\ncodegraph = false\n\n[mcp.omh-memory.env]\nOMH_TEST = \"seen\"\n",
     );
     let (off, policy) = cmd::session::resolved(&paths).unwrap();
     assert!(
@@ -4143,14 +4144,14 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
     // between them was asserted nowhere, so deleting it left the suite
     // green and a token reached no server.
     assert_eq!(
-        policy.mcp_env["memory"]["OMH_TEST"], "seen",
+        policy.mcp_env["omh-memory"]["OMH_TEST"], "seen",
         "a per-repo MCP environment has to reach the plan too"
     );
     // And the half that used to hang off `Own`: switching a feature off is
     // what drops its server from the document, and it is a fact about this
     // repo rather than about what omh generates.
     assert!(
-        policy.disabled_servers.contains("codegraph"),
+        policy.disabled_servers.contains("omh-codegraph"),
         "the feature's server travels with the feature: {:?}",
         policy.disabled_servers
     );
@@ -5733,15 +5734,15 @@ fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
 
 /// A feature named after its own entry resolves as the feature.
 ///
-/// The shipped manifest does this deliberately — `codegraph` is an mcp
-/// entry *and* the feature containing it — so the two manifest lookups in
-/// `names` are ordered, not disjoint. Reversing them refuses
-/// `omh set codegraph off` with a sentence naming `codegraph` as part of
-/// `codegraph`, and the feature keeps no spelling at all.
+/// The shipped manifest did this until omh's servers were named `omh-…` —
+/// `codegraph` was an mcp entry *and* the feature containing it — and a base
+/// set in `~/.omh/base` that an older omh wrote still does. So the two
+/// manifest lookups in `names` are ordered, not disjoint. Reversing them
+/// refuses `omh set codegraph off` with a sentence naming `codegraph` as part
+/// of `codegraph`, and the feature keeps no spelling at all.
 ///
-/// The end-to-end test that would catch a swap today does so only as a
-/// side effect of asserting a happy path, and would stop covering it the
-/// moment somebody rewrote that assertion.
+/// Its own manifest rather than the shipped one, which no longer collides:
+/// read off the shipped data, this asserted nothing from the day it stopped.
 #[test]
 fn a_feature_named_after_its_own_entry_resolves_as_the_feature() {
     let dir = tempfile::tempdir().unwrap();
@@ -5751,33 +5752,22 @@ fn a_feature_named_after_its_own_entry_resolves_as_the_feature() {
     };
     std::fs::create_dir_all(paths.base()).unwrap();
     std::fs::create_dir_all(&paths.repo).unwrap();
-    for f in bundled::Shipped::Base.files() {
-        std::fs::write(paths.base().join(f.name), f.contents).unwrap();
-    }
+    std::fs::write(
+        paths.base().join("2026.08.toml"),
+        "version = \"2026.08\"\n[[entry]]\nname = \"codegraph\"\nkind = \"mcp\"\n\
+         feature = \"codegraph\"\nsince = \"2026.06\"\nbecause = \"b\"\nremove = \"r\"\n\
+         command = \"c\"\n",
+    )
+    .unwrap();
 
-    let manifest = base::Manifest::load_dir(&paths.base()).unwrap();
-    let both: Vec<&str> = manifest
-        .entries
-        .iter()
-        .filter(|e| e.name == e.feature)
-        .map(|e| e.name.as_str())
-        .collect();
     assert!(
-        !both.is_empty(),
-        "no feature is named after its own entry, so this test asserts \
-         nothing — if that is deliberate, the ordering comment in `names` \
-         is what needs changing"
+        matches!(
+            cmd::settings::names(&paths, "codegraph", &out::Ctx::plain()),
+            cmd::settings::Names::AFeature
+        ),
+        "`codegraph` is both a feature and an entry, and only the feature \
+         reading leaves it a spelling"
     );
-    for name in both {
-        assert!(
-            matches!(
-                cmd::settings::names(&paths, name, &out::Ctx::plain()),
-                cmd::settings::Names::AFeature
-            ),
-            "`{name}` is both a feature and an entry, and only the feature \
-             reading leaves it a spelling"
-        );
-    }
 }
 
 /// If the two vocabularies ever did collide, the setting wins.

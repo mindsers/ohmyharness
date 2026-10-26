@@ -68,6 +68,14 @@ pub struct Entry {
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Names this entry shipped under before, which are still read as it.
+    ///
+    /// An install keeps the name it was seeded with in `~/.omh/mcp.json`, and
+    /// a repo keeps it in `[mcp.<name>.env]`. Read as nobody's, the first
+    /// looks like omh's server taken out by hand — which switches its feature
+    /// off — and the second overrides a server that is not there.
+    #[serde(default)]
+    pub was: Vec<String>,
     #[serde(default)]
     pub measured: Vec<Measured>,
     #[serde(default)]
@@ -354,6 +362,26 @@ impl Manifest {
 
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// The entry of `cap` that used to be called `name`.
+    ///
+    /// Apart from [`Self::owns`] on purpose: what `owns` answers is also what
+    /// Claude may run unasked and Codex approves, and an old name in a
+    /// catalogue is not omh's server once `omh upgrade` has moved it.
+    pub fn was_named(&self, cap: crate::adapter::Capability, name: &str) -> Option<&Entry> {
+        self.entries
+            .iter()
+            .find(|e| e.kind.capability() == cap && e.was.iter().any(|w| w == name))
+    }
+
+    /// Every name a server of omh's used to have, to the name it has now.
+    pub fn retired_servers(&self) -> BTreeMap<String, String> {
+        self.entries
+            .iter()
+            .filter(|e| e.kind == Kind::Mcp)
+            .flat_map(|e| e.was.iter().map(|old| (old.clone(), e.name.clone())))
+            .collect()
     }
 
     /// Every name omh owns, by capability, each pointing at its feature.
@@ -1444,7 +1472,7 @@ mod tests {
     #[test]
     fn removing_a_feature_server_stops_generating_the_rest_of_it() {
         let manifest = shipped();
-        let installed = BTreeSet::from(["memory".to_string()]);
+        let installed = BTreeSet::from(["omh-memory".to_string()]);
         let own = own(&manifest, &BTreeSet::new(), &installed).unwrap();
 
         assert!(
@@ -1756,18 +1784,18 @@ command = "c"
             .as_object()
             .expect("an mcpServers object");
         assert!(!servers.is_empty(), "init would seed an empty base set");
-        assert_eq!(servers["codegraph"]["command"], GRAPH_BIN);
+        assert_eq!(servers["omh-codegraph"]["command"], GRAPH_BIN);
     }
 
     #[test]
     fn the_base_set_ships_a_code_graph() {
         let s = shipped().servers();
         assert!(
-            s.contains_key("codegraph"),
+            s.contains_key("omh-codegraph"),
             "got: {:?}",
             s.keys().collect::<Vec<_>>()
         );
-        assert_eq!(s["codegraph"].command, GRAPH_BIN);
+        assert_eq!(s["omh-codegraph"].command, GRAPH_BIN);
     }
 
     /// The manifest's arguments and the launcher's mounts have to name the
@@ -1785,7 +1813,7 @@ command = "c"
     fn the_memory_server_is_pointed_at_the_store_omh_mounts() {
         let manifest = shipped();
         let entry = manifest
-            .entry("memory")
+            .entry("omh-memory")
             .expect("the memory server is in the manifest");
         let args = entry.args.clone();
         assert!(
@@ -1793,6 +1821,22 @@ command = "c"
                 .any(|w| w[0] == "--notes" && w[1] == crate::memory::GUEST_MEMORY),
             "the server must read the directory omh mounts: {args:?}"
         );
+    }
+
+    /// `omh doctor` finds the memory server as the one server of the feature
+    /// `memory::tools::FEATURE` names, and the launcher mounts the note store by
+    /// that feature: a feature of another name, or two servers in it, and the
+    /// probe asks the wrong one or none.
+    #[test]
+    fn the_memory_feature_has_exactly_one_server() {
+        let manifest = shipped();
+        let servers: Vec<&str> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::Mcp && e.feature == crate::memory::tools::FEATURE)
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(servers.len(), 1, "{servers:?}");
     }
 
     /// A hand-typed byte count in this file has already been wrong by 5x — the
@@ -1821,7 +1865,7 @@ command = "c"
         let declared = shipped()
             .entries
             .iter()
-            .find(|e| e.name == "memory")
+            .find(|e| e.name == "omh-memory")
             .expect("the memory entry")
             .measured
             .iter()
@@ -1856,6 +1900,20 @@ command = "c"
                 );
             }
         }
+    }
+
+    /// A server omh ships is named for omh in every harness, so a policy can
+    /// tell it from one a session added: an allowlist is keyed by name, and a
+    /// bare `memory` is also what half the MCP servers people install call
+    /// themselves.
+    #[test]
+    fn every_server_omh_ships_is_named_for_omh() {
+        let unprefixed: Vec<String> = shipped()
+            .servers()
+            .into_keys()
+            .filter(|name| !name.starts_with("omh-"))
+            .collect();
+        assert!(unprefixed.is_empty(), "not named `omh-…`: {unprefixed:?}");
     }
 
     /// Every entry has to be able to answer "why is this here", and the answer

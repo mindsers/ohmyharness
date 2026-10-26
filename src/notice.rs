@@ -160,7 +160,7 @@ fn record_path(paths: &Paths) -> PathBuf {
 /// only itself.
 ///
 /// omh's own are excluded from both by [`crate::selection::Selection`] itself,
-/// so a `codegraph` sitting in the catalogue's `mcp.json` is never reported as
+/// so an `omh-codegraph` sitting in the catalogue's `mcp.json` is never reported as
 /// something `omh use` could fix — `omh use` refuses to write it.
 pub fn selection(
     profile: &crate::profile::Profile,
@@ -656,7 +656,7 @@ mod tests {
     }
 
     /// omh's own live in the catalogue's `mcp.json` and are governed by `[omh]`.
-    /// Reporting one as unselected would advise `omh use mcp codegraph`, which
+    /// Reporting one as unselected would advise `omh use mcp omh-codegraph`, which
     /// `omh use` refuses to write — a report pointing at a wall.
     #[test]
     fn omhs_own_servers_are_never_reported_as_unselected() {
@@ -664,7 +664,7 @@ mod tests {
         std::fs::create_dir_all(&fx.paths.root).unwrap();
         std::fs::write(
             fx.paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"omh-memory":{"command":"omh"},
                               "linear":{"command":"l"}}}"#,
         )
         .unwrap();
