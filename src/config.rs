@@ -1110,8 +1110,10 @@ pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
 /// the same rule for the entries the manifest owns.
 ///
 /// A server held under a name it used to have — `retired`, old to new — moves
-/// to the name it has now first, unless that name is already taken. The answer
-/// names those moves apart from the refreshes: a name in your file changed.
+/// to the name it has now first, unless that name is already taken: then both
+/// stay, and the answer says so, since the old name is omh's and every command
+/// but this one reads it that way. The answer names the moves apart from the
+/// refreshes: a name in your file changed.
 pub fn refresh_own_servers(
     paths: &Paths,
     own: &BTreeMap<String, Server>,
@@ -1120,8 +1122,12 @@ pub fn refresh_own_servers(
     let path = mcp_path(paths);
     let mut all = read_servers(&path)?;
     let mut renamed = Vec::new();
+    let mut kept = Vec::new();
     for (old, new) in retired {
         if all.contains_key(new) {
+            if all.contains_key(old) {
+                kept.push((old.clone(), new.clone()));
+            }
             continue;
         }
         if let Some(server) = all.remove(old) {
@@ -1147,7 +1153,11 @@ pub fn refresh_own_servers(
     if !changed.is_empty() || !renamed.is_empty() {
         write_servers(&path, &all)?;
     }
-    Ok(Refreshed { renamed, changed })
+    Ok(Refreshed {
+        renamed,
+        changed,
+        kept,
+    })
 }
 
 /// What [`refresh_own_servers`] did to the catalogue.
@@ -1157,6 +1167,9 @@ pub struct Refreshed {
     pub renamed: Vec<(String, String)>,
     /// Servers whose definition went back to the manifest's.
     pub changed: Vec<String>,
+    /// Old name, new name: held under the old name and not moved, because the
+    /// new one was taken.
+    pub kept: Vec<(String, String)>,
 }
 
 pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
@@ -1228,7 +1241,8 @@ fn read_servers(path: &Path) -> Result<BTreeMap<String, Server>> {
 fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> {
     std::fs::create_dir_all(path.parent().unwrap())?;
     let doc = serde_json::json!({ "mcpServers": servers });
-    std::fs::write(path, serde_json::to_string_pretty(&doc)? + "\n")?;
+    std::fs::write(path, serde_json::to_string_pretty(&doc)? + "\n")
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -2041,7 +2055,14 @@ mod tests {
             r#"{"mcpServers":{"codegraph":{"command":"mine"},"omh-codegraph":{"command":"cbm"}}}"#,
         );
         let done = refresh_own_servers(&paths, &own, &retired).unwrap();
-        assert_eq!(done, Refreshed::default());
+        assert_eq!(
+            done,
+            Refreshed {
+                kept: vec![("codegraph".to_string(), "omh-codegraph".to_string())],
+                ..Refreshed::default()
+            },
+            "left, and said so"
+        );
         let held = read_servers(&mcp_path(&paths)).unwrap();
         assert_eq!(held["codegraph"].command, "mine", "{held:?}");
     }

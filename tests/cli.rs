@@ -859,6 +859,61 @@ fn upgrade_moves_omhs_servers_onto_their_omh_names() {
     );
 }
 
+/// What `omh upgrade` does to your catalogue's copies of omh's servers is said
+/// on stderr, under `--json` too: a rename, a definition of yours put back to
+/// omh's, and a rename it could not make because the new name was taken —
+/// which left a server under a name that is omh's, and said nothing.
+#[test]
+fn upgrade_names_every_change_to_omhs_servers_even_under_json() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    let catalogue = sb.home.join(".omh/mcp.json");
+
+    std::fs::write(
+        &catalogue,
+        r#"{"mcpServers":{
+             "codegraph":{"command":"codebase-memory-mcp"},
+             "omh-memory":{"command":"omh","args":["memory","serve","--edited"]}}}"#,
+    )
+    .unwrap();
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("`codegraph`") && said.contains("`omh-codegraph`"),
+        "the rename: {said}"
+    );
+    assert!(said.contains("`omh-memory`"), "the edit put back: {said}");
+
+    std::fs::write(
+        &catalogue,
+        r#"{"mcpServers":{
+             "codegraph":{"command":"mine"},
+             "omh-codegraph":{"command":"codebase-memory-mcp"}}}"#,
+    )
+    .unwrap();
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.lines().any(|l| l.contains("left")
+            && l.contains("`codegraph`")
+            && l.contains("`omh-codegraph`")),
+        "the server left under omh's old name, beside the one it would have moved onto: {said}"
+    );
+}
+
 /// Notes committed under `<repo>/.omh/notes` are not read, and omh says so
 /// rather than leaving somebody to wonder where their store went.
 ///

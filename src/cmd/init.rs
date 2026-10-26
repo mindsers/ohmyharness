@@ -1092,9 +1092,19 @@ pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<Str
              are named for omh now"
         ));
     }
+    // `warn` too: a definition you edited was just written over.
     for name in refreshed.changed {
-        ctx.progress(&format!(
-            "refreshed the `{name}` server in your catalogue — it is omh's own"
+        ctx.warn(&format!(
+            "put omh's definition back over the `{name}` server in your catalogue — \
+             it is omh's own"
+        ));
+    }
+    for (old, new) in &refreshed.kept {
+        ctx.warn(&format!(
+            "left the `{old}` server in your catalogue: `{new}` is already there, and \
+             `{old}` is a name omh's server used to have, so omh reads it as `{new}`'s. \
+             Rename or remove it in {}",
+            config::mcp_path(paths).display()
         ));
     }
     Ok(adapters)
