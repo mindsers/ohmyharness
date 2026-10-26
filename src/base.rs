@@ -10,8 +10,8 @@
 //! same one — a benchmark over a stochastic metric would have dressed the second
 //! as the first, which is why there isn't one.
 //!
-//! The manifest is the single source of truth: `omh init` seeds from it and
-//! `omh why` explains from it, so they cannot disagree.
+//! The manifest is the single source of truth: every launch generates from it
+//! and `omh why` explains from it, so they cannot disagree.
 
 use crate::hook::Field;
 use crate::render::Server;
@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 
 /// The base set as data.
 ///
-/// `omh init` seeds from this and `omh why` explains from it, so the two cannot
-/// disagree about what is installed or why. Keeping the rationale in a shipped
+/// Every launch generates from this and `omh why` explains from it, so the two
+/// cannot disagree about what is installed or why. Keeping the rationale in a shipped
 /// file rather than in the binary also means the opinion is reviewable by the
 /// people it is imposed on.
 #[derive(Debug, Default, Deserialize)]
@@ -62,8 +62,7 @@ pub struct Entry {
     pub because: String,
     /// A default nobody can leave is a cage.
     pub remove: String,
-    /// For `mcp` entries: what `init` seeds. Also the baseline that decides
-    /// whether the user's copy counts as modified.
+    /// For `mcp` entries: the command every launch runs the server as.
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -71,13 +70,11 @@ pub struct Entry {
     /// Names this entry shipped under before. Servers only, each name one
     /// entry's alone and nobody's now — `check_names` refuses anything else.
     ///
-    /// An install keeps the name it was seeded with in `~/.omh/mcp.json`, and
-    /// a repo keeps it in `[mcp.<name>.env]`. Read as nobody's, the first
-    /// looks like omh's server taken out by hand — which switches its feature
-    /// off — and the second overrides a server that is not there. So `init`
-    /// and `upgrade` move a catalogue key onto the entry's name, an env table
-    /// under one reaches the entry, and the name stays omh's everywhere a name
-    /// could be yours ([`Manifest::reserved`]). It is not in
+    /// A `~/.omh/mcp.json` an earlier omh seeded holds a copy under one, and
+    /// `init` and `upgrade` take it out by that name as by the current one.
+    /// The name stays omh's everywhere a name could be yours
+    /// ([`Manifest::reserved`]): refused by `[use]`, `omh use`, `settings mcp
+    /// add`, `rm` and `import`, and as `[mcp.<name>.env]`. It is not in
     /// [`Manifest::owns`]: nothing under it is run or approved as omh's.
     #[serde(default)]
     pub was: Vec<String>,
@@ -372,7 +369,8 @@ impl Manifest {
         }
     }
 
-    /// The MCP servers `omh init` seeds, built from the manifest.
+    /// The MCP servers the manifest declares — what [`own`] generates for the
+    /// features on, and what `upgrade` tells a stale copy's edits by.
     ///
     /// There is no second definition in code to disagree with this one — that
     /// was the point of moving the base set into a file.
@@ -519,7 +517,7 @@ pub const GRAPH_BIN: &str = "codebase-memory-mcp";
 
 // The MCP servers and their rationale are not here: they are
 // `Manifest::servers()` and `Manifest::rationale()`, read from the base-set
-// file. One file that `init` seeds from and `why` explains from cannot
+// file. One file that launches generate from and `why` explains from cannot
 // contradict itself; a hardcoded list beside it can.
 
 /// The graph UI runs **once per repo**, not once per session.
@@ -1768,10 +1766,9 @@ command = "c"
         assert_eq!(Manifest::load_dir(dir.path()).unwrap().version, "2027.10");
     }
 
-    /// The failure `the_document_init_seeds_actually_contains_the_base_set`
-    /// describes, arriving through the runtime path that test cannot see: a
-    /// manifest that parses but names nothing seeds an empty base set while
-    /// hooks still point at a server that is not installed.
+    /// A manifest that parses but names nothing is an empty base set: every
+    /// session comes up without a graph, and "no MCP servers" is a legitimate
+    /// state nothing downstream questions.
     #[test]
     fn a_manifest_naming_nothing_is_an_error_not_an_empty_base_set() {
         let dir = manifest_dir(&[("2026.08.toml", "version = \"2026.08\"\n")]);
@@ -1869,29 +1866,8 @@ command = "c"
         assert_eq!(
             declared,
             manifest.servers().len(),
-            "an mcp entry is missing its `command` and would seed nothing"
+            "an mcp entry is missing its `command` and would generate nothing"
         );
-    }
-
-    /// Exactly the document `init` writes into the shared layer.
-    ///
-    /// A manifest that parses but yields an empty server map is silent on both
-    /// sides: init reports success, and every new sandbox simply comes up
-    /// without a graph. Nothing downstream notices, because "no MCP servers
-    /// configured" is a legitimate state.
-    #[test]
-    fn the_document_init_seeds_actually_contains_the_base_set() {
-        let manifest = shipped();
-        let body =
-            serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))
-                .unwrap();
-
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let servers = parsed["mcpServers"]
-            .as_object()
-            .expect("an mcpServers object");
-        assert!(!servers.is_empty(), "init would seed an empty base set");
-        assert_eq!(servers["omh-codegraph"]["command"], GRAPH_BIN);
     }
 
     #[test]

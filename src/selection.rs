@@ -24,10 +24,10 @@
 //! configured. `"*"` is "keep following the catalogue as it grows", said out
 //! loud.
 //!
-//! **A feature is not selectable, in any capability.** `init` seeds
-//! `manifest.servers()` into `~/.omh/mcp.json`, so `omh-codegraph` and `omh-memory` sit
-//! there looking exactly like servers you added. Naming one in `[use].mcp`
-//! without its hooks — or quietly omitting it — is a bundle taken apart, which
+//! **A feature is not selectable, in any capability.** Its server, hooks and
+//! rules section are generated together at launch, and none is an entry of
+//! your catalogue. Naming one in `[use]` without the rest — or quietly
+//! omitting it — is a bundle taken apart, which
 //! is the state `settings.rs` makes unrepresentable rather than warning about,
 //! and the state that shipped broken once when the graph hooks kept firing
 //! against a server dropped from the document. `[omh]` is the switch for those.
@@ -467,9 +467,9 @@ mod tests {
     }
 
     /// `[use]` names *your* entries. omh's belong to `[omh]`, and the rule holds
-    /// across every capability rather than for hooks alone: `init` seeds
-    /// `omh-codegraph` and `omh-memory` into `~/.omh/mcp.json`, where they look exactly
-    /// like servers you added.
+    /// across every capability rather than for hooks alone: `omh-codegraph`
+    /// and `omh-memory` are servers, named like servers you add, and generated
+    /// with their features rather than chosen from your catalogue.
     ///
     /// Selecting one without its hooks — or omitting it from a list that names
     /// the servers around it — is a feature taken apart, which is the one
