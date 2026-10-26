@@ -189,9 +189,9 @@ pub fn parse_layers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
 /// read it; doctor re-deriving the retains is how it once demanded servers the
 /// launch had deliberately left out.
 ///
-/// omh's go in last, so a name your catalogue also holds — `mcp.json` is
-/// yours to edit, and one written before omh stopped seeding it still has
-/// them — is omh's definition, never yours.
+/// A name of omh's in your catalogue — `mcp.json` is yours to edit, and one
+/// written before omh stopped seeding it still holds copies — is dropped
+/// before omh's own go in, so the harness is handed omh's definition, once.
 pub fn servers(
     sources: &[PathBuf],
     own: &crate::base::Own,
