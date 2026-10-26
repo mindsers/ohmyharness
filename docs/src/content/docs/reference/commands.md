@@ -1839,14 +1839,15 @@ omh why <thing>
 | `<thing>` | a base-set entry, something you added, something omh rejected, or a settings key |
 
 ```console
-$ omh why omh-codegraph
+$ omh why codegraph
 ```
 
-```text title="omh why omh-codegraph"
+```text title="omh why codegraph"
 omh-codegraph — omh's choice, in the base set since 2026.06
 
   because     structural queries instead of re-grepping the repo every task
   part of     codegraph
+  brings      graph-orient, graph-first, graph-read, graph-refresh, graph-rules
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
               3.4 MB on disk                   measured 2026-08-06
@@ -1862,8 +1863,8 @@ omh-codegraph — omh's choice, in the base set since 2026.06
 
 **Everything omh ships belongs to a feature**, and removal follows the feature:
 `omh set codegraph off` takes the server and its four hooks together.
-`omh why codegraph` answers for the feature, listing everything it gathers;
-`omh why graph-first` answers "part of codegraph" from the other direction, and
+`omh why codegraph` and `omh why omh-codegraph` are the same question and get
+this answer; `omh why graph-first` answers "part of codegraph" from the other direction, and
 says `(off here)` when this repo has switched the feature off in
 `.omh/settings.toml`.
 

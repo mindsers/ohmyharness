@@ -142,7 +142,7 @@ that tells the agent it exists.
 |---|---|
 | **removal** | `omh set codegraph off` takes the feature, its server and its hooks together. A test runs every `remove` command and asserts the feature ends up off |
 | **disabling** | `[omh] codegraph = false` in `<repo>/.omh/settings.toml`. Per repo, and nothing is uninstalled — your `mcp.json` is untouched and the next repo gets it back |
-| **explaining** | `omh why graph-first` answers "part of codegraph"; `omh why codegraph` lists what it brought |
+| **explaining** | `omh why graph-first` answers "part of codegraph"; `omh why codegraph` — or `omh-codegraph`, the same thing — lists what it brought |
 
 **`[omh]` takes feature names only.** `graph-first = false` is refused, naming
 the feature it belongs to — which is also how the grouping is discoverable

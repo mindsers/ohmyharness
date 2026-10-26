@@ -119,6 +119,17 @@ pub enum Verdict<'a> {
 
 impl<'a> Catalog<'a> {
     pub fn why(&'a self, name: &str) -> Verdict<'a> {
+        // A feature with a server is that server: `codegraph` and
+        // `omh-codegraph` are one thing and get one answer.
+        let name = match self.manifest.entry(name) {
+            Some(_) => name,
+            None => self
+                .manifest
+                .entries
+                .iter()
+                .find(|e| e.kind == crate::base::Kind::Mcp && e.feature == name)
+                .map_or(name, |e| e.name.as_str()),
+        };
         let entry = self.manifest.entry(name);
         let yours = self.installed.iter().find(|s| s.key == name);
 
@@ -272,9 +283,10 @@ fn costs(entry: &Entry, version: &str, out: &mut String) {
 ///
 /// Both halves or neither: "part of codegraph" is only half an answer in a
 /// repo where codegraph is switched off, and that is exactly the repo where
-/// somebody is asking. A feature's own entry also lists what it brought,
+/// somebody is asking. A feature's server also lists what it brought,
 /// because the question "what does removing this take with it" has no other
-/// answer once the grouping stopped being a comment.
+/// answer once the grouping stopped being a comment — and the server is what
+/// `omh why <feature>` answers with.
 fn feature(catalog: &Catalog, entry: &Entry, out: &mut String) {
     let off = if catalog.off.contains(&entry.feature) {
         "   (off here)"
@@ -290,7 +302,7 @@ fn feature(catalog: &Catalog, entry: &Entry, out: &mut String) {
         .filter(|e| e.feature == entry.feature && e.name != entry.name)
         .map(|e| e.name.as_str())
         .collect();
-    if entry.name == entry.feature && !brings.is_empty() {
+    if entry.kind == crate::base::Kind::Mcp && !brings.is_empty() {
         out.push_str(&format!("  {:<11} {}\n", "brings", brings.join(", ")));
     }
 }
@@ -718,6 +730,33 @@ mod tests {
         for name in ["graph-orient", "graph-first", "graph-read", "graph-refresh"] {
             assert!(out.contains(name), "{name} is part of codegraph: {out}");
         }
+    }
+
+    /// A feature and its server are one thing, so they get one answer — the
+    /// server's case and everything the feature brings — whichever name is
+    /// typed.
+    #[test]
+    fn a_feature_and_its_server_answer_the_same() {
+        let m = manifest();
+        let c = catalog(
+            &m,
+            vec![
+                setting("omh-codegraph", "codebase-memory-mcp", Layer::Shared),
+                setting("omh-memory", "omh", Layer::Shared),
+            ],
+        );
+        for (feature, server) in [("codegraph", "omh-codegraph"), ("memory", "omh-memory")] {
+            let by_feature = render(&c, &c.why(feature), "2026.08");
+            assert_eq!(by_feature, render(&c, &c.why(server), "2026.08"));
+            assert!(by_feature.contains("because"), "{by_feature}");
+        }
+        let out = render(&c, &c.why("codegraph"), "2026.08");
+        assert!(
+            out.lines().any(|l| l.trim_start().starts_with("brings")
+                && l.contains("graph-orient")
+                && l.contains("graph-rules")),
+            "{out}"
+        );
     }
 
     /// The load-bearing case: omh must not claim authorship of your choices.

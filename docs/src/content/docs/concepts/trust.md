@@ -100,11 +100,12 @@ did what it said?"* — and because the answer is not "the tests pass."
 Provenance extended from *where* to *why*.
 
 ```console
-$ omh why omh-codegraph
+$ omh why codegraph
 omh-codegraph — omh's choice, in the base set since 2026.06
 
   because     structural queries instead of re-grepping the repo every task
   part of     codegraph
+  brings      graph-orient, graph-first, graph-read, graph-refresh, graph-rules
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
               3.4 MB on disk                   measured 2026-08-06
