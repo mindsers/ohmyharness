@@ -3368,6 +3368,40 @@ mod tests {
         );
     }
 
+    /// A catalogue `omh upgrade` has not cleaned still holds what an earlier
+    /// omh seeded: the graph server under its old name, and an edited copy
+    /// under its new one. Neither is staged — the harness is handed omh's
+    /// definition, once — and a server of yours beside them is untouched.
+    #[test]
+    fn copies_of_omhs_servers_in_your_catalogue_are_never_staged() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},
+                              "omh-codegraph":{"command":"my-fork"},
+                              "linear":{"command":"npx"}}}"#,
+        )
+        .unwrap();
+        let p = plan_for(&fx, "claude");
+        assert_eq!(
+            staged_servers(&p),
+            ["linear", "omh-codegraph", "omh-memory"],
+            "no second graph server under the old name"
+        );
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".mcp.json"))
+            .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mount.host).unwrap()).unwrap();
+        assert_eq!(
+            doc["mcpServers"]["omh-codegraph"]["command"],
+            crate::base::GRAPH_BIN,
+            "omh's definition, not the copy: {doc}"
+        );
+    }
+
     /// Every part of a feature follows its switch, on every harness, and none
     /// of it comes from your catalogue.
     ///
