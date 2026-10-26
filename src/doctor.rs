@@ -3612,8 +3612,7 @@ mod tests {
         off: std::collections::BTreeSet<String>,
     ) -> (crate::base::Own, crate::settings::RepoPolicy) {
         let manifest = base_manifest();
-        let installed = manifest.servers().into_keys().collect();
-        let own = crate::base::own(manifest, &off, &installed).unwrap();
+        let own = crate::base::own(manifest, &off).unwrap();
         (
             own,
             crate::settings::RepoPolicy::switching_off(manifest, off),

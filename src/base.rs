@@ -1039,6 +1039,13 @@ fn note_taking() -> String {
 pub struct Own {
     pub hooks: Vec<Hook>,
     pub sections: Vec<Section>,
+    /// omh's MCP servers, for the features on here, by name — generated from
+    /// the manifest at launch like the hooks and the sections, and never read
+    /// from your catalogue. Seeded into `~/.omh/mcp.json`, a server was the one
+    /// part of a feature you could edit or delete on its own, and a deleted
+    /// one took the hooks and the rules section with it while the rest of the
+    /// feature stayed mounted.
+    pub servers: BTreeMap<String, crate::render::Server>,
     /// Every hook name the manifest owns, whether or not its feature is on.
     ///
     /// A file in a layer answering to one of these is never read. With the
@@ -1057,47 +1064,18 @@ pub struct Own {
 /// combination that manufactures confident wrong answers — so it is
 /// unrepresentable rather than warned about.
 ///
-/// Two ways a feature is off, and they are different acts:
-///
-/// - **switched off here**, by `[omh]`. Nothing is uninstalled.
-/// - **removed**, by its server leaving your profile — `mcp.json` edited by
-///   hand, since `omh settings rm` refuses omh's own servers. The hooks and the
-///   rules section go with it, and nothing but `mcp.json` changed — so that is
-///   kept here or nowhere. Before generation the hooks were files and removing
-///   the server left four of them behind; generating them unconditionally
-///   would have rebuilt that defect with no file left to delete.
-///
-/// `installed` is the servers the resolved profile declares. A feature with no
-/// server of its own — `git-notice` — is unaffected by it.
+/// One way a feature is off: `[omh]`. Every part of it is generated here —
+/// server, hooks, section — so there is no part a catalogue could hold, edit or
+/// take away on its own. There used to be a second way, a server deleted from
+/// `mcp.json` by hand, and it was half of one: the hooks and the section went,
+/// the index volume stayed mounted, and `omh info --repo` still said `on`.
 ///
 /// Fails rather than filters when the binary ships a hook or a section this
 /// manifest does not describe. That is omh disagreeing with itself, not a
 /// preference somebody expressed, and the two were the same silent `false`:
 /// the entry was not generated *and* `reserved` blocked any layer file from
 /// standing in, so it existed nowhere and nothing said so.
-pub fn own(
-    manifest: &Manifest,
-    off: &BTreeSet<String>,
-    installed: &BTreeSet<String>,
-) -> Result<Own> {
-    // A feature keeps its non-server parts only while a server it owns is
-    // still there. `any` rather than `all`: a feature with two servers and one
-    // removed is a judgement nothing here can make, and keeping it is the
-    // conservative half.
-    let gone: BTreeSet<&str> = manifest
-        .entries
-        .iter()
-        .filter(|e| e.kind == Kind::Mcp)
-        .fold(BTreeMap::<&str, bool>::new(), |mut acc, e| {
-            let present = installed.contains(&e.name);
-            *acc.entry(e.feature.as_str()).or_insert(false) |= present;
-            acc
-        })
-        .into_iter()
-        .filter(|(_, present)| !present)
-        .map(|(feature, _)| feature)
-        .collect();
-
+pub fn own(manifest: &Manifest, off: &BTreeSet<String>) -> Result<Own> {
     let on = |name: &str| -> Result<bool> {
         let entry = manifest.entry(name).with_context(|| {
             format!(
@@ -1105,12 +1083,21 @@ pub fn own(
                 manifest.source()
             )
         })?;
-        Ok(!off.contains(&entry.feature) && !gone.contains(entry.feature.as_str()))
+        Ok(!off.contains(&entry.feature))
     };
 
     let mut own = Own {
         hooks: Vec::new(),
         sections: Vec::new(),
+        servers: manifest
+            .servers()
+            .into_iter()
+            .filter(|(name, _)| {
+                manifest
+                    .entry(name)
+                    .is_some_and(|e| !off.contains(&e.feature))
+            })
+            .collect(),
         // Every hook the manifest owns, on or off — which is why this is built
         // from the manifest rather than from `hooks()`. A file answering to one
         // of these is never read, and with the feature off there would be
@@ -1530,22 +1517,17 @@ mod tests {
         }
     }
 
-    /// A feature's server gone from `mcp.json` has to take the hooks and the
-    /// rules section with it. Before generation the four hooks were files and
-    /// removing the server left them behind, nudging the agent toward
-    /// something that was gone; generation would have reintroduced exactly
-    /// that, because what omh generates was decided by the manifest alone.
-    ///
-    /// `omh settings rm` refuses omh's own servers now, but `mcp.json` is
-    /// yours to edit. A guard on the *string* of the `remove` field — which is
-    /// what shipped first — passed just as happily when the instruction did
-    /// nothing, so this asserts the behaviour instead.
+    /// A feature off here takes every part omh generates for it — its server
+    /// as much as its hooks and its section — and leaves the other features
+    /// whole. The server is generated, never read from a catalogue, so there
+    /// is no way to take it without the rest.
     #[test]
-    fn removing_a_feature_server_stops_generating_the_rest_of_it() {
+    fn a_feature_off_generates_none_of_its_parts() {
         let manifest = shipped();
-        let installed = BTreeSet::from(["omh-memory".to_string()]);
-        let own = own(&manifest, &BTreeSet::new(), &installed).unwrap();
+        let off = BTreeSet::from(["codegraph".to_string()]);
+        let own = own(&manifest, &off).unwrap();
 
+        assert_eq!(own.servers.keys().collect::<Vec<_>>(), ["omh-memory"]);
         assert!(
             !own.hooks.iter().any(|h| h.name.starts_with("graph-")),
             "no graph hook may outlive its server: {:?}",
@@ -1555,13 +1537,19 @@ mod tests {
             !own.sections.iter().any(|s| s.name == "graph-rules"),
             "and neither may the section telling the agent to query it"
         );
-        assert!(
-            own.sections.iter().any(|s| s.name == "memory-rules"),
-            "memory is still installed, so its section stays"
-        );
-        assert!(
-            own.sections.iter().any(|s| s.name == "git-rules"),
-            "git-notice has no server to remove, so nothing about it changes"
+        assert!(own.sections.iter().any(|s| s.name == "memory-rules"));
+        assert!(own.sections.iter().any(|s| s.name == "git-rules"));
+    }
+
+    /// Every server the manifest declares is generated while its feature is
+    /// on, with the manifest's definition — there is nowhere else it comes
+    /// from.
+    #[test]
+    fn every_feature_on_generates_the_manifests_servers() {
+        let manifest = shipped();
+        assert_eq!(
+            own(&manifest, &BTreeSet::new()).unwrap().servers,
+            manifest.servers()
         );
     }
 
@@ -1579,7 +1567,7 @@ mod tests {
         let dir = manifest_dir(&[("2026.08.toml", &format!("version = \"2026.08\"{ONE_ENTRY}"))]);
         let manifest = Manifest::load_dir(dir.path()).unwrap();
 
-        let err = own(&manifest, &BTreeSet::new(), &BTreeSet::new())
+        let err = own(&manifest, &BTreeSet::new())
             .expect_err("the binary ships hooks this manifest never mentions");
         let err = format!("{err:#}");
         assert!(err.contains("graph-refresh"), "must name it: {err}");

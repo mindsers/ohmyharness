@@ -240,18 +240,9 @@ impl Selection {
         self.owner(cap, name).is_some()
     }
 
-    /// Every entry of this capability omh owns, in name order.
-    ///
-    /// What a *feature* brings, whatever this repo selected: `[use]` names
-    /// your entries and never omh's. A feature switched off here is still
-    /// owned — the caller that cares (the servers Claude may run unasked)
-    /// checks `disabled_servers` for that.
-    pub fn omhs(&self, cap: Capability) -> Vec<&str> {
-        self.owned
-            .get(&cap)
-            .into_iter()
-            .flat_map(|entries| entries.keys().map(String::as_str))
-            .collect()
+    /// Is this name never yours — omh's own, or one its entries used to have?
+    pub fn is_reserved(&self, cap: Capability, name: &str) -> bool {
+        self.is_omhs(cap, name) || self.retired.get(&cap).is_some_and(|r| r.contains_key(name))
     }
 
     /// The feature that owns `name`, if omh does.
@@ -580,7 +571,7 @@ mod tests {
             .unselected(Capability::Mcp, &["memory".into(), "linear".into()])
             .is_empty());
         assert!(!s.allows(Capability::Mcp, "memory"));
-        assert!(!s.omhs(Capability::Mcp).contains(&"memory"));
+        assert!(!s.is_omhs(Capability::Mcp, "memory"));
     }
 
     #[test]

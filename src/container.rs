@@ -1351,11 +1351,7 @@ mod tests {
     fn decided_from(fx: &Fx) -> (crate::base::Own, crate::settings::RepoPolicy) {
         let manifest = base_manifest();
         let repo = crate::settings::resolve(&fx.paths, manifest).unwrap();
-        let installed = manifest.servers().into_keys().collect();
-        (
-            crate::base::own(manifest, &repo.off, &installed).unwrap(),
-            repo,
-        )
+        (crate::base::own(manifest, &repo.off).unwrap(), repo)
     }
 
     /// The shipped manifest, parsed once. Same reason `hook::tests::shipped`
@@ -1366,16 +1362,13 @@ mod tests {
         CELL.get_or_init(|| crate::base::Manifest::load_dir(Path::new(BASE)).unwrap())
     }
 
-    /// Every server the manifest names is treated as installed unless a case
-    /// is about removal: `own` switches a feature off when its server is gone
-    /// from the profile, and a fixture that declared none would silently
-    /// disable everything.
+    /// What omh contributes and what this repo decided, with `off` switched
+    /// off and nothing else said.
     fn decided_with(
         off: std::collections::BTreeSet<String>,
     ) -> (crate::base::Own, crate::settings::RepoPolicy) {
         let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
-        let installed = manifest.servers().into_keys().collect();
-        let own = crate::base::own(&manifest, &off, &installed).unwrap();
+        let own = crate::base::own(&manifest, &off).unwrap();
         // Through the same constructor `settings::resolve` uses, so a fixture
         // cannot hold a different opinion about which servers a feature owns.
         (
@@ -2723,7 +2716,11 @@ mod tests {
         .unwrap();
         selects(&fx, "mcp = [\"linear\"]\n");
 
-        assert_eq!(staged_servers(&plan_for(&fx, "claude")), vec!["linear"]);
+        assert_eq!(
+            staged_servers(&plan_for(&fx, "claude")),
+            vec!["linear", "omh-codegraph", "omh-memory"],
+            "yours as named, and omh's, which `[use]` does not name"
+        );
         assert!(
             std::fs::read_to_string(fx.paths.root.join("mcp.json"))
                 .unwrap()
@@ -3324,7 +3321,6 @@ mod tests {
         std::fs::write(dir.path().join("2026.08.toml"), older).unwrap();
         let manifest = crate::base::Manifest::load_dir(dir.path()).unwrap();
         let off: std::collections::BTreeSet<String> = ["memory".to_string()].into();
-        let installed = manifest.servers().into_keys().collect();
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
@@ -3340,7 +3336,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: Some(bin),
                 base: None,
-                omh: crate::base::own(&manifest, &off, &installed).unwrap(),
+                omh: crate::base::own(&manifest, &off).unwrap(),
                 repo: crate::settings::RepoPolicy::switching_off(&manifest, off),
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
@@ -3355,6 +3351,121 @@ mod tests {
             "no note store: {:?}",
             p.mounts
         );
+    }
+
+    /// Every part of a feature follows its switch, on every harness, and none
+    /// of it comes from your catalogue.
+    ///
+    /// Each part is found by something only it puts in what the sandbox is
+    /// handed: a file staged for the harness, or a mount. A hook this harness
+    /// cannot express counts as there when the launch names it dropped — that
+    /// is the honest outcome for it, and a switch that turned it off would
+    /// remove the name from that list too.
+    ///
+    /// The catalogue holds none of omh's servers on purpose. Seeded into it,
+    /// they were the one part a user could edit or delete on its own — and a
+    /// server deleted by hand took the hooks and the rules section with it
+    /// while the index volume stayed mounted.
+    #[test]
+    fn every_part_of_a_feature_follows_its_switch_on_every_harness() {
+        type Part = (&'static str, fn(&Plan, &str) -> bool);
+        let staged = |p: &Plan| -> String {
+            p.mounts
+                .iter()
+                .filter(|m| m.file && m.host.is_file())
+                .filter_map(|m| std::fs::read_to_string(&m.host).ok())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mounted = |p: &Plan, guest: &str| p.mounts.iter().any(|m| m.guest == Path::new(guest));
+        let dropped = |p: &Plan, hook: &str| p.dropped_hooks.iter().any(|d| d.name == hook);
+        // A server entry, in JSON or in Codex's TOML — not merely the name:
+        // Claude's `permissions.allow` spells `mcp__<name>` whether or not the
+        // document it approves carries the server.
+        fn serves(staged: &str, name: &str) -> bool {
+            staged.contains(&format!("\"{name}\":"))
+                || staged.contains(&format!("mcp_servers.{name}"))
+        }
+        let features: [(&str, Vec<Part>); 2] = [
+            (
+                crate::base::GRAPH_FEATURE,
+                vec![
+                    ("omh-codegraph", |_, s| serves(s, "omh-codegraph")),
+                    ("graph-refresh", |_, s| s.contains("index_repository")),
+                    ("graph-orient", |_, s| s.contains("get_architecture")),
+                    ("graph-rules", |_, s| {
+                        s.contains("This repo is indexed as a graph")
+                    }),
+                    ("graph-cache", |p, _| {
+                        p.mounts
+                            .iter()
+                            .any(|m| m.guest == Path::new(crate::base::GRAPH_CACHE))
+                    }),
+                ],
+            ),
+            (
+                crate::memory::tools::FEATURE,
+                vec![
+                    ("omh-memory", |_, s| serves(s, "omh-memory")),
+                    ("memory-rules", |_, s| s.contains("## Which graph to ask")),
+                    ("note store", |p, _| {
+                        p.mounts
+                            .iter()
+                            .any(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+                    }),
+                    ("server binary", |p, _| {
+                        p.mounts
+                            .iter()
+                            .any(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN))
+                    }),
+                ],
+            ),
+        ];
+        // The two graph nudges, which some harnesses cannot express.
+        let nudges = [
+            ("graph-first", "This repo has a code graph"),
+            ("graph-read", "is large. For one symbol"),
+        ];
+
+        for harness in ["claude", "codex", "omp", "opencode"] {
+            for (feature, parts) in &features {
+                for on in [true, false] {
+                    let fx = fixture();
+                    let bin = fake_server_binary(&fx);
+                    let switch = if on {
+                        String::new()
+                    } else {
+                        format!("\n[omh]\n{feature} = false\n")
+                    };
+                    std::fs::write(
+                        fx.paths.repo.join(".omh/settings.toml"),
+                        format!("carry_in = [\".env\"]\n{switch}"),
+                    )
+                    .unwrap();
+                    let p = plan_with_memory_bin(&fx, harness, Some(bin));
+                    let text = staged(&p);
+                    for (part, present) in parts {
+                        assert_eq!(
+                            present(&p, &text),
+                            on,
+                            "{harness}: `{part}` with {feature} {}",
+                            if on { "on" } else { "off" }
+                        );
+                    }
+                    if *feature == crate::base::GRAPH_FEATURE {
+                        for (hook, says) in nudges {
+                            assert_eq!(
+                                text.contains(says) || dropped(&p, hook),
+                                on,
+                                "{harness}: `{hook}` with {feature} {}",
+                                if on { "on" } else { "off" }
+                            );
+                        }
+                    }
+                    let _ = mounted;
+                }
+            }
+        }
     }
 
     /// A feature off in this repo takes its server, its hooks and its section
