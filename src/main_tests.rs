@@ -2060,7 +2060,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // the box that names a new entry.
         // + `omh init` in help's line for space.
         ("src/tui.rs", 4),
-        ("src/why.rs", 3),
+        ("src/why.rs", 1),
     ]
     .into_iter()
     .map(|(f, n)| (f.to_string(), n))

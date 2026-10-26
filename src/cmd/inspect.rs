@@ -691,20 +691,10 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
 
     let manifest = base::Manifest::load_dir(&paths.base())?;
 
-    // Servers and hooks are the same kind of thing here: installed, from a
-    // layer, chosen by omh or by you.
+    // Servers and hooks of yours, from the layer each won in. omh's are not
+    // among them: its features are generated, and answered for by the manifest.
     let mut installed = config::servers(&paths)?;
     installed.extend(config::hooks(&paths)?);
-
-    // What omh ships, for deciding whether your copy has been changed. MCP
-    // servers only: hooks and rules sections are generated at launch, so there
-    // is nothing of yours to compare — a file of that name is a leftover, and
-    // the `Generated` verdict names it as one rather than as your edit.
-    let baselines: std::collections::BTreeMap<String, String> = manifest
-        .entries
-        .iter()
-        .filter_map(|e| e.command.clone().map(|c| (e.name.clone(), c)))
-        .collect();
 
     // Hooks that belong to a detected ecosystem are omh's opinion about that
     // ecosystem, not about this repo. Reported as neither the base set nor
@@ -747,7 +737,6 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
     let catalog = why::Catalog {
         off: settings::resolve(&paths, &manifest)?.off,
         manifest: &manifest,
-        baselines,
         installed,
         derived,
     };
