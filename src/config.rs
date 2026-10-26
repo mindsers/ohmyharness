@@ -1136,10 +1136,10 @@ pub fn refresh_own_servers(
         match all.get(name) {
             Some(theirs) if theirs == server => {}
             Some(_) => {
+                // Renamed or not: a definition you edited is overwritten
+                // either way, and the rename line does not say so.
                 all.insert(name.clone(), server.clone());
-                if !renamed.iter().any(|(_, new)| new == name) {
-                    changed.push(name.clone());
-                }
+                changed.push(name.clone());
             }
             None => {}
         }
@@ -2019,8 +2019,20 @@ mod tests {
             done.renamed,
             [("codegraph".to_string(), "omh-codegraph".to_string())]
         );
+        assert!(done.changed.is_empty(), "the definition was already omh's");
         let held = read_servers(&mcp_path(&paths)).unwrap();
         assert_eq!(held.keys().collect::<Vec<_>>(), ["omh-codegraph"]);
+
+        // Moved and put back: an edit of yours is overwritten, and said so.
+        seed(
+            &paths,
+            Layer::Personal,
+            "mcp.json",
+            r#"{"mcpServers":{"codegraph":{"command":"edited"}}}"#,
+        );
+        let done = refresh_own_servers(&paths, &own, &retired).unwrap();
+        assert_eq!(done.renamed.len(), 1);
+        assert_eq!(done.changed, ["omh-codegraph"]);
 
         seed(
             &paths,
