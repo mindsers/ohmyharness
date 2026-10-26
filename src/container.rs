@@ -662,21 +662,26 @@ pub fn plan(
         });
     }
 
-    // The graph index, keyed by repo rather than harness — that is what lets
-    // it survive a container rebuild and a switch from Claude Code to opencode.
-    mounts.push(Mount {
-        host: PathBuf::from(paths.cache_volume()),
-        guest: PathBuf::from(crate::base::GRAPH_CACHE),
-        read_only: false,
-        file: false,
-    });
-
     // A feature is all or nothing, and that has to reach the mounts rather
     // than stopping at the documents. With `memory` off the agent was still
     // given a writable store it is never told about and a server binary
     // nothing spawns — the half-configured state the design calls
-    // unrepresentable.
+    // unrepresentable. `codegraph` kept its index volume the same way.
+    let graph_on = !opts.repo.off.contains(crate::base::GRAPH_FEATURE);
     let memory_on = !opts.repo.off.contains(crate::memory::tools::FEATURE);
+
+    // The graph index, keyed by repo rather than harness — that is what lets
+    // it survive a container rebuild and a switch from Claude Code to opencode.
+    // The volume is not removed when the feature is off, only not mounted, so
+    // switching it back on finds the index where it was.
+    if graph_on {
+        mounts.push(Mount {
+            host: PathBuf::from(paths.cache_volume()),
+            guest: PathBuf::from(crate::base::GRAPH_CACHE),
+            read_only: false,
+            file: false,
+        });
+    }
 
     // The local note store, keyed by repo like the graph cache and for the
     // same reason: it must survive a container rebuild, a harness switch and
@@ -3417,6 +3422,16 @@ mod tests {
         assert!(
             !composed_rules(&p).contains("This repo is indexed as a graph"),
             "no graph section"
+        );
+        // And the index volume, which only the server reads: mounted with the
+        // feature off, it is a writable cache nothing in the session is told
+        // about — the half the memory store already had taken away.
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.guest == Path::new(crate::base::GRAPH_CACHE)),
+            "no graph index: {:?}",
+            p.mounts
         );
     }
 

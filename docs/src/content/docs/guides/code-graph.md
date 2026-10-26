@@ -89,8 +89,9 @@ Five things were wrong, none findable from the documentation.
   `omh settings rm` refuses it.
 
 Switching the hooks off means switching off the graph. The server, its four
-hooks and its section of the rules are one feature, `codegraph`, removed and
-disabled together. There is deliberately no way to keep the graph and drop
+hooks, its section of the rules and the index volume's mount are one feature,
+`codegraph`, removed and disabled together. The volume itself stays, so
+switching the feature back on finds the index where it was. There is deliberately no way to keep the graph and drop
 `graph-refresh`, because that is the combination that manufactures confident
 wrong answers.
 

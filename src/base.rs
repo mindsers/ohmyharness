@@ -471,6 +471,12 @@ impl Manifest {
     }
 }
 
+/// The base-set feature the graph server is part of — what `[omh]` switches,
+/// and so what decides whether [`GRAPH_CACHE`] is mounted. The feature rather
+/// than the server's name, for `memory::tools::FEATURE`'s reason: the name is
+/// whatever `~/.omh/base` says.
+pub const GRAPH_FEATURE: &str = "codegraph";
+
 /// Where the graph server keeps its index inside the sandbox.
 ///
 /// Mounted from a volume keyed by **repo**, not by harness, so the index
@@ -1921,19 +1927,22 @@ command = "c"
     }
 
     /// `omh doctor` finds the memory server as the one server of the feature
-    /// `memory::tools::FEATURE` names, and the launcher mounts the note store by
-    /// that feature: a feature of another name, or two servers in it, and the
-    /// probe asks the wrong one or none.
+    /// `memory::tools::FEATURE` names, and the launcher mounts the note store
+    /// and the graph index by `FEATURE` and `GRAPH_FEATURE`: a feature of
+    /// another name and the mount is gated on a switch nothing flips; two
+    /// servers in it and the probe asks the wrong one or none.
     #[test]
-    fn the_memory_feature_has_exactly_one_server() {
+    fn the_features_mounts_are_keyed_on_have_exactly_one_server() {
         let manifest = shipped();
-        let servers: Vec<&str> = manifest
-            .entries
-            .iter()
-            .filter(|e| e.kind == Kind::Mcp && e.feature == crate::memory::tools::FEATURE)
-            .map(|e| e.name.as_str())
-            .collect();
-        assert_eq!(servers.len(), 1, "{servers:?}");
+        for feature in [crate::memory::tools::FEATURE, GRAPH_FEATURE] {
+            let servers: Vec<&str> = manifest
+                .entries
+                .iter()
+                .filter(|e| e.kind == Kind::Mcp && e.feature == feature)
+                .map(|e| e.name.as_str())
+                .collect();
+            assert_eq!(servers.len(), 1, "{feature}: {servers:?}");
+        }
     }
 
     /// A hand-typed byte count in this file has already been wrong by 5x — the
