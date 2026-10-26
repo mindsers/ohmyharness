@@ -204,10 +204,6 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
 pub struct RepoPolicy {
     /// Features switched off here. Nothing is uninstalled.
     pub off: BTreeSet<String>,
-    /// Servers to drop from the rendered document even though `mcp.json` still
-    /// lists them — the servers those switched-off features own. The file is
-    /// left exactly as the user has it, and the next repo gets them back.
-    pub disabled_servers: BTreeSet<String>,
     /// Per-repo MCP environment, by server name, from `[mcp.<name>.env]`.
     ///
     /// An override rather than a redeclaration, which is the whole point: a
@@ -241,18 +237,10 @@ pub struct RepoPolicy {
 impl RepoPolicy {
     /// The policy of a repo that switched off exactly these features.
     ///
-    /// Public because the fixtures in `container` and `doctor` need it: a test
-    /// that builds `disabled_servers` by hand is a second opinion about which
-    /// servers a feature owns, and it can be wrong in the same direction as the
-    /// code. One derivation, and `resolve` goes through it too.
+    /// Public because the fixtures in `container` and `doctor` need it, and
+    /// `resolve` goes through it too: one derivation of what omh owns.
     pub fn switching_off(manifest: &Manifest, off: BTreeSet<String>) -> Self {
         Self {
-            disabled_servers: manifest
-                .entries
-                .iter()
-                .filter(|e| e.kind == crate::base::Kind::Mcp && off.contains(&e.feature))
-                .map(|e| e.name.clone())
-                .collect(),
             off,
             mcp_env: BTreeMap::new(),
             // Empty of choices but *not* of what omh owns. A `Selection::default()`

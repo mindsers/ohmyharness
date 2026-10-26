@@ -4146,13 +4146,12 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
         policy.mcp_env["omh-memory"]["OMH_TEST"], "seen",
         "a per-repo MCP environment has to reach the plan too"
     );
-    // And the half that used to hang off `Own`: switching a feature off is
-    // what drops its server from the document, and it is a fact about this
-    // repo rather than about what omh generates.
-    assert!(
-        policy.disabled_servers.contains("omh-codegraph"),
-        "the feature's server travels with the feature: {:?}",
-        policy.disabled_servers
+    // And the server: generated with the rest of the feature, so switched off
+    // with it.
+    assert_eq!(
+        off.servers.keys().collect::<Vec<_>>(),
+        ["omh-memory"],
+        "the feature's server travels with the feature"
     );
 }
 

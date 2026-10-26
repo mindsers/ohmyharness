@@ -1688,7 +1688,7 @@ pub fn checks(
             Render::Concat => Expect::NonEmptyFile,
             Render::Dir => Expect::Entries(entry_names(&sources, capability, repo)?),
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-                Expect::Mentions(server_names(&sources, repo)?)
+                Expect::Mentions(server_names(&sources, own, repo)?)
             }
             Render::ClaudeSettings | Render::CodexHooks => Expect::NonEmptyFile,
             // A program gets a stronger check than a config file, not a weaker
@@ -1724,7 +1724,7 @@ pub fn checks(
         // trade the rest of this function makes: no check beats one that fails
         // forever and blames the harness for a question omh never asked.
         if let (Some(verify), Some(ready)) = (&binding.verify, &binding.ready) {
-            let names = server_names(&sources, repo)?;
+            let names = server_names(&sources, own, repo)?;
             let ask_from = expand(&binding.path, GUEST_HOME)
                 .parent()
                 .map(PathBuf::from)
@@ -1834,14 +1834,15 @@ fn hook_names(
 }
 
 /// What the document is expected to mention — which is what the launcher
-/// renders, not what the layers declare.
+/// renders, not what the layers declare, so it is read from the same function:
+/// `render::servers`.
 ///
 /// A server whose feature is off here is deliberately left out of that
-/// document, and so is one `[use] mcp` does not name — the same two retains
-/// `render` makes, in the same order. Demanding either makes `omh doctor` fail
-/// forever and blame the harness for obeying, which is the opposite of what
-/// this command is for. The second was missing until a repo whose `init`
-/// wrote `mcp = []` added a server and every doctor run went red over it.
+/// document, and so is one `[use] mcp` does not name. Demanding either makes
+/// `omh doctor` fail forever and blame the harness for obeying, which is the
+/// opposite of what this command is for. The second was missing until a repo
+/// whose `init` wrote `mcp = []` added a server and every doctor run went red
+/// over it — this re-derived the launcher's retains, and missed one.
 ///
 /// **A layer omh could not parse is an error, not an empty expectation.** This
 /// ended in `.unwrap_or_default()`, which spelled "every server is switched
@@ -1849,11 +1850,13 @@ fn hook_names(
 /// second one then built a check that demands nothing and prints `ok`.
 /// `parse_layers` propagates, like `profile::entries` and `doctor_cmd`; this
 /// was the one caller that did not.
-fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Result<Vec<String>> {
-    Ok(crate::render::parse_layers(sources)?
+fn server_names(
+    sources: &[PathBuf],
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+) -> Result<Vec<String>> {
+    Ok(crate::render::servers(sources, own, repo)?
         .into_keys()
-        .filter(|name| !repo.disabled_servers.contains(name))
-        .filter(|name| repo.selection.allows(Capability::Mcp, name))
         .collect())
 }
 
@@ -3719,8 +3722,8 @@ mod tests {
         .expect("claude stages mcp");
         assert_eq!(
             mcp.expect,
-            Expect::Mentions(vec![]),
-            "the only server in this profile is omh-codegraph, and it is off here"
+            Expect::Mentions(vec!["omh-memory".to_string()]),
+            "omh-codegraph is off here; omh-memory is generated, the catalogue's or not"
         );
     }
 
@@ -3959,8 +3962,8 @@ mod tests {
             .expect("claude stages mcp");
         assert_eq!(
             mcp.expect,
-            Expect::Mentions(vec!["omh-codegraph".to_string()]),
-            "omh-codegraph is omh's and always goes in; linear was not selected here"
+            Expect::Mentions(vec!["omh-codegraph".to_string(), "omh-memory".to_string()]),
+            "omh's go in whatever `[use]` says; linear was not selected here"
         );
         let loaded = got
             .iter()
@@ -3969,7 +3972,7 @@ mod tests {
         match &loaded.expect {
             Expect::Loaded { names, .. } => assert_eq!(
                 names,
-                &vec!["omh-codegraph".to_string()],
+                &vec!["omh-codegraph".to_string(), "omh-memory".to_string()],
                 "the harness is asked only about servers it was given"
             ),
             other => panic!("mcp-loaded asks the harness, not {other:?}"),
@@ -4169,7 +4172,10 @@ mod tests {
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
 
         let mcp = cs.iter().find(|c| c.name == "mcp").unwrap();
-        assert_eq!(mcp.expect, Expect::Mentions(vec!["omh-codegraph".into()]));
+        assert_eq!(
+            mcp.expect,
+            Expect::Mentions(vec!["omh-codegraph".into(), "omh-memory".into()])
+        );
     }
 
     /// Regression: the check stripped `.md`, guessing at how a harness names a
