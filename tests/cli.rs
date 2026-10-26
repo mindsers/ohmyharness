@@ -5179,7 +5179,10 @@ fn your_defaults_are_said_as_yours_and_omhs_own_as_omhs() {
             .unwrap_or_default()
             .to_string()
     };
-    assert!(line("codegraph").contains("omh's own"), "{said}");
+    assert!(
+        !said.contains("codegraph"),
+        "omh's are part of omh, not of your catalogue: {said}"
+    );
     assert!(line("linear").contains("your catalogue"), "{said}");
 
     let said = run(&["settings", "set", "codegraph", "maybe"]);
@@ -13700,6 +13703,45 @@ fn use_all_does_not_turn_on_a_guard() {
     assert!(settings.contains("go-format") && settings.contains("go-test"));
     assert!(!settings.contains("tdd-guard"), "got: {settings}");
     assert!(!settings.contains("config-guard"), "got: {settings}");
+}
+
+/// omh's servers are part of omh, not of your catalogue, so nothing that lists
+/// or counts your catalogue names them — not even in a `mcp.json` an earlier
+/// omh seeded and `omh upgrade` has not cleaned yet.
+#[test]
+fn omhs_servers_are_never_counted_as_your_catalogue() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"omh-codegraph":{"command":"codebase-memory-mcp"},
+                          "memory":{"command":"omh"},"linear":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+
+    for argv in [
+        vec!["info"],
+        vec!["settings", "mcp", "ls"],
+        vec!["--json", "info"],
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            out.status.success(),
+            "`omh {}`: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.contains("linear"), "`omh {}`: {said}", argv.join(" "));
+        for omhs in ["omh-codegraph", "\"memory\"", " memory "] {
+            assert!(
+                !said.contains(omhs),
+                "`omh {}` counts {omhs} as yours: {said}",
+                argv.join(" ")
+            );
+        }
+    }
 }
 
 /// The names omh's servers had before they were named `omh-…` stay omh's, and

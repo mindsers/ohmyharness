@@ -1099,7 +1099,13 @@ impl Profile {
         let mut out: Vec<String> = Vec::new();
         for source in self.sources(cap)? {
             if cap == Capability::Mcp {
-                out.extend(crate::render::parse_layers(&[source])?.into_keys());
+                // omh's servers are part of omh, never of your catalogue.
+                let omhs = crate::base::server_names()?;
+                out.extend(
+                    crate::render::parse_layers(&[source])?
+                        .into_keys()
+                        .filter(|name| !omhs.contains(name)),
+                );
                 continue;
             }
             out.extend(listed(&source, cap)?.into_iter().map(|(name, _)| name));

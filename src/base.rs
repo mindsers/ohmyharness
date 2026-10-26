@@ -471,6 +471,22 @@ impl Manifest {
     }
 }
 
+/// Every name that is omh's server, now or before, from the base set in the
+/// binary.
+///
+/// None of them is ever part of your catalogue: omh's servers are generated
+/// with their features, and a `mcp.json` an earlier omh seeded holds copies
+/// `omh upgrade` takes out. Read from the binary rather than `~/.omh/base`, so
+/// a stale copy there cannot hand one back to you.
+pub fn server_names() -> Result<BTreeSet<String>> {
+    Ok(Manifest::shipped()?
+        .reserved()
+        .remove(&crate::adapter::Capability::Mcp)
+        .unwrap_or_default()
+        .into_keys()
+        .collect())
+}
+
 /// The base-set feature the graph server is part of — what `[omh]` switches,
 /// and so what decides whether [`GRAPH_CACHE`] is mounted. The feature rather
 /// than the server's name, for `memory::tools::FEATURE`'s reason: the name is

@@ -1416,6 +1416,17 @@ pub(crate) fn rm(
         // add` and `mcp import` take any — so checking it as a path left
         // `org/x` in the catalogue with no command that could take it out.
         adapter::Capability::Mcp => {
+            // omh's, first: it is not in your catalogue to be found, and
+            // "no such server" would hide the switch that does work.
+            if let Some(feature) = shipped_servers()?.get(name) {
+                anyhow::bail!(
+                    "the `{name}` server is omh's own — the {feature} feature, which is \
+                     switched off whole rather than taken apart. In a repo:\n  \
+                     omh set {feature} off\n\
+                     and for every repo `omh init` sets up after:\n  \
+                     omh settings set {feature} off"
+                );
+            }
             let known: Vec<String> = config::servers(paths)?.into_iter().map(|s| s.key).collect();
             if !known.iter().any(|k| k == name) {
                 return Err(no_such_entry(cap, name, &known));
@@ -1440,20 +1451,6 @@ pub(crate) fn rm(
              and for every repo `omh init` sets up after:\n  \
              omh settings unuse hooks {name}"
         );
-    }
-    if cap == adapter::Capability::Mcp {
-        // Taking the server out took the feature's hooks and rules section with
-        // it, in every repo at once — `base::own` keeps that true for an
-        // `mcp.json` edited by hand, but no verb of omh's does it.
-        if let Some(feature) = shipped_servers()?.get(name) {
-            anyhow::bail!(
-                "the `{name}` server is omh's own — the {feature} feature, which is \
-                 switched off whole rather than taken apart. In a repo:\n  \
-                 omh set {feature} off\n\
-                 and for every repo `omh init` sets up after:\n  \
-                 omh settings set {feature} off"
-            );
-        }
     }
     let what = match &entry {
         Some(path) => path.display().to_string(),

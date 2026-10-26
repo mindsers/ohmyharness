@@ -464,11 +464,14 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
 
     let mut found = Vec::new();
     let path = mcp_path(paths);
+    // omh's servers are part of omh, never of your catalogue — a copy an
+    // earlier omh seeded here is one `omh upgrade` takes out, not one of yours.
+    let omhs = crate::base::server_names()?;
     if let Some(raw) = read_layer(&path)? {
         let doc: serde_json::Value =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         if let Some(servers) = doc.get("mcpServers").and_then(|v| v.as_object()) {
-            for (name, spec) in servers {
+            for (name, spec) in servers.iter().filter(|(name, _)| !omhs.contains(*name)) {
                 // Through the same parser the renderer uses, for the reason
                 // `hooks` gives: an entry omh cannot understand used to become
                 // a server with a blank command here, which compares unequal to
@@ -2038,16 +2041,16 @@ mod tests {
             &paths,
             Layer::Personal,
             "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},
-                              "omh-memory":{"command":"omh-mcp"}}}"#,
+            r#"{"mcpServers":{"linear":{"command":"npx"},
+                              "sentry":{"command":"sentry-mcp"}}}"#,
         );
 
         let s = servers(&paths).unwrap();
         assert_eq!(s.len(), 2);
-        assert_eq!(get(&s, "codegraph").layer, Layer::Personal);
-        assert_eq!(get(&s, "codegraph").value, "codebase-memory-mcp");
+        assert_eq!(get(&s, "linear").layer, Layer::Personal);
+        assert_eq!(get(&s, "linear").value, "npx");
         assert!(
-            get(&s, "codegraph").shadows.is_empty(),
+            get(&s, "linear").shadows.is_empty(),
             "one catalogue, so nothing to shadow"
         );
     }

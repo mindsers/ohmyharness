@@ -194,17 +194,13 @@ pub(crate) fn repo_has_selection(paths: &Paths) -> Result<bool> {
 
 /// The catalogue's MCP servers, with whose each one is.
 pub(crate) fn show_servers(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
-    // omh's own are its features', not your catalogue's, though they sit in
-    // the same file: the screen files them under the feature, and so does this.
-    let shipped = crate::cmd::settings::shipped_servers()?;
+    // Yours alone: omh's are part of its features, not of your catalogue, and
+    // `config::servers` never lists them.
     ctx.say(&report::Servers {
         servers: config::servers(paths)?
             .into_iter()
             .map(|s| report::Setting {
-                whose: Some(match shipped.get(&s.key) {
-                    Some(feature) => format!("omh's own — the {feature} feature"),
-                    None => s.layer.whose().to_string(),
-                }),
+                whose: Some(s.layer.whose().to_string()),
                 key: s.key,
                 value: s.value,
             })
