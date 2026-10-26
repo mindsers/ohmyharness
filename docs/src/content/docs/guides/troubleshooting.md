@@ -604,12 +604,12 @@ explicit list makes, and this line is what stops it being silent.
 
 #### `mcp/codegraph is omh's`
 
-`omh-codegraph` and `omh-memory` are in `~/.omh/mcp.json` because `omh init`
-seeded them there, so they look exactly like servers you added. They are not
-selectable in either direction, and neither are `codegraph` and `memory`, the
-names they had before `omh upgrade` renamed them: a feature is its server, its hooks and its rules section
-together, and keeping half of it is the one combination that manufactures
-confident wrong answers.
+`omh-codegraph` and `omh-memory` are omh's servers, generated at launch with
+their features — not entries of your catalogue. They are not selectable in
+either direction, and neither are `codegraph` and `memory`, the names they
+had: a feature is its server, its hooks and its rules section together, and
+keeping half of it is the one combination that manufactures confident wrong
+answers.
 
 **Switch the whole feature instead:**
 

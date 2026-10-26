@@ -6,7 +6,7 @@ description: omh's opinion as a versioned data file — how to propose an entry,
 Propose an entry for the base set — what every omh session is built from — and
 look up what each field of an entry has to say.
 
-**Status: built.** The set lives in a versioned manifest, `init` seeds from it and `omh why` explains from it, and the four-field test is enforced by the build. What is not built is cost accounting — the rollup that would give the set a reason to shrink.
+**Status: built.** The set lives in a versioned manifest, every launch generates from it and `omh why` explains from it, and the four-field test is enforced by the build. What is not built is cost accounting — the rollup that would give the set a reason to shrink.
 
 **This is the product.** Everything else in omh is a place to put it.
 
@@ -99,7 +99,7 @@ feature = "codegraph"           # what it is part of; `[omh]` switches features,
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
 remove  = "omh set codegraph off — the feature, its server and its hooks together…"
-command = "codebase-memory-mcp" # what init seeds; also the baseline `why` compares against
+command = "codebase-memory-mcp" # what every launch runs the server as
 was     = ["codegraph"]         # names it had before: `omh upgrade` renames them in your catalogue, and `[mcp.<old>.env]` still reaches it
 
   [[entry.measured]]
@@ -122,7 +122,7 @@ was     = ["codegraph"]         # names it had before: `omh upgrade` renames the
 | `since` | the base-set version it arrived in | yes |
 | `because` | what it buys: argued, not measured | yes |
 | `remove` | the way out, printed by `omh why` | yes |
-| `command`, `args` | for an `mcp` entry, what `init` seeds — also the baseline `omh why` compares your copy against | for `mcp` |
+| `command`, `args` | for an `mcp` entry, the server every launch generates | for `mcp` |
 | `[[entry.measured]]` | a cost: `what`, `value`, `how`, and `on` — the date, `YYYY-MM-DD` | at least one |
 | `[[entry.instead_of]]` | an alternative, by `name`, and `why` it lost | at least one |
 | `[[rejected]]` | a candidate turned down: `name`, `considered` (a version) and `because` | no |
@@ -141,8 +141,8 @@ that tells the agent it exists.
 | | |
 |---|---|
 | **removal** | `omh set codegraph off` takes the feature, its server and its hooks together. A test runs every `remove` command and asserts the feature ends up off |
-| **disabling** | `[omh] codegraph = false` in `<repo>/.omh/settings.toml`. Per repo, and nothing is uninstalled — your `mcp.json` is untouched and the next repo gets it back |
-| **explaining** | `omh why graph-first` answers "part of codegraph"; `omh why codegraph` — or `omh-codegraph`, the same thing — lists what it brought |
+| **disabling** | `[omh] codegraph = false` in `<repo>/.omh/settings.toml`. Per repo, and nothing is uninstalled — the next repo gets it back |
+| **explaining** | `omh why` answers for the feature whole, by any of its names — `codegraph`, `omh-codegraph`, `graph-first` — listing every part with what it costs |
 
 **`[omh]` takes feature names only.** `graph-first = false` is refused, naming
 the feature it belongs to — which is also how the grouping is discoverable
@@ -276,32 +276,33 @@ which is exactly when carried-over numbers should be re-taken or re-affirmed.
 
 </details>
 
-## Seeded, or generated
+## Generated, all of it
 
 | | How it reaches a session | What follows |
 |---|---|---|
-| MCP servers, in `mcp.json` | **seeded**: `init` copies them into your profile with `write_if_absent`, and `init` and `upgrade` put omh's definition back over its own servers | a server of yours is never touched; an edit of omh's own is written over, and said so |
+| MCP servers | **generated**: written into the session's MCP document at launch, from the manifest | none is in your catalogue, so none can be edited or deleted apart from its feature |
 | hooks and rules sections | **generated**: written into the session at launch, from the manifest; they exist as a file nowhere | omh can ship a fix to its own machinery |
 
-Two consequences of seeding, and both caused bugs:
-
-- **An omh-seeded server and one you added are byte-identical in the same
-  file.** Nothing marks which is which, so `omh why` recovers authorship by
-  comparing against the manifest rather than by reading a marker.
-- **Until `omh upgrade` runs, the binary is newer than both.** `omh why`
-  reports *"not what omh ships now"* and declines to say who caused the
-  difference — it cannot know.
+Every part of a feature reaches a session the same way, which is what makes a
+feature all or nothing in fact and not only in the manifest: `[omh]` is the
+only switch, and there is no part a catalogue could hold, change or take away
+on its own.
 
 <details>
-<summary>Why generation is the only way to fix a hook, and what guessing authorship did</summary>
+<summary>Why generation, and what seeding did</summary>
 
 Generation is the only arrangement in which omh can ship a fix to its own
 machinery: seeding never revisits, so `git-unavailable` — rewritten once, after
 the old pattern was found to miss the multi-line scripts agents most often emit
 — would have gone on running broken in every repo initialised before the fix.
 
-An earlier version of `omh why` that guessed who changed a seeded server told
-every user they had edited files they never opened.
+The servers were the last part seeded, into `~/.omh/mcp.json`, until they were
+named `omh-…`. There they were byte-identical to servers you added, so `omh why`
+recovered authorship by comparing against the manifest — and an earlier version
+that guessed who changed one told every user they had edited files they never
+opened. A server deleted from that file took its feature's hooks and rules
+section with it while the rest of the feature stayed mounted. `omh upgrade`
+takes those copies out.
 
 </details>
 

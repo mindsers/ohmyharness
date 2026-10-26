@@ -577,10 +577,10 @@ is the thing an allowlist exists to make possible.
 
 ### A feature is not selectable
 
-`omh-codegraph` and `omh-memory` sit in `~/.omh/mcp.json` looking exactly like
-servers you added, because `omh init` seeded them there. They are not yours to
-select, under those names or under `codegraph` and `memory`, the names they had
-before, which are also their features' names:
+`omh-codegraph` and `omh-memory` are omh's servers, generated at launch with
+their features' hooks and rules sections — not entries of your catalogue. They
+are not yours to select, under those names or under `codegraph` and `memory`,
+the names they had before, which are also their features' names:
 
 ```console
 $ omh use mcp codegraph
@@ -1221,8 +1221,9 @@ and one `[tools]` map per adapter.
 
 Your MCP servers live in your catalogue. `omh settings mcp` lists and adds
 them, and `omh settings rm mcp` takes one out, as it takes out any other entry
-— except omh's own, `omh-codegraph` and `omh-memory`, which belong to features and are
-switched off with [`[omh]`](#omh--omhs-own-features):
+— omh's own, `omh-codegraph` and `omh-memory`, are never in it: they are
+generated with their features, switched with [`[omh]`](#omh--omhs-own-features),
+and a repo cannot set their environment under `[mcp.<name>.env]`:
 
 ```console
 $ omh settings mcp ls

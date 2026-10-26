@@ -265,11 +265,10 @@ because it is the command that looks at that again. It:
 
 1. refreshes the managed catalogue from the binary — adapters, the base set,
    editors, stacks, hooks, markers — keeping anything you edited as `.yours`,
-   just as `init` does. omh's own servers in `~/.omh/mcp.json` go back to the
-   base set's definition, an edit of yours with no `.yours` copy; one still
-   under a name it used to have — `codegraph`, `memory` — moves to its name
-   now, `omh-codegraph`, `omh-memory`, unless that name is already taken, in
-   which case both stay. Each of these is named on stderr, `--json` or not;
+   just as `init` does. omh's own servers are generated at launch now, so a
+   copy an earlier omh seeded into `~/.omh/mcp.json` — under the name it has or
+   the one it had, `codegraph`, `memory` — is taken out, and named on stderr,
+   `--json` or not, with a word when it was an edit of yours;
 2. asks the sandbox again which of this repo's provides apply, and corrects
    [`[provision]`](/reference/configuration/#provision--what-your-sandbox-is-built-with)
    before it builds anything;
@@ -1844,30 +1843,52 @@ $ omh why codegraph
 ```
 
 ```text title="omh why codegraph"
-omh-codegraph — omh's choice, in the base set since 2026.06
+codegraph — an omh feature, in the base set since 2026.06
 
-  because     structural queries instead of re-grepping the repo every task
-  part of     codegraph
-  brings      graph-orient, graph-first, graph-read, graph-refresh, graph-rules
-  costs       0.46s to index this repo, cold   measured 2026-08-06
-              index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
-              3.4 MB on disk                   measured 2026-08-06
-              the graph volume after a cold index of this repo
-  instead of  gitnexus            PolyForm-Noncommercial licence
-              codegraphcontext    needs a Neo4j service running
-              @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
-  installed   your catalogue
+  gathers     omh-codegraph   structural queries instead of re-grepping the repo every task
+              graph-orient    the agent is given the module map instead of discovering it by reading files
+              graph-first     structural questions answer in one call instead of an iterative grep
+              graph-read      one symbol instead of a whole file, when the file is big enough for that to matter
+              graph-refresh   the graph describes the code as it is now, not as the session found it
+              graph-rules     a graph the agent has not been told about is a graph it never queries — the four hooks fire while it is already doing something, and this is what is true before it starts
+  costs       omh-codegraph   0.46s to index this repo, cold             measured 2026-08-06
+                              index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
+                              3.4 MB on disk                             measured 2026-08-06
+                              the graph volume after a cold index of this repo
+              graph-orient    2,300 B per context rebuild                measured 2026-08-06
+                              get_architecture with four targeted aspects (2,138 B of payload) plus the hook's own framing prose
+              graph-first     243 B per grep                             measured 2026-08-07
+                              the nudge string for a `repo-sNN` project name, computed from the literals the hook ships — see the_grep_nudges_declared_cost_matches_the_string_it_ships
+              graph-read      1,511 B when it fires                      measured 2026-08-06
+                              get_code_snippet for one symbol, against reading the enclosing source file whole — this repo's largest was over 20x that. The file size is deliberately not recorded: it moves on every edit, and an earlier version of this line was already stale on the commit that wrote it.
+                              0 B when it does not                       measured 2026-08-06
+                              silent unless the target is source over 8,000 bytes
+              graph-refresh   0.14s per turn                             measured 2026-08-06
+                              incremental re-index of a session worktree at Stop
+              graph-rules     673 B in the agent's context, every turn   measured 2026-08-12
+                              the section as shipped, byte for byte. Computed by `every_rules_section_costs_what_it_says` against the string omh sends rather than typed in — a hand-written cost and the prose it describes have no relationship a test can check
+  instead of  omh-codegraph   gitnexus                      PolyForm-Noncommercial licence
+                              codegraphcontext              needs a Neo4j service running
+                              @sdsrs/code-graph             close second; needs a node runtime rather than a static binary
+              graph-orient    the `overview` aspect         6,173 B for the same orientation the four targeted aspects give in 2,138
+              graph-first     blocking grep outright        grep is right for a literal string, and a hook that blocks correct work gets disabled
+              graph-read      nudging on every Read         Read is the most frequent tool there is; a nudge on every call becomes noise the model tunes out
+              graph-refresh   indexing once at init         a session's worktree is not the checkout it started from; the graph would describe code the agent has since changed
+              graph-rules     the graph-orient hook alone   orientation is re-paid at every context rebuild and describes the modules; this names the tools and the project variable once. Different claims, and the hook's 2,300 B is the one that repeats
   remove      omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings set codegraph off` does the same for every repo `omh init` sets up after
+
+  A feature is all or nothing: every part above is generated at
+  launch and switched together, and none of them is a file of yours.
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
 
 **Everything omh ships belongs to a feature**, and removal follows the feature:
 `omh set codegraph off` takes the server and its four hooks together.
-`omh why codegraph` and `omh why omh-codegraph` are the same question and get
-this answer; `omh why graph-first` answers "part of codegraph" from the other direction, and
-says `(off here)` when this repo has switched the feature off in
-`.omh/settings.toml`.
+Every name in a feature is the same question and gets this answer —
+`omh why omh-codegraph`, `omh why graph-first`, `omh why graph-rules` — since
+no part can be had on its own. It says `off in this repo` when this repo has
+switched the feature off in `.omh/settings.toml`.
 
 **Cost is measured; benefit is argued.** Every cost carries the date it was
 taken *and how*, and one predating the current base-set version is marked stale
