@@ -1099,77 +1099,49 @@ pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
     Ok(read_servers(&mcp_path(paths))?.remove(name))
 }
 
-/// Bring omh's own servers back in line with the manifest, and leave yours
-/// alone. Answers what it changed, and what it would have and did not.
+/// Take omh's own servers out of your catalogue, and leave yours.
 ///
-/// `init` seeds the catalogue with `write_if_absent`, so nothing refreshed a
-/// server after the first run: the memory server kept the arguments it was
-/// seeded with, and a release that moved them — `--team`/`--local` to
-/// `--notes` — reached an existing install as a server that would not start.
-/// Adapters, the base set and the stacks are already managed this way; this is
-/// the same rule for the entries the manifest owns.
-///
-/// A server held under a name it used to have — `retired`, old to new — moves
-/// to the name it has now first, unless that name is already taken: then both
-/// stay, and the answer says so, since the old name is omh's and every command
-/// but this one reads it that way. The answer names the moves apart from the
-/// refreshes: a name in your file changed.
-pub fn refresh_own_servers(
+/// omh's are generated from the base set at launch, like its hooks and rules
+/// sections. An earlier omh seeded them into `~/.omh/mcp.json`, which made a
+/// server the one part of a feature you could edit or delete on its own — and
+/// a deleted one took the hooks and the section with it while the rest of the
+/// feature stayed mounted. So the copies go, under the names they have now
+/// (`own`, the manifest's servers) and the names they had (`retired`, old to
+/// new), and each is answered with whether it differed from omh's definition:
+/// that is an edit of yours, and it is not kept.
+pub fn remove_own_servers(
     paths: &Paths,
     own: &BTreeMap<String, Server>,
     retired: &BTreeMap<String, String>,
-) -> Result<Refreshed> {
+) -> Result<Vec<Removed>> {
     let path = mcp_path(paths);
     let mut all = read_servers(&path)?;
-    let mut renamed = Vec::new();
-    let mut kept = Vec::new();
-    for (old, new) in retired {
-        if all.contains_key(new) {
-            if all.contains_key(old) {
-                kept.push((old.clone(), new.clone()));
-            }
-            continue;
-        }
-        if let Some(server) = all.remove(old) {
-            all.insert(new.clone(), server);
-            renamed.push((old.clone(), new.clone()));
-        }
-    }
-    let mut changed = Vec::new();
-    for (name, server) in own {
-        // Only a server omh ships and the catalogue still holds: a name taken
-        // out of `mcp.json` by hand stays out.
-        match all.get(name) {
-            Some(theirs) if theirs == server => {}
-            Some(_) => {
-                // Renamed or not: a definition you edited is overwritten
-                // either way, and the rename line does not say so.
-                all.insert(name.clone(), server.clone());
-                changed.push(name.clone());
-            }
-            None => {}
+    let mut removed = Vec::new();
+    let names = own
+        .keys()
+        .map(|name| (name.clone(), name.clone()))
+        .chain(retired.iter().map(|(old, new)| (old.clone(), new.clone())));
+    for (name, is) in names {
+        if let Some(held) = all.remove(&name) {
+            removed.push(Removed {
+                edited: own.get(&is) != Some(&held),
+                name,
+            });
         }
     }
-    if !changed.is_empty() || !renamed.is_empty() {
+    if !removed.is_empty() {
         write_servers(&path, &all)?;
     }
-    Ok(Refreshed {
-        renamed,
-        changed,
-        kept,
-    })
+    Ok(removed)
 }
 
-/// What [`refresh_own_servers`] did to the catalogue.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Refreshed {
-    /// Old name, new name.
-    pub renamed: Vec<(String, String)>,
-    /// Servers whose definition went back to the manifest's.
-    pub changed: Vec<String>,
-    /// Old name, new name: held under the old name and not moved, because the
-    /// new one was taken.
-    pub kept: Vec<(String, String)>,
+/// One of omh's servers [`remove_own_servers`] took out of your catalogue.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Removed {
+    /// The name your catalogue held it under.
+    pub name: String,
+    /// It differed from omh's definition — an edit of yours, now gone.
+    pub edited: bool,
 }
 
 pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
@@ -2008,63 +1980,55 @@ mod tests {
         assert!(servers(&paths).unwrap().is_empty());
     }
 
-    /// A server under a name omh's used to have moves to the name it has now —
-    /// unless that name is already taken, in which case the file holds two
-    /// servers and moving one would write over the other.
+    /// omh's servers leave your catalogue under every name they had, and
+    /// yours stay: what is taken is answered with whether it was an edit of
+    /// yours, since that edit is what goes with it.
     #[test]
-    fn a_server_moves_off_an_old_name_only_onto_a_free_one() {
+    fn omhs_servers_leave_the_catalogue_and_yours_stay() {
         let (_d, paths) = fixture();
         let server = |c: &str| Server {
             command: c.into(),
             args: Vec::new(),
             env: BTreeMap::new(),
         };
-        let own = BTreeMap::from([("omh-codegraph".to_string(), server("cbm"))]);
-        let retired = BTreeMap::from([("codegraph".to_string(), "omh-codegraph".to_string())]);
-
+        let own = BTreeMap::from([
+            ("omh-codegraph".to_string(), server("cbm")),
+            ("omh-memory".to_string(), server("omh")),
+        ]);
+        let retired = BTreeMap::from([
+            ("codegraph".to_string(), "omh-codegraph".to_string()),
+            ("memory".to_string(), "omh-memory".to_string()),
+        ]);
         seed(
             &paths,
             Layer::Personal,
             "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"cbm"}}}"#,
+            r#"{"mcpServers":{"codegraph":{"command":"cbm"},"omh-memory":{"command":"edited"},
+                              "mine":{"command":"m"}}}"#,
         );
-        let done = refresh_own_servers(&paths, &own, &retired).unwrap();
+
+        let removed = remove_own_servers(&paths, &own, &retired).unwrap();
         assert_eq!(
-            done.renamed,
-            [("codegraph".to_string(), "omh-codegraph".to_string())]
-        );
-        assert!(done.changed.is_empty(), "the definition was already omh's");
-        let held = read_servers(&mcp_path(&paths)).unwrap();
-        assert_eq!(held.keys().collect::<Vec<_>>(), ["omh-codegraph"]);
-
-        // Moved and put back: an edit of yours is overwritten, and said so.
-        seed(
-            &paths,
-            Layer::Personal,
-            "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"edited"}}}"#,
-        );
-        let done = refresh_own_servers(&paths, &own, &retired).unwrap();
-        assert_eq!(done.renamed.len(), 1);
-        assert_eq!(done.changed, ["omh-codegraph"]);
-
-        seed(
-            &paths,
-            Layer::Personal,
-            "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"mine"},"omh-codegraph":{"command":"cbm"}}}"#,
-        );
-        let done = refresh_own_servers(&paths, &own, &retired).unwrap();
-        assert_eq!(
-            done,
-            Refreshed {
-                kept: vec![("codegraph".to_string(), "omh-codegraph".to_string())],
-                ..Refreshed::default()
-            },
-            "left, and said so"
+            removed,
+            [
+                Removed {
+                    name: "omh-memory".into(),
+                    edited: true
+                },
+                Removed {
+                    name: "codegraph".into(),
+                    edited: false
+                },
+            ]
         );
         let held = read_servers(&mcp_path(&paths)).unwrap();
-        assert_eq!(held["codegraph"].command, "mine", "{held:?}");
+        assert_eq!(held.keys().collect::<Vec<_>>(), ["mine"]);
+        assert!(
+            remove_own_servers(&paths, &own, &retired)
+                .unwrap()
+                .is_empty(),
+            "nothing the second time"
+        );
     }
 
     #[test]

@@ -429,6 +429,9 @@ pub fn plan(
                         matches!(b.render, Render::ClaudeSettings | Render::CodexHooks)
                     })
             }
+            // And servers: omh's are generated, so a catalogue with none of
+            // yours — no `mcp.json` at all — still has them to stage.
+            Capability::Mcp => !sources.is_empty() || !opts.omh.servers.is_empty(),
             _ => !sources.is_empty(),
         };
         if !carries_something {
@@ -3431,6 +3434,10 @@ mod tests {
             for (feature, parts) in &features {
                 for on in [true, false] {
                     let fx = fixture();
+                    // No catalogue servers at all — where most installs are
+                    // once omh's left `mcp.json`, and the case that asked the
+                    // profile whether to stage an MCP document at all.
+                    std::fs::remove_file(fx.paths.root.join("mcp.json")).unwrap();
                     let bin = fake_server_binary(&fx);
                     let switch = if on {
                         String::new()

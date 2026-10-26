@@ -1942,7 +1942,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // set` in the header of the gitignored file `init` seeds, + `omh set
         // carry_in` teaching the key in the committed file's header, + `omh
         // settings set account` in the refusal of an `[account]` entry.
-        ("src/cmd/init.rs", 11),
+        ("src/cmd/init.rs", 12),
         ("src/cmd/upgrade.rs", 1), // the `omh init` redirect when a repo is not set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only

@@ -527,13 +527,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // either: it produces hooks, and a sentence describing a test command is
     // not the thing that runs it.
 
-    // The base set: omh's opinion, seeded into your catalogue where it is
-    // visible, reviewable, and removable rather than hidden in the binary.
-    // `write_if_absent`, so a server you removed does not come back.
-    let base_mcp =
-        serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))?
-            + "\n";
-    write_if_absent(&config::mcp_path(&paths), &base_mcp)?;
+    // No servers are seeded into your catalogue: omh's are generated from the
+    // base set at launch, with its hooks and rules sections, and `omh why`
+    // answers for them from the same file.
     // Only when this run actually created the file. Reporting a seed over a
     // settings.toml that was already there would claim an effect the template
     // did not have — `write_if_absent` never revisits.
@@ -1082,29 +1078,20 @@ pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<Str
     // The catalogue's own entries, for the reason the files above are managed:
     // a shipped fix has to reach an existing install. Yours are untouched.
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    let refreshed =
-        config::refresh_own_servers(paths, &manifest.servers(), &manifest.retired_servers())?;
     // `warn`, not `progress`, for the reason `say_what_moved_off_the_old_key`
-    // gives: a name in your file changed, once, and `--json` hides progress.
-    for (old, new) in &refreshed.renamed {
+    // gives: your file changed, once, and `--json` hides progress.
+    let removed =
+        config::remove_own_servers(paths, &manifest.servers(), &manifest.retired_servers())?;
+    for server in removed {
+        let edit = if server.edited {
+            " It differed from omh's definition, and your edit is not kept."
+        } else {
+            ""
+        };
         ctx.warn(&format!(
-            "renamed the `{old}` server in your catalogue to `{new}` — omh's own servers \
-             are named for omh now"
-        ));
-    }
-    // `warn` too: a definition you edited was just written over.
-    for name in refreshed.changed {
-        ctx.warn(&format!(
-            "put omh's definition back over the `{name}` server in your catalogue — \
-             it is omh's own"
-        ));
-    }
-    for (old, new) in &refreshed.kept {
-        ctx.warn(&format!(
-            "left the `{old}` server in your catalogue: `{new}` is already there, and \
-             `{old}` is a name omh's server used to have, so omh reads it as `{new}`'s. \
-             Rename or remove it in {}",
-            config::mcp_path(paths).display()
+            "took the `{}` server out of your catalogue — it is omh's, part of a feature \
+             omh generates at launch, and switched with `omh set <feature> on|off`.{edit}",
+            server.name
         ));
     }
     Ok(adapters)

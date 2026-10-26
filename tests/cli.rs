@@ -747,170 +747,68 @@ exit 0
     }
 }
 
-/// `omh upgrade` re-reads omh's own servers from the manifest, so a release
-/// that changes one's arguments reaches an existing install.
-///
-/// `init` seeds `~/.omh/mcp.json` with `write_if_absent` and nothing refreshed
-/// it, so the memory server kept the arguments it was seeded with — in 0.14
-/// `--team … --local …`, which the binary that reads them now refuses. Only
-/// omh's own entries: the file is yours, and a server you added is yours to
-/// keep.
+/// omh's servers are generated from the base set, so `omh upgrade` takes the
+/// copies an earlier omh seeded into `~/.omh/mcp.json` out of it — under the
+/// names they have now and the ones they had — and leaves yours. Each is named
+/// on stderr, `--json` or not, and a copy you had edited says the edit is not
+/// kept: it was the one part of a feature you could change on its own, and
+/// that is what ends here.
 #[test]
-fn upgrade_refreshes_omhs_own_servers() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
-    let _log = sb.fake_docker();
-    std::fs::write(
-        sb.home.join(".omh/mcp.json"),
-        r#"{"mcpServers":{
-             "omh-memory":{"command":"omh","args":["memory","serve","--team","/work/.omh/notes","--local","/omh/notes/local"]},
-             "mine":{"command":"my-server","args":["--flag"]}}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        sb.repo.join(".omh/seeded-by"),
-        "0.1.0
-",
-    )
-    .unwrap();
-
-    let out = sb.omh(&["upgrade"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
-            .unwrap();
-    let args = doc["mcpServers"]["omh-memory"]["args"].to_string();
-    assert!(
-        args.contains("--notes") && args.contains("/omh/memory") && !args.contains("--team"),
-        "omh's own server follows the manifest: {args}"
-    );
-    assert_eq!(
-        doc["mcpServers"]["mine"]["command"], "my-server",
-        "and yours is left exactly as you have it: {doc}"
-    );
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        said.contains("memory"),
-        "and it says what it changed: {said}"
-    );
-}
-
-/// An install from before omh named its servers `omh-…` holds them under the
-/// old names, and `omh upgrade` moves them: a catalogue still saying `codegraph`
-/// beside a manifest saying `omh-codegraph` reads as the graph server removed by
-/// hand, which switches the whole feature off — and leaves a server named
-/// `codegraph` that is neither omh's nor, by any command, yours.
-#[test]
-fn upgrade_moves_omhs_servers_onto_their_omh_names() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
-    let _log = sb.fake_docker();
-    std::fs::write(
-        sb.home.join(".omh/mcp.json"),
-        r#"{"mcpServers":{
-             "codegraph":{"command":"codebase-memory-mcp"},
-             "memory":{"command":"omh","args":["memory","serve","--notes","/omh/memory"]},
-             "mine":{"command":"my-server","args":["--flag"]}}}"#,
-    )
-    .unwrap();
-    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
-
-    let out = sb.omh(&["upgrade"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
-            .unwrap();
-    let names: Vec<&str> = doc["mcpServers"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        names,
-        ["mine", "omh-codegraph", "omh-memory"],
-        "every server of omh's under its new name, and only once: {doc}"
-    );
-    assert_eq!(
-        doc["mcpServers"]["omh-codegraph"]["command"],
-        "codebase-memory-mcp"
-    );
-    assert_eq!(doc["mcpServers"]["mine"]["command"], "my-server", "{doc}");
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        said.contains("`codegraph`") && said.contains("`omh-codegraph`"),
-        "and it says what it renamed: {said}"
-    );
-}
-
-/// What `omh upgrade` does to your catalogue's copies of omh's servers is said
-/// on stderr, under `--json` too: a rename, a definition of yours put back to
-/// omh's, and a rename it could not make because the new name was taken —
-/// which left a server under a name that is omh's, and said nothing.
-#[test]
-fn upgrade_names_every_change_to_omhs_servers_even_under_json() {
+fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     let _log = sb.fake_docker();
     std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
     let catalogue = sb.home.join(".omh/mcp.json");
-
     std::fs::write(
         &catalogue,
         r#"{"mcpServers":{
              "codegraph":{"command":"codebase-memory-mcp"},
-             "omh-memory":{"command":"omh","args":["memory","serve","--edited"]}}}"#,
+             "omh-memory":{"command":"omh","args":["memory","serve","--edited"]},
+             "mine":{"command":"my-server","args":["--flag"]}}}"#,
     )
     .unwrap();
-    let out = sb.omh(&["--json", "upgrade"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        said.contains("`codegraph`") && said.contains("`omh-codegraph`"),
-        "the rename: {said}"
-    );
-    assert!(said.contains("`omh-memory`"), "the edit put back: {said}");
 
-    std::fs::write(
-        &catalogue,
-        r#"{"mcpServers":{
-             "codegraph":{"command":"mine"},
-             "omh-codegraph":{"command":"codebase-memory-mcp"}}}"#,
-    )
-    .unwrap();
     let out = sb.omh(&["--json", "upgrade"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&catalogue).unwrap()).unwrap();
+    let names: Vec<&str> = doc["mcpServers"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(names, ["mine"], "omh's out, yours kept: {doc}");
+    assert_eq!(doc["mcpServers"]["mine"]["args"][0], "--flag", "{doc}");
+
     let said = String::from_utf8_lossy(&out.stderr);
+    for name in ["`codegraph`", "`omh-memory`"] {
+        assert!(said.contains(name), "names {name}: {said}");
+    }
     assert!(
-        said.lines().any(|l| l.contains("left")
-            && l.contains("`codegraph`")
-            && l.contains("`omh-codegraph`")),
-        "the server left under omh's old name, beside the one it would have moved onto: {said}"
+        said.lines()
+            .any(|l| l.contains("`omh-memory`") && l.contains("not kept")),
+        "and that the edit is gone: {said}"
+    );
+    assert!(
+        !said
+            .lines()
+            .any(|l| l.contains("`codegraph`") && l.contains("not kept")),
+        "an untouched copy loses nothing: {said}"
+    );
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("catalogue"),
+        "and nothing to say the second time: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
