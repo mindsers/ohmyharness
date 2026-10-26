@@ -70,15 +70,7 @@ pub(crate) fn eject(
             continue;
         };
         let sources = profile.sources(cap)?;
-        let carries = match cap {
-            // Rules are never "what the profile carries": the project's own
-            // `AGENTS.md` is composed in, and on a fresh install it is the only
-            // thing there. Asking the profile would eject an empty rules file
-            // for the configuration most people start from.
-            Capability::Rules => !rules_doc.trim().is_empty(),
-            _ => !sources.is_empty(),
-        };
-        if !carries {
+        if !crate::container::carries(cap, &sources, &rules_doc, &own, &adapter) {
             continue;
         }
 

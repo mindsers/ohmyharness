@@ -403,38 +403,7 @@ pub fn plan(
 
     for cap in Capability::ALL {
         let sources = profile.sources(cap)?;
-        // Every other capability is exactly what the profile carries. Rules are
-        // not: the project's own `AGENTS.md` is composed in, and it is often the
-        // only thing there — a fresh install has no rules layer of its own. So
-        // asking the profile whether to stage threw the repo's conventions away
-        // in the configuration a clone lands in, which is the bug this module
-        // was written to fix.
-        //
-        // Hooks are the same story: omh's five are generated from the manifest
-        // and belong to no layer at all, so a repo with no `hooks/` directory
-        // still has them to stage.
-        let carries_something = match cap {
-            Capability::Rules => !rules_doc.trim().is_empty(),
-            // And a `claude-settings` document is no longer only hooks: it also
-            // carries the approval without which the MCP document omh mounts is
-            // listed and never loaded. Skipping it when a repo has turned every
-            // hook off would turn that repo's MCP servers off with them, at a
-            // distance, through a file neither setting mentions.
-            Capability::Hooks => {
-                !sources.is_empty()
-                    || !opts.omh.hooks.is_empty()
-                    // Codex's system config likewise carries the trust without
-                    // which `/work` is prompted about and its rules skipped.
-                    || adapter.supports(cap).is_some_and(|b| {
-                        matches!(b.render, Render::ClaudeSettings | Render::CodexHooks)
-                    })
-            }
-            // And servers: omh's are generated, so a catalogue with none of
-            // yours — no `mcp.json` at all — still has them to stage.
-            Capability::Mcp => !sources.is_empty() || !opts.omh.servers.is_empty(),
-            _ => !sources.is_empty(),
-        };
-        if !carries_something {
+        if !carries(cap, &sources, &rules_doc, &opts.omh, adapter) {
             continue;
         }
         if adapter.supports(cap).is_none() {
@@ -1324,6 +1293,49 @@ pub(crate) fn sample_plan() -> Plan {
         dropped_hooks: vec![],
         rules: Default::default(),
         tty: true,
+    }
+}
+
+/// Whether the harness is handed anything for `cap`: the one rule a launch and
+/// `omh eject` both follow, since an eject is the launch's documents written
+/// somewhere a harness can read without a container.
+///
+/// Every other capability is exactly what the profile carries. Rules are not:
+/// the project's own `AGENTS.md` is composed in, and it is often the only thing
+/// there — a fresh install has no rules layer of its own. So asking the
+/// profile whether to stage threw the repo's conventions away in the
+/// configuration a clone lands in, which is the bug this module was written to
+/// fix.
+///
+/// Hooks and servers are the same story: omh's are generated from the
+/// manifest and belong to no layer at all, so a catalogue with no `hooks/` or
+/// no `mcp.json` of yours still has them to hand over. Eject asked the profile
+/// alone, and wrote Claude's approval for a server it never defined.
+pub(crate) fn carries(
+    cap: Capability,
+    sources: &[PathBuf],
+    rules_doc: &str,
+    own: &crate::base::Own,
+    adapter: &Adapter,
+) -> bool {
+    match cap {
+        Capability::Rules => !rules_doc.trim().is_empty(),
+        // And a `claude-settings` document is no longer only hooks: it also
+        // carries the approval without which the MCP document omh mounts is
+        // listed and never loaded. Skipping it when a repo has turned every
+        // hook off would turn that repo's MCP servers off with them, at a
+        // distance, through a file neither setting mentions.
+        Capability::Hooks => {
+            !sources.is_empty()
+                || !own.hooks.is_empty()
+                // Codex's system config likewise carries the trust without
+                // which `/work` is prompted about and its rules skipped.
+                || adapter.supports(cap).is_some_and(|b| {
+                    matches!(b.render, Render::ClaudeSettings | Render::CodexHooks)
+                })
+        }
+        Capability::Mcp => !sources.is_empty() || !own.servers.is_empty(),
+        _ => !sources.is_empty(),
     }
 }
 

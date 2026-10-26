@@ -14131,6 +14131,45 @@ fn eject_writes_what_each_capability_renders_to() {
     );
 }
 
+/// omh's servers come out of `eject` like its hooks and rules sections — they
+/// are generated, not read from your catalogue, so a catalogue holding none of
+/// yours still ejects them. It ejected none: the document was skipped for a
+/// profile with no `mcp.json`, and Claude's settings came out approving a
+/// server nothing defined.
+#[test]
+fn eject_writes_omhs_servers_with_no_catalogue_of_yours() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    assert!(!sb.home.join(".omh/mcp.json").exists());
+    for harness in ["claude", "codex"] {
+        let out = sb.home.join(format!("ejected-{harness}"));
+        let ran = sb.omh(&["eject", harness, "--to", out.to_str().unwrap()]);
+        assert!(
+            ran.status.success(),
+            "eject {harness}: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let mut defines = Vec::new();
+        fn walk(at: &Path, into: &mut Vec<String>) {
+            for e in std::fs::read_dir(at).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    walk(&e.path(), into);
+                } else if let Ok(body) = std::fs::read_to_string(e.path()) {
+                    into.push(body);
+                }
+            }
+        }
+        walk(&out, &mut defines);
+        for server in ["omh-codegraph", "omh-memory"] {
+            assert!(
+                defines.iter().any(|b| b.contains(&format!("\"{server}\":"))
+                    || b.contains(&format!("mcp_servers.{server}"))),
+                "{harness}: no document defines {server}"
+            );
+        }
+    }
+}
+
 /// `--dry-run` runs everything and writes nothing.
 ///
 /// The 0.7.0 rule: a command either answers the flag or refuses it, and one
