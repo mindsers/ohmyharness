@@ -564,6 +564,25 @@ mod tests {
             .is_empty());
     }
 
+    /// A name omh's server used to have is omh's too: never reported as
+    /// unselected, since `omh use` refuses it — and never let through as
+    /// omh's either, since `allows` is what Claude and Codex run unasked.
+    #[test]
+    fn a_name_omh_used_to_have_is_neither_unselected_nor_omhs_to_run() {
+        let retired = Owned::from([(
+            Capability::Mcp,
+            BTreeMap::from([("memory".to_string(), "memory".to_string())]),
+        )]);
+        let mut s = Selection::owning(owned()).retiring(retired);
+        let table = BTreeMap::from([("mcp".to_string(), vec!["linear".to_string()])]);
+        s.apply(&table, Path::new("settings.toml")).unwrap();
+        assert!(s
+            .unselected(Capability::Mcp, &["memory".into(), "linear".into()])
+            .is_empty());
+        assert!(!s.allows(Capability::Mcp, "memory"));
+        assert!(!s.omhs(Capability::Mcp).contains(&"memory"));
+    }
+
     #[test]
     fn a_selected_name_nothing_answers_to_is_reported() {
         let s = selection(&[("skills", &["reveiw-diff"])]);
