@@ -265,10 +265,11 @@ because it is the command that looks at that again. It:
 
 1. refreshes the managed catalogue from the binary — adapters, the base set,
    editors, stacks, hooks, markers — keeping anything you edited as `.yours`,
-   just as `init` does; omh's own servers in `~/.omh/mcp.json` go back to the
-   base set's definition, and one still under a name it used to have —
-   `codegraph`, `memory` — moves to its name now, `omh-codegraph`,
-   `omh-memory`, and is named on stderr;
+   just as `init` does. omh's own servers in `~/.omh/mcp.json` go back to the
+   base set's definition, an edit of yours with no `.yours` copy; one still
+   under a name it used to have — `codegraph`, `memory` — moves to its name
+   now, `omh-codegraph`, `omh-memory`, unless that name is already taken, in
+   which case both stay. Each of these is named on stderr, `--json` or not;
 2. asks the sandbox again which of this repo's provides apply, and corrects
    [`[provision]`](/reference/configuration/#provision--what-your-sandbox-is-built-with)
    before it builds anything;
@@ -2014,8 +2015,10 @@ omh: `graph-rules` is part of the `codegraph` feature, not a feature itself. A f
 Settings keys never collide with feature names, and a test fails the build if
 they ever do: `omh set <name>` writes two different shapes into one file, so a
 name meaning both could not be resolved by any error message. Feature and
-*entry* names do overlap on purpose — the manifest names a feature after its
-principal entry — and the feature reading wins.
+*entry* names may overlap — a base set may name a feature after its principal
+entry, as omh's did until its servers were named `omh-…` and as a
+`~/.omh/base` written by an older omh still does — and the feature reading
+wins.
 
 </details>
 

@@ -5741,7 +5741,8 @@ fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
 /// of `codegraph`, and the feature keeps no spelling at all.
 ///
 /// Its own manifest rather than the shipped one, which no longer collides:
-/// read off the shipped data, this asserted nothing from the day it stopped.
+/// read off the shipped data, its guard against asserting nothing went red the
+/// day the servers were renamed.
 #[test]
 fn a_feature_named_after_its_own_entry_resolves_as_the_feature() {
     let dir = tempfile::tempdir().unwrap();

@@ -808,8 +808,8 @@ fn upgrade_refreshes_omhs_own_servers() {
 /// An install from before omh named its servers `omh-…` holds them under the
 /// old names, and `omh upgrade` moves them: a catalogue still saying `codegraph`
 /// beside a manifest saying `omh-codegraph` reads as the graph server removed by
-/// hand, which switches the whole feature off — and keeps a server named
-/// `codegraph` running as though it were yours.
+/// hand, which switches the whole feature off — and leaves a server named
+/// `codegraph` that is neither omh's nor, by any command, yours.
 #[test]
 fn upgrade_moves_omhs_servers_onto_their_omh_names() {
     let sb = sandbox();
@@ -7070,7 +7070,8 @@ fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
 /// in silence, so a second `linear` took the first one's arguments and its
 /// token with it — and replaced `codegraph`, which `rm` refuses to take out.
 /// `--replace` says you meant it, as it does for `mcp import`; omh's own
-/// servers are refused with it too, since `omh upgrade` puts them back.
+/// servers are refused with it too, since `omh upgrade` puts them back — and
+/// so are the names they had, which `omh upgrade` would move onto omh's.
 #[test]
 fn mcp_add_does_not_write_over_a_server() {
     let sb = sandbox();

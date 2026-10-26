@@ -68,12 +68,17 @@ pub struct Entry {
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Names this entry shipped under before, which are still read as it.
+    /// Names this entry shipped under before. Servers only, each name one
+    /// entry's alone and nobody's now — `check_names` refuses anything else.
     ///
     /// An install keeps the name it was seeded with in `~/.omh/mcp.json`, and
     /// a repo keeps it in `[mcp.<name>.env]`. Read as nobody's, the first
     /// looks like omh's server taken out by hand — which switches its feature
-    /// off — and the second overrides a server that is not there.
+    /// off — and the second overrides a server that is not there. So `init`
+    /// and `upgrade` move a catalogue key onto the entry's name, an env table
+    /// under one reaches the entry, and the name stays omh's everywhere a name
+    /// could be yours ([`Manifest::reserved`]). It is not in
+    /// [`Manifest::owns`]: nothing under it is run or approved as omh's.
     #[serde(default)]
     pub was: Vec<String>,
     #[serde(default)]
@@ -1995,9 +2000,9 @@ command = "c"
     }
 
     /// A server omh ships is named for omh in every harness, so a policy can
-    /// tell it from one a session added: an allowlist is keyed by name, and a
-    /// bare `memory` is also what half the MCP servers people install call
-    /// themselves.
+    /// tell it from one added inside a session: an allowlist is keyed by
+    /// name, and a bare `memory` is also what the reference memory server is
+    /// usually installed as.
     #[test]
     fn every_server_omh_ships_is_named_for_omh() {
         let unprefixed: Vec<String> = shipped()

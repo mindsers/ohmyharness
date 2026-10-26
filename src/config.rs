@@ -1100,7 +1100,7 @@ pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
 }
 
 /// Bring omh's own servers back in line with the manifest, and leave yours
-/// alone. Answers the names it changed.
+/// alone. Answers what it changed, and what it would have and did not.
 ///
 /// `init` seeds the catalogue with `write_if_absent`, so nothing refreshed a
 /// server after the first run: the memory server kept the arguments it was

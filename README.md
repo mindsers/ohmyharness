@@ -467,9 +467,13 @@ omh-codegraph — omh's choice, in the base set since 2026.06
   brings      graph-orient, graph-first, graph-read, graph-refresh, graph-rules
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
+              3.4 MB on disk                   measured 2026-08-06
+              the graph volume after a cold index of this repo
   instead of  gitnexus            PolyForm-Noncommercial licence
-  remove      omh set codegraph off — the feature, its server and its hooks
-              together. Nothing is uninstalled and the next repo gets it back
+              codegraphcontext    needs a Neo4j service running
+              @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
+  installed   your catalogue
+  remove      omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings set codegraph off` does the same for every repo `omh init` sets up after
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```

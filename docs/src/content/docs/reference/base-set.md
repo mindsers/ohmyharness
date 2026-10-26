@@ -280,7 +280,7 @@ which is exactly when carried-over numbers should be re-taken or re-affirmed.
 
 | | How it reaches a session | What follows |
 |---|---|---|
-| MCP servers, in `mcp.json` | **seeded**: `init` copies them into your profile with `write_if_absent` and never revisits | your edits survive, and your copy drifts from the manifest by design |
+| MCP servers, in `mcp.json` | **seeded**: `init` copies them into your profile with `write_if_absent`, and `init` and `upgrade` put omh's definition back over its own servers | a server of yours is never touched; an edit of omh's own is written over, and said so |
 | hooks and rules sections | **generated**: written into the session at launch, from the manifest; they exist as a file nowhere | omh can ship a fix to its own machinery |
 
 Two consequences of seeding, and both caused bugs:
@@ -288,7 +288,7 @@ Two consequences of seeding, and both caused bugs:
 - **An omh-seeded server and one you added are byte-identical in the same
   file.** Nothing marks which is which, so `omh why` recovers authorship by
   comparing against the manifest rather than by reading a marker.
-- **The manifest is refreshed on upgrade while your profile is not.** `omh why`
+- **Until `omh upgrade` runs, the binary is newer than both.** `omh why`
   reports *"not what omh ships now"* and declines to say who caused the
   difference — it cannot know.
 

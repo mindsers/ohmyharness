@@ -579,8 +579,8 @@ is the thing an allowlist exists to make possible.
 
 `omh-codegraph` and `omh-memory` sit in `~/.omh/mcp.json` looking exactly like
 servers you added, because `omh init` seeded them there. They are not yours to
-select — under those names, under `codegraph` and `memory`, the ones they had
-before, or by their feature's name:
+select, under those names or under `codegraph` and `memory`, the names they had
+before, which are also their features' names:
 
 ```console
 $ omh use mcp codegraph

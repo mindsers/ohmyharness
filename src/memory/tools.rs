@@ -21,9 +21,9 @@ pub const SERVER_NAME: &str = "omh-memory";
 ///
 /// The feature, never the server's key in `mcp.json`: that key is whatever the
 /// manifest in `~/.omh/base` says, and it said `memory` until omh's servers
-/// were named `omh-…`. A constant naming the key matched one manifest and not
-/// the other, so a binary newer than its base set kept the note store mounted
-/// with the feature switched off.
+/// were named `omh-…`. A constant naming the key would match one manifest and
+/// not the other, and a binary newer than its base set would keep the note
+/// store mounted with the feature switched off.
 pub const FEATURE: &str = "memory";
 
 pub struct Server {

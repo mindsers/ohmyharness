@@ -3301,11 +3301,11 @@ mod tests {
         );
     }
 
-    /// The same, against a base set an older omh wrote — one that still names
-    /// the server `memory`, which is what `~/.omh/base` holds until `omh
-    /// upgrade` refreshes it. Keyed on the server's name, the store stayed
-    /// mounted with the feature off, because the name this binary expected was
-    /// not the one that manifest switched off.
+    /// The note store, against a base set an older omh wrote — one that still
+    /// names the server `memory`, which is what `~/.omh/base` holds until `omh
+    /// upgrade` or `omh init` refreshes it. Keyed on the server's name, the
+    /// store would stay mounted with the feature off, because the name this
+    /// binary expects is not the one that manifest switches off.
     #[test]
     fn a_disabled_feature_takes_its_mounts_under_an_older_base_set_too() {
         let fx = fixture();

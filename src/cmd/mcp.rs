@@ -29,12 +29,14 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
             env,
             replace,
         } => {
-            // omh's own: `omh upgrade` puts its definition back over yours,
-            // and `rm` refuses it for the same reason.
+            // omh's own, or a name one of its servers had: `omh upgrade` puts
+            // omh's definition back over the one, and moves the other onto
+            // omh's server, so either would take yours. `rm` refuses them too.
             if let Some(feature) = crate::cmd::settings::shipped_servers()?.get(name) {
                 anyhow::bail!(
-                    "the `{name}` server is omh's own — the {feature} feature, and \
-                     `omh upgrade` puts its definition back. To switch it off in a repo:\n  \
+                    "`{name}` is omh's own — the {feature} feature's server, or a name it \
+                     had — and `omh upgrade` would take a server of yours under it. To \
+                     switch the feature off in a repo:\n  \
                      omh set {feature} off\n\
                      and for every repo `omh init` sets up after:\n  \
                      omh settings set {feature} off"
