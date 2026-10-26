@@ -1984,7 +1984,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // set` and `omh set`, where one line said `omh set` for both. + `omh
         // init` and `omh settings unuse hooks` where rm refuses a hook omh
         // ships.
-        ("src/cmd/settings.rs", 32),
+        ("src/cmd/settings.rs", 35),
         // The screen's own: `omh import hooks <harness>` where a hook cannot
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start

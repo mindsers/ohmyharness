@@ -1174,6 +1174,18 @@ pub(crate) fn edit_target(
         );
     }
     selection::validate_entry_name(name, cap, &dir)?;
+    // A part of one of omh's features is generated at launch and is not a file
+    // to edit. Opened anyway, the editor made a catalogue file of that name —
+    // one every launch then refused, as a file answering to a name omh ships.
+    if let Some(feature) = shipped_owned(cap)?.get(name) {
+        anyhow::bail!(
+            "{cap}/{name} is omh's — part of the `{feature}` feature, generated at launch \
+             and switched whole, not edited part by part. In a repo:\n  \
+             omh set {feature} off\n\
+             and for every repo `omh init` sets up after:\n  \
+             omh settings set {feature} off"
+        );
+    }
     // The file the kind is read as, by its exact name, first: the name joined
     // with `format!` and not `with_extension`, which replaces whatever follows
     // the last dot — `v1.2` became `v1.md`, another rule. And an exact match

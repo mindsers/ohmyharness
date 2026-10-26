@@ -13705,6 +13705,31 @@ fn use_all_does_not_turn_on_a_guard() {
     assert!(!settings.contains("config-guard"), "got: {settings}");
 }
 
+/// A part of omh's features cannot be edited on its own: `settings edit` under
+/// the name of one of omh's hooks or rules sections used to open an editor on a
+/// new catalogue file of that name — one every launch then refuses. It is
+/// refused before any editor opens, naming the feature's switch.
+#[test]
+fn settings_edit_refuses_a_part_of_omhs_features() {
+    let sb = sandbox();
+    sb.seed_base();
+    for (cap, name, feature) in [
+        ("hooks", "graph-first", "codegraph"),
+        ("hooks", "graph-refresh", "codegraph"),
+        ("rules", "graph-rules", "codegraph"),
+        ("rules", "memory-rules", "memory"),
+    ] {
+        let out = sb.omh(&["settings", "edit", cap, name]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "`settings edit {cap} {name}` opened");
+        assert!(said.contains(&format!("omh set {feature} off")), "{said}");
+        assert!(
+            !sb.bin.join("editor.log").exists(),
+            "no editor was opened for {cap}/{name}"
+        );
+    }
+}
+
 /// omh's servers are part of omh, not of your catalogue, so nothing that lists
 /// or counts your catalogue names them — not even in a `mcp.json` an earlier
 /// omh seeded and `omh upgrade` has not cleaned yet.
