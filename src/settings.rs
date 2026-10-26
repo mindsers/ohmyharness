@@ -99,7 +99,10 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut provision: BTreeMap<String, bool> = BTreeMap::new();
     let mut selection =
         crate::selection::Selection::owning(manifest.owns()).retiring(manifest.retired());
-    let retired = manifest.retired_servers();
+    let omhs = manifest
+        .reserved()
+        .remove(&crate::adapter::Capability::Mcp)
+        .unwrap_or_default();
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
             continue;
@@ -161,11 +164,19 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         // environment; the catalogue's own env lives on the server in
         // `~/.omh/mcp.json`, which is the file that owns servers.
         //
-        // A name one of omh's servers used to have is read as that server, so
-        // a token set before the rename keeps reaching it — and `omh settings
-        // mcp add` refuses those names, so no server of yours is added under one.
+        // Not omh's, under the name a server has or the one it had: a server
+        // of omh's is part of a feature, generated with the rest of it, and a
+        // repo changing its environment would change one part on its own.
         for (name, over) in file.mcp {
-            let name = retired.get(&name).cloned().unwrap_or(name);
+            if let Some(feature) = omhs.get(&name) {
+                anyhow::bail!(
+                    "{}: `[mcp.{name}.env]` sets the environment of omh's own `{name}` \
+                     server — part of the {feature} feature, which is switched whole and \
+                     not configured part by part. Delete the table; to switch the \
+                     feature off here:\n  omh set {feature} off",
+                    path.display()
+                );
+            }
             mcp_env.entry(name).or_default().extend(over.env);
         }
         // Wholesale per capability, which is the opposite rule and deliberately
@@ -452,30 +463,30 @@ mod tests {
         assert_eq!(env["REGION"], "eu");
     }
 
-    /// A repo that set a token for omh's graph server before it was named
-    /// `omh-codegraph` keeps it: the table under the old name is read as the
-    /// server's, and merges with one under the new name rather than becoming
-    /// an override for a server nobody has.
+    /// omh's servers are part of its features, so a repo cannot set one's
+    /// environment on its own — under the name it has or the one it had. A
+    /// table that did was the one way left to change a part of a feature
+    /// without the rest; it is refused with the switch that does work.
     #[test]
-    fn an_override_under_a_servers_old_name_reaches_it() {
-        let (_d, paths, m) = fixture();
-        write(
-            paths.repo.join(".omh/settings.toml"),
-            "[mcp.codegraph.env]\nTOKEN = \"t\"\n",
-        );
-        write(
-            paths.repo.join(".omh/settings.local.toml"),
-            "[mcp.omh-codegraph.env]\nREGION = \"eu\"\n",
-        );
-        let r = resolve(&paths, &m).unwrap();
-        assert_eq!(
-            r.mcp_env.keys().collect::<Vec<_>>(),
-            ["omh-codegraph"],
-            "{:?}",
-            r.mcp_env
-        );
-        assert_eq!(r.mcp_env["omh-codegraph"]["TOKEN"], "t");
-        assert_eq!(r.mcp_env["omh-codegraph"]["REGION"], "eu");
+    fn an_override_for_one_of_omhs_servers_is_refused() {
+        for (file, name) in [
+            ("settings.toml", "omh-codegraph"),
+            ("settings.local.toml", "codegraph"),
+            ("settings.toml", "omh-memory"),
+            ("settings.local.toml", "memory"),
+        ] {
+            let (_d, paths, m) = fixture();
+            write(
+                paths.repo.join(".omh").join(file),
+                &format!("[mcp.{name}.env]\nTOKEN = \"t\"\n"),
+            );
+            let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+            assert!(
+                err.contains(&format!("[mcp.{name}")),
+                "names the table: {err}"
+            );
+            assert!(err.contains("omh set"), "and the switch: {err}");
+        }
     }
 
     /// A `[use]` list naming one of omh's servers by the name it used to have

@@ -2049,6 +2049,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/rules.rs", 1),
         ("src/selection.rs", 1),
         ("src/session.rs", 4),
+        ("src/settings.rs", 1),
         ("src/shadow.rs", 11),
         // The config include header and the known_hosts header, both naming
         // `omh s attach` as what rewrites them.
@@ -4126,7 +4127,7 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
 
     write(
         paths.repo.join(".omh/settings.toml"),
-        "[omh]\ncodegraph = false\n\n[mcp.omh-memory.env]\nOMH_TEST = \"seen\"\n",
+        "[omh]\ncodegraph = false\n\n[mcp.linear.env]\nOMH_TEST = \"seen\"\n",
     );
     let (off, policy) = cmd::session::resolved(&paths).unwrap();
     assert!(
@@ -4143,7 +4144,7 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
     // between them was asserted nowhere, so deleting it left the suite
     // green and a token reached no server.
     assert_eq!(
-        policy.mcp_env["omh-memory"]["OMH_TEST"], "seen",
+        policy.mcp_env["linear"]["OMH_TEST"], "seen",
         "a per-repo MCP environment has to reach the plan too"
     );
     // And the server: generated with the rest of the feature, so switched off
