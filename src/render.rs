@@ -439,6 +439,56 @@ pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Resul
     }
 }
 
+/// The keys a session's copy of an account file is seeded without: the ones
+/// that name a server, switch one on or off, grant a permission, or carry a
+/// credential helper or an environment. Everything else is kept as written.
+pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
+    match format {
+        // Claude Code 2.1.300's `~/.claude.json`. Top level: user-scope
+        // servers, the legacy `env` and `apiKeyHelper` it still reads as a
+        // fallback (#197, read in the binary). Per project — every session's
+        // is `/work`, but all go, so none is kept to be renamed into it: its
+        // servers, the `/mcp` switches, the switches on `.mcp.json` servers
+        // (2.1.300 migrates those into `/work/.claude/settings.local.json` at
+        // start), and `allowedTools`, the permissions granted there —
+        // measured present in a captured account.
+        PolicyFormat::ClaudeManaged => {
+            const TOP: [&str; 6] = [
+                "mcpServers",
+                "disabledMcpjsonServers",
+                "enabledMcpjsonServers",
+                "enableAllProjectMcpServers",
+                "env",
+                "apiKeyHelper",
+            ];
+            const PROJECT: [&str; 7] = [
+                "mcpServers",
+                "disabledMcpServers",
+                "enabledMcpServers",
+                "enabledMcpjsonServers",
+                "disabledMcpjsonServers",
+                "enableAllProjectMcpServers",
+                "allowedTools",
+            ];
+            let Some(top) = doc.as_object_mut() else {
+                return;
+            };
+            for key in TOP {
+                top.remove(key);
+            }
+            if let Some(projects) = top.get_mut("projects").and_then(|p| p.as_object_mut()) {
+                for project in projects.values_mut().filter_map(|p| p.as_object_mut()) {
+                    for key in PROJECT {
+                        project.remove(key);
+                    }
+                }
+            }
+        }
+        // Codex copies nothing; `check_policy` refuses a `copy` for it.
+        PolicyFormat::CodexRequirements => {}
+    }
+}
+
 /// Where Codex sends the ChatGPT tokens and fetches an enterprise's bundle.
 /// Pinned in the policy so no layer a session writes can move it.
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/";
@@ -1971,6 +2021,73 @@ mod tests {
     use std::io::Write;
 
     // ── policy ──────────────────────────────────────────────────────────────
+
+    /// What a session's `~/.claude.json` is seeded without, by name: a server,
+    /// a switch on one, a permission grant, a helper or an environment — at
+    /// the top and under every project. Identity, onboarding and everything
+    /// omh has no opinion on are kept as written.
+    #[test]
+    fn a_claude_account_file_is_seeded_without_what_names_or_switches_a_server() {
+        let planted =
+            serde_json::json!({ "omh-memory": { "command": "omh", "env": { "PATH": "/x" } } });
+        let project = serde_json::json!({
+            "mcpServers": planted,
+            "disabledMcpServers": ["omh-memory"],
+            "enabledMcpServers": ["x"],
+            "enabledMcpjsonServers": ["x"],
+            "disabledMcpjsonServers": ["omh-memory"],
+            "enableAllProjectMcpServers": false,
+            "allowedTools": ["Bash(curl *)"],
+            "hasTrustDialogAccepted": true,
+            "lastCost": 1.5,
+        });
+        let mut doc = serde_json::json!({
+            "mcpServers": planted,
+            "disabledMcpjsonServers": ["omh-memory"],
+            "enabledMcpjsonServers": ["x"],
+            "enableAllProjectMcpServers": false,
+            "env": { "ANTHROPIC_BASE_URL": "https://elsewhere" },
+            "apiKeyHelper": "/tmp/helper",
+            "oauthAccount": { "emailAddress": "a@b" },
+            "userID": "u",
+            "hasCompletedOnboarding": true,
+            "theme": "dark",
+            "projects": { "/work": project.clone(), "/elsewhere": project },
+        });
+        scrub(PolicyFormat::ClaudeManaged, &mut doc);
+
+        let gone = [
+            "mcpServers",
+            "disabledMcpjsonServers",
+            "enabledMcpjsonServers",
+            "enableAllProjectMcpServers",
+            "env",
+            "apiKeyHelper",
+        ];
+        for key in gone {
+            assert!(doc.get(key).is_none(), "top-level {key} kept: {doc}");
+        }
+        for kept in ["oauthAccount", "userID", "hasCompletedOnboarding", "theme"] {
+            assert!(doc.get(kept).is_some(), "{kept} dropped: {doc}");
+        }
+        let gone_per_project = [
+            "mcpServers",
+            "disabledMcpServers",
+            "enabledMcpServers",
+            "enabledMcpjsonServers",
+            "disabledMcpjsonServers",
+            "enableAllProjectMcpServers",
+            "allowedTools",
+        ];
+        for (path, p) in doc["projects"].as_object().unwrap() {
+            for key in gone_per_project {
+                assert!(p.get(key).is_none(), "{path}.{key} kept: {p}");
+            }
+            for kept in ["hasTrustDialogAccepted", "lastCost"] {
+                assert!(p.get(kept).is_some(), "{path}.{kept} dropped: {p}");
+            }
+        }
+    }
 
     fn server(command: &str, args: &[&str]) -> Server {
         Server {

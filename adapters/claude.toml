@@ -160,6 +160,18 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # read from every admin source, so they hold beside an organisation's own
 # managed settings; `allowedMcpServers` does not merge — an organisation's list
 # replaces omh's [docs, not measured].
+#
+# `~/.claude.json` is each session's own copy, not the account's. The lock
+# compares no `env`, so an entry there with omh's command and arguments and an
+# `env.PATH` of its own passes it [measured in #197] — and a shared file cannot
+# be scrubbed while another session runs, since a running Claude rewrites it
+# whole. So each session gets a copy seeded from the account's without what
+# names, switches or grants (`render::scrub`): identity — `oauthAccount`,
+# `userID`, onboarding — still comes from the account, tokens stay in the
+# shared `.credentials.json`, and nothing a session writes there reaches the
+# account or any other session. `omh auth` mounts the account's own file: a
+# login is where its identity is written.
 [policy]
 path   = "/etc/claude-code/managed-settings.d/omh.json"
 format = "claude-managed"
+copy   = ["$HOME/.claude.json"]

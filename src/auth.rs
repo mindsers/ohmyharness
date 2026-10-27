@@ -305,6 +305,96 @@ fn mountpoint(root: &std::path::Path, relative: &std::path::Path, is_dir: bool) 
     }
 }
 
+/// Seed the session's copies of the account's `[policy] copy` files into
+/// `home`, mirroring `$HOME` the way an account directory does.
+///
+/// Once per session and account: a copy already seeded from `account_dir` is
+/// the session's, and a relaunch continues from it. `fresh` reseeds anyway —
+/// `omh doctor`'s scratch, which keeps nothing.
+pub fn seed_copies(
+    adapter: &Adapter,
+    account_dir: &std::path::Path,
+    home: &std::path::Path,
+    fresh: bool,
+) -> Result<()> {
+    let Some(policy) = adapter.policy.as_ref().filter(|p| !p.copy.is_empty()) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+    let stamp = home.join(SEEDED_FROM);
+    let from = account_dir.display().to_string();
+    let same = match std::fs::read_to_string(&stamp) {
+        Ok(seeded) => seeded == from,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e).with_context(|| format!("reading {}", stamp.display())),
+    };
+    for copy in &policy.copy {
+        let rel = copy.trim_start_matches("$HOME/");
+        let dest = home.join(rel);
+        let there = std::fs::symlink_metadata(&dest).is_ok();
+        if same && there && !fresh {
+            continue;
+        }
+        let shown = account_dir.join(rel);
+        let raw = read_account_file(account_dir, rel)
+            .with_context(|| format!("seeding this session's copy of {}", shown.display()))?;
+        let mut doc = match is_placeholder(&raw) {
+            true => serde_json::json!({}),
+            false => serde_json::from_str(&raw).with_context(|| {
+                format!(
+                    "{} is not JSON, so no session can be seeded from it — `omh auth {}` \
+                     captures it again",
+                    shown.display(),
+                    adapter.name
+                )
+            })?,
+        };
+        crate::render::scrub(policy.format, &mut doc);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, serde_json::to_string_pretty(&doc)?)
+            .with_context(|| format!("writing {}", dest.display()))?;
+    }
+    std::fs::write(&stamp, &from).with_context(|| format!("writing {}", stamp.display()))
+}
+
+/// Beside a session's copies: the account they were seeded from.
+const SEEDED_FROM: &str = ".omh-seeded-from";
+
+/// Far more than any `~/.claude.json` measured (231 KB with a year of
+/// projects), and a bound on what a session could make a launch read.
+const COPY_CAP: u64 = 16 << 20;
+
+/// `rel` under the account, read as a file a session could have written: one
+/// name at a time through [`crate::held`], never through a link, never whole
+/// past [`COPY_CAP`]. Absent is empty — `prepare` lays a placeholder anyway.
+fn read_account_file(account_dir: &std::path::Path, rel: &str) -> Result<String> {
+    use std::io::Read;
+    let path = std::path::Path::new(rel);
+    let names: Vec<&std::ffi::OsStr> = path.iter().collect();
+    let Some((leaf, above)) = names.split_last() else {
+        anyhow::bail!("{rel} names no file");
+    };
+    let mut dir = crate::held::Dir::open(account_dir)?;
+    for name in above {
+        dir = dir.sub(name)?;
+    }
+    let file = match dir.file(leaf) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(COPY_CAP + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= COPY_CAP,
+        "it is larger than omh reads ({} MiB)",
+        COPY_CAP >> 20
+    );
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// The account a launch of this harness is configured with, if any — its own
 /// entry in `[account]`, or the one name for every harness.
 pub fn configured(paths: &Paths, adapter: &Adapter) -> Result<Option<String>> {
@@ -1674,6 +1764,103 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("cloud-config-bundle-cache.json"), "{err}");
+    }
+
+    // ── a session's own copies ──────────────────────────────────────────────
+
+    fn copied(home: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap()
+    }
+
+    /// The account's `~/.claude.json`, as a session before this one could
+    /// have left it: a server of its own, and identity worth keeping.
+    fn planted_account() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&claude(), d.path(), "/home/agent").unwrap();
+        std::fs::write(
+            d.path().join(".claude.json"),
+            r#"{"userID":"u","mcpServers":{"planted":{"command":"omh","env":{"PATH":"/x"}}}}"#,
+        )
+        .unwrap();
+        d
+    }
+
+    #[test]
+    fn a_session_is_seeded_its_own_copy_without_what_names_a_server() {
+        let account = planted_account();
+        let home = tempfile::tempdir().unwrap();
+        seed_copies(&claude(), account.path(), home.path(), false).unwrap();
+        let doc = copied(home.path());
+        assert_eq!(doc["userID"], "u", "identity comes from the account: {doc}");
+        assert!(doc.get("mcpServers").is_none(), "{doc}");
+    }
+
+    /// Seeded once: a relaunch continues from what the session made of its
+    /// copy — unless the account is another one, which reseeds.
+    #[test]
+    fn a_copy_is_seeded_once_per_session_and_account() {
+        let account = planted_account();
+        let home = tempfile::tempdir().unwrap();
+        seed_copies(&claude(), account.path(), home.path(), false).unwrap();
+        std::fs::write(home.path().join(".claude.json"), r#"{"theme":"mine"}"#).unwrap();
+        seed_copies(&claude(), account.path(), home.path(), false).unwrap();
+        assert_eq!(copied(home.path())["theme"], "mine", "a relaunch reseeded");
+
+        let other = planted_account();
+        std::fs::write(other.path().join(".claude.json"), r#"{"userID":"other"}"#).unwrap();
+        seed_copies(&claude(), other.path(), home.path(), false).unwrap();
+        assert_eq!(
+            copied(home.path())["userID"],
+            "other",
+            "another account kept the old copy"
+        );
+
+        std::fs::write(home.path().join(".claude.json"), r#"{"theme":"mine"}"#).unwrap();
+        seed_copies(&claude(), other.path(), home.path(), true).unwrap();
+        assert_eq!(
+            copied(home.path())["userID"],
+            "other",
+            "fresh did not reseed"
+        );
+    }
+
+    /// The account's file was writable from every session before this: read
+    /// as the agent's — never through a link, never whole when huge — and
+    /// refused by name when it cannot be read as JSON, rather than seeded as
+    /// nothing, which would log the session out of its identity in silence.
+    #[test]
+    fn an_account_file_that_cannot_be_read_as_its_own_is_refused_by_name() {
+        let home = tempfile::tempdir().unwrap();
+
+        let account = planted_account();
+        let elsewhere = account.path().join("elsewhere.json");
+        std::fs::write(&elsewhere, r#"{"userID":"followed"}"#).unwrap();
+        std::fs::remove_file(account.path().join(".claude.json")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, account.path().join(".claude.json")).unwrap();
+        let err = seed_copies(&claude(), account.path(), home.path(), false).unwrap_err();
+        assert!(format!("{err:#}").contains(".claude.json"), "{err:#}");
+        assert!(!home.path().join(".claude.json").exists());
+
+        let account = planted_account();
+        std::fs::write(account.path().join(".claude.json"), "{ not json").unwrap();
+        let err = seed_copies(&claude(), account.path(), home.path(), false).unwrap_err();
+        assert!(format!("{err:#}").contains(".claude.json"), "{err:#}");
+
+        let account = planted_account();
+        let huge = format!("{{\"pad\":\"{}\"}}", "x".repeat(20 << 20));
+        std::fs::write(account.path().join(".claude.json"), huge).unwrap();
+        let err = seed_copies(&claude(), account.path(), home.path(), false).unwrap_err();
+        assert!(format!("{err:#}").contains(".claude.json"), "{err:#}");
+    }
+
+    /// `prepare`'s placeholder is no identity, and seeds an empty copy.
+    #[test]
+    fn a_placeholder_account_file_seeds_an_empty_copy() {
+        let account = tempfile::tempdir().unwrap();
+        prepare(&claude(), account.path(), "/home/agent").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        seed_copies(&claude(), account.path(), home.path(), false).unwrap();
+        assert_eq!(copied(home.path()), serde_json::json!({}));
     }
 
     #[test]
