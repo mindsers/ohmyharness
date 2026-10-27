@@ -1070,14 +1070,16 @@ pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Refresh
     // to the adapters for one reason: an opinion imposed on somebody should be
     // one they can read. They travel inside the binary (otherwise a released
     // omh installs nothing) but still land as files under `~/.omh`, which is
-    // where the reviewability lives — `omh why` reads the base file init seeds
-    // from. Managed, so a shipped fix always reaches an existing install.
+    // where the reviewability lives — `omh why` reads the base file every
+    // launch generates from. Managed, so a shipped fix always reaches an
+    // existing install.
     install_bundled(&paths.base(), bundled::Shipped::Base, ctx)?;
     install_bundled(&paths.stacks(), bundled::Shipped::Stacks, ctx)?;
     install_bundled(&paths.hooks(), bundled::Shipped::Hooks, ctx)?;
     install_bundled(&paths.markers(), bundled::Shipped::Markers, ctx)?;
-    // The catalogue's own entries, for the reason the files above are managed:
-    // a shipped fix has to reach an existing install. Yours are untouched.
+    // And the copies of omh's servers an earlier omh seeded into your
+    // catalogue: they are generated with their features now, so the copies go
+    // and yours are untouched.
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let taken_out = config::remove_own_servers(paths, &manifest, false)?;
     say_what_was_taken_out(&taken_out, false, ctx);

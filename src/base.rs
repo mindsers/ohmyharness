@@ -292,9 +292,9 @@ impl Manifest {
             )
         })?;
 
-        // A manifest that parses but names nothing seeds an empty base set and
-        // reports success, leaving every session running hooks that point at a
-        // server which is not installed. Fail here rather than there.
+        // A manifest that parses but names nothing is an empty base set: the
+        // launch would refuse later, naming a hook rather than this file. Fail
+        // here, where the file can be named.
         if manifest.entries.is_empty() {
             anyhow::bail!("{} declares no base-set entries", path.display());
         }
@@ -417,10 +417,11 @@ impl Manifest {
     /// answers to it is how a feature gets taken apart by one of them while the
     /// other still thinks it is whole.
     ///
-    /// The names an entry *used* to have are not in here, because this is also
-    /// what Claude runs unasked and Codex approves. They are omh's all the same
-    /// — [`Self::reserved`] is both together, and it is what anything deciding
-    /// whether a name is yours reads.
+    /// The names an entry *used* to have are not in here: an owned name is one
+    /// `[use]` lets through whatever the list says, and an old name in a
+    /// catalogue names nothing of omh's to let through. They are omh's all the
+    /// same — [`Self::reserved`] is both together, and it is what anything
+    /// deciding whether a name is yours reads.
     pub fn owns(&self) -> crate::selection::Owned {
         let mut out = crate::selection::Owned::new();
         for entry in &self.entries {
@@ -1031,7 +1032,7 @@ fn note_taking() -> String {
 /// `memory_bin` and `base` already follow: `plan` stays pure given a temp
 /// filesystem, and a probe inside it is a probe no test can reach.
 ///
-/// It used to carry `disabled_servers` and `mcp_env` as well, on the argument
+/// It used to carry the servers of switched-off features and `mcp_env` as well, on the argument
 /// that both are decisions about the rendered document arriving from outside
 /// `plan`. True, and not enough — they are decisions *this repo* made, which is
 /// the opposite of what this type's name claims, and the moment a third one
@@ -1704,11 +1705,11 @@ command = "c"
         assert!(err.contains("omh init"), "must say the way out: {err}");
     }
 
-    /// A name an entry used to have is read as that entry — a catalogue key is
-    /// moved onto it and `[mcp.<old>.env]` reaches it — so it has to point at
-    /// exactly one entry, and can be nobody's name now. A manifest saying
-    /// otherwise is refused where it is read: `refresh_own_servers` would
-    /// otherwise move one live server onto another and write over it.
+    /// Every reader looks an entry up by name — `omh why`, `upgrade` judging a
+    /// catalogue copy, the refusals naming a switch — so a name, current or
+    /// used before, has to be one entry's alone within its kind. A manifest
+    /// saying otherwise is refused where it is read, rather than resolved
+    /// differently by each reader.
     #[test]
     fn a_name_used_before_belongs_to_one_server_and_is_nobodys_now() {
         let entry = |name: &str, kind: &str, was: &str| {

@@ -29,9 +29,9 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
             env,
             replace,
         } => {
-            // omh's own, or a name one of its servers had: `omh upgrade` puts
-            // omh's definition back over the one, and moves the other onto
-            // omh's server, so either would take yours. `rm` refuses them too.
+            // omh's own, or a name one of its servers had: either is omh's,
+            // and `omh upgrade` takes a server under one out of your catalogue.
+            // `rm` and `import` refuse them too.
             if let Some(feature) = crate::cmd::settings::shipped_servers()?.get(name) {
                 anyhow::bail!(
                     "`{name}` is omh's own — the {feature} feature's server, or a name it \

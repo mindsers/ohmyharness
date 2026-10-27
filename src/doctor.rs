@@ -1756,7 +1756,7 @@ pub fn checks(
 /// An entry this repo did not select is deliberately absent, for the reason
 /// `server_names` gives one capability over: demanding it makes `omh doctor`
 /// fail forever and blame the harness for obeying. That argument was applied to
-/// `disabled_servers` and not carried across when `[use]` landed, so a doctor
+/// switched-off features' servers and not carried across when `[use]` landed, so a doctor
 /// run in any curated repo reported `missing: <name>` — a false alarm in the
 /// one command CONTRIBUTING puts above the test suite.
 ///
@@ -3608,9 +3608,8 @@ mod tests {
         })
     }
 
-    /// Every server the manifest names counts as installed: `own` also
-    /// switches a feature off when its server is gone from the profile, and a
-    /// fixture declaring none would disable everything for the wrong reason.
+    /// What omh contributes and what this repo decided, with `off` switched
+    /// off and nothing else said.
     ///
     /// The pair together, because a fixture that named a feature off without
     /// the servers it owns would let a check pass on a plan omh cannot build.
@@ -3932,7 +3931,7 @@ mod tests {
     ///
     /// The case above carried across to directories and not to servers. It is
     /// the ordinary configuration, not an edge: `omh init` writes `mcp = []`
-    /// when the catalogue holds only omh's own servers, so the first
+    /// when the catalogue holds no server of yours, so the first
     /// `omh settings mcp add` afterwards made every `omh doctor` in that repo
     /// fail on two rows, `mcp` and `mcp-loaded`, both `missing: linear`.
     #[test]
@@ -3940,7 +3939,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx._dir.path().join("home/mcp.json"),
-            r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"linear":{"command":"l"}}}"#,
+            r#"{"mcpServers":{"linear":{"command":"l"}}}"#,
         )
         .unwrap();
         let (own, mut repo) = decided();

@@ -159,9 +159,9 @@ fn record_path(paths: &Paths) -> PathBuf {
 /// reason to refuse to start work, and a name that resolves to nothing costs
 /// only itself.
 ///
-/// omh's own are excluded from both by [`crate::selection::Selection`] itself,
-/// so an `omh-codegraph` sitting in the catalogue's `mcp.json` is never reported as
-/// something `omh use` could fix — `omh use` refuses to write it.
+/// omh's own are excluded from both — `Profile::entries` never lists them and
+/// [`crate::selection::Selection`] never reports one — so nothing of omh's is
+/// reported as something `omh use` could fix: `omh use` refuses to write it.
 pub fn selection(
     profile: &crate::profile::Profile,
     selection: &crate::selection::Selection,
@@ -655,7 +655,8 @@ mod tests {
         assert!(about_selection(&fx, &["skills/refactor/SKILL.md"], "").is_empty());
     }
 
-    /// omh's own live in the catalogue's `mcp.json` and are governed by `[omh]`.
+    /// omh's own are governed by `[omh]`, and a copy of one in `mcp.json` is a
+    /// leftover, not an entry of yours.
     /// Reporting one as unselected would advise `omh use mcp omh-codegraph`, which
     /// `omh use` refuses to write — a report pointing at a wall.
     #[test]

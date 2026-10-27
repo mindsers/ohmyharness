@@ -419,7 +419,8 @@ impl Paths {
         self.root.join(Capability::Hooks.source())
     }
 
-    /// The base set as shipped: what `init` seeds and what `omh why` explains.
+    /// The base set as shipped: what every launch generates from and what
+    /// `omh why` explains.
     /// Versioned files, oldest kept, so an upgrade can eventually diff two.
     pub fn base(&self) -> PathBuf {
         self.root.join("base")

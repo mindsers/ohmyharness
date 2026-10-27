@@ -4102,18 +4102,6 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
         std::fs::write(p, body).unwrap();
     };
     cmd::init::install_bundled(&paths.base(), bundled::Shipped::Base, &out::Ctx::plain()).unwrap();
-    // Which servers the catalogue declares decides whether a feature was
-    // *removed* rather than merely switched off, so the fixture has to
-    // declare them — in the catalogue, which is the only place a server
-    // lives. Seeded into `.omh/profile/mcp.json` this asserted nothing:
-    // `installed` came back empty, every feature was already `gone` by the
-    // removed-server path, and the `[omh]` half below was asserting an
-    // absence that was there before the setting was written.
-    write(
-        paths.root.join("mcp.json"),
-        r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"omh-memory":{"command":"omh"}}}"#,
-    );
-
     let (own, _) = cmd::session::resolved(&paths).unwrap();
     assert!(
         !own.hooks.is_empty() && !own.sections.is_empty(),

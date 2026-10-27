@@ -458,14 +458,13 @@ mod tests {
         }
     }
 
-    /// A hook or a rules section is generated from the manifest at launch and
-    /// is not a file anywhere, so the file-shaped answers are all wrong about
-    /// it: `Removed` says "not installed here" about something that is
-    /// running, and `Omh` points at a layer nothing reads.
+    /// A part of a feature is generated from the manifest at launch and is
+    /// not a file anywhere, so the answer for it is the feature's, with no
+    /// file of yours in it.
     ///
-    /// The leftover case is the one that matters. Every repo initialised
-    /// before generation still has five hook files sitting in its profile;
-    /// they lose the merge, so reporting one as what omh ships would be a
+    /// The leftover case is the one that matters. A repo initialised before
+    /// generation can still have hook files under omh's names in its profile;
+    /// they are not what runs, so reporting one as what omh ships would be a
     /// confident wrong answer about the thing this command exists to be right
     /// about.
     #[test]
@@ -553,9 +552,8 @@ mod tests {
         let m = manifest();
         let c = catalog(&m, vec![]);
 
-        // The feature, whole — not the first entry of it. A feature with a
-        // server answers as that server; one without has nothing to stand in
-        // for it, and `git-rules` alone would be a part named as the whole.
+        // The feature, whole — not the first entry of it: `git-rules` alone
+        // would be a part named as the whole.
         match c.why("git-notice") {
             Verdict::Feature { parts, .. } => {
                 let names: Vec<&str> = parts.iter().map(|e| e.name.as_str()).collect();

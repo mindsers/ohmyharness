@@ -6973,7 +6973,7 @@ fn settings_rm_refuses_a_hook_omh_ships_and_takes_one_of_yours() {
 /// named here, so the next feature's server is held to it as well — and with
 /// `--yes` and `--dry-run` both, since the screen previews before it asks.
 /// Under every name it used to have too: a catalogue `omh upgrade` has not yet
-/// moved holds omh's server under one.
+/// cleaned holds a copy of omh's server under one.
 #[test]
 fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
     let sb = sandbox();
@@ -7048,8 +7048,9 @@ fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
 /// in silence, so a second `linear` took the first one's arguments and its
 /// token with it — and replaced `codegraph`, which `rm` refuses to take out.
 /// `--replace` says you meant it, as it does for `mcp import`; omh's own
-/// servers are refused with it too, since `omh upgrade` puts them back — and
-/// so are the names they had, which `omh upgrade` would move onto omh's.
+/// servers are refused with it too — under their names now and the ones they
+/// had — since a name of omh's is never yours and `omh upgrade` takes a
+/// server under one out of your catalogue.
 #[test]
 fn mcp_add_does_not_write_over_a_server() {
     let sb = sandbox();

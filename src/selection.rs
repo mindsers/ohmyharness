@@ -92,8 +92,8 @@ pub struct Selection {
     ///
     /// Still omh's, so refused by `read_list` and never reported as
     /// unselected, like `owned`. Kept apart from it because `owned` is also
-    /// what `allows` lets through and what Claude and Codex run unasked, and a
-    /// server sitting under an old name in a catalogue is not omh's server.
+    /// what `allows` lets through whatever a list says, and a server sitting
+    /// under an old name in a catalogue is not omh's server.
     retired: Owned,
 }
 
@@ -541,7 +541,7 @@ mod tests {
         );
     }
 
-    /// omh's own live in the catalogue's `mcp.json` and are governed elsewhere.
+    /// omh's own are its features', governed by `[omh]`, not by a list.
     /// Reporting them as unselected would send people to `omh use` for
     /// something `omh use` refuses to write.
     #[test]
@@ -557,7 +557,7 @@ mod tests {
 
     /// A name omh's server used to have is omh's too: never reported as
     /// unselected, since `omh use` refuses it — and never let through as
-    /// omh's either, since `allows` is what Claude and Codex run unasked.
+    /// omh's either: `allows` passes omh's own whatever a list says.
     #[test]
     fn a_name_omh_used_to_have_is_neither_unselected_nor_omhs_to_run() {
         let retired = Owned::from([(

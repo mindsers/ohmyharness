@@ -249,7 +249,7 @@ impl RepoPolicy {
     /// The policy of a repo that switched off exactly these features.
     ///
     /// Public because the fixtures in `container` and `doctor` need it, and
-    /// `resolve` goes through it too: one derivation of what omh owns.
+    /// `resolve` starts from it.
     pub fn switching_off(manifest: &Manifest, off: BTreeSet<String>) -> Self {
         Self {
             off,
