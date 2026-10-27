@@ -26,6 +26,11 @@ pub struct Catalog<'a> {
     /// What is actually installed, with the layer it won in — your catalogue's
     /// servers and hooks, never omh's.
     pub installed: Vec<Setting>,
+    /// What sits in your catalogue under a name of omh's, by kind: hook files,
+    /// and the copies an earlier omh seeded into `mcp.json`. A leftover is one
+    /// matching a part *of the same kind* — a hook of yours named like a
+    /// server is a hook, and runs.
+    pub copies: Vec<(crate::adapter::Capability, Setting)>,
     /// Name → what `init` would have written for a detected stack: omh's
     /// writing, but not omh's opinion.
     ///
@@ -87,9 +92,15 @@ impl<'a> Catalog<'a> {
                 .filter(|e| e.feature == feature)
                 .collect();
             let stale = self
-                .installed
+                .copies
                 .iter()
-                .filter(|s| parts.iter().any(|p| p.name == s.key))
+                .filter(|(cap, s)| {
+                    parts.iter().any(|p| {
+                        p.kind.capability() == *cap
+                            && (p.name == s.key || p.was.iter().any(|w| *w == s.key))
+                    })
+                })
+                .map(|(_, s)| s)
                 .collect();
             return Verdict::Feature {
                 name: feature.to_string(),
@@ -283,7 +294,11 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
             } else {
                 ""
             };
-            let since = parts.iter().map(|p| p.since.as_str()).min().unwrap_or("");
+            // As versions, not strings: `2027.2` sorts after `2027.10` as text.
+            let since = parts
+                .iter()
+                .min_by_key(|p| crate::base::parse_ym(&p.since))
+                .map_or("", |p| p.since.as_str());
             out.push_str(&format!(
                 "{name} — an omh feature, in the base set since {since}{off}\n\n"
             ));
@@ -298,7 +313,22 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
             }
             costs(parts, version, &mut out);
             alternatives(parts, &mut out);
-            out.push_str(&format!("  {:<11} {}\n", "remove", parts[0].remove));
+            // One switch, but each part says what switching it off leaves
+            // behind — `git-turn` its ref, `git-note` its note — so a part's
+            // own text is shown when it differs from the rest.
+            let first = parts.first().map(|p| p.remove.as_str()).unwrap_or("");
+            if parts.iter().all(|p| p.remove == first) {
+                out.push_str(&format!("  {:<11} {first}\n", "remove"));
+            } else {
+                let mut label = "remove";
+                for part in parts {
+                    out.push_str(&format!(
+                        "  {label:<11} {:<names$}   {}\n",
+                        part.name, part.remove
+                    ));
+                    label = "";
+                }
+            }
             // Line by line rather than one continued literal. The `\` escape
             // does strip the next line's leading whitespace, so the source
             // reads correctly and prints correctly — until `cargo fmt` joins
@@ -391,6 +421,7 @@ mod tests {
         Catalog {
             manifest: m,
             installed,
+            copies: Vec::new(),
             derived: BTreeMap::new(),
             off: BTreeSet::new(),
         }
@@ -452,7 +483,8 @@ mod tests {
         }
 
         let leftover = setting("graph-refresh", "what an older omh wrote", Layer::Shared);
-        let c = catalog(&m, vec![leftover]);
+        let mut c = catalog(&m, vec![]);
+        c.copies = vec![(crate::adapter::Capability::Hooks, leftover)];
         let verdict = c.why("graph-refresh");
         assert!(
             matches!(verdict, Verdict::Feature { ref stale, .. } if stale.len() == 1),
@@ -600,7 +632,46 @@ mod tests {
                         a.name
                     );
                 }
+                // The way out, each part's own: `git-turn` and `git-note` say
+                // what they leave behind, and the first part's text alone
+                // dropped both.
+                assert!(
+                    answer.contains(&part.remove),
+                    "{feature} carries {}'s way out: {answer}",
+                    part.name
+                );
             }
+        }
+    }
+
+    /// A copy an older omh seeded into your catalogue — under the server's
+    /// old name as much as its new one — is named in the feature's answer as
+    /// not read. Leftovers are matched by kind: a hook of yours that shares a
+    /// server's name is a hook, runs, and is not anybody's leftover.
+    #[test]
+    fn a_leftover_is_matched_by_kind_and_by_every_name_a_part_had() {
+        let m = manifest();
+        let mut c = catalog(&m, vec![]);
+        c.copies = vec![
+            (
+                crate::adapter::Capability::Mcp,
+                setting("codegraph", "codebase-memory-mcp", Layer::Personal),
+            ),
+            (
+                crate::adapter::Capability::Hooks,
+                setting("omh-memory", "a hook of yours", Layer::Personal),
+            ),
+        ];
+        match c.why("codegraph") {
+            Verdict::Feature { stale, .. } => assert_eq!(
+                stale.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(),
+                ["codegraph"]
+            ),
+            other => panic!("expected the feature, got {other:?}"),
+        }
+        match c.why("memory") {
+            Verdict::Feature { stale, .. } => assert!(stale.is_empty(), "{stale:?}"),
+            other => panic!("expected the feature, got {other:?}"),
         }
     }
 

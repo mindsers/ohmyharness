@@ -695,6 +695,17 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
     // among them: its features are generated, and answered for by the manifest.
     let mut installed = config::servers(&paths)?;
     installed.extend(config::hooks(&paths)?);
+    // And what sits under omh's names, by kind, for the feature's answer to
+    // name as not read: hook files, and server copies an earlier omh seeded.
+    let copies = config::hooks(&paths)?
+        .into_iter()
+        .map(|h| (adapter::Capability::Hooks, h))
+        .chain(
+            config::omhs_server_copies(&paths)?
+                .into_iter()
+                .map(|s| (adapter::Capability::Mcp, s)),
+        )
+        .collect();
 
     // Hooks that belong to a detected ecosystem are omh's opinion about that
     // ecosystem, not about this repo. Reported as neither the base set nor
@@ -738,6 +749,7 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
         off: settings::resolve(&paths, &manifest)?.off,
         manifest: &manifest,
         installed,
+        copies,
         derived,
     };
     ctx.say(&report::Why {

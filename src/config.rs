@@ -494,6 +494,36 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
     Ok(resolve(found))
 }
 
+/// The entries of your catalogue under a name of omh's servers: copies an
+/// earlier omh seeded, which nothing reads and `omh upgrade` takes out.
+/// [`servers`] never lists them; `omh why` names them as leftovers.
+pub fn omhs_server_copies(paths: &Paths) -> Result<Vec<Setting>> {
+    let omhs = crate::base::server_names()?;
+    let path = mcp_path(paths);
+    let Some(raw) = read_layer(&path)? else {
+        return Ok(Vec::new());
+    };
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(doc
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| omhs.contains(*name))
+        .map(|(name, spec)| Setting {
+            key: name.clone(),
+            value: spec
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            layer: Layer::Personal,
+            shadows: Vec::new(),
+        })
+        .collect())
+}
+
 /// `<repo>/.omh/` holds `settings.toml`, `memory.toml` and `hooks/`, and it
 /// used to hold `mcp.json` too — so writing one there is the natural mistake
 /// rather than the exotic one, and it is silent in the worst way: reported as
@@ -1158,16 +1188,40 @@ pub fn remove_own_servers(
     if removed.is_empty() || dry_run {
         return Ok(removed);
     }
+    // The mode the catalogue has, for both files written below: it holds
+    // tokens, and one you made private does not come back readable to all.
+    let like = std::fs::metadata(&path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .permissions();
     if removed.iter().any(|r| r.differs) {
         let backup = path.with_file_name("mcp.json.yours");
-        std::fs::write(&backup, &raw)
+        write_like(&backup, raw.as_bytes(), &like)
             .with_context(|| format!("saving your catalogue as {}", backup.display()))?;
     }
     let written = path.with_file_name(".mcp.json.omh-new");
-    std::fs::write(&written, serde_json::to_string_pretty(&doc)? + "\n")
-        .with_context(|| format!("writing {}", written.display()))?;
+    write_like(
+        &written,
+        (serde_json::to_string_pretty(&doc)? + "\n").as_bytes(),
+        &like,
+    )
+    .with_context(|| format!("writing {}", written.display()))?;
     std::fs::rename(&written, &path).with_context(|| format!("writing {}", path.display()))?;
     Ok(removed)
+}
+
+/// Write `contents` to `path` with `like`'s permissions, set before a byte of
+/// it is written — the file is created or emptied first, so nothing is ever
+/// readable under a wider mode.
+fn write_like(path: &Path, contents: &[u8], like: &std::fs::Permissions) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.set_permissions(like.clone())?;
+    file.write_all(contents)?;
+    Ok(())
 }
 
 /// One of omh's servers [`remove_own_servers`] took out of your catalogue.
@@ -2016,6 +2070,35 @@ mod tests {
         let (_d, paths) = fixture();
         assert!(policy(&paths).unwrap().is_empty());
         assert!(servers(&paths).unwrap().is_empty());
+    }
+
+    /// `mcp.json` holds tokens, and a catalogue you made private stays
+    /// private: the rewrite and the copy kept beside it take the mode the file
+    /// had, not the umask's.
+    #[cfg(unix)]
+    #[test]
+    fn taking_omhs_servers_out_keeps_the_catalogue_as_private_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, paths) = fixture();
+        let manifest = crate::base::Manifest::shipped().unwrap();
+        seed(
+            &paths,
+            Layer::Personal,
+            "mcp.json",
+            r#"{"mcpServers":{"memory":{"command":"edited"},"mine":{"command":"m","env":{"TOKEN":"t"}}}}"#,
+        );
+        let path = mcp_path(&paths);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let removed = remove_own_servers(&paths, &manifest, false).unwrap();
+        assert_eq!(removed.len(), 1);
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "the catalogue");
+        assert_eq!(
+            mode(&paths.root.join("mcp.json.yours")),
+            0o600,
+            "and the copy of it"
+        );
     }
 
     /// omh's servers leave your catalogue under every name they had, and
