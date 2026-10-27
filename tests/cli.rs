@@ -16418,6 +16418,20 @@ fn omh_doctor_names_what_codexs_policy_stops_here() {
     }
 }
 
+/// Every file below `dir`, or none when it is not there.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|e| match e.path().is_dir() {
+            true => files_under(&e.path()),
+            false => vec![e.path()],
+        })
+        .collect()
+}
+
 /// What a `docker` argv mounted at `guest`, from the stand-in's log.
 fn mounted_at(log: &str, guest: &str) -> Option<String> {
     log.split_whitespace()
@@ -16447,7 +16461,7 @@ fn a_launch_mounts_its_own_claude_json_and_a_login_the_accounts() {
     let host = mounted_at(&seen, "/home/agent/.claude.json")
         .unwrap_or_else(|| panic!("nothing at ~/.claude.json: {}", printed(&out)));
     assert!(
-        host.ends_with("/s01/home/claude/.claude.json") && host.contains("/.omh/run/"),
+        host.ends_with("/s01/.home/claude/.claude.json") && host.contains("/.omh/run/"),
         "a launch mounted {host}"
     );
     let copy = std::fs::read_to_string(&host).expect("the session's copy was seeded");
@@ -16468,6 +16482,30 @@ fn a_launch_mounts_its_own_claude_json_and_a_login_the_accounts() {
         mounted_at(&seen, "/home/agent/.claude.json").map(PathBuf::from),
         Some(account.join(".claude.json")),
         "a login mounts the account's own file: {seen}"
+    );
+
+    // `omh doctor` mounts a fresh copy of its own, under `scratch/` — and a
+    // preview writes none.
+    let log = sb.fake_docker_answering_doctor(&[], &[]);
+    let scratch = sb.home.join(".omh/scratch");
+    let copies = || -> Vec<PathBuf> {
+        files_under(&scratch)
+            .into_iter()
+            .filter(|p| p.ends_with("home/doctor/claude/.claude.json"))
+            .collect()
+    };
+    sb.omh(&["doctor", "--dry-run", "--harness", "claude"]);
+    assert!(copies().is_empty(), "a preview seeded {:?}", copies());
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["doctor", "--harness", "claude"]);
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let host = mounted_at(&seen, "/home/agent/.claude.json")
+        .unwrap_or_else(|| panic!("doctor mounted nothing there: {}", printed(&out)));
+    assert!(host.contains("/.omh/scratch/"), "doctor mounted {host}");
+    let copy = std::fs::read_to_string(&host).expect("doctor's copy was seeded");
+    assert!(
+        copy.contains("\"u\"") && !copy.contains("planted"),
+        "{copy}"
     );
 }
 

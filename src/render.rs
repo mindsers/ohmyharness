@@ -495,9 +495,11 @@ pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
             let projects = top
                 .entry("projects")
                 .or_insert_with(|| serde_json::json!({}));
-            let Some(projects) = projects.as_object_mut() else {
+            if !projects.is_object() {
                 *projects = serde_json::json!({});
-                return scrub(format, doc);
+            }
+            let Some(projects) = projects.as_object_mut() else {
+                return;
             };
             for project in projects.values_mut().filter_map(|p| p.as_object_mut()) {
                 for key in PROJECT {
@@ -2088,64 +2090,52 @@ mod tests {
         });
         scrub(PolicyFormat::ClaudeManaged, &mut doc);
 
-        let gone = [
-            "mcpServers",
-            "disabledMcpjsonServers",
-            "enabledMcpjsonServers",
-            "enableAllProjectMcpServers",
-            "env",
-            "apiKeyHelper",
-            "customApiKeyResponses",
-            "bypassPermissionsModeAccepted",
-        ];
-        for key in gone {
-            assert!(doc.get(key).is_none(), "top-level {key} kept: {doc}");
-        }
-        // The account's own API key is its login, like the OAuth tokens.
-        for kept in [
-            "oauthAccount",
-            "userID",
-            "hasCompletedOnboarding",
-            "theme",
-            "primaryApiKey",
-        ] {
-            assert!(doc.get(kept).is_some(), "{kept} dropped: {doc}");
-        }
-        let gone_per_project = [
-            "mcpServers",
-            "disabledMcpServers",
-            "enabledMcpServers",
-            "enabledMcpjsonServers",
-            "disabledMcpjsonServers",
-            "enableAllProjectMcpServers",
-            "allowedTools",
-            "hasClaudeMdExternalIncludesApproved",
-        ];
-        for (path, p) in doc["projects"].as_object().unwrap() {
-            for key in gone_per_project {
-                assert!(p.get(key).is_none(), "{path}.{key} kept: {p}");
-            }
-            assert!(p.get("lastCost").is_some(), "{path}.lastCost dropped: {p}");
-        }
+        // What is left, whole, rather than the list restated: identity and
+        // what omh has no opinion on stay, everything else in the fixture goes
+        // — a key dropped by mistake fails as surely as one kept. The
+        // account's own API key is its login, like the OAuth tokens.
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&doc),
+            [
+                "hasCompletedOnboarding",
+                "oauthAccount",
+                "primaryApiKey",
+                "projects",
+                "theme",
+                "userID"
+            ],
+            "{doc}"
+        );
         // Trust is omh's to give, and it gives it to `/work` alone — never a
         // grant a session left in the account.
         assert_eq!(
-            doc["projects"]["/work"]["hasTrustDialogAccepted"], true,
+            keys(&doc["projects"]["/work"]),
+            ["hasTrustDialogAccepted", "lastCost"],
             "{doc}"
         );
-        assert!(
-            doc["projects"]["/elsewhere"]
-                .get("hasTrustDialogAccepted")
-                .is_none(),
-            "{doc}"
-        );
+        assert_eq!(doc["projects"]["/work"]["hasTrustDialogAccepted"], true);
+        assert_eq!(keys(&doc["projects"]["/elsewhere"]), ["lastCost"], "{doc}");
 
-        let mut empty = serde_json::json!({});
-        scrub(PolicyFormat::ClaudeManaged, &mut empty);
-        assert_eq!(
-            empty["projects"]["/work"]["hasTrustDialogAccepted"], true,
-            "an account with no projects still trusts /work: {empty}"
-        );
+        // An account with no projects, projects that are not an object, or a
+        // `/work` that is not one: each still trusts `/work`, and none panics
+        // — the file was the agent's to write.
+        for shape in [
+            serde_json::json!({}),
+            serde_json::json!({ "projects": [] }),
+            serde_json::json!({ "projects": { "/work": "junk" } }),
+        ] {
+            let mut d = shape.clone();
+            scrub(PolicyFormat::ClaudeManaged, &mut d);
+            assert_eq!(
+                d["projects"]["/work"]["hasTrustDialogAccepted"], true,
+                "{shape} → {d}"
+            );
+        }
     }
 
     fn server(command: &str, args: &[&str]) -> Server {

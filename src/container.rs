@@ -2025,6 +2025,36 @@ mod tests {
         );
     }
 
+    /// With an account, every writable mount's source is one of: the
+    /// worktree, the account's credentials, this session's own run directory
+    /// (transcripts, its copy of `~/.claude.json`), omh's per-repo stores, or a
+    /// named volume — and never the account's own copied file, which is the
+    /// one every later session would read.
+    #[test]
+    fn with_an_account_every_writable_mount_is_one_of_these() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/claude/work");
+        let p = plan_account(&fx, "claude", Some(account.clone()));
+        let run = fx.paths.runs().join(&fx.session.id);
+        let allowed = |host: &Path| {
+            host.starts_with(&fx.session.worktree)
+                || host.starts_with(&account)
+                || host.starts_with(&run)
+                || host.starts_with(fx.paths.shadows())
+                || host == fx.paths.memory()
+                || host.is_relative()
+        };
+        for m in p.mounts.iter().filter(|m| !m.read_only) {
+            assert!(allowed(&m.host), "writable from elsewhere: {m:?}");
+        }
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.host == account.join(".claude.json")),
+            "the account's own copied file is mounted"
+        );
+    }
+
     /// Every session gets its own network, named like its container. One
     /// network per checkout let a service one session started be reached from
     /// every other session of the repo, which is not what a sandbox promises.
