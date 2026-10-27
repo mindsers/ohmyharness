@@ -1157,6 +1157,7 @@ impl Stager<'_> {
                         tools: &adapter.tools,
                         resolves,
                         log,
+                        provider: None,
                     },
                 )?;
                 dropped_hooks.extend(rendered.dropped);

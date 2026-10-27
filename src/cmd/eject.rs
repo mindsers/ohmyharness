@@ -132,6 +132,7 @@ pub(crate) fn eject(
                             // must carry none of omh's own plumbing — see
                             // `hook::render`'s doc on this parameter.
                             log: None,
+                            provider: None,
                         },
                     )?;
                     write_file(&out_path, &doc.body, dry_run)?;

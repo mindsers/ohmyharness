@@ -1824,6 +1824,7 @@ fn hook_names(
             resolves,
             // A doctor probe, not a launch — nothing here stages a session.
             log: None,
+            provider: None,
         },
     )?;
     let dropped: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();

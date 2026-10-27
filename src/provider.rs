@@ -195,15 +195,12 @@ pub fn from_codex_config(
 
 /// Write `doc` as the account's provider file, readable by the user alone.
 pub fn write(account_dir: &Path, doc: &toml::Table) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     validate(doc)?;
     std::fs::create_dir_all(account_dir)?;
     let path = account_dir.join(FILE);
     crate::held::Dir::open(account_dir)?
-        .replace(std::ffi::OsStr::new(FILE), toml::to_string(doc)?.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("restricting {}", path.display()))
+        .replace_private(std::ffi::OsStr::new(FILE), toml::to_string(doc)?.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// `doc` with every secret value replaced, for anything shown or ejected.

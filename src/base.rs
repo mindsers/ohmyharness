@@ -2317,6 +2317,7 @@ command = "c"
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
