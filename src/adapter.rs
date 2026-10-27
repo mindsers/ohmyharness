@@ -131,6 +131,26 @@ pub enum PolicyFormat {
     ClaudeManaged,
 }
 
+impl PolicyFormat {
+    /// As an adapter spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CodexRequirements => "codex-requirements",
+            Self::ClaudeManaged => "claude-managed",
+        }
+    }
+
+    /// The account files `render::scrub` knows how to seed a session's copy
+    /// of, for this format — what `[policy] copy` may name. Beside the format
+    /// rather than in `render`, which `adapter` does not reach.
+    pub fn seeds(self) -> &'static [&'static str] {
+        match self {
+            Self::CodexRequirements => &[],
+            Self::ClaudeManaged => &["$HOME/.claude.json"],
+        }
+    }
+}
+
 /// The capability classes a profile can carry. Ordered as declared, which is
 /// also the order they are staged and reported in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -676,12 +696,17 @@ impl Adapter {
                 files.join(", ")
             );
         }
-        anyhow::ensure!(
-            policy.copy.is_empty() || policy.format == PolicyFormat::ClaudeManaged,
-            "adapter {shown}: `[policy]` format {:?} has no copy to seed — `render::scrub` \
-             knows what to drop for claude-managed only",
-            policy.format
-        );
+        // And one `render::scrub` knows: a file it has no list for would be
+        // seeded unscrubbed, and an absolute one would not be the session's.
+        for copy in &policy.copy {
+            anyhow::ensure!(
+                policy.format.seeds().contains(&copy.as_str()),
+                "adapter {shown}: `[policy]` copy entry {copy:?} is not a file {} knows how \
+                 to seed ({})",
+                policy.format.name(),
+                policy.format.seeds().join(", ")
+            );
+        }
         Ok(())
     }
 
@@ -1474,10 +1499,24 @@ render = "concat"
                 "path = \"/etc/x.toml\"\ncopy = [\"$HOME/.other.json\"]",
                 "copy entry \"$HOME/.other.json\" must be one of this adapter's credential files",
             ),
+            // A copy is seeded by `render::scrub`, which knows one file per
+            // format: a credential file it does not know — or any for a
+            // format that copies nothing — has no seed, and an absolute one
+            // would not even be the session's.
             (
                 "creds = [\"$HOME/.p/\", \"$HOME/.p.json\"]",
                 "format = \"codex-requirements\"\npath = \"/etc/x.toml\"\ncopy = [\"$HOME/.p.json\"]",
-                "has no copy to seed",
+                "is not a file codex-requirements knows how to seed",
+            ),
+            (
+                "creds = [\"$HOME/.p/\", \"$HOME/.p.json\"]",
+                "path = \"/etc/x.toml\"\ncopy = [\"$HOME/.p.json\"]",
+                "is not a file claude-managed knows how to seed",
+            ),
+            (
+                "creds = [\"$HOME/.p/\", \"/abs/.claude.json\"]",
+                "path = \"/etc/x.toml\"\ncopy = [\"/abs/.claude.json\"]",
+                "is not a file claude-managed knows how to seed",
             ),
         ] {
             let d = tempfile::tempdir().unwrap();

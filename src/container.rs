@@ -742,9 +742,14 @@ pub fn plan(
         let home = session_home(paths, session, adapter.name.as_str());
         for cred in crate::auth::mounts(adapter, account, GUEST_HOME) {
             let host = match copied.contains(&cred.guest) {
+                // `check_policy` holds every copy under `$HOME`; never fall back
+                // to the account's own file, which is what a copy replaces.
                 true => match cred.guest.strip_prefix(GUEST_HOME) {
                     Ok(rel) => home.path().join(rel),
-                    Err(_) => cred.host,
+                    Err(_) => anyhow::bail!(
+                        "{} is copied per session but is not under {GUEST_HOME}",
+                        cred.guest.display()
+                    ),
                 },
                 false => cred.host,
             };
