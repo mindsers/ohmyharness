@@ -221,15 +221,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         let Ok(relative) = guest.strip_prefix(&cred.guest) else {
             continue;
         };
-        let point = cred.host.join(relative);
-        if is_dir {
-            std::fs::create_dir_all(&point)?;
-        } else {
-            if let Some(parent) = point.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            file_mountpoint(&point)?;
-        }
+        mountpoint(&cred.host, relative, is_dir)?;
     }
 
     for cred in creds {
@@ -252,29 +244,64 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     Ok(())
 }
 
-/// A file for a bind mount to land on, inside an account directory a session
-/// could write.
+/// A mountpoint at `relative` under a credential directory's `root`, which a
+/// session can write: a directory, or a file for a bind mount to land on.
 ///
-/// A regular file there keeps its bytes — the mount hides it. Nothing there
-/// gets a placeholder, created exclusively so a link that appears in between
-/// is not followed. Anything else — a link, a directory — may be a session's,
-/// and is refused by name rather than written through or mounted over.
-fn file_mountpoint(point: &std::path::Path) -> Result<()> {
-    use std::io::Write;
-    match std::fs::symlink_metadata(point) {
-        Ok(m) if m.file_type().is_file() => Ok(()),
-        Ok(_) => anyhow::bail!(
-            "{} is not a regular file — omh mounts a file there, and will not \
-             write through or over whatever this is. Remove it and launch again",
-            point.display()
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(point)
-            .and_then(|mut f| f.write_all(placeholder(point).as_bytes()))
-            .with_context(|| format!("creating {}", point.display())),
-        Err(e) => Err(e).with_context(|| format!("reading {}", point.display())),
+/// Laid one name at a time through [`crate::held`], from `root` down — the
+/// mount source itself, which no session can replace. Every directory on the
+/// way is entered or made without following a link, and a file is made only
+/// where nothing has its name. A regular file already there keeps its bytes
+/// (the mount hides them). Anything else on the way — a link, dangling or not,
+/// a file where a directory goes, a directory or a pipe where a file goes —
+/// may be a session's, and is refused by name rather than written through or
+/// mounted over.
+fn mountpoint(root: &std::path::Path, relative: &std::path::Path, is_dir: bool) -> Result<()> {
+    use std::path::Component;
+    let refuse = |at: &std::path::Path, what: &str, e: std::io::Error| {
+        anyhow::anyhow!(
+            "{} {what} — omh mounts there, and will not make anything through or \
+             over whatever this is ({e}). Remove it and launch again",
+            at.display()
+        )
+    };
+    std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    let mut dir = crate::held::Dir::open(root)
+        .map_err(|e| refuse(root, "is not a directory omh can enter", e))?;
+    let names: Vec<&std::ffi::OsStr> = relative
+        .components()
+        .map(|c| match c {
+            Component::Normal(n) => Ok(n),
+            _ => Err(anyhow::anyhow!(
+                "{} is not a path under {}",
+                relative.display(),
+                root.display()
+            )),
+        })
+        .collect::<Result<_>>()?;
+    let (leaf, above) = match is_dir {
+        true => (None, &names[..]),
+        false => match names.split_last() {
+            Some((leaf, above)) => (Some(*leaf), above),
+            None => anyhow::bail!("{} names no file", relative.display()),
+        },
+    };
+    let mut at = root.to_path_buf();
+    for name in above {
+        at.push(name);
+        dir = dir
+            .sub_or_create(name)
+            .map_err(|e| refuse(&at, "is not a directory omh can make or enter", e))?;
+    }
+    let Some(leaf) = leaf else {
+        return Ok(());
+    };
+    at.push(leaf);
+    match dir.file(leaf) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir
+            .create_new(leaf, placeholder(&at).as_bytes())
+            .map_err(|e| refuse(&at, "could not be made", e)),
+        Err(e) => Err(refuse(&at, "is not a regular file", e)),
     }
 }
 
@@ -1594,6 +1621,55 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let point = d.path().join(mask);
         std::fs::create_dir_all(&point).unwrap();
+        let err = prepare(&a, d.path(), "/home/agent")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cloud-config-bundle-cache.json"), "{err}");
+    }
+
+    /// Every directory between the credential root and a mountpoint is the
+    /// session's too: a link anywhere on the way is refused by name, and
+    /// nothing is made where it points — a file's mountpoint or a directory's.
+    #[test]
+    fn a_link_above_a_mountpoint_is_refused_and_never_written_through() {
+        let omp = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let account = d.path().join("account");
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(account.join(".omp/agent")).unwrap();
+        std::os::unix::fs::symlink(&outside, account.join(".omp/agent/hooks")).unwrap();
+        let err = prepare(&omp, &account, "/home/agent").unwrap_err();
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "something was made through the link"
+        );
+        assert!(format!("{err:#}").contains("hooks"), "{err:#}");
+
+        // A directory capability, under a linked parent.
+        let claude = claude();
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(d.path().join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&outside, d.path().join(".claude/skills")).unwrap();
+        let err = prepare(&claude, d.path(), "/home/agent").unwrap_err();
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        assert!(format!("{err:#}").contains("skills"), "{err:#}");
+    }
+
+    /// A link to a regular file is still a link: refused, never kept as the
+    /// file it points at.
+    #[test]
+    fn a_link_to_a_regular_file_at_a_mountpoint_is_refused() {
+        let a = codex();
+        let mask = a.policy.as_ref().unwrap().mask[0].trim_start_matches("$HOME/");
+        let d = tempfile::tempdir().unwrap();
+        let point = d.path().join(mask);
+        std::fs::create_dir_all(point.parent().unwrap()).unwrap();
+        std::fs::write(d.path().join("real.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(d.path().join("real.json"), &point).unwrap();
         let err = prepare(&a, d.path(), "/home/agent")
             .unwrap_err()
             .to_string();
