@@ -318,7 +318,11 @@ pub fn policy(
         let servers: Vec<String> = doc
             .get("mcp_servers")
             .and_then(toml::Value::as_table)
-            .map(|t| t.keys().map(|k| crate::out::untrusted(k)).collect())
+            .map(|t| {
+                t.keys()
+                    .map(|k| crate::out::untrusted(k).replace('\n', "\u{fffd}"))
+                    .collect()
+            })
             .unwrap_or_default();
         if !servers.is_empty() {
             said.push(format!(
@@ -462,12 +466,16 @@ mod tests {
         std::fs::create_dir_all(work.path().join(".codex")).unwrap();
         std::fs::write(
             work.path().join(".codex/config.toml"),
-            "[mcp_servers.\"a\\u001b[2Jb\"]\ncommand = \"l\"\n",
+            "[mcp_servers.\"a\\u001b[2Jb\"]\ncommand = \"l\"\n[mcp_servers.\"c\\nomh: forged\"]\ncommand = \"l\"\n",
         )
         .unwrap();
         let said = super::policy(&policy, work.path(), None).unwrap();
         assert!(said.iter().any(|s| s.contains('a')), "{said:?}");
         assert!(!said.iter().any(|s| s.contains('\u{1b}')), "{said:?}");
+        assert!(
+            !said.iter().any(|s| s.contains('\n')),
+            "a name spoofs a line: {said:?}"
+        );
     }
 
     /// What the policy stops is named, server by server, and only when the
