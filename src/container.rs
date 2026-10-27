@@ -716,19 +716,22 @@ pub fn plan(
             adapter,
             &mut mounts,
         )?;
-        // The session's worktree is `/work`. A dry run never makes one, and
-        // a new session's starts as this checkout, so that is what it reads.
-        let work = match session.worktree.exists() {
-            true => &session.worktree,
-            false => &paths.repo,
+        // A real session's worktree is `/work`. Before it exists — a dry run
+        // — it will be made from the base branch, and a scratch session's
+        // `/work` (`omh doctor`, `omh auth`) is not the repo's at all: both
+        // read the base branch, which is what a new session will hold. Only
+        // a worktree known to be absent falls through; one omh cannot stat is
+        // read, and says why it could not be.
+        let worktree =
+            session.branch.is_some() && !matches!(session.worktree.try_exists(), Ok(false));
+        let work = match (worktree, opts.base.as_deref()) {
+            (false, Some(base)) => crate::notice::Work::Base {
+                repo: &paths.repo,
+                base,
+            },
+            _ => crate::notice::Work::Worktree(&session.worktree),
         };
-        // Never fatal: an unreadable file costs the notice, not the session.
-        policy_notes = crate::notice::policy(policy, work, opts.account_dir.as_deref())
-            .unwrap_or_else(|e| {
-                vec![format!(
-                    "could not check what omh's policy stops here — {e:#}"
-                )]
-            });
+        policy_notes = crate::notice::policy(policy, work, opts.account_dir.as_deref());
     }
 
     // The harness's transcripts, over a per-session directory omh owns, so a

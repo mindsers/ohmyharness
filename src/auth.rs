@@ -227,9 +227,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
             if let Some(parent) = point.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            if !point.exists() {
-                std::fs::write(&point, placeholder(&point))?;
-            }
+            file_mountpoint(&point)?;
         }
     }
 
@@ -251,6 +249,32 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         }
     }
     Ok(())
+}
+
+/// A file for a bind mount to land on, inside an account directory a session
+/// could write.
+///
+/// A regular file there keeps its bytes — the mount hides it. Nothing there
+/// gets a placeholder, created exclusively so a link that appears in between
+/// is not followed. Anything else — a link, a directory — may be a session's,
+/// and is refused by name rather than written through or mounted over.
+fn file_mountpoint(point: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    match std::fs::symlink_metadata(point) {
+        Ok(m) if m.file_type().is_file() => Ok(()),
+        Ok(_) => anyhow::bail!(
+            "{} is not a regular file — omh mounts a file there, and will not \
+             write through or over whatever this is. Remove it and launch again",
+            point.display()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(point)
+            .and_then(|mut f| f.write_all(placeholder(point).as_bytes()))
+            .with_context(|| format!("creating {}", point.display())),
+        Err(e) => Err(e).with_context(|| format!("reading {}", point.display())),
+    }
 }
 
 /// The account a launch of this harness is configured with, if any — its own
@@ -1544,6 +1568,35 @@ mod tests {
             let point = d.path().join(mask.trim_start_matches("$HOME/"));
             assert_eq!(std::fs::read_to_string(point).unwrap(), "the harness's own");
         }
+    }
+
+    /// The account was writable in every session before the mask, so what
+    /// sits at a masked path may be a session's: a link is never written
+    /// through, and neither it nor a directory there is taken for the file.
+    #[test]
+    fn a_masked_path_that_is_not_a_file_is_refused_and_never_written_through() {
+        let a = codex();
+        let mask = a.policy.as_ref().unwrap().mask[0].trim_start_matches("$HOME/");
+
+        let d = tempfile::tempdir().unwrap();
+        let account = d.path().join("account");
+        let point = account.join(mask);
+        std::fs::create_dir_all(point.parent().unwrap()).unwrap();
+        let outside = d.path().join("outside");
+        std::os::unix::fs::symlink(&outside, &point).unwrap();
+        let err = prepare(&a, &account, "/home/agent")
+            .unwrap_err()
+            .to_string();
+        assert!(!outside.exists(), "a write went through the link");
+        assert!(err.contains("cloud-config-bundle-cache.json"), "{err}");
+
+        let d = tempfile::tempdir().unwrap();
+        let point = d.path().join(mask);
+        std::fs::create_dir_all(&point).unwrap();
+        let err = prepare(&a, d.path(), "/home/agent")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cloud-config-bundle-cache.json"), "{err}");
     }
 
     #[test]

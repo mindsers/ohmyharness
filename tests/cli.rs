@@ -16285,21 +16285,9 @@ fn a_launch_mounts_the_credentials_of_the_adapter_it_resolved() {
     }
 }
 
-/// A harness name is a name, not a path.
-///
-/// `omh new <word>` reached `Adapter::find`, which joins the word straight into
-/// `<dir>/<word>.toml`. A word with `..` in it therefore names a file outside
-/// the catalogue, and omh loads it: its `install` becomes a `RUN` line in a
-/// host `docker build` and its `bin` becomes the sandbox's argv. The same word
-/// also picked the credential directory, so it chose what got bound over
-/// `/home/agent`.
-///
-/// The planted adapter is **valid**, so the refusal cannot come from a parse
-/// error — it has to come from the name being refused as a name.
-#[test]
-fn what_codexs_policy_stops_here_is_said_once_before_a_launch() {
-    let sb = sandbox();
-    let _log = sb.fake_docker();
+/// A repo whose own `.codex/config.toml` declares a server — committed, so a
+/// launch's worktree has it too, or left in the working tree only.
+fn repo_declaring_a_codex_server(sb: &Sandbox, commit: bool) {
     sb.git_init();
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     std::fs::create_dir_all(sb.repo.join(".codex")).unwrap();
@@ -16308,7 +16296,11 @@ fn what_codexs_policy_stops_here_is_said_once_before_a_launch() {
         "[mcp_servers.repo-linear]\ncommand = \"l\"\n",
     )
     .unwrap();
-    for args in [&["add", "-A"][..], &["commit", "-qm", "repo"]] {
+    let steps: Vec<&[&str]> = match commit {
+        true => vec![&["add", "-A"], &["commit", "-qm", "repo"]],
+        false => vec![&["commit", "-q", "--allow-empty", "-m", "root"]],
+    };
+    for args in steps {
         let out = Command::new("git")
             .arg("-C")
             .arg(&sb.repo)
@@ -16323,34 +16315,88 @@ fn what_codexs_policy_stops_here_is_said_once_before_a_launch() {
             .expect("git");
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
+}
+
+fn printed(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// What Codex's policy stops in this repo is said once: on a dry run, and on a
+/// launch, which says the rules twice.
+#[test]
+fn what_codexs_policy_stops_here_is_said_once_before_a_launch() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
 
     let out = sb.omh(&["new", "codex", "--dry-run"]);
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.status.success(), "{said}");
+    assert!(out.status.success(), "{}", printed(&out));
     assert_eq!(
-        said.matches("repo-linear").count(),
+        printed(&out).matches("repo-linear").count(),
         1,
-        "the server this repo declares is named, once: {said}"
+        "the server this repo declares is named, once: {}",
+        printed(&out)
     );
 
-    // And once on a launch, which says the rules twice.
     let out = sb.omh(&["new", "codex"]);
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
     assert_eq!(
-        said.matches("repo-linear").count(),
+        printed(&out).matches("repo-linear").count(),
         1,
-        "on a launch: {said}"
+        "on a launch: {}",
+        printed(&out)
     );
 }
 
+/// A dry run describes the launch it stands for, and a launch's worktree is
+/// made from the default branch: a `.codex/config.toml` only in the working
+/// tree is not one the session will have, so it is not named.
+#[test]
+fn a_dry_run_names_only_what_the_launch_would_be_handed() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, false);
+
+    let out = sb.omh(&["new", "codex", "--dry-run"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(!printed(&out).contains("repo-linear"), "{}", printed(&out));
+}
+
+/// `omh doctor` says it too. Its probe runs in a scratch `/work`, which holds
+/// nothing of the repo's, so what it names has to come from the repo itself.
+#[test]
+fn omh_doctor_names_what_codexs_policy_stops_here() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, true);
+    sb.fake_docker_answering_doctor(&[], &[]);
+    for argv in [
+        &["doctor", "--dry-run", "--harness", "codex"][..],
+        &["doctor", "--harness", "codex"][..],
+    ] {
+        let out = sb.omh(argv);
+        assert_eq!(
+            printed(&out).matches("repo-linear").count(),
+            1,
+            "{argv:?}: {}",
+            printed(&out)
+        );
+    }
+}
+
+/// A harness name is a name, not a path.
+///
+/// `omh new <word>` reached `Adapter::find`, which joins the word straight into
+/// `<dir>/<word>.toml`. A word with `..` in it therefore names a file outside
+/// the catalogue, and omh loads it: its `install` becomes a `RUN` line in a
+/// host `docker build` and its `bin` becomes the sandbox's argv. The same word
+/// also picked the credential directory, so it chose what got bound over
+/// `/home/agent`.
+///
+/// The planted adapter is **valid**, so the refusal cannot come from a parse
+/// error — it has to come from the name being refused as a name.
 #[test]
 fn a_harness_name_is_not_a_path() {
     let sb = sandbox();

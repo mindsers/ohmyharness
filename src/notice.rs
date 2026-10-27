@@ -292,29 +292,52 @@ fn read_dir(dir: &Path) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
-/// What a harness's policy stops that this checkout or this account carries.
+/// Where what a session will see as `/work` is read from.
+pub enum Work<'a> {
+    /// The session's own worktree. The agent writes it, so it is read held.
+    Worktree(&'a Path),
+    /// The branch a new session's worktree is made from — before there is one
+    /// (a dry run), or where the sandbox's `/work` is not the repo's at all
+    /// (`omh doctor`'s scratch).
+    Base { repo: &'a Path, base: &'a str },
+}
+
+/// What Codex's policy stops in this repo's `.codex/config.toml`, and the
+/// account's masked bundle cache when it holds a real one.
 ///
 /// The policy omh writes changes what a session loads, and a change nobody is
 /// told about is found later as a server that silently is not there. So each
 /// thing it stops is named at launch — only when there is one: a repo with no
-/// `.codex/config.toml` hears nothing.
+/// `.codex/config.toml` hears nothing. Not named: servers and hooks in the
+/// account's own `~/.codex/config.toml`, and Claude Code's `~/.claude.json` —
+/// the lock stops those too.
 ///
-/// `worktree` is what the session sees as `/work`; `account` the account
-/// directory it mounts, if any.
+/// Each read stands alone. One that cannot be made is said as such, in its own
+/// line, and costs nothing the others found.
 pub fn policy(
     policy: &crate::adapter::Policy,
-    worktree: &Path,
+    work: Work<'_>,
     account: Option<&Path>,
-) -> Result<Vec<String>> {
+) -> Vec<String> {
     let mut said = Vec::new();
     if policy.format != crate::adapter::PolicyFormat::CodexRequirements {
-        return Ok(said);
+        return said;
     }
-    // A file Codex itself cannot parse is Codex's to report, and it will: this
-    // names what the policy stops, not what is broken.
-    let project =
-        read_held(worktree, ".codex/config.toml")?.and_then(|raw| raw.parse::<toml::Table>().ok());
-    if let Some(doc) = project {
+    const PROJECT: &str = ".codex/config.toml";
+    let raw = match work {
+        Work::Worktree(root) => read_held(root, PROJECT),
+        Work::Base { repo, base } => crate::rules::at_base(repo, base, PROJECT),
+    };
+    let raw = raw.unwrap_or_else(|e| {
+        said.push(format!(
+            "could not check this repo's {PROJECT} — {e:#}. The MCP servers and hooks it \
+             declares, which Codex no longer loads, went unnamed"
+        ));
+        None
+    });
+    // A file Codex itself cannot parse is Codex's to report: this names what
+    // the policy stops, not what is broken.
+    if let Some(doc) = raw.and_then(|raw| raw.parse::<toml::Table>().ok()) {
         let servers: Vec<String> = doc
             .get("mcp_servers")
             .and_then(toml::Value::as_table)
@@ -341,20 +364,27 @@ pub fn policy(
             );
         }
     }
+    // Codex has one mask, the cloud bundle cache, so the words are its own; a
+    // second mask needs words of its own.
     if let Some(account) = account {
         for mask in &policy.mask {
-            let held = read_held(account, mask.trim_start_matches("$HOME/"))?;
-            if held.is_some_and(|c| !crate::auth::is_placeholder(&c)) {
-                said.push(
+            let rel = mask.trim_start_matches("$HOME/");
+            match read_held(account, rel) {
+                Ok(Some(c)) if !crate::auth::is_placeholder(&c) => said.push(
                     "this account caches an enterprise cloud bundle, which omh hides from the \
                      session — a session could rewrite it for the next one. Codex fetches the \
                      bundle at every start instead, and does not start offline"
                         .into(),
-                );
+                ),
+                Ok(_) => {}
+                Err(e) => said.push(format!(
+                    "could not check this account's ~/{rel} — {e:#}. Whether Codex can start \
+                     offline went unsaid"
+                )),
             }
         }
     }
-    Ok(said)
+    said
 }
 
 /// Far more than any config or bundle cache this reads, and far less than
@@ -443,7 +473,7 @@ mod tests {
             work.path().join(".codex/config.toml"),
         )
         .unwrap();
-        let said = super::policy(&policy, work.path(), None);
+        let said = super::policy(&policy, Work::Worktree(work.path()), None);
         assert!(
             !format!("{said:?}").contains("followed"),
             "a link was followed: {said:?}"
@@ -456,7 +486,7 @@ mod tests {
             "x".repeat(8 << 20)
         );
         std::fs::write(work.path().join(".codex/config.toml"), huge).unwrap();
-        let said = super::policy(&policy, work.path(), None);
+        let said = super::policy(&policy, Work::Worktree(work.path()), None);
         assert!(
             !format!("{said:?}").contains("huge"),
             "an oversized file was read whole: {said:?}"
@@ -469,7 +499,7 @@ mod tests {
             "[mcp_servers.\"a\\u001b[2Jb\"]\ncommand = \"l\"\n[mcp_servers.\"c\\nomh: forged\"]\ncommand = \"l\"\n",
         )
         .unwrap();
-        let said = super::policy(&policy, work.path(), None).unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), None);
         assert!(said.iter().any(|s| s.contains('a')), "{said:?}");
         assert!(!said.iter().any(|s| s.contains('\u{1b}')), "{said:?}");
         assert!(
@@ -486,9 +516,7 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let account = tempfile::tempdir().unwrap();
         assert!(
-            super::policy(&policy, work.path(), Some(account.path()))
-                .unwrap()
-                .is_empty(),
+            super::policy(&policy, Work::Worktree(work.path()), Some(account.path())).is_empty(),
             "nothing to stop, nothing said"
         );
 
@@ -501,14 +529,14 @@ mod tests {
         let cache = account.path().join(".codex/cloud-config-bundle-cache.json");
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(&cache, "{}").unwrap();
-        let said = super::policy(&policy, work.path(), Some(account.path())).unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
         assert_eq!(said.len(), 2, "{said:#?}");
         assert!(said[0].contains("linear"), "{said:#?}");
         assert!(said[1].contains("hooks"), "{said:#?}");
 
         // The placeholder omh lays down is not a cache; a real one is.
         std::fs::write(&cache, r#"{"signature":"x"}"#).unwrap();
-        let said = super::policy(&policy, work.path(), Some(account.path())).unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
         assert!(
             said.iter().any(|s| s.contains("does not start offline")),
             "{said:#?}"
@@ -900,5 +928,85 @@ mod tests {
 
         let err = result.expect_err("unreadable is not empty").to_string();
         assert!(err.contains("hooks"), "must name the path: {err}");
+    }
+
+    /// One read that cannot be made costs that read's note, said as such —
+    /// never the notes the other reads already found.
+    #[test]
+    fn a_read_that_fails_is_said_and_the_others_still_are() {
+        let policy = codex_policy();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(
+            work.path().join(".codex/config.toml"),
+            "[mcp_servers.linear]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        let account = tempfile::tempdir().unwrap();
+        let cache = account.path().join(".codex/cloud-config-bundle-cache.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/nowhere", &cache).unwrap();
+
+        let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
+        assert!(said.iter().any(|s| s.contains("linear")), "{said:#?}");
+        assert!(
+            said.iter()
+                .any(|s| s.starts_with("could not check") && s.contains("cloud-config-bundle")),
+            "{said:#?}"
+        );
+    }
+
+    /// A config that declares no server is not told it declares some.
+    #[test]
+    fn a_config_with_no_servers_and_no_hooks_says_nothing() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(work.path().join(".codex/config.toml"), "model = \"o3\"\n").unwrap();
+        let said = super::policy(&codex_policy(), Work::Worktree(work.path()), None);
+        assert!(said.is_empty(), "{said:#?}");
+    }
+
+    /// Before a session has a worktree — a dry run, `omh doctor` — what it will
+    /// hold is the base branch's: a file only in the working tree is not
+    /// named, a committed one is.
+    #[test]
+    fn before_a_worktree_the_base_branch_is_what_is_read() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(args)
+                .envs([
+                    ("GIT_AUTHOR_NAME", "t"),
+                    ("GIT_AUTHOR_EMAIL", "t@t"),
+                    ("GIT_COMMITTER_NAME", "t"),
+                    ("GIT_COMMITTER_EMAIL", "t@t"),
+                ])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(repo.path().join(".codex")).unwrap();
+        std::fs::write(
+            repo.path().join(".codex/config.toml"),
+            "[mcp_servers.committed]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "c"]);
+        std::fs::write(
+            repo.path().join(".codex/config.toml"),
+            "[mcp_servers.uncommitted]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+
+        let work = Work::Base {
+            repo: repo.path(),
+            base: "main",
+        };
+        let said = super::policy(&codex_policy(), work, None);
+        assert!(said.iter().any(|s| s.contains("committed")), "{said:#?}");
+        assert!(!said.iter().any(|s| s.contains("uncommitted")), "{said:#?}");
     }
 }

@@ -285,6 +285,12 @@ fn body(paths: &Paths, worktree: &Path, base: Option<&str>, name: &str) -> Resul
     show(&paths.repo, base, name)
 }
 
+/// `<name>` as `<base>` has it, for a reader that is not composing rules —
+/// what a new session's worktree will hold, before there is one.
+pub(crate) fn at_base(repo: &Path, base: &str, name: &str) -> Result<Option<String>> {
+    Ok(show(repo, base, name)?.map(|f| f.body))
+}
+
 /// `git show <base>:<name>`, distinguishing "not on that branch" from a git
 /// that could not answer.
 ///
