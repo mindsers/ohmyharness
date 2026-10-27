@@ -292,6 +292,9 @@ fn read_dir(dir: &Path) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// The repo's own Codex config, relative to `/work`.
+pub const PROJECT_CONFIG: &str = ".codex/config.toml";
+
 /// Where what a session will see as `/work` is read from.
 pub enum Work<'a> {
     /// The session's own worktree. The agent writes it, so it is read held.
@@ -323,7 +326,7 @@ pub fn policy(
     if policy.format != crate::adapter::PolicyFormat::CodexRequirements {
         return said;
     }
-    const PROJECT: &str = ".codex/config.toml";
+    const PROJECT: &str = PROJECT_CONFIG;
     let raw = match work {
         Work::Worktree(root) => read_held(root, PROJECT),
         Work::Base { repo, base } => crate::rules::at_base(repo, base, PROJECT),

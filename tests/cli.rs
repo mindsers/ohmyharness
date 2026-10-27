@@ -16411,6 +16411,36 @@ fn omh_doctor_names_what_codexs_policy_stops_here() {
     }
 }
 
+/// A `.codex/config.toml` the repo carries in reaches the session though no
+/// branch has it, so the dry run and `omh doctor` name it as the launch does.
+#[test]
+fn a_carried_codex_config_is_named_before_a_launch_too() {
+    for doctor in [false, true] {
+        let sb = sandbox();
+        repo_declaring_a_codex_server(&sb, false);
+        std::fs::write(sb.repo.join(".gitignore"), ".codex/\n").unwrap();
+        let (_log, argv): (_, &[&str]) = match doctor {
+            false => (Some(sb.fake_docker()), &["new", "codex", "--dry-run"]),
+            true => {
+                sb.fake_docker_answering_doctor(&[], &[]);
+                (None, &["doctor", "--dry-run", "--harness", "codex"])
+            }
+        };
+        // After the stand-in, which writes this repo's settings itself.
+        let settings = sb.repo.join(".omh/settings.toml");
+        let mut body = std::fs::read_to_string(&settings).unwrap_or_default();
+        body.push_str("carry_in = [\".codex/config.toml\"]\n");
+        std::fs::write(&settings, body).unwrap();
+        let out = sb.omh(argv);
+        assert_eq!(
+            printed(&out).matches("repo-linear").count(),
+            1,
+            "{argv:?}: {}",
+            printed(&out)
+        );
+    }
+}
+
 /// A harness name is a name, not a path.
 ///
 /// `omh new <word>` reached `Adapter::find`, which joins the word straight into

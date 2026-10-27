@@ -716,20 +716,32 @@ pub fn plan(
             adapter,
             &mut mounts,
         )?;
-        // A real session's worktree is `/work`. Before it exists — a dry run
-        // — it will be made from the base branch, and a scratch session's
-        // `/work` (`omh doctor`, `omh auth`) is not the repo's at all: both
-        // read the base branch, which is what a new session will hold. Only
-        // a worktree known to be absent falls through; one omh cannot stat is
-        // read, and says why it could not be.
+        // What the session's `/work` holds, or will:
+        // - a real session's worktree, read held. One omh cannot stat is read
+        //   too, and says why it could not be; only one known to be absent is
+        //   not there yet.
+        // - before it exists (a dry run), or where `/work` is not the repo's
+        //   at all (`omh doctor`'s scratch): the checkout's copy if `carry_in`
+        //   brings it in, which is what lands in `/work`, else `opts.base`,
+        //   which a new session's worktree is made from.
+        // - no base (`omh auth`, which prints no notes): the scratch itself,
+        //   which holds nothing.
         let worktree =
             session.branch.is_some() && !matches!(session.worktree.try_exists(), Ok(false));
-        let work = match (worktree, opts.base.as_deref()) {
-            (false, Some(base)) => crate::notice::Work::Base {
+        let carried = crate::config::policy_list(paths, "carry_in")
+            .iter()
+            .any(|p| {
+                let p = p.trim().trim_start_matches("./").trim_end_matches('/');
+                Path::new(crate::notice::PROJECT_CONFIG).starts_with(p)
+            });
+        let work = match (worktree, carried, opts.base.as_deref()) {
+            (true, _, _) => crate::notice::Work::Worktree(&session.worktree),
+            (false, true, _) => crate::notice::Work::Worktree(&paths.repo),
+            (false, false, Some(base)) => crate::notice::Work::Base {
                 repo: &paths.repo,
                 base,
             },
-            _ => crate::notice::Work::Worktree(&session.worktree),
+            (false, false, None) => crate::notice::Work::Worktree(&session.worktree),
         };
         policy_notes = crate::notice::policy(policy, work, opts.account_dir.as_deref());
     }
@@ -3055,6 +3067,68 @@ mod tests {
             p.policy
         );
         assert!(plan_for(&fx, "claude").policy.is_empty());
+    }
+
+    /// A session that has its worktree — a launch, `resume`, `attach` — reads
+    /// the worktree, not the base branch it was made from: what the agent
+    /// wrote there since is what `/work` holds.
+    #[test]
+    fn a_session_with_a_worktree_reads_it_and_not_the_base() {
+        let fx = fixture();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "r",
+            ][..],
+        ] {
+            let ran = std::process::Command::new("git")
+                .current_dir(&fx.paths.repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(ran.success(), "{args:?}");
+        }
+        std::fs::create_dir_all(fx.session.worktree.join(".codex")).unwrap();
+        std::fs::write(
+            fx.session.worktree.join(".codex/config.toml"),
+            "[mcp_servers.linear]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
+        let (own, repo) = decided_from(&fx);
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: Some("main".into()),
+                omh: own,
+                repo,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert!(
+            p.policy.iter().any(|n| n.contains("linear")),
+            "{:?}",
+            p.policy
+        );
     }
 
     /// A dry run writes no policy and no mask, on every harness that has them.
