@@ -326,20 +326,24 @@ impl Manifest {
         Ok(manifest)
     }
 
-    /// Refuse a name used before that is not one entry's alone.
+    /// Refuse a name that is not one entry's alone, within its kind — a
+    /// current name held twice, or a name used before that is someone's now
+    /// or two entries' at once.
     ///
-    /// Such a name is read as its entry — `refresh_own_servers` moves a
-    /// catalogue key onto the entry's name and `[mcp.<old>.env]` reaches it —
-    /// so pointing at two entries, or at a name some entry has now, moves one
-    /// live server onto another and writes over it. Servers only: nothing
-    /// renames a hook or a rules section, so a `was` there would be reserved
-    /// and never read.
+    /// Every reader looks an entry up by name: `omh why` answers for the
+    /// feature a name belongs to, `upgrade` judges a catalogue copy against
+    /// the definition its name points at, and the refusals name a feature's
+    /// switch. A name answering to two entries makes each of them pick one,
+    /// and not always the same one. Servers only for `was`: nothing renames a
+    /// hook or a rules section, so a `was` there would be reserved and never
+    /// read.
     fn check_names(&self) -> Result<()> {
-        let mut seen: BTreeMap<(crate::adapter::Capability, &str), &str> = self
-            .entries
-            .iter()
-            .map(|e| ((e.kind.capability(), e.name.as_str()), e.name.as_str()))
-            .collect();
+        let mut seen: BTreeMap<(crate::adapter::Capability, &str), &str> = BTreeMap::new();
+        for entry in &self.entries {
+            if let Some(holder) = seen.insert((entry.kind.capability(), &entry.name), &entry.name) {
+                anyhow::bail!("`{holder}` names two entries — a name is one entry's alone");
+            }
+        }
         for entry in &self.entries {
             for old in &entry.was {
                 anyhow::ensure!(
@@ -1725,6 +1729,12 @@ command = "c"
             ),
             (entry("omh-a", "mcp", "\"omh-a\""), "`omh-a`"),
             (entry("a-hook", "hook", "\"old-hook\""), "`old-hook`"),
+            // Two entries of one kind under one current name: the later one
+            // silently won every lookup by name.
+            (
+                entry("omh-a", "mcp", "") + &entry("omh-a", "mcp", ""),
+                "`omh-a`",
+            ),
         ] {
             let dir = manifest_dir(&[("2026.08.toml", &format!("version = \"2026.08\"\n{body}"))]);
             let err = format!("{:#}", Manifest::load_dir(dir.path()).expect_err(&body));

@@ -3325,47 +3325,62 @@ mod tests {
     /// binary expects is not the one that manifest switches off.
     #[test]
     fn a_disabled_feature_takes_its_mounts_under_an_older_base_set_too() {
-        let fx = fixture();
-        let bin = fake_server_binary(&fx);
         let shipped = std::fs::read_to_string(Path::new(BASE).join("2026.08.toml")).unwrap();
         let older = shipped
             .replace("name    = \"omh-memory\"", "name    = \"memory\"")
             .replace("was     = [\"memory\"]\n", "");
-        assert_ne!(older, shipped, "the fixture must actually rename it");
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("2026.08.toml"), older).unwrap();
         let manifest = crate::base::Manifest::load_dir(dir.path()).unwrap();
-        let off: std::collections::BTreeSet<String> = ["memory".to_string()].into();
-
-        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let p = plan(
-            &fx.paths,
-            &fx.profile,
-            &adapter,
-            &fx.session,
-            &[],
-            Options {
-                staging: Staging::Apply,
-                persist: crate::persist::Mode::None,
-                tty: true,
-                account_dir: None,
-                memory_bin: Some(bin),
-                base: None,
-                omh: crate::base::own(&manifest, &off).unwrap(),
-                repo: crate::settings::RepoPolicy::switching_off(&manifest, off),
-                image: crate::image::tag_for(&adapter, None),
-                resolves: BTreeMap::new(),
-            },
-        )
-        .unwrap();
-
         assert!(
-            !p.mounts
-                .iter()
-                .any(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY)),
-            "no note store: {:?}",
-            p.mounts
+            manifest.entry("memory").is_some() && manifest.entry("omh-memory").is_none(),
+            "the fixture must name the server as an older omh did"
         );
+
+        // Both halves: off takes the store and the binary, on keeps them —
+        // keyed on a server name, either half could hold while the other broke.
+        for on in [false, true] {
+            let fx = fixture();
+            let bin = fake_server_binary(&fx);
+            let off: std::collections::BTreeSet<String> = if on {
+                Default::default()
+            } else {
+                ["memory".to_string()].into()
+            };
+            let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+            let p = plan(
+                &fx.paths,
+                &fx.profile,
+                &adapter,
+                &fx.session,
+                &[],
+                Options {
+                    staging: Staging::Apply,
+                    persist: crate::persist::Mode::None,
+                    tty: true,
+                    account_dir: None,
+                    memory_bin: Some(bin),
+                    base: None,
+                    omh: crate::base::own(&manifest, &off).unwrap(),
+                    repo: crate::settings::RepoPolicy::switching_off(&manifest, off),
+                    image: crate::image::tag_for(&adapter, None),
+                    resolves: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+            for guest in [
+                crate::memory::GUEST_MEMORY,
+                crate::memory::deliver::GUEST_BIN,
+            ] {
+                assert_eq!(
+                    p.mounts.iter().any(|m| m.guest == Path::new(guest)),
+                    on,
+                    "{guest} with memory {}: {:?}",
+                    if on { "on" } else { "off" },
+                    p.mounts
+                );
+            }
+        }
     }
 
     /// A catalogue `omh upgrade` has not cleaned still holds what an earlier
@@ -3426,7 +3441,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let mounted = |p: &Plan, guest: &str| p.mounts.iter().any(|m| m.guest == Path::new(guest));
         let dropped = |p: &Plan, hook: &str| p.dropped_hooks.iter().any(|d| d.name == hook);
         // A server entry, in JSON or in Codex's TOML — not merely the name:
         // Claude's `permissions.allow` spells `mcp__<name>` whether or not the
@@ -3476,33 +3490,38 @@ mod tests {
             ("graph-read", "is large. For one symbol"),
         ];
 
+        // Every part of every feature is there exactly when *its own* feature
+        // is on — whichever one is switched off, and with none switched off.
+        // Checked across both features at once, so a switch that reached the
+        // other feature's parts fails as surely as one that missed its own.
         for harness in ["claude", "codex", "omp", "opencode"] {
-            for (feature, parts) in &features {
-                for on in [true, false] {
-                    let fx = fixture();
-                    // No catalogue servers at all — where most installs are
-                    // once omh's left `mcp.json`, and the case that asked the
-                    // profile whether to stage an MCP document at all.
-                    std::fs::remove_file(fx.paths.root.join("mcp.json")).unwrap();
-                    let bin = fake_server_binary(&fx);
-                    let switch = if on {
-                        String::new()
-                    } else {
-                        format!("\n[omh]\n{feature} = false\n")
-                    };
-                    std::fs::write(
-                        fx.paths.repo.join(".omh/settings.toml"),
-                        format!("carry_in = [\".env\"]\n{switch}"),
-                    )
-                    .unwrap();
-                    let p = plan_with_memory_bin(&fx, harness, Some(bin));
-                    let text = staged(&p);
+            for off in [
+                None,
+                Some(crate::base::GRAPH_FEATURE),
+                Some(crate::memory::tools::FEATURE),
+            ] {
+                let fx = fixture();
+                // No catalogue servers at all — where most installs are once
+                // omh's left `mcp.json`, and the case that asked the profile
+                // whether to stage an MCP document at all.
+                std::fs::remove_file(fx.paths.root.join("mcp.json")).unwrap();
+                let bin = fake_server_binary(&fx);
+                let switch = off.map_or(String::new(), |f| format!("\n[omh]\n{f} = false\n"));
+                std::fs::write(
+                    fx.paths.repo.join(".omh/settings.toml"),
+                    format!("carry_in = [\".env\"]\n{switch}"),
+                )
+                .unwrap();
+                let p = plan_with_memory_bin(&fx, harness, Some(bin));
+                let text = staged(&p);
+                for (feature, parts) in &features {
+                    let on = off != Some(*feature);
+                    let state = if on { "on" } else { "off" };
                     for (part, present) in parts {
                         assert_eq!(
                             present(&p, &text),
                             on,
-                            "{harness}: `{part}` with {feature} {}",
-                            if on { "on" } else { "off" }
+                            "{harness}: `{part}` with {feature} {state}, {off:?} switched off"
                         );
                     }
                     if *feature == crate::base::GRAPH_FEATURE {
@@ -3510,12 +3529,10 @@ mod tests {
                             assert_eq!(
                                 text.contains(says) || dropped(&p, hook),
                                 on,
-                                "{harness}: `{hook}` with {feature} {}",
-                                if on { "on" } else { "off" }
+                                "{harness}: `{hook}` with {feature} {state}, {off:?} switched off"
                             );
                         }
                     }
-                    let _ = mounted;
                 }
             }
         }

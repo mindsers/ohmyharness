@@ -530,6 +530,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // No servers are seeded into your catalogue: omh's are generated from the
     // base set at launch, with its hooks and rules sections, and `omh why`
     // answers for them from the same file.
+
     // Only when this run actually created the file. Reporting a seed over a
     // settings.toml that was already there would claim an effect the template
     // did not have — `write_if_absent` never revisits.

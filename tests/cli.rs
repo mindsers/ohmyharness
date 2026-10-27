@@ -10206,6 +10206,20 @@ fn init_installs_every_directory_this_repo_ships() {
             );
         }
     }
+
+    // And no server catalogue: omh's servers are generated at launch, so a
+    // fresh install has no `mcp.json` until you add a server of your own. The
+    // repo's settings file, written just after where one used to be seeded,
+    // shows `init` got that far.
+    assert!(
+        sb.repo.join(".omh/settings.toml").exists(),
+        "init stopped before the point this checks"
+    );
+    assert!(
+        !sb.home.join(".omh/mcp.json").exists(),
+        "init seeded a server catalogue: {}",
+        std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap_or_default()
+    );
 }
 
 /// Provisioning stays behind the runtime check, and records nothing without it.
@@ -13867,6 +13881,7 @@ fn a_name_omhs_servers_used_to_have_never_reaches_a_use_list() {
     std::fs::write(
         &theirs,
         r#"{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"]},
+                          "omh-codegraph":{"command":"a-graph-of-theirs"},
                           "linear":{"command":"npx","args":["-y","mcp-remote"]}}}"#,
     )
     .unwrap();
@@ -13895,10 +13910,13 @@ fn a_name_omhs_servers_used_to_have_never_reaches_a_use_list() {
         );
         assert_eq!(held(), ["linear", "omh-memory"], "`omh {}`", argv.join(" "));
         let said = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            said.contains("memory") && said.contains("omh's"),
-            "and it says why `memory` was left out: {said}"
-        );
+        for name in ["memory", "omh-codegraph"] {
+            assert!(
+                said.lines()
+                    .any(|l| l.contains(name) && l.contains("omh's")),
+                "and it says why `{name}` was left out: {said}"
+            );
+        }
     }
 
     // `mcp.json` is yours to edit, so the old name can still be there.
