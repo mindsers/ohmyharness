@@ -548,6 +548,7 @@ pub(crate) fn doctor_cmd(
             persist: persist::Mode::None,
             tty: false,
             account_dir: account.clone(),
+            launch: crate::container::Launch::Session,
             memory_bin,
             // The probe has to compose the same rules a launch would, or it proves
             // the harness reads a document nobody will be given.
@@ -565,10 +566,24 @@ pub(crate) fn doctor_cmd(
         if let Some(account_dir) = &account {
             auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
         }
+        // Read and checked before anything runs; written below.
+        let seeds = match &account {
+            Some(account_dir) => auth::seeds(&adapter, account_dir)?,
+            None => None,
+        };
         crate::cmd::session::say_selection(&paths, &profile, &opts.repo, ctx);
         let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
         crate::cmd::session::say_rules(&plan, ctx);
         crate::cmd::session::say_policy(&plan, ctx);
+        // The probe's own copies, reseeded every run: nothing an earlier
+        // probe left there is trusted. Not on a preview, which writes nothing.
+        if let Some(seeds) = seeds.as_ref().filter(|_| !dry_run) {
+            seeds.write(&container::session_home(
+                &paths,
+                &session,
+                adapter.name.as_str(),
+            ))?;
+        }
         plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 
         plan.validate_for(&backend)?;

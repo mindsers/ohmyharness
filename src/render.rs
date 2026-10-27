@@ -439,6 +439,92 @@ pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Resul
     }
 }
 
+/// The keys a session's copy of an account file is seeded without: the ones
+/// that name a server, switch one on or off, grant a permission or a consent,
+/// or carry a credential helper or an environment — and the one key it adds:
+/// trust in the session's own `/work`. Everything else is kept as written.
+/// The files a format seeds are `PolicyFormat::seeds`.
+pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
+    match format {
+        // Claude Code 2.1.300's `~/.claude.json`.
+        //
+        // Top level: user-scope servers; the legacy `env` and `apiKeyHelper`
+        // it still reads as a fallback (#197: read in the binary, inferred;
+        // not measured); approvals of an API key from the environment and of
+        // bypass-permissions mode.
+        //
+        // Per project — every session's is `/work`, but every project's go, so
+        // no other entry survives to be moved under `/work` later: its
+        // servers; the `/mcp` switches; the switches on `.mcp.json` servers
+        // (2.1.300 migrates those into `/work/.claude/settings.local.json` at
+        // start — read in the binary); `allowedTools`, the permissions granted
+        // there; approval of a CLAUDE.md that includes files from outside the
+        // project; and trust in the folder. Measured present in a captured
+        // account: the servers, the `.mcp.json` switches, `allowedTools`, the
+        // CLAUDE.md approval and the trust; the `/mcp` switches are #197's
+        // (docs, binary). omh trusts `/work` itself, below — that 2.1.300 skips its
+        // trust dialog for it is inferred.
+        //
+        // The account's own `primaryApiKey` stays: it is that login's key.
+        //
+        // A list of what goes, not of what stays. Step 2 of #197 turns the
+        // file's preferences into a declared allowlist; until then the test
+        // asserts the whole of what is left.
+        PolicyFormat::ClaudeManaged => {
+            const TOP: [&str; 8] = [
+                "mcpServers",
+                "disabledMcpjsonServers",
+                "enabledMcpjsonServers",
+                "enableAllProjectMcpServers",
+                "env",
+                "apiKeyHelper",
+                "customApiKeyResponses",
+                "bypassPermissionsModeAccepted",
+            ];
+            const PROJECT: [&str; 9] = [
+                "mcpServers",
+                "disabledMcpServers",
+                "enabledMcpServers",
+                "enabledMcpjsonServers",
+                "disabledMcpjsonServers",
+                "enableAllProjectMcpServers",
+                "allowedTools",
+                "hasClaudeMdExternalIncludesApproved",
+                "hasTrustDialogAccepted",
+            ];
+            let Some(top) = doc.as_object_mut() else {
+                return;
+            };
+            for key in TOP {
+                top.remove(key);
+            }
+            let projects = top
+                .entry("projects")
+                .or_insert_with(|| serde_json::json!({}));
+            if !projects.is_object() {
+                *projects = serde_json::json!({});
+            }
+            let Some(projects) = projects.as_object_mut() else {
+                return;
+            };
+            for project in projects.values_mut().filter_map(|p| p.as_object_mut()) {
+                for key in PROJECT {
+                    project.remove(key);
+                }
+            }
+            let work = projects
+                .entry(crate::container_workdir())
+                .or_insert_with(|| serde_json::json!({}));
+            if !work.is_object() {
+                *work = serde_json::json!({});
+            }
+            work["hasTrustDialogAccepted"] = serde_json::Value::Bool(true);
+        }
+        // Codex copies nothing; `check_policy` refuses a `copy` for it.
+        PolicyFormat::CodexRequirements => {}
+    }
+}
+
 /// Where Codex sends the ChatGPT tokens and fetches an enterprise's bundle.
 /// Pinned in the policy so no layer a session writes can move it.
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/";
@@ -1971,6 +2057,92 @@ mod tests {
     use std::io::Write;
 
     // ── policy ──────────────────────────────────────────────────────────────
+
+    /// What a session's `~/.claude.json` is seeded without, by name: a server,
+    /// a switch on one, a permission grant, a helper or an environment — at
+    /// the top and under every project. Identity, onboarding and everything
+    /// omh has no opinion on are kept as written.
+    #[test]
+    fn a_claude_account_file_is_seeded_without_what_names_or_switches_a_server() {
+        let planted =
+            serde_json::json!({ "omh-memory": { "command": "omh", "env": { "PATH": "/x" } } });
+        let project = serde_json::json!({
+            "mcpServers": planted,
+            "disabledMcpServers": ["omh-memory"],
+            "enabledMcpServers": ["x"],
+            "enabledMcpjsonServers": ["x"],
+            "disabledMcpjsonServers": ["omh-memory"],
+            "enableAllProjectMcpServers": false,
+            "allowedTools": ["Bash(curl *)"],
+            "hasTrustDialogAccepted": true,
+            "hasClaudeMdExternalIncludesApproved": true,
+            "lastCost": 1.5,
+        });
+        let mut doc = serde_json::json!({
+            "mcpServers": planted,
+            "disabledMcpjsonServers": ["omh-memory"],
+            "enabledMcpjsonServers": ["x"],
+            "enableAllProjectMcpServers": false,
+            "env": { "ANTHROPIC_BASE_URL": "https://elsewhere" },
+            "apiKeyHelper": "/tmp/helper",
+            "customApiKeyResponses": { "approved": ["planted"] },
+            "bypassPermissionsModeAccepted": true,
+            "primaryApiKey": "sk-the-accounts-own",
+            "oauthAccount": { "emailAddress": "a@b" },
+            "userID": "u",
+            "hasCompletedOnboarding": true,
+            "theme": "dark",
+            "projects": { "/work": project.clone(), "/elsewhere": project },
+        });
+        scrub(PolicyFormat::ClaudeManaged, &mut doc);
+
+        // What is left, whole, rather than the list restated: identity and
+        // what omh has no opinion on stay, everything else in the fixture goes
+        // — a key dropped by mistake fails as surely as one kept. The
+        // account's own API key is its login, like the OAuth tokens.
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&doc),
+            [
+                "hasCompletedOnboarding",
+                "oauthAccount",
+                "primaryApiKey",
+                "projects",
+                "theme",
+                "userID"
+            ],
+            "{doc}"
+        );
+        // Trust is omh's to give, and it gives it to `/work` alone — never a
+        // grant a session left in the account.
+        assert_eq!(
+            keys(&doc["projects"]["/work"]),
+            ["hasTrustDialogAccepted", "lastCost"],
+            "{doc}"
+        );
+        assert_eq!(doc["projects"]["/work"]["hasTrustDialogAccepted"], true);
+        assert_eq!(keys(&doc["projects"]["/elsewhere"]), ["lastCost"], "{doc}");
+
+        // An account with no projects, projects that are not an object, or a
+        // `/work` that is not one: each still trusts `/work`, and none panics
+        // — the file was the agent's to write.
+        for shape in [
+            serde_json::json!({}),
+            serde_json::json!({ "projects": [] }),
+            serde_json::json!({ "projects": { "/work": "junk" } }),
+        ] {
+            let mut d = shape.clone();
+            scrub(PolicyFormat::ClaudeManaged, &mut d);
+            assert_eq!(
+                d["projects"]["/work"]["hasTrustDialogAccepted"], true,
+                "{shape} → {d}"
+            );
+        }
+    }
 
     fn server(command: &str, args: &[&str]) -> Server {
         Server {

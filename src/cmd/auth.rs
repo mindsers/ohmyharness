@@ -44,6 +44,11 @@ pub(crate) fn auth_cmd(
     auth::validate_name(account)?;
     let account_dir = auth::dir(&paths, &adapter, account);
     let already = auth::is_captured(&paths, &adapter, account);
+    // Before `prepare`, which then lays a placeholder where a file was set
+    // aside: the login mounts the account's own files, not a session's copy.
+    for note in auth::scrub_account(&adapter, &account_dir)? {
+        ctx.warn(&note);
+    }
     auth::prepare(&adapter, &account_dir, "/home/agent")?;
 
     // `--import` copies what the host already holds and starts nothing: a
@@ -145,6 +150,7 @@ fn login_in_sandbox(
             persist: persist::Mode::None,
             tty: true,
             account_dir: Some(account_dir.to_path_buf()),
+            launch: crate::container::Launch::Login,
             memory_bin: memory::deliver::available(paths, ctx),
             // Empty, like the base this scratch session was created with at
             // `session.ensure(&paths.repo, "")`: a login is not work on the

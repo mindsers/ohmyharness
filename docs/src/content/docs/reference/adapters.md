@@ -159,8 +159,9 @@ mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
 ```
 
 The account directory is writable and shared by every session on it, so
-anything a session adds there — an MCP server through `codex mcp add` or
-written into `~/.claude.json`, a hook — would load in every later session. A
+anything a session adds there — an MCP server through `codex mcp add`, a hook
+— would load in every later session (Claude Code's `~/.claude.json` is each
+session's own copy; see `copy`). A
 harness's policy layer is read from `/etc`, which omh fills from the launch
 with a read-only file, and nothing a session writes there outlives its
 container:
@@ -170,10 +171,13 @@ container:
 | `path` | the guest path the harness reads its policy from: a file under `/etc/`, absolute, with no `..`, not under a `creds` or `transcripts` path and not a capability's own path — a literal, never expanded | required |
 | `format` | `codex-requirements` or `claude-managed` | required |
 | `mask` | guest paths strictly inside one of `creds`' directories, with no `..`, that a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
+| `copy` | `creds` file entries each session gets its own copy of, seeded from the account's without what names, switches or grants a server, and never written back — see [`~/.claude.json` is each session's own](/guides/accounts/#claudejson-is-each-sessions-own). Only a file its format knows how to seed: `$HOME/.claude.json`, for `claude-managed` | none |
 
 The policy admits exactly the MCP servers the launch staged, by command and
 arguments compared exactly — and by name too, on Codex. Neither harness
-compares `env`, which is still open ([risk 1b](/concepts/risks/#1b-the-account-directory-is-writable-and-every-repo-shares-it)). It is written even when
+compares `env`: on Claude Code each session's own `~/.claude.json` (`copy`
+above) keeps such an entry from reaching another session; on Codex it is still
+open ([risk 1b](/concepts/risks/#1b-the-account-directory-is-writable-and-every-repo-shares-it)). It is written even when
 nothing is staged, because a harness with no allowlist admits anything. On
 Codex, what the policy stops in your checkout or account — a repo's own
 `.codex/config.toml` servers or hooks, an enterprise bundle cache — is named at

@@ -90,6 +90,16 @@ impl Session {
         session.git(&["add", "-A"]);
         session.git(&["commit", "-q", "-m", "omh"]);
 
+        // A captured account, for a driver that launches with one.
+        if let Some(account) = harness.account {
+            let dir = session.account();
+            for (file, contents) in account() {
+                let path = dir.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, contents).unwrap();
+            }
+        }
+
         // Refused at the last step, for want of a terminal — everything before
         // it is what the test is here for. Docker words that refusal its own
         // way per platform ("the input device is not a TTY" on Linux, "stdin
@@ -348,6 +358,14 @@ impl Session {
     /// A file in the worktree, as the agent left it.
     pub fn read(&self, file: &str) -> Option<String> {
         std::fs::read_to_string(self.worktree().join(file)).ok()
+    }
+
+    /// The account a driver with one launches with, on the host.
+    pub fn account(&self) -> PathBuf {
+        self.home
+            .join(".omh/creds")
+            .join(self.harness.name)
+            .join("e2e")
     }
 
     pub fn worktree(&self) -> PathBuf {

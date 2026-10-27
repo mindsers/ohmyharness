@@ -216,6 +216,49 @@ thing and reading the error.
 
 </details>
 
+### `~/.claude.json` is each session's own
+
+One credential file is not the account's in a session: Claude Code's
+`~/.claude.json`. It holds MCP servers, the `/mcp` switches and permissions
+granted per project, and a session that wrote one there would hand it to every
+later session on the account — including a server with omh's own command and
+arguments and an `env.PATH` of its own, which the policy's allowlist passes. So
+each session gets a copy, seeded from the account's when it first launches:
+
+- **kept:** your identity (`oauthAccount`, `userID`), onboarding, the account's
+  own API key, and everything else omh has no opinion on. Tokens stay in
+  `.credentials.json`, which is still the account's, shared and refreshed in
+  place;
+- **dropped:** every MCP server and switch on one, `allowedTools`, the legacy
+  `env` and `apiKeyHelper`, and the consents a session could leave — so an
+  interactive session should ask again about bypass-permissions mode, an API
+  key from the environment, and a `CLAUDE.md` that includes files from outside
+  the project (inferred from the keys dropped; not measured). omh trusts
+  `/work` itself (inferred to skip the trust dialog; not measured);
+- **never written back:** nothing a session changes there reaches the account
+  or another session. A `/mcp` switch lasts that session; to turn a server off
+  for good, `omh unuse mcp <name>` — or `omh set memory off` and
+  `omh set codegraph off` for omh's own `omh-memory` and `omh-codegraph`.
+
+A `/login` inside a session replaces the account's shared tokens for every
+session on it, but the identity it writes stays in that session's copy — later
+sessions carry the account's old `oauthAccount` beside the new tokens.
+`omh auth claude --name <account>` is how an account's identity changes: it
+writes the account's own file, after cleaning it the same way, and setting it
+aside if no session could be seeded from it.
+
+The copy lives at `~/.omh/run/<repo>/<session>/.home/claude/.claude.json` and
+goes with the session at `omh sNN rm`. It is seeded again — and what the
+session made of it discarded — when the session's account changes, when that
+account's own file does (after `omh auth claude` captures it again), or when the
+copy is gone or no longer parses.
+
+Claude Code 2.1.300 also reads `~/.claude/.config.json` *instead of*
+`~/.claude.json` when it is not empty, and that one sits in the account's
+shared `~/.claude/`; omh hides it behind an empty read-only file in every
+session (read in the binary; a server planted there loaded in `tests/e2e`
+until it was masked).
+
 ### `token` is what proves a login
 
 The adapter names the file that proves a login, and nothing else counts. A

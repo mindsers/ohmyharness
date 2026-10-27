@@ -270,6 +270,35 @@ impl Staging {
     }
 }
 
+/// What a launch is for — which decides where an adapter's `[policy] copy`
+/// files come from and what its policy admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// A session, or `omh doctor`'s probe: each mounts its own copies, seeded
+    /// from the account by `auth::seeds` under [`session_home`], and admits
+    /// the servers the launch staged.
+    Session,
+    /// `omh auth`'s login: it mounts the account's own files, since that is
+    /// where a login writes the identity every later session is seeded with.
+    /// `auth::scrub_account` has cleaned them first; and a login needs no MCP
+    /// server, so its policy admits none.
+    Login,
+}
+
+/// Where a session's own copies of account files live: in its run directory
+/// for a real session, kept between its launches; under `scratch/` for one
+/// that is not (`omh doctor`), seeded afresh each time, so nothing there is
+/// mistaken for a session. `.home`, dotted like `.harness`: the run
+/// directory's other children are named after harnesses.
+pub fn session_home(paths: &Paths, session: &Session, harness: &str) -> crate::auth::Home {
+    match session.branch {
+        Some(_) => {
+            crate::auth::Home::Kept(paths.runs().join(&session.id).join(".home").join(harness))
+        }
+        None => crate::auth::Home::Scratch(paths.scratch("home").join(&session.id).join(harness)),
+    }
+}
+
 /// Launch options that are not part of the profile.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -278,6 +307,9 @@ pub struct Options {
     pub tty: bool,
     /// Resolved credential account. `None` means no login is mounted.
     pub account_dir: Option<PathBuf>,
+    /// What this launch is for: where `[policy] copy` files are mounted from,
+    /// and — for a login — that the policy admits no MCP server.
+    pub launch: Launch,
     /// Resolved memory-server binary. `None` means none is mounted, and that
     /// is the whole absent case.
     ///
@@ -692,10 +724,37 @@ pub fn plan(
     // Credentials mount at the paths the harness itself reads — anywhere else
     // and the session starts logged out no matter what was captured. Writable,
     // because OAuth tokens refresh in place.
+    //
+    // A credential file the policy copies is the session's own copy instead,
+    // seeded from the account by `auth::seed_copies` — never by `plan`, which
+    // runs before the reuse decision and would rewrite a file bind-mounted
+    // into a running container.
     if let Some(account) = &opts.account_dir {
+        let copied: Vec<PathBuf> = match opts.launch {
+            Launch::Session => adapter
+                .policy
+                .iter()
+                .flat_map(|p| p.copy.iter())
+                .map(|c| expand(c, GUEST_HOME))
+                .collect(),
+            Launch::Login => Vec::new(),
+        };
+        let home = session_home(paths, session, adapter.name.as_str());
         for cred in crate::auth::mounts(adapter, account, GUEST_HOME) {
+            let host = match copied.contains(&cred.guest) {
+                // `check_policy` holds every copy under `$HOME`; never fall back
+                // to the account's own file, which is what a copy replaces.
+                true => match cred.guest.strip_prefix(GUEST_HOME) {
+                    Ok(rel) => home.path().join(rel),
+                    Err(_) => anyhow::bail!(
+                        "{} is copied per session but is not under {GUEST_HOME}",
+                        cred.guest.display()
+                    ),
+                },
+                false => cred.host,
+            };
             mounts.push(Mount {
-                host: cred.host,
+                host,
                 guest: cred.guest,
                 read_only: false,
                 file: cred.file,
@@ -849,15 +908,31 @@ fn stage_policy(
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
     let sources = profile.sources(Capability::Mcp)?;
-    let servers = admitted(&sources, rules_doc, &opts.omh, &opts.repo, adapter)?;
+    // A login mounts the account's own files, with whatever an earlier
+    // session left in them, and needs no server: it admits none.
+    let servers = match opts.launch {
+        Launch::Session => admitted(&sources, rules_doc, &opts.omh, &opts.repo, adapter)?,
+        Launch::Login => BTreeMap::new(),
+    };
     let body = crate::render::policy(policy.format, &servers)?;
     let file = stage.join("policy.rendered");
     let mask = stage.join("masked");
     if staging == Staging::Apply {
         std::fs::create_dir_all(stage)?;
         std::fs::write(&file, body).context("staging the harness's policy")?;
+        // Empty and without a write bit: a read-only mount keeps the mode the
+        // harness sees, and Claude Code takes an empty `.config.json` whose
+        // mode is writable as its config when `~/.claude.json` is absent.
         if !policy.mask.is_empty() {
-            std::fs::write(&mask, "")?;
+            use std::os::unix::fs::PermissionsExt;
+            match std::fs::remove_file(&mask) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("replacing {}", mask.display()))
+                }
+                _ => {}
+            }
+            std::fs::write(&mask, "").with_context(|| format!("staging {}", mask.display()))?;
+            std::fs::set_permissions(&mask, std::fs::Permissions::from_mode(0o444))?;
         }
     }
     mounts.push(Mount {
@@ -1602,6 +1677,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -1639,6 +1715,7 @@ mod tests {
                     persist: crate::persist::Mode::None,
                     tty: true,
                     account_dir: None,
+                    launch: crate::container::Launch::Session,
                     memory_bin: None,
                     base: None,
                     omh: decided().0,
@@ -1698,6 +1775,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -1803,6 +1881,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin,
                 base: None,
                 omh: own,
@@ -1845,6 +1924,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: Default::default(),
@@ -1892,6 +1972,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: Default::default(),
@@ -1955,6 +2036,36 @@ mod tests {
         );
     }
 
+    /// With an account, every writable mount's source is one of: the
+    /// worktree, the account's credentials, this session's own run directory
+    /// (transcripts, its copy of `~/.claude.json`), omh's per-repo stores, or a
+    /// named volume — and never the account's own copied file, which is the
+    /// one every later session would read.
+    #[test]
+    fn with_an_account_every_writable_mount_is_one_of_these() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/claude/work");
+        let p = plan_account(&fx, "claude", Some(account.clone()));
+        let run = fx.paths.runs().join(&fx.session.id);
+        let allowed = |host: &Path| {
+            host.starts_with(&fx.session.worktree)
+                || host.starts_with(&account)
+                || host.starts_with(&run)
+                || host.starts_with(fx.paths.shadows())
+                || host == fx.paths.memory()
+                || host.is_relative()
+        };
+        for m in p.mounts.iter().filter(|m| !m.read_only) {
+            assert!(allowed(&m.host), "writable from elsewhere: {m:?}");
+        }
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.host == account.join(".claude.json")),
+            "the account's own copied file is mounted"
+        );
+    }
+
     /// Every session gets its own network, named like its container. One
     /// network per checkout let a service one session started be reached from
     /// every other session of the repo, which is not what a sandbox promises.
@@ -1979,6 +2090,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: false,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -2104,6 +2216,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -2503,6 +2616,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: Some(account.to_path_buf()),
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -2512,6 +2626,98 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// The plan, with `copies` and `session` chosen: the `.claude.json` mount.
+    fn claude_json_mount(fx: &Fx, session: &Session, launch: Launch) -> Mount {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            session,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: Some(PathBuf::from("/host/creds/claude/work")),
+                launch,
+                memory_bin: None,
+                base: None,
+                omh: decided().0,
+                repo: decided().1,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let mut at: Vec<Mount> = p
+            .mounts
+            .into_iter()
+            .filter(|m| m.guest == Path::new("/home/agent/.claude.json"))
+            .collect();
+        assert_eq!(at.len(), 1, "one mount at ~/.claude.json: {at:?}");
+        at.remove(0)
+    }
+
+    /// A launch mounts the session's own `~/.claude.json`, never the
+    /// account's — writable, so the harness can save it — while the rest of
+    /// the account, `.credentials.json` included, is the account's.
+    #[test]
+    fn a_session_mounts_its_own_copy_of_the_account_file() {
+        let fx = fixture();
+        let m = claude_json_mount(&fx, &fx.session, Launch::Session);
+        assert_eq!(
+            m.host,
+            session_home(&fx.paths, &fx.session, "claude")
+                .path()
+                .join(".claude.json")
+        );
+        assert!(m.host.starts_with(fx.paths.runs()), "{m:?}");
+        assert!(!m.read_only && m.file, "{m:?}");
+
+        let scratch = Session::scratch(fx.paths.scratch("doctor"), "doctor".into());
+        let m = claude_json_mount(&fx, &scratch, Launch::Session);
+        assert!(
+            m.host.starts_with(fx.paths.root.join("scratch")),
+            "doctor's copy is never under run/: {m:?}"
+        );
+
+        let m = claude_json_mount(&fx, &fx.session, Launch::Login);
+        assert_eq!(m.host, Path::new("/host/creds/claude/work/.claude.json"));
+    }
+
+    /// A login mounts the account's own `~/.claude.json`, with whatever an
+    /// earlier session left there — so its policy admits no server at all,
+    /// omh's included: a login needs none, and a planted one with omh's
+    /// command and its own `env` would pass a list of omh's.
+    #[test]
+    fn a_login_admits_no_mcp_server() {
+        let fx = fixture();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: Some(fx.paths.root.join("creds/claude/work")),
+                launch: Launch::Login,
+                memory_bin: None,
+                base: None,
+                omh: decided().0,
+                repo: decided().1,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(policy_admits(&p, &adapter), vec![]);
     }
 
     /// Regression: credentials mounted at `$HOME/.omh-creds`, which no harness
@@ -3116,6 +3322,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: Some("main".into()),
                 omh: own,
@@ -3152,6 +3359,7 @@ mod tests {
                     persist: crate::persist::Mode::None,
                     tty: true,
                     account_dir: None,
+                    launch: crate::container::Launch::Session,
                     memory_bin: None,
                     base: None,
                     omh: own,
@@ -3258,6 +3466,13 @@ mod tests {
             let m = &p.mounts[at];
             assert!(m.read_only && m.file, "{m:?}");
             assert_eq!(std::fs::read(&m.host).unwrap(), b"", "{m:?}");
+            // No write bit either: Claude Code takes an empty `.config.json`
+            // as its config when its mode is writable and `~/.claude.json` is
+            // absent (read in the binary; measured: a launch with no account
+            // lost omh's servers) — a read-only mount does not change the mode.
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&m.host).unwrap().permissions().mode();
+            assert_eq!(mode & 0o222, 0, "{m:?} is {mode:o}");
             let holder = p
                 .mounts
                 .iter()
@@ -3438,6 +3653,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -3472,6 +3688,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -3754,6 +3971,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: Some(bin),
                 base: None,
                 omh: decided_with(["memory".to_string()].into()).0,
@@ -3822,6 +4040,7 @@ mod tests {
                     persist: crate::persist::Mode::None,
                     tty: true,
                     account_dir: None,
+                    launch: crate::container::Launch::Session,
                     memory_bin: Some(bin),
                     base: None,
                     omh: crate::base::own(&manifest, &off).unwrap(),
@@ -4030,6 +4249,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -4122,6 +4342,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4228,6 +4449,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided_with(["codegraph".to_string()].into()).0,
@@ -4256,6 +4478,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4478,6 +4701,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4619,6 +4843,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4670,6 +4895,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4709,6 +4935,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4760,6 +4987,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4780,6 +5008,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: decided().0,
@@ -4811,6 +5040,7 @@ mod tests {
             persist: crate::persist::Mode::Dtach,
             tty: true,
             account_dir: None,
+            launch: crate::container::Launch::Session,
             memory_bin: None,
             base: None,
             omh: decided().0,
@@ -4833,6 +5063,7 @@ mod tests {
             persist: crate::persist::Mode::None,
             tty: true,
             account_dir: None,
+            launch: crate::container::Launch::Session,
             memory_bin: None,
             base: None,
             omh: decided().0,
@@ -4860,6 +5091,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,
@@ -4885,6 +5117,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir,
+                launch: crate::container::Launch::Session,
                 memory_bin: None,
                 base: None,
                 omh: own,

@@ -113,6 +113,13 @@ pub struct Policy {
     /// behind an empty read-only file. `$HOME` is expanded per image.
     #[serde(default)]
     pub mask: Vec<String>,
+    /// Credential files each session gets a copy of, instead of the account's
+    /// own: seeded from it without what `render::scrub` drops, and never
+    /// written back. One session's writes then reach no other. Each is one of
+    /// `creds`' *file* entries and a file its format knows how to seed
+    /// ([`PolicyFormat::seeds`]) — see `check_policy`.
+    #[serde(default)]
+    pub copy: Vec<String>,
 }
 
 /// What a policy file is written as, which is a claim about one harness.
@@ -123,6 +130,26 @@ pub enum PolicyFormat {
     CodexRequirements,
     /// A Claude Code `managed-settings.d` drop-in.
     ClaudeManaged,
+}
+
+impl PolicyFormat {
+    /// As an adapter spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CodexRequirements => "codex-requirements",
+            Self::ClaudeManaged => "claude-managed",
+        }
+    }
+
+    /// The account files `render::scrub` knows how to seed a session's copy
+    /// of, for this format — what `[policy] copy` may name. Beside the format
+    /// rather than in `render`, which `adapter` does not reach.
+    pub fn seeds(self) -> &'static [&'static str] {
+        match self {
+            Self::CodexRequirements => &[],
+            Self::ClaudeManaged => &["$HOME/.claude.json"],
+        }
+    }
 }
 
 /// The capability classes a profile can carry. Ordered as declared, which is
@@ -652,6 +679,33 @@ impl Adapter {
                 !walks(mask),
                 "adapter {shown}: `[policy]` mask entry {mask:?} has a `..` — it is joined \
                  into the account directory on the host"
+            );
+        }
+        // A copy replaces one credential file's mount, so it names one —
+        // never a directory, never a path no credential mount covers.
+        let files: Vec<&str> = self
+            .creds
+            .iter()
+            .filter(|c| !c.ends_with('/'))
+            .map(String::as_str)
+            .collect();
+        for copy in &policy.copy {
+            anyhow::ensure!(
+                files.contains(&copy.as_str()),
+                "adapter {shown}: `[policy]` copy entry {copy:?} must be one of this adapter's \
+                 credential files ({})",
+                files.join(", ")
+            );
+        }
+        // And one `render::scrub` knows: a file it has no list for would be
+        // seeded unscrubbed, and an absolute one would not be the session's.
+        for copy in &policy.copy {
+            anyhow::ensure!(
+                policy.format.seeds().contains(&copy.as_str()),
+                "adapter {shown}: `[policy]` copy entry {copy:?} is not a file {} knows how \
+                 to seed ({})",
+                policy.format.name(),
+                policy.format.seeds().join(", ")
             );
         }
         Ok(())
@@ -1436,15 +1490,48 @@ render = "concat"
                 "path = \"/etc/x.toml\"\nmask = [\"$HOME/.p/../../tmp/x\"]",
                 "mask entry \"$HOME/.p/../../tmp/x\" has a `..`",
             ),
+            (
+                "creds = [\"$HOME/.p/\", \"$HOME/.p.json\"]",
+                "path = \"/etc/x.toml\"\ncopy = [\"$HOME/.p/\"]",
+                "copy entry \"$HOME/.p/\" must be one of this adapter's credential files",
+            ),
+            (
+                "creds = [\"$HOME/.p/\", \"$HOME/.p.json\"]",
+                "path = \"/etc/x.toml\"\ncopy = [\"$HOME/.other.json\"]",
+                "copy entry \"$HOME/.other.json\" must be one of this adapter's credential files",
+            ),
+            // A copy is seeded by `render::scrub`, which knows one file per
+            // format: a credential file it does not know — or any for a
+            // format that copies nothing — has no seed, and an absolute one
+            // would not even be the session's.
+            (
+                "creds = [\"$HOME/.p/\", \"$HOME/.p.json\"]",
+                "format = \"codex-requirements\"\npath = \"/etc/x.toml\"\ncopy = [\"$HOME/.p.json\"]",
+                "is not a file codex-requirements knows how to seed",
+            ),
+            (
+                "creds = [\"$HOME/.p/\", \"$HOME/.p.json\"]",
+                "path = \"/etc/x.toml\"\ncopy = [\"$HOME/.p.json\"]",
+                "is not a file claude-managed knows how to seed",
+            ),
+            (
+                "creds = [\"$HOME/.p/\", \"/abs/.claude.json\"]",
+                "path = \"/etc/x.toml\"\ncopy = [\"/abs/.claude.json\"]",
+                "is not a file claude-managed knows how to seed",
+            ),
         ] {
             let d = tempfile::tempdir().unwrap();
+            let format = match policy.contains("format =") {
+                true => "",
+                false => "format = \"claude-managed\"\n",
+            };
             write(
                 d.path(),
                 "p.toml",
                 &format!(
                     "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\n{top}\n\n\
                      [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
-                     [policy]\nformat = \"claude-managed\"\n{policy}\n"
+                     [policy]\n{format}{policy}\n"
                 ),
             );
             let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
