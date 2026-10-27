@@ -440,31 +440,37 @@ pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Resul
 }
 
 /// The keys a session's copy of an account file is seeded without: the ones
-/// that name a server, switch one on or off, grant a permission, or carry a
-/// credential helper or an environment. Everything else is kept as written.
+/// that name a server, switch one on or off, grant a permission or a consent,
+/// or carry a credential helper or an environment — and the one key it adds:
+/// trust in the session's own `/work`. Everything else is kept as written.
+/// The files a format seeds are `PolicyFormat::seeds`.
 pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
     match format {
-        // Claude Code 2.1.300's `~/.claude.json`. Top level: user-scope
-        // servers, the legacy `env` and `apiKeyHelper` it still reads as a
-        // fallback (#197, read in the binary). Per project — every session's
-        // is `/work`, but all go, so none is kept to be renamed into it: its
-        // servers, the `/mcp` switches, the switches on `.mcp.json` servers
+        // Claude Code 2.1.300's `~/.claude.json`.
+        //
+        // Top level: user-scope servers; the legacy `env` and `apiKeyHelper`
+        // it still reads as a fallback (#197: read in the binary, inferred;
+        // not measured); approvals of an API key from the environment and of
+        // bypass-permissions mode.
+        //
+        // Per project — every session's is `/work`, but every project's go, so
+        // no other entry survives to be moved under `/work` later: its
+        // servers; the `/mcp` switches; the switches on `.mcp.json` servers
         // (2.1.300 migrates those into `/work/.claude/settings.local.json` at
-        // start), and `allowedTools`, the permissions granted there —
-        // measured present in a captured account.
+        // start — read in the binary); `allowedTools`, the permissions granted
+        // there; approval of a CLAUDE.md that includes files from outside the
+        // project; and trust in the folder. Measured present in a captured
+        // account: the servers, the `.mcp.json` switches, `allowedTools`, the
+        // CLAUDE.md approval and the trust; the `/mcp` switches are #197's
+        // (docs, binary). omh trusts `/work` itself, below — that 2.1.300 skips its
+        // trust dialog for it is inferred.
+        //
+        // The account's own `primaryApiKey` stays: it is that login's key.
+        //
+        // A list of what goes, not of what stays. Step 2 of #197 turns the
+        // file's preferences into a declared allowlist; until then the test
+        // asserts the whole of what is left.
         PolicyFormat::ClaudeManaged => {
-            //
-            // And every consent a session could have left there: approvals of
-            // an API key from the environment, of bypass-permissions mode, of
-            // a CLAUDE.md that includes files from outside the project, and
-            // trust in a folder. omh trusts `/work` itself, below — the key's
-            // place is measured in a captured account, that 2.1.300 skips its
-            // trust dialog for it is inferred. The account's own
-            // `primaryApiKey` stays: it is that login's key.
-            //
-            // A list of what goes, not of what stays. Step 2 of #197 turns the
-            // file's preferences into a declared allowlist; until then this
-            // list is held by the test that names every key.
             const TOP: [&str; 8] = [
                 "mcpServers",
                 "disabledMcpjsonServers",

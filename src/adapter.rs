@@ -116,7 +116,8 @@ pub struct Policy {
     /// Credential files each session gets a copy of, instead of the account's
     /// own: seeded from it without what `render::scrub` drops, and never
     /// written back. One session's writes then reach no other. Each is one of
-    /// `creds`' *file* entries.
+    /// `creds`' *file* entries and a file its format knows how to seed
+    /// ([`PolicyFormat::seeds`]) — see `check_policy`.
     #[serde(default)]
     pub copy: Vec<String>,
 }

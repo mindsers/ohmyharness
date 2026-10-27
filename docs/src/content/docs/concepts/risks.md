@@ -78,7 +78,8 @@ Several accounts widens this gap rather than narrowing it.
 omh mounts each `creds` path read-write, because OAuth tokens refresh in
 place, and a captured account lives under `~/.omh/creds/<harness>/<name>` —
 one directory for every repo that uses it. For Claude Code that is all of
-`~/.claude/` and `~/.claude.json`; for omp, all of `~/.omp/agent/`; for Codex,
+`~/.claude/` and, until #197, `~/.claude.json` — each session now gets its own
+copy of that one, below; for omp, all of `~/.omp/agent/`; for Codex,
 `~/.codex/`.
 
 **Those directories hold more than credentials.** By the adapters' own
@@ -86,7 +87,7 @@ accounts of what each harness reads:
 
 - `~/.claude/CLAUDE.md` is Claude Code's personal memory file, and
   `~/.claude.json` holds user-scope MCP servers nested per project — and every
-  session's project is `/work`;
+  session's project is `/work` (each session's own copy since #197);
 - `~/.codex/AGENTS.md` is Codex's user-scope instructions;
 - omp discovers every module under `~/.omp/agent/hooks/pre/`, and omh's own
   `omh.ts` is only one file in that directory.
@@ -109,15 +110,20 @@ Codex case and the direct writes. Codex also runs managed hooks only, so a hook
 written into `~/.codex/config.toml` does not run either (read in Codex's
 source; nothing in `tests/e2e` plants one).
 
-**Closed on Claude Code** (#197): an entry in `~/.claude.json` with the
-*same* command and arguments as one of omh's servers and an `env` of its own
-passes the lock, since the allowlist compares no `env` (measured in #197). So
-each session now gets its own copy of `~/.claude.json`, seeded from the
-account's without any server, switch, permission grant or consent — see
+**Closed across sessions on Claude Code** (#197): an entry in `~/.claude.json`
+with the *same* command and arguments as one of omh's servers and an `env` of
+its own passes the lock, since the allowlist compares no `env` (measured in
+#197). So each session now gets its own copy of `~/.claude.json`, seeded from
+the account's without any server, switch, permission grant or consent, and the
+legacy `~/.claude/.config.json` Claude Code would read instead is masked — see
 [`~/.claude.json` is each session's own](/guides/accounts/#claudejson-is-each-sessions-own).
-Nothing a session writes there reaches the account. `tests/e2e` launches with
-an account holding such an entry, omh-memory switched off, and asserts none of
-it reaches the session and nothing the session writes reaches the account.
+Nothing a session writes there reaches the account; a session's own relaunch
+still reads what it wrote into its copy. `tests/e2e` launches with an account
+holding such an entry — at the top, under `/work`, and in `.config.json` — with
+omh-memory switched off and a permission granted, checks the entry is one the
+lock admits, and asserts none of it reaches the session and nothing the
+session writes reaches the account. `omh auth`'s login, which mounts the
+account's own file, cleans it the same way first and admits no server.
 
 **Still open:**
 
