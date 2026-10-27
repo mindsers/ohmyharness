@@ -342,7 +342,8 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             harness,
             account,
             import,
-        } => cmd::auth::auth_cmd(&cwd, harness, account, *import, ctx),
+            provider,
+        } => cmd::auth::auth_cmd(&cwd, harness, account, *import, provider.as_deref(), ctx),
         Cmd::Info { repo } => {
             if *repo {
                 cmd::settings::show_repo(&cwd, ctx)

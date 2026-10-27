@@ -425,6 +425,15 @@ pub fn plan(
 
     // Built once, which is what the type is for. Constructed inside the loop it
     // rebuilt every value six times and bought nothing its own doc claimed.
+    // The account's provider, for the harness that takes one: checked here,
+    // so a file that would stop every start of the harness refuses the
+    // launch instead, naming itself.
+    let provider = match (&adapter.policy, &opts.account_dir) {
+        (Some(policy), Some(account)) if policy.format.reads_provider() => {
+            crate::provider::read(account)?
+        }
+        _ => None,
+    };
     let stager = Stager {
         adapter,
         rules_doc: &rules_doc,
@@ -435,6 +444,7 @@ pub fn plan(
         worktree: &session.worktree,
         staging,
         log,
+        provider: provider.as_ref(),
     };
 
     for cap in Capability::ALL {
@@ -1007,6 +1017,8 @@ struct Stager<'a> {
     /// mount: what a dry run prints should still be the truth about the
     /// launch it describes.
     log: Option<&'a str>,
+    /// The account's provider file, checked, for the harness that takes one.
+    provider: Option<&'a toml::Table>,
 }
 
 impl Stager<'_> {
@@ -1026,6 +1038,7 @@ impl Stager<'_> {
             worktree,
             staging,
             log,
+            provider,
         } = *self;
         let mut dropped_hooks = Vec::new();
         let mut rendered_hooks = Vec::new();
@@ -1157,14 +1170,24 @@ impl Stager<'_> {
                         tools: &adapter.tools,
                         resolves,
                         log,
-                        provider: None,
+                        provider,
                     },
                 )?;
                 dropped_hooks.extend(rendered.dropped);
                 rendered_hooks.extend(rendered.rendered_hooks);
                 if staging == Staging::Apply {
                     std::fs::create_dir_all(stage)?;
-                    std::fs::write(&file, rendered.body)?;
+                    // A document carrying the account's provider carries its
+                    // token: the user's alone from its first byte.
+                    match provider.is_some() && binding.render == Render::CodexHooks {
+                        true => crate::held::Dir::open(stage)?
+                            .replace_private(
+                                file.file_name().context("a staged file has a name")?,
+                                rendered.body.as_bytes(),
+                            )
+                            .with_context(|| format!("staging {}", file.display()))?,
+                        false => std::fs::write(&file, rendered.body)?,
+                    }
                 }
                 let guest = expand(&binding.path, GUEST_HOME);
                 // A target inside the worktree needs the mountpoint to exist
@@ -3443,6 +3466,71 @@ mod tests {
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&mount.host).unwrap()).unwrap();
         assert_eq!(doc["allowedMcpServers"], serde_json::json!([]), "{doc}");
+    }
+
+    /// An account's provider file reaches Codex in the System layer the
+    /// session cannot write, staged for the user alone since it carries a
+    /// token; one that is broken refuses the launch, naming itself — Codex
+    /// would refuse every start with it.
+    #[test]
+    fn the_accounts_provider_reaches_codex_read_only_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/codex/default");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(
+            account.join(crate::provider::FILE),
+            "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+             base_url = \"https://example.invalid/openai\"\n\
+             experimental_bearer_token = \"sk-secret\"\n",
+        )
+        .unwrap();
+        let p = plan_account(&fx, "codex", Some(account.clone()));
+        let m = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new("/etc/codex/config.toml"))
+            .expect("the System layer is mounted");
+        assert!(m.read_only, "{m:?}");
+        let body: toml::Table = toml::from_str(&std::fs::read_to_string(&m.host).unwrap()).unwrap();
+        assert_eq!(body["model_provider"].as_str(), Some("azure"));
+        let mode = std::fs::metadata(&m.host).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "a staged token is the user's alone: {mode:o}"
+        );
+
+        std::fs::write(account.join(crate::provider::FILE), "notify = [\"x\"]\n").unwrap();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
+        let (own, repo) = decided_from(&fx);
+        let err = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: Some(account),
+                launch: Launch::Session,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .err()
+        .expect("a broken provider file refuses the launch");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("provider.toml") && err.contains("notify"),
+            "{err}"
+        );
     }
 
     /// A file a session could write and the harness trusts on its next start

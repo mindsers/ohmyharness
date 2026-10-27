@@ -16432,6 +16432,69 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// `omh auth codex --provider` keeps the provider a Codex config names in a
+/// file of the account's own, resolved for a sandbox and readable by the user
+/// alone, and the account counts as captured on it; a launch hands it to Codex
+/// in the System layer; a command it runs is refused, and nothing is kept.
+#[test]
+fn a_provider_authored_for_an_account_reaches_its_launches() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let config = sb.home.join("their-codex.toml");
+    std::fs::write(
+        &config,
+        "model = \"o3\"\nmodel_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+         base_url = \"https://example.invalid/openai\"\nenv_key = \"E2E_AZURE_KEY\"\n",
+    )
+    .unwrap();
+
+    let refused = sb.home.join("runs-a-command.toml");
+    std::fs::write(
+        &refused,
+        "model_provider = \"p\"\n[model_providers.p]\nname = \"P\"\nauth = { command = \"/bin/token\" }\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["auth", "codex", "--provider", refused.to_str().unwrap()]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("auth"), "{}", printed(&out));
+    let kept = sb.home.join(".omh/creds/codex/default/provider.toml");
+    assert!(!kept.exists(), "a refused provider was kept");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .args(["auth", "codex", "--provider", config.to_str().unwrap()])
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("E2E_AZURE_KEY", "sk-from-the-shell")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        !printed(&out).contains("sk-from-the-shell"),
+        "a value was printed"
+    );
+    let body = std::fs::read_to_string(&kept).unwrap();
+    assert!(
+        body.contains("sk-from-the-shell") && !body.contains("env_key"),
+        "{body}"
+    );
+    assert!(!body.contains("o3"), "only the provider is kept: {body}");
+    let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    let info = sb.omh(&["info", "--json"]);
+    assert!(printed(&info).contains("default"), "{}", printed(&info));
+
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["new", "codex"]);
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let host = mounted_at(&seen, "/etc/codex/config.toml")
+        .unwrap_or_else(|| panic!("no System layer: {}", printed(&out)));
+    let system = std::fs::read_to_string(&host).unwrap();
+    assert!(system.contains("model_provider = \"azure\""), "{system}");
+}
+
 /// What a `docker` argv mounted at `guest`, from the stand-in's log.
 fn mounted_at(log: &str, guest: &str) -> Option<String> {
     log.split_whitespace()
@@ -17588,6 +17651,15 @@ const EXERCISES: &[Exercise] = &[
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: true,
+    },
+    // A file that is not there: refused, naming it, and nothing kept. That a
+    // real one is kept and launched with is
+    // `a_provider_authored_for_an_account_reaches_its_launches`.
+    Exercise {
+        argv: &["auth", "codex", "--provider", "no-such-provider.toml"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["no-such-provider.toml"]),
+        runtime: false,
     },
     Exercise {
         argv: &["graph"],

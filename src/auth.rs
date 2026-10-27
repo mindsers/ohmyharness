@@ -97,7 +97,15 @@ pub fn accounts(paths: &Paths, adapter: &Adapter) -> Result<Vec<String>> {
 pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     // Defined in terms of `unfilled` so the two answers can never disagree —
     // they did, and `omh auth` failed while `omh info` listed the account.
-    unfilled(adapter, &dir(paths, adapter, account), GUEST_HOME).is_empty()
+    // An account holding only its model provider is one too: a provider's
+    // token is the login for a harness pointed at it (#197 §6).
+    let dir = dir(paths, adapter, account);
+    let provider = adapter
+        .policy
+        .as_ref()
+        .is_some_and(|p| p.format.reads_provider())
+        && dir.join(crate::provider::FILE).is_file();
+    provider || unfilled(adapter, &dir, GUEST_HOME).is_empty()
 }
 
 /// Which account to use. Ambiguity is an error, never a guess — silently
