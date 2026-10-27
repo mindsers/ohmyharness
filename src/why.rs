@@ -673,6 +673,38 @@ mod tests {
         }
     }
 
+    /// A feature is in the base set since its oldest part, compared as a
+    /// version: as text, `2027.10` sorts before `2027.2`.
+    #[test]
+    fn a_feature_is_dated_by_its_oldest_part_as_a_version() {
+        let m: Manifest = toml::from_str(
+            r#"
+version = "2027.10"
+[[entry]]
+name = "late"
+kind = "hook"
+feature = "f"
+since = "2027.10"
+because = "b"
+remove = "r"
+[[entry]]
+name = "early"
+kind = "hook"
+feature = "f"
+since = "2027.2"
+because = "b"
+remove = "r"
+"#,
+        )
+        .unwrap();
+        let c = catalog(&m, vec![]);
+        let out = render(&c, &c.why("f"), "2027.10");
+        assert!(
+            out.starts_with("f — an omh feature, in the base set since 2027.2"),
+            "{out}"
+        );
+    }
+
     /// The load-bearing case: omh must not claim authorship of your choices.
     #[test]
     fn your_own_entry_gets_no_rationale() {
