@@ -160,7 +160,7 @@ mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
 
 The account directory is writable and shared by every session on it, so
 anything a session adds there — an MCP server through `codex mcp add` or
-`claude mcp add -s user`, a hook — would load in every later session. A
+written into `~/.claude.json`, a hook — would load in every later session. A
 harness's policy layer sits above every file a session can write, and omh
 fills it from the launch:
 

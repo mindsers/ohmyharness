@@ -99,9 +99,10 @@ may have put that repo's secrets in reach.
 Codex omh fills the harness's own policy layer on every launch — see
 [`[policy]`](/reference/adapters/#policy-what-a-session-may-load) — and it
 admits exactly the servers the launch staged, by command and arguments. A
-server a session adds with `codex mcp add` or `claude mcp add -s user` stays in
-the account and does not load, in that session or any later one;
-`tests/e2e` asserts it on both. Codex also runs managed hooks only, so a hook
+server a session adds with `codex mcp add` stays in the account and loads
+disabled, in that session and every later one; on Claude Code `claude mcp add`
+refuses it, and one written into `~/.claude.json` directly is left out.
+`tests/e2e` asserts both. Codex also runs managed hooks only, so a hook
 written into `~/.codex/config.toml` does not run either.
 
 **Still open:**

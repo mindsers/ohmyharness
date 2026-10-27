@@ -252,6 +252,7 @@ pub(crate) fn session_up(
     }
 
     say_rules(&plan, ctx);
+    say_policy(&plan, ctx);
     image::ensure_stack(
         backend,
         adapter,
@@ -1839,13 +1840,19 @@ pub(crate) fn work_state(
 /// `doctor` compose the same document, and a fallback announced on one path in
 /// three is the same silence the notice exists to break. Only when there is
 /// something to say — a line printed every launch is a line nobody reads.
-///
-/// What the harness's policy stops rides along, on the same terms: it is
-/// decided in the plan, and every path that builds one prints from here.
 pub(crate) fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
     for notice in plan.rules.notices() {
         ctx.warn(&notice.to_string());
     }
+}
+
+/// Say what the harness's policy stops in this checkout or account.
+///
+/// Once per launch, which `say_rules` is not: `run` says the rules before its
+/// dry-run return and `session_up` says them again. So this is called where
+/// each path says it once — `session_up` for a real launch or attach, `run`'s
+/// dry run, and `omh doctor`.
+pub(crate) fn say_policy(plan: &container::Plan, ctx: &out::Ctx) {
     for note in &plan.policy {
         ctx.warn(note);
     }
@@ -2217,6 +2224,7 @@ pub(crate) fn run(
     // launching*, which is the one thing `Staging::Skip` means that is not
     // about writing.
     if !staging.is_apply() {
+        say_policy(&plan, ctx);
         // What the agent is given, read off the plan's own mounts — so the
         // report cannot describe a launch other than the one that would happen.
         let mut reads: Vec<(String, String)> = Vec::new();

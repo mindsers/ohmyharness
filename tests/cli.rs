@@ -16297,6 +16297,61 @@ fn a_launch_mounts_the_credentials_of_the_adapter_it_resolved() {
 /// The planted adapter is **valid**, so the refusal cannot come from a parse
 /// error — it has to come from the name being refused as a name.
 #[test]
+fn what_codexs_policy_stops_here_is_said_once_before_a_launch() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::create_dir_all(sb.repo.join(".codex")).unwrap();
+    std::fs::write(
+        sb.repo.join(".codex/config.toml"),
+        "[mcp_servers.repo-linear]\ncommand = \"l\"\n",
+    )
+    .unwrap();
+    for args in [&["add", "-A"][..], &["commit", "-qm", "repo"]] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .envs([
+                ("GIT_AUTHOR_NAME", "t"),
+                ("GIT_AUTHOR_EMAIL", "t@t"),
+                ("GIT_COMMITTER_NAME", "t"),
+                ("GIT_COMMITTER_EMAIL", "t@t"),
+            ])
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    let out = sb.omh(&["new", "codex", "--dry-run"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert_eq!(
+        said.matches("repo-linear").count(),
+        1,
+        "the server this repo declares is named, once: {said}"
+    );
+
+    // And once on a launch, which says the rules twice.
+    let out = sb.omh(&["new", "codex"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        said.matches("repo-linear").count(),
+        1,
+        "on a launch: {said}"
+    );
+}
+
+#[test]
 fn a_harness_name_is_not_a_path() {
     let sb = sandbox();
     let _log = sb.fake_docker();

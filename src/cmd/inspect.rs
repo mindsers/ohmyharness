@@ -568,6 +568,7 @@ pub(crate) fn doctor_cmd(
         crate::cmd::session::say_selection(&paths, &profile, &opts.repo, ctx);
         let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
         crate::cmd::session::say_rules(&plan, ctx);
+        crate::cmd::session::say_policy(&plan, ctx);
         plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 
         plan.validate_for(&backend)?;

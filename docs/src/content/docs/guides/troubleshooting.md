@@ -98,7 +98,7 @@ see [Something else](#something-else).
 | A server is `disabled` with `requirements (/etc/codex/requirements.toml)`, or a repo's `.codex/config.toml` hooks do not run | [Put it in your catalogue](#a-server-is-disabled-by-requirements-etccodexrequirementstoml) |
 | Codex does not start offline on an enterprise account | [Expected](#a-server-is-disabled-by-requirements-etccodexrequirementstoml) |
 | **Claude Code** | |
-| A server added with `claude mcp add` is not listed, or claude.ai connectors are missing | [Put it in your catalogue](#a-server-added-with-claude-mcp-add-is-not-listed) |
+| `claude mcp add` says "not allowed by enterprise policy", or claude.ai connectors are missing | [Put it in your catalogue](#claude-mcp-add-says-not-allowed-by-enterprise-policy) |
 | **Your setup in the session** | |
 | The agent does not see your rules or skills | [Run `omh doctor`, then read the launch line](#the-harness-starts-but-does-not-see-my-rules-or-skills) |
 | One skill is missing, and the launch says `1 catalogue entry is not selected here` | [Select it with `omh use`](#a-skill-i-have-is-not-reaching-the-agent) |
@@ -577,13 +577,14 @@ at every start instead, and with no network it does not start.
 
 ### Claude Code
 
-#### A server added with `claude mcp add` is not listed
+#### `claude mcp add` says "not allowed by enterprise policy"
 
 omh writes a managed-settings drop-in on every launch,
 `/etc/claude-code/managed-settings.d/omh.json`, and it admits exactly the MCP
-servers the launch staged, by command and arguments. A server added inside a
-session — `claude mcp add`, any scope — is in no catalogue, so Claude Code
-leaves it out. To use one in sessions, put it in your catalogue and select it.
+servers the launch staged, by command and arguments. Inside a session
+`claude mcp add` refuses any other server, in any scope, and one written into
+`~/.claude.json` by hand is left out of `claude mcp list`. To use a server in
+sessions, put it in your catalogue and select it.
 
 claude.ai connectors are off in sessions, deliberately: Claude Code matches a
 connector by its URL, and allowing that URL would let a session put its own

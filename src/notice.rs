@@ -313,12 +313,12 @@ pub fn policy(
     // A file Codex itself cannot parse is Codex's to report, and it will: this
     // names what the policy stops, not what is broken.
     let project =
-        read(&worktree.join(".codex/config.toml"))?.and_then(|raw| raw.parse::<toml::Table>().ok());
+        read_held(worktree, ".codex/config.toml")?.and_then(|raw| raw.parse::<toml::Table>().ok());
     if let Some(doc) = project {
-        let servers: Vec<&str> = doc
+        let servers: Vec<String> = doc
             .get("mcp_servers")
             .and_then(toml::Value::as_table)
-            .map(|t| t.keys().map(String::as_str).collect())
+            .map(|t| t.keys().map(|k| crate::out::untrusted(k)).collect())
             .unwrap_or_default();
         if !servers.is_empty() {
             said.push(format!(
@@ -339,7 +339,7 @@ pub fn policy(
     }
     if let Some(account) = account {
         for mask in &policy.mask {
-            let held = read(&account.join(mask.trim_start_matches("$HOME/")))?;
+            let held = read_held(account, mask.trim_start_matches("$HOME/"))?;
             if held.is_some_and(|c| !crate::auth::is_placeholder(&c)) {
                 said.push(
                     "this account caches an enterprise cloud bundle, which omh hides from the \
@@ -351,6 +351,49 @@ pub fn policy(
         }
     }
     Ok(said)
+}
+
+/// Far more than any config or bundle cache this reads, and far less than
+/// anything a session could use to stall a launch.
+const HELD_CAP: u64 = 1 << 20;
+
+/// `root/rel`, read the way a file the sandbox can write is read: through
+/// [`crate::held`], one name at a time, never following a link, a regular
+/// file only — a pipe would block the launch — and no more than [`HELD_CAP`].
+/// `root` is omh's own (the worktree, the account), so holding starts there.
+fn read_held(root: &Path, rel: &str) -> Result<Option<String>> {
+    use std::io::Read;
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let what = || format!("reading {}", root.join(rel).display());
+    let names: Vec<&str> = rel.split('/').collect();
+    let (file, dirs) = names.split_last().expect("split yields one name");
+    let mut dir = match crate::held::Dir::open(root) {
+        Ok(d) => d,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(what),
+    };
+    for name in dirs {
+        dir = match dir.sub(std::ffi::OsStr::new(name)) {
+            Ok(d) => d,
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => return Err(e).with_context(what),
+        };
+    }
+    let held = match dir.file(std::ffi::OsStr::new(file)) {
+        Ok(f) => f,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(what),
+    };
+    let mut bytes = Vec::new();
+    held.take(HELD_CAP + 1)
+        .read_to_end(&mut bytes)
+        .with_context(what)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= HELD_CAP,
+        "{} is larger than omh reads",
+        root.join(rel).display()
+    );
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 fn read(path: &Path) -> Result<Option<String>> {
@@ -373,6 +416,58 @@ mod tests {
         .unwrap()
         .policy
         .unwrap()
+    }
+
+    /// The checkout and the account are both written from the sandbox, so
+    /// what the notice reads there is the agent's: a link is not followed, a
+    /// file too large is not read whole, and a name never reaches the terminal
+    /// as an escape sequence.
+    #[test]
+    fn what_the_policy_notice_reads_is_the_agents() {
+        let policy = codex_policy();
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(
+            host.path().join("elsewhere.toml"),
+            "[mcp_servers.followed]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::os::unix::fs::symlink(
+            host.path().join("elsewhere.toml"),
+            work.path().join(".codex/config.toml"),
+        )
+        .unwrap();
+        let said = super::policy(&policy, work.path(), None);
+        assert!(
+            !format!("{said:?}").contains("followed"),
+            "a link was followed: {said:?}"
+        );
+
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        let huge = format!(
+            "[mcp_servers.huge]\ncommand = \"l\"\n#{}\n",
+            "x".repeat(8 << 20)
+        );
+        std::fs::write(work.path().join(".codex/config.toml"), huge).unwrap();
+        let said = super::policy(&policy, work.path(), None);
+        assert!(
+            !format!("{said:?}").contains("huge"),
+            "an oversized file was read whole: {said:?}"
+        );
+
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(
+            work.path().join(".codex/config.toml"),
+            "[mcp_servers.\"a\\u001b[2Jb\"]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        let said = super::policy(&policy, work.path(), None).unwrap();
+        assert!(said.iter().any(|s| s.contains('a')), "{said:?}");
+        assert!(!said.iter().any(|s| s.contains('\u{1b}')), "{said:?}");
     }
 
     /// What the policy stops is named, server by server, and only when the

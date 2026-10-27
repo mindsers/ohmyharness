@@ -716,14 +716,19 @@ pub fn plan(
             adapter,
             &mut mounts,
         )?;
+        // The session's worktree is `/work`. A dry run never makes one, and
+        // a new session's starts as this checkout, so that is what it reads.
+        let work = match session.worktree.exists() {
+            true => &session.worktree,
+            false => &paths.repo,
+        };
         // Never fatal: an unreadable file costs the notice, not the session.
-        policy_notes =
-            crate::notice::policy(policy, &session.worktree, opts.account_dir.as_deref())
-                .unwrap_or_else(|e| {
-                    vec![format!(
-                        "could not check what omh's policy stops here — {e:#}"
-                    )]
-                });
+        policy_notes = crate::notice::policy(policy, work, opts.account_dir.as_deref())
+            .unwrap_or_else(|e| {
+                vec![format!(
+                    "could not check what omh's policy stops here — {e:#}"
+                )]
+            });
     }
 
     // The harness's transcripts, over a per-session directory omh owns, so a
@@ -2919,7 +2924,7 @@ mod tests {
 
     /// What the policy admits, as `[command, args…]`, keyed by name where the
     /// harness matches by name too.
-    fn admitted(p: &Plan, adapter: &Adapter) -> Vec<(Option<String>, Vec<String>)> {
+    fn policy_admits(p: &Plan, adapter: &Adapter) -> Vec<(Option<String>, Vec<String>)> {
         let policy = adapter.policy.as_ref().unwrap();
         let mount = p
             .mounts
@@ -3014,7 +3019,7 @@ mod tests {
                     .collect();
                 want.sort();
                 assert_eq!(
-                    admitted(&p, adapter),
+                    policy_admits(&p, adapter),
                     want,
                     "{} with `{}` and {off:?} off",
                     adapter.name,
