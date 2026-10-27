@@ -1853,14 +1853,20 @@ mod tests {
         assert!(format!("{err:#}").contains(".claude.json"), "{err:#}");
     }
 
-    /// `prepare`'s placeholder is no identity, and seeds an empty copy.
+    /// `prepare`'s placeholder is no identity: the copy holds only what omh adds.
     #[test]
     fn a_placeholder_account_file_seeds_an_empty_copy() {
         let account = tempfile::tempdir().unwrap();
         prepare(&claude(), account.path(), "/home/agent").unwrap();
         let home = tempfile::tempdir().unwrap();
         seed_copies(&claude(), account.path(), home.path(), false).unwrap();
-        assert_eq!(copied(home.path()), serde_json::json!({}));
+        let mut empty = serde_json::json!({});
+        crate::render::scrub(crate::adapter::PolicyFormat::ClaudeManaged, &mut empty);
+        assert_eq!(
+            copied(home.path()),
+            empty,
+            "no identity, and only what omh adds"
+        );
     }
 
     #[test]

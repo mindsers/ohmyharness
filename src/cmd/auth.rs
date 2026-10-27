@@ -145,6 +145,7 @@ fn login_in_sandbox(
             persist: persist::Mode::None,
             tty: true,
             account_dir: Some(account_dir.to_path_buf()),
+            copies: crate::container::Copies::Account,
             memory_bin: memory::deliver::available(paths, ctx),
             // Empty, like the base this scratch session was created with at
             // `session.ensure(&paths.repo, "")`: a login is not work on the

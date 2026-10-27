@@ -453,15 +453,27 @@ pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
         // start), and `allowedTools`, the permissions granted there —
         // measured present in a captured account.
         PolicyFormat::ClaudeManaged => {
-            const TOP: [&str; 6] = [
+            //
+            // And every consent a session could have left there: approvals of
+            // an API key from the environment, of bypass-permissions mode, of
+            // a CLAUDE.md that includes files from outside the project, and
+            // trust in a folder. omh trusts `/work` itself, below. The
+            // account's own `primaryApiKey` stays: it is that login's key.
+            //
+            // A list of what goes, not of what stays. Step 2 of #197 turns the
+            // file's preferences into a declared allowlist; until then this
+            // list is held by the test that names every key.
+            const TOP: [&str; 8] = [
                 "mcpServers",
                 "disabledMcpjsonServers",
                 "enabledMcpjsonServers",
                 "enableAllProjectMcpServers",
                 "env",
                 "apiKeyHelper",
+                "customApiKeyResponses",
+                "bypassPermissionsModeAccepted",
             ];
-            const PROJECT: [&str; 7] = [
+            const PROJECT: [&str; 9] = [
                 "mcpServers",
                 "disabledMcpServers",
                 "enabledMcpServers",
@@ -469,6 +481,8 @@ pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
                 "disabledMcpjsonServers",
                 "enableAllProjectMcpServers",
                 "allowedTools",
+                "hasClaudeMdExternalIncludesApproved",
+                "hasTrustDialogAccepted",
             ];
             let Some(top) = doc.as_object_mut() else {
                 return;
@@ -476,13 +490,25 @@ pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
             for key in TOP {
                 top.remove(key);
             }
-            if let Some(projects) = top.get_mut("projects").and_then(|p| p.as_object_mut()) {
-                for project in projects.values_mut().filter_map(|p| p.as_object_mut()) {
-                    for key in PROJECT {
-                        project.remove(key);
-                    }
+            let projects = top
+                .entry("projects")
+                .or_insert_with(|| serde_json::json!({}));
+            let Some(projects) = projects.as_object_mut() else {
+                *projects = serde_json::json!({});
+                return scrub(format, doc);
+            };
+            for project in projects.values_mut().filter_map(|p| p.as_object_mut()) {
+                for key in PROJECT {
+                    project.remove(key);
                 }
             }
+            let work = projects
+                .entry(crate::container_workdir())
+                .or_insert_with(|| serde_json::json!({}));
+            if !work.is_object() {
+                *work = serde_json::json!({});
+            }
+            work["hasTrustDialogAccepted"] = serde_json::Value::Bool(true);
         }
         // Codex copies nothing; `check_policy` refuses a `copy` for it.
         PolicyFormat::CodexRequirements => {}
@@ -2039,6 +2065,7 @@ mod tests {
             "enableAllProjectMcpServers": false,
             "allowedTools": ["Bash(curl *)"],
             "hasTrustDialogAccepted": true,
+            "hasClaudeMdExternalIncludesApproved": true,
             "lastCost": 1.5,
         });
         let mut doc = serde_json::json!({
@@ -2048,6 +2075,9 @@ mod tests {
             "enableAllProjectMcpServers": false,
             "env": { "ANTHROPIC_BASE_URL": "https://elsewhere" },
             "apiKeyHelper": "/tmp/helper",
+            "customApiKeyResponses": { "approved": ["planted"] },
+            "bypassPermissionsModeAccepted": true,
+            "primaryApiKey": "sk-the-accounts-own",
             "oauthAccount": { "emailAddress": "a@b" },
             "userID": "u",
             "hasCompletedOnboarding": true,
@@ -2063,11 +2093,20 @@ mod tests {
             "enableAllProjectMcpServers",
             "env",
             "apiKeyHelper",
+            "customApiKeyResponses",
+            "bypassPermissionsModeAccepted",
         ];
         for key in gone {
             assert!(doc.get(key).is_none(), "top-level {key} kept: {doc}");
         }
-        for kept in ["oauthAccount", "userID", "hasCompletedOnboarding", "theme"] {
+        // The account's own API key is its login, like the OAuth tokens.
+        for kept in [
+            "oauthAccount",
+            "userID",
+            "hasCompletedOnboarding",
+            "theme",
+            "primaryApiKey",
+        ] {
             assert!(doc.get(kept).is_some(), "{kept} dropped: {doc}");
         }
         let gone_per_project = [
@@ -2078,15 +2117,33 @@ mod tests {
             "disabledMcpjsonServers",
             "enableAllProjectMcpServers",
             "allowedTools",
+            "hasClaudeMdExternalIncludesApproved",
         ];
         for (path, p) in doc["projects"].as_object().unwrap() {
             for key in gone_per_project {
                 assert!(p.get(key).is_none(), "{path}.{key} kept: {p}");
             }
-            for kept in ["hasTrustDialogAccepted", "lastCost"] {
-                assert!(p.get(kept).is_some(), "{path}.{kept} dropped: {p}");
-            }
+            assert!(p.get("lastCost").is_some(), "{path}.lastCost dropped: {p}");
         }
+        // Trust is omh's to give, and it gives it to `/work` alone — never a
+        // grant a session left in the account.
+        assert_eq!(
+            doc["projects"]["/work"]["hasTrustDialogAccepted"], true,
+            "{doc}"
+        );
+        assert!(
+            doc["projects"]["/elsewhere"]
+                .get("hasTrustDialogAccepted")
+                .is_none(),
+            "{doc}"
+        );
+
+        let mut empty = serde_json::json!({});
+        scrub(PolicyFormat::ClaudeManaged, &mut empty);
+        assert_eq!(
+            empty["projects"]["/work"]["hasTrustDialogAccepted"], true,
+            "an account with no projects still trusts /work: {empty}"
+        );
     }
 
     fn server(command: &str, args: &[&str]) -> Server {

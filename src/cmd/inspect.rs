@@ -548,6 +548,7 @@ pub(crate) fn doctor_cmd(
             persist: persist::Mode::None,
             tty: false,
             account_dir: account.clone(),
+            copies: crate::container::Copies::Session,
             memory_bin,
             // The probe has to compose the same rules a launch would, or it proves
             // the harness reads a document nobody will be given.
