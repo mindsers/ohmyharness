@@ -600,12 +600,11 @@ likely to kill the project, and it is not a technical one.
   pass `doctor`, which proves their paths and nothing about their behaviour.
   `omp` carries one gap beyond that: its login probe greps for a field name read
   out of oh-my-pi's source, and no logged-in run has confirmed it.
-- **A seeded profile and the shipped base set drift by design.** `init` copies
-  the [base set](/reference/base-set/) into your profile once and never rewrites
-  it, so your edits survive — but an upgrade moves the manifest and not your
-  copy. `omh why` reports the difference and deliberately does **not** say who
-  caused it, because it cannot tell an edit from an upgrade. Recording the
-  version a profile was seeded from would close this; nothing does yet.
+- **Copies an older omh seeded stay until `omh upgrade`.** omh's servers are
+  generated with their features now, but a `~/.omh/mcp.json` written before
+  holds copies of them. Nothing reads those, `omh why` names them as not read,
+  and `omh upgrade` takes them out — keeping the file as it was in
+  `mcp.json.yours` when a copy was not what omh ships now.
 - **`omh why` answers about one repo's profile.** It reads the layers resolved
   for the current repo, so the same entry can legitimately answer differently in
   two checkouts. That is correct and occasionally surprising.

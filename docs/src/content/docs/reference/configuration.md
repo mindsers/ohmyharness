@@ -634,14 +634,14 @@ features**:
 
 ```toml
 [omh]
-codegraph = false     # the server, its four hooks and its section of the rules
+codegraph = false     # the server, its four hooks, its section of the rules and its index volume
 ```
 
 | Feature | What it brings | Default |
 |---|---|---|
-| `codegraph` | the code graph's MCP server; the hooks `graph-orient`, `graph-first`, `graph-read` and `graph-refresh`; the `graph-rules` section | on |
+| `codegraph` | the code graph's MCP server; the hooks `graph-orient`, `graph-first`, `graph-read` and `graph-refresh`; the `graph-rules` section; the index volume's mount | on |
 | `git-notice` | the hooks `git-note` and `git-turn`; the `git-rules` section | on |
-| `memory` | the memory MCP server; the `memory-rules` section | on |
+| `memory` | the memory MCP server; the `memory-rules` section; the note store's mount and the server binary's | on |
 
 There are three ways to take a feature away, at different reaches:
 
@@ -656,8 +656,9 @@ belongs to — keeping the graph while dropping one of the things that make it
 used is taking a bundle apart, not changing a setting, and "graph on, refresher
 off" is a graph that quietly stops tracking the code.
 
-**Disabling is not removal.** Your `mcp.json` is untouched, the server is left
-out of the document *this* session is given, and the next repo gets it back.
+**Disabling is not removal.** Nothing is uninstalled: the feature's parts are
+left out of what *this* repo's sessions are given, and the next repo gets them
+back.
 
 **`omh set codegraph off` takes the hooks and rules section with the server**,
 because a hook nudging the agent toward a server that is gone is worse than no
@@ -1268,7 +1269,9 @@ $ omh settings mcp import claude
 
 **Import does not clobber.** Each server is added, recognised as already
 identical, or reported as a conflict and left alone; re-running is a no-op.
-`--replace` overwrites a conflicting entry instead.
+`--replace` overwrites a conflicting entry instead. A server under one of omh's
+names — `omh-codegraph`, `omh-memory`, or the `codegraph` and `memory` they
+had — is skipped either way, naming the feature: add it under another name.
 
 **Import paths expand against the host**, deliberately using a different
 expansion than everything else — the guest home would send import looking into

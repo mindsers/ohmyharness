@@ -143,7 +143,7 @@ user:   agent uid=1000    home: /home/agent    cwd: /work
 tools:  claude=ok dtach=ok git=ok rg=ok node=ok
   rules      # tdd / <repo>/AGENTS.md    (your catalogue, then the project's)
   skills     graphify, review-diff       (your catalogue)
-  mcp        filesystem, github, linear, omh-codegraph, omh-memory, sentry
+  mcp        codegraph, filesystem, github, linear, omh-memory, sentry
   subagents  explorer.md
   hooks      rust-test, graph-refresh …  (translated into settings.json)
   version    2.1.222 (Claude Code)

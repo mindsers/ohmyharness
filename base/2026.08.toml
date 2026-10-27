@@ -1,6 +1,6 @@
 # The base set — omh's opinion, as data.
 #
-# This file is the single source of truth: `omh init` seeds from it and
+# This file is the single source of truth: every launch generates from it and
 # `omh why` explains from it, so the two cannot disagree about what is
 # installed or why.
 #

@@ -100,7 +100,7 @@ since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
 remove  = "omh set codegraph off — the feature, its server and its hooks together…"
 command = "codebase-memory-mcp" # what every launch runs the server as
-was     = ["codegraph"]         # names it had before: `omh upgrade` renames them in your catalogue, and `[mcp.<old>.env]` still reaches it
+was     = ["codegraph"]         # names it had before: still omh's, and `omh upgrade` takes a copy under one out of your catalogue
 
   [[entry.measured]]
   what  = "to index this repo, cold"
@@ -123,6 +123,7 @@ was     = ["codegraph"]         # names it had before: `omh upgrade` renames the
 | `because` | what it buys: argued, not measured | yes |
 | `remove` | the way out, printed by `omh why` | yes |
 | `command`, `args` | for an `mcp` entry, the server every launch generates | for `mcp` |
+| `was` | for an `mcp` entry, names it had before. Each stays omh's: refused by `[use]`, `omh use`, `settings mcp add`, `rm` and `import`, and as `[mcp.<name>.env]`; `omh upgrade` takes a copy under one out of your catalogue. One entry's alone, and nobody's name now | no |
 | `[[entry.measured]]` | a cost: `what`, `value`, `how`, and `on` — the date, `YYYY-MM-DD` | at least one |
 | `[[entry.instead_of]]` | an alternative, by `name`, and `why` it lost | at least one |
 | `[[rejected]]` | a candidate turned down: `name`, `considered` (a version) and `because` | no |

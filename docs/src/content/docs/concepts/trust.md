@@ -182,9 +182,9 @@ Three more:
 - **an omh feature** — asked by the feature's name, a part's, or a name a part
   used to have, the answer is the same: every part, what each is for, what each
   costs and what was considered instead, and the one switch. No part is
-  answered for on its own, because no part can be had on its own. A file in
-  your catalogue named like a part is a copy an older omh seeded, and the
-  answer names it as not read.
+  answered for on its own, because no part can be had on its own. A leftover
+  in your catalogue under a part's name — a hook file, or a server copy an
+  older omh seeded into `mcp.json` — is named as not read.
 - **considered, not in the base set** — which is how a rejection stops being
   re-litigated every time somebody rediscovers it.
 - **nothing recorded** — omh lists the names it does know rather than guessing.

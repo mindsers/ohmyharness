@@ -1900,19 +1900,17 @@ see
 **A name matching nothing prints what *is* known** rather than guessing — the
 same rule as `omh s01 attach emacs`.
 
-### Seven answers, because authorship differs
+### Five answers, because authorship differs
 
 | | |
 |---|---|
-| **omh's choice** | in the base set, and your copy matches what omh ships |
-| **omh's own, generated at launch** | a hook or a rules section. Not a file anywhere — omh writes it into the session and nothing else, which is what lets a fix reach you with the upgrade. A leftover of the same name in your profile is named as no longer read |
-| **not what omh ships now** | omh's entry, and your copy differs. Both values shown, and **no claim about who changed it** — omh cannot tell an edit from an upgrade |
-| **not installed here** | in the base set, absent from your profile. Not an error |
+| **an omh feature** | a feature, asked by its name, a part's or a name a part had: every part with what it is for, what it costs and what was considered instead, and the one switch. No part has an answer of its own, because none can be had on its own. A leftover in your catalogue under a part's name — a hook file, or a server copy an older omh seeded — is named as no longer read |
 | **written by omh init** | derived from your repo, like `rust-format` from `Cargo.toml`. omh's writing, not omh's opinion |
 | **your choice** | you added it. **No rationale is offered** — omh does not have one and will not invent one |
 | **considered, not in the base set** | rejected, with the reasoning. `omh why gitnexus` explains the licence problem |
+| **nothing recorded** | a name omh does not know. It lists the names it does |
 
-That last row is why rejections are recorded at all: without them the same
+The rejections are why they are recorded at all: without them the same
 candidate gets re-litigated every time somebody rediscovers it.
 
 ## `omh set` · `omh unset`
@@ -2317,7 +2315,7 @@ gitignored `settings.local.toml`, once git ignores it; the rest in the
 committed `settings.toml`. `[mcp.<name>.env]` is
 **refused**: a server's environment can be a token and the file `init` writes
 is committed. It already has a home — `omh settings mcp add <name> <command>
---env KEY=value` puts it on the server in `~/.omh/mcp.json`, where servers live.
+--env KEY=value` puts it on the server in `~/.omh/mcp.json`, where your servers live.
 
 **MCP lives under `omh settings` because MCP servers *are* configuration.** They
 live in your catalogue; a repo overrides a server's environment without
@@ -2340,7 +2338,10 @@ directory holding a `SKILL.md`, and that file is what opens, for a new skill as
 for one you have. A new skill nothing was saved into is taken back rather than
 left as an empty directory. A name is a name whole:
 `omh settings edit rules v1.2` opens `v1.2.md`. A server has no file of its
-own, so `omh settings edit mcp` takes no name and opens `mcp.json`.
+own, so `omh settings edit mcp` takes no name and opens `mcp.json`. A part of
+one of omh's features — `graph-first`, `graph-rules`, `memory-rules` — is
+refused before any editor opens: it is generated at launch, not a file to edit,
+and switched with its feature.
 
 **A new entry opens as its kind's shape** — front matter for a skill, a
 subagent or a command, a hook's JSON, a rule's heading — and one saved untouched

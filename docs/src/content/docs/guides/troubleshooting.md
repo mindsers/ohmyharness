@@ -124,7 +124,7 @@ see [Something else](#something-else).
 | `your catalogue has no skills called …` | [Check the name, or create the entry](#your-catalogue-has-no-skills-called-) |
 | `a repo names servers from your catalogue, it cannot declare one` | [Move the servers to your catalogue](#a-repo-names-servers-from-your-catalogue-it-cannot-declare-one) |
 | `keys.toml is where key templates used to live` | [Rename it to `memory.toml`](#keystoml-is-where-key-templates-used-to-live) |
-| `omh why` says something is not installed when it is | [Look for a path in the message](#omh-why-says-something-is-not-installed-when-it-is) |
+| `omh why` fails naming a file it cannot read | [Fix the file it names](#omh-why-fails-naming-a-file-it-cannot-read) |
 | `is inside your checkout, and eject will not write there` | [Eject somewhere outside it](#is-inside-your-checkout-and-eject-will-not-write-there) |
 | **Command-line errors** | |
 | `--dry-run is not something this command can answer yet` | [Run the command without it](#--dry-run-is-not-something-this-command-can-answer-yet) |
@@ -1071,18 +1071,18 @@ every existing key would stop being derivable from anything.
 
 </details>
 
-#### `omh why` says something is not installed when it is
+#### `omh why` fails naming a file it cannot read
 
-Check the message for a path. A layer that cannot be **read** — wrong
-permissions, a broken symlink — is now an error naming the file rather than an
-empty layer.
+A layer that cannot be **read** — wrong permissions, a broken symlink — is an
+error naming the file, not an empty layer. Fix the file it names.
 
 <details>
 <summary>On an older build</summary>
 
-If you hit the old behaviour on an older build, the tell is that `omh init`
-appears to do nothing: it uses `write_if_absent`, sees the file exists, and
-leaves it alone, so the advice and the problem never meet.
+An older build read such a layer as empty and answered "not installed here"
+about something that was, advising `omh init` — which did nothing, because it
+saw the file existed and left it alone, so the advice and the problem never
+met.
 
 </details>
 
