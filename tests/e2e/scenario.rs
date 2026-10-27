@@ -694,18 +694,28 @@ fn doctor(s: &Session) {
         s.harness.name,
         crate::sandbox::text(&out)
     );
-    // Asked, not merely not failed: doctor finds the memory server by the name
-    // the base set gives it, and one looking under another name finds nothing
-    // to probe — a row missing, which the assertion above reads as a pass.
-    assert!(
-        documents
-            .iter()
-            .flat_map(|d| d["checks"].as_array().into_iter().flatten())
-            .any(|c| c["name"] == "memory"),
-        "omh doctor never probed the memory server on {}: {}",
-        s.harness.name,
-        crate::sandbox::text(&out)
-    );
+    // Asked, not merely not failed: a check doctor skips is a row missing,
+    // which the assertion above reads as a pass. The memory probe, the
+    // document omh's servers are rendered into, and — where the harness can
+    // be asked — whether it loaded them under their `omh-…` names. The last
+    // two were skipped on every install with no `mcp.json` of its own.
+    let rows: Vec<&str> = documents
+        .iter()
+        .flat_map(|d| d["checks"].as_array().into_iter().flatten())
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let asked = ["claude", "codex"].contains(&s.harness.name);
+    for row in ["memory", "mcp"]
+        .into_iter()
+        .chain(asked.then_some("mcp-loaded"))
+    {
+        assert!(
+            rows.contains(&row),
+            "omh doctor never checked `{row}` on {}: {rows:?}\n{}",
+            s.harness.name,
+            crate::sandbox::text(&out)
+        );
+    }
     assert_eq!(
         documents.len(),
         1,

@@ -1641,7 +1641,7 @@ pub fn checks(
     let mut out = Vec::new();
     for capability in Capability::ALL {
         let sources = profile.sources(capability)?;
-        // Two capabilities are mounted whether or not a layer sources them,
+        // Three capabilities are mounted whether or not a layer sources them,
         // because omh generates part of them from the base manifest. Asking
         // the profile is the same mistake `container::plan` made about rules:
         // it answers about the layers, and the question is about the mount.
@@ -1667,6 +1667,10 @@ pub fn checks(
         let generated = match capability {
             Capability::Rules => !own.sections.is_empty(),
             Capability::Hooks => true,
+            // omh's servers are generated, and `omh init` writes no `mcp.json`:
+            // asking the profile alone skipped both MCP checks on every fresh
+            // install, while the launch staged the servers all the same.
+            Capability::Mcp => !own.servers.is_empty(),
             _ => false,
         };
         if sources.is_empty() && !generated {
@@ -3581,10 +3585,9 @@ mod tests {
         write(catalogue.join("rules/tdd.md"), "rules");
         write(catalogue.join("skills/graphify/SKILL.md"), "s");
         write(catalogue.join("subagents/explorer.md"), "a");
-        write(
-            catalogue.join("mcp.json"),
-            r#"{"mcpServers":{"omh-codegraph":{"command":"c"}}}"#,
-        );
+        // No `mcp.json`: what `omh init` leaves now that omh's servers are
+        // generated. A copy of one here was what kept the MCP checks alive
+        // while every fresh install had them skipped.
         Fx {
             _dir: dir,
             profile: Profile::resolve(&paths),
