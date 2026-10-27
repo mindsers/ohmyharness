@@ -36,6 +36,7 @@ mod notice;
 mod out;
 mod persist;
 mod profile;
+mod provider;
 mod render;
 mod report;
 mod rules;
