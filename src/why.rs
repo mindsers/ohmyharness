@@ -96,8 +96,7 @@ impl<'a> Catalog<'a> {
                 .iter()
                 .filter(|(cap, s)| {
                     parts.iter().any(|p| {
-                        p.kind.capability() == *cap
-                            && (p.name == s.key || p.was.iter().any(|w| *w == s.key))
+                        p.kind.capability() == *cap && (p.name == s.key || p.was.contains(&s.key))
                     })
                 })
                 .map(|(_, s)| s)
