@@ -920,8 +920,19 @@ fn stage_policy(
     if staging == Staging::Apply {
         std::fs::create_dir_all(stage)?;
         std::fs::write(&file, body).context("staging the harness's policy")?;
+        // Empty and without a write bit: a read-only mount keeps the mode the
+        // harness sees, and Claude Code takes an empty `.config.json` whose
+        // mode is writable as its config when `~/.claude.json` is absent.
         if !policy.mask.is_empty() {
-            std::fs::write(&mask, "")?;
+            use std::os::unix::fs::PermissionsExt;
+            match std::fs::remove_file(&mask) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("replacing {}", mask.display()))
+                }
+                _ => {}
+            }
+            std::fs::write(&mask, "").with_context(|| format!("staging {}", mask.display()))?;
+            std::fs::set_permissions(&mask, std::fs::Permissions::from_mode(0o444))?;
         }
     }
     mounts.push(Mount {
@@ -3455,6 +3466,13 @@ mod tests {
             let m = &p.mounts[at];
             assert!(m.read_only && m.file, "{m:?}");
             assert_eq!(std::fs::read(&m.host).unwrap(), b"", "{m:?}");
+            // No write bit either: Claude Code takes an empty `.config.json`
+            // as its config when its mode is writable and `~/.claude.json` is
+            // absent (read in the binary; measured: a launch with no account
+            // lost omh's servers) — a read-only mount does not change the mode.
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&m.host).unwrap().permissions().mode();
+            assert_eq!(mode & 0o222, 0, "{m:?} is {mode:o}");
             let holder = p
                 .mounts
                 .iter()
