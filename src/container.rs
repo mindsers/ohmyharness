@@ -277,7 +277,9 @@ pub enum Copies {
     /// under [`session_home`] — what every launch and `omh doctor` mount.
     Session,
     /// The account's own files: `omh auth`, where a login writes the
-    /// identity every later session is seeded with.
+    /// identity every later session is seeded with. Whatever an earlier
+    /// session left in them is mounted too, so this launch's policy admits no
+    /// MCP server — a login needs none.
     Account,
 }
 
@@ -894,7 +896,12 @@ fn stage_policy(
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
     let sources = profile.sources(Capability::Mcp)?;
-    let servers = admitted(&sources, rules_doc, &opts.omh, &opts.repo, adapter)?;
+    // A login mounts the account's own files, with whatever an earlier
+    // session left in them, and needs no server: it admits none.
+    let servers = match opts.copies {
+        Copies::Session => admitted(&sources, rules_doc, &opts.omh, &opts.repo, adapter)?,
+        Copies::Account => BTreeMap::new(),
+    };
     let body = crate::render::policy(policy.format, &servers)?;
     let file = stage.join("policy.rendered");
     let mask = stage.join("masked");
@@ -2626,6 +2633,38 @@ mod tests {
 
         let m = claude_json_mount(&fx, &fx.session, Copies::Account);
         assert_eq!(m.host, Path::new("/host/creds/claude/work/.claude.json"));
+    }
+
+    /// A login mounts the account's own `~/.claude.json`, with whatever an
+    /// earlier session left there — so its policy admits no server at all,
+    /// omh's included: a login needs none, and a planted one with omh's
+    /// command and its own `env` would pass a list of omh's.
+    #[test]
+    fn a_login_admits_no_mcp_server() {
+        let fx = fixture();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: Some(fx.paths.root.join("creds/claude/work")),
+                copies: Copies::Account,
+                memory_bin: None,
+                base: None,
+                omh: decided().0,
+                repo: decided().1,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(policy_admits(&p, &adapter), vec![]);
     }
 
     #[test]

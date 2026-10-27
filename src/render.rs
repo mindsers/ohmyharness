@@ -457,8 +457,10 @@ pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
             // And every consent a session could have left there: approvals of
             // an API key from the environment, of bypass-permissions mode, of
             // a CLAUDE.md that includes files from outside the project, and
-            // trust in a folder. omh trusts `/work` itself, below. The
-            // account's own `primaryApiKey` stays: it is that login's key.
+            // trust in a folder. omh trusts `/work` itself, below — the key's
+            // place is measured in a captured account, that 2.1.300 skips its
+            // trust dialog for it is inferred. The account's own
+            // `primaryApiKey` stays: it is that login's key.
             //
             // A list of what goes, not of what stays. Step 2 of #197 turns the
             // file's preferences into a declared allowlist; until then this

@@ -229,8 +229,10 @@ gets a copy, seeded from the account's when it first launches:
   everything else omh has no opinion on. Tokens stay in `.credentials.json`,
   which is still the account's and refreshed in place;
 - **dropped:** every MCP server and switch on one, `allowedTools`, the legacy
-  `env` and `apiKeyHelper`, and the consents a session could leave — omh
-  trusts `/work` itself;
+  `env` and `apiKeyHelper`, and the consents a session could leave — so an
+  interactive session asks again about bypass-permissions mode and an API key
+  from the environment. omh trusts `/work` itself (inferred to skip the trust
+  dialog; not measured);
 - **never written back:** nothing a session changes there reaches the account
   or another session. A `/mcp` switch lasts that session; `omh unuse` is the
   lasting one. A `/login` inside a session refreshes the shared tokens, but

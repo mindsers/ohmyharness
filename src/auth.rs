@@ -308,8 +308,10 @@ fn mountpoint(root: &std::path::Path, relative: &std::path::Path, is_dir: bool) 
 /// Seed the session's copies of the account's `[policy] copy` files into
 /// `home`, mirroring `$HOME` the way an account directory does.
 ///
-/// Once per session and account: a copy already seeded from `account_dir` is
-/// the session's, and a relaunch continues from it. `fresh` reseeds anyway —
+/// Once per session and seed: a copy already seeded from what the account
+/// holds now is the session's, and a relaunch continues from it. The stamp
+/// names the account *and* what was seeded from it, so another account — or
+/// `omh auth` capturing this one again — reseeds. `fresh` reseeds anyway:
 /// `omh doctor`'s scratch, which keeps nothing.
 pub fn seed_copies(
     adapter: &Adapter,
@@ -320,21 +322,10 @@ pub fn seed_copies(
     let Some(policy) = adapter.policy.as_ref().filter(|p| !p.copy.is_empty()) else {
         return Ok(());
     };
-    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
-    let stamp = home.join(SEEDED_FROM);
-    let from = account_dir.display().to_string();
-    let same = match std::fs::read_to_string(&stamp) {
-        Ok(seeded) => seeded == from,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(e).with_context(|| format!("reading {}", stamp.display())),
-    };
+    let mut seeds = Vec::new();
+    let mut seeded = account_dir.display().to_string();
     for copy in &policy.copy {
         let rel = copy.trim_start_matches("$HOME/");
-        let dest = home.join(rel);
-        let there = std::fs::symlink_metadata(&dest).is_ok();
-        if same && there && !fresh {
-            continue;
-        }
         let shown = account_dir.join(rel);
         let raw = read_account_file(account_dir, rel)
             .with_context(|| format!("seeding this session's copy of {}", shown.display()))?;
@@ -350,13 +341,34 @@ pub fn seed_copies(
             })?,
         };
         crate::render::scrub(policy.format, &mut doc);
+        let body = serde_json::to_string_pretty(&doc)?;
+        seeded.push_str(&format!(
+            "\n{rel} {:016x}",
+            crate::hash::fnv1a_64(body.as_bytes())
+        ));
+        seeds.push((home.join(rel), body));
+    }
+
+    std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+    let stamp = home.join(SEEDED_FROM);
+    let same = match std::fs::read_to_string(&stamp) {
+        Ok(stamped) => stamped == seeded,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e).with_context(|| format!("reading {}", stamp.display())),
+    };
+    let there = seeds
+        .iter()
+        .all(|(dest, _)| std::fs::symlink_metadata(dest).is_ok());
+    if same && there && !fresh {
+        return Ok(());
+    }
+    for (dest, body) in seeds {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&dest, serde_json::to_string_pretty(&doc)?)
-            .with_context(|| format!("writing {}", dest.display()))?;
+        std::fs::write(&dest, body).with_context(|| format!("writing {}", dest.display()))?;
     }
-    std::fs::write(&stamp, &from).with_context(|| format!("writing {}", stamp.display()))
+    std::fs::write(&stamp, &seeded).with_context(|| format!("writing {}", stamp.display()))
 }
 
 /// Beside a session's copies: the account they were seeded from.
@@ -1821,6 +1833,20 @@ mod tests {
             copied(home.path())["userID"],
             "other",
             "fresh did not reseed"
+        );
+
+        // `omh auth` capturing the same account again — a new identity in
+        // the same directory — reaches the sessions on it.
+        std::fs::write(
+            other.path().join(".claude.json"),
+            r#"{"userID":"relogged"}"#,
+        )
+        .unwrap();
+        seed_copies(&claude(), other.path(), home.path(), false).unwrap();
+        assert_eq!(
+            copied(home.path())["userID"],
+            "relogged",
+            "a re-login never reached the session"
         );
     }
 
