@@ -199,8 +199,18 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     // Docker refuses to create a mountpoint inside a bind-mounted host
     // directory, so anything omh will mount *inside* a credential directory has
     // to exist on the host first or the launch fails outright.
-    for binding in adapter.capabilities.values() {
-        let guest = crate::adapter::expand(&binding.path, guest_home);
+    // A masked path is a file mount like a rendered document's.
+    let masked = adapter
+        .policy
+        .iter()
+        .flat_map(|p| p.mask.iter())
+        .map(|path| (path, false));
+    let bound = adapter
+        .capabilities
+        .values()
+        .map(|b| (&b.path, b.render == crate::adapter::Render::Dir));
+    for (path, is_dir) in bound.chain(masked) {
+        let guest = crate::adapter::expand(path, guest_home);
         let Some(cred) = creds
             .iter()
             .find(|c| !c.file && guest.starts_with(&c.guest))
@@ -211,7 +221,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
             continue;
         };
         let point = cred.host.join(relative);
-        if binding.render == crate::adapter::Render::Dir {
+        if is_dir {
             std::fs::create_dir_all(&point)?;
         } else {
             if let Some(parent) = point.parent() {
@@ -1505,6 +1515,35 @@ mod tests {
             d.path().join(".claude/settings.json").is_file(),
             "hooks mountpoint"
         );
+    }
+
+    /// A path the policy masks inside the account needs its mountpoint for the
+    /// same reason — and one that is already there is the harness's, which
+    /// the mask hides and never rewrites.
+    #[test]
+    fn a_masked_path_in_a_credential_directory_gets_a_mountpoint_and_keeps_its_bytes() {
+        let a = codex();
+        let masks = &a.policy.as_ref().unwrap().mask;
+        assert!(!masks.is_empty());
+
+        let d = tempfile::tempdir().unwrap();
+        prepare(&a, d.path(), "/home/agent").unwrap();
+        for mask in masks {
+            let rel = mask.trim_start_matches("$HOME/");
+            assert!(d.path().join(rel).is_file(), "{mask} has no mountpoint");
+        }
+
+        let d = tempfile::tempdir().unwrap();
+        for mask in masks {
+            let point = d.path().join(mask.trim_start_matches("$HOME/"));
+            std::fs::create_dir_all(point.parent().unwrap()).unwrap();
+            std::fs::write(&point, "the harness's own").unwrap();
+        }
+        prepare(&a, d.path(), "/home/agent").unwrap();
+        for mask in masks {
+            let point = d.path().join(mask.trim_start_matches("$HOME/"));
+            assert_eq!(std::fs::read_to_string(point).unwrap(), "the harness's own");
+        }
     }
 
     #[test]

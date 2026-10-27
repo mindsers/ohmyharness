@@ -4,7 +4,7 @@
 //! the target harness parses. This is how `omh-mcp` (memory) and the wired
 //! code-graph server reach every harness without being configured twice.
 
-use crate::adapter::{Binding, Capability, Render};
+use crate::adapter::{Binding, Capability, PolicyFormat, Render};
 use crate::hook::{self, Outcome};
 use crate::ledger;
 use anyhow::{Context, Result};
@@ -313,6 +313,132 @@ fn mcp_approving(
         _ => unreachable!("caller matched on MCP renders"),
     }
 }
+
+// ── policy ──────────────────────────────────────────────────────────────────
+
+/// The harness's policy file: the servers this launch staged are the only ones
+/// it may load, by name and by exact command and arguments.
+///
+/// `servers` is what [`servers`] made for the MCP document — the allowlist and
+/// the document are the same list, or the lock turns off a server omh staged.
+pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Result<String> {
+    match format {
+        // The matcher form, `{ executable, args = [{ match = "exact", … }] }`,
+        // compares every argument in place and their count. The bare
+        // `command = "…"` form compares the executable alone, which would admit
+        // omh's own command with arguments a session chose.
+        PolicyFormat::CodexRequirements => {
+            #[derive(Serialize)]
+            struct Exact<'a> {
+                r#match: &'static str,
+                value: &'a str,
+            }
+            #[derive(Serialize)]
+            struct Command<'a> {
+                executable: &'a str,
+                args: Vec<Exact<'a>>,
+            }
+            #[derive(Serialize)]
+            struct Identity<'a> {
+                command: Command<'a>,
+            }
+            #[derive(Serialize)]
+            struct Entry<'a> {
+                identity: Identity<'a>,
+            }
+            #[derive(Serialize)]
+            struct Plugin<'a> {
+                mcp_servers: BTreeMap<&'a str, Entry<'a>>,
+            }
+            #[derive(Serialize)]
+            struct Doc<'a> {
+                allow_managed_hooks_only: bool,
+                chatgpt_base_url: &'static str,
+                mcp_servers: BTreeMap<&'a str, Entry<'a>>,
+                plugins: BTreeMap<&'static str, Plugin<'a>>,
+            }
+
+            let mcp_servers = servers
+                .iter()
+                .map(|(name, s)| {
+                    let args = s
+                        .args
+                        .iter()
+                        .map(|value| Exact {
+                            r#match: "exact",
+                            value,
+                        })
+                        .collect();
+                    let command = Command {
+                        executable: &s.command,
+                        args,
+                    };
+                    (
+                        name.as_str(),
+                        Entry {
+                            identity: Identity { command },
+                        },
+                    )
+                })
+                .collect();
+            let doc = Doc {
+                allow_managed_hooks_only: true,
+                chatgpt_base_url: CHATGPT_BASE_URL,
+                mcp_servers,
+                // Any plugin entry with `mcp_servers` set holds every plugin
+                // to its own list, and this one names no plugin: so no
+                // plugin's server is on one.
+                plugins: BTreeMap::from([(
+                    NO_PLUGIN,
+                    Plugin {
+                        mcp_servers: BTreeMap::new(),
+                    },
+                )]),
+            };
+            let body =
+                toml::to_string_pretty(&doc).context("rendering codex requirements.toml")?;
+            // An absent table is no allowlist at all. A serializer that drops
+            // empty maps would turn "none" into "any", so it is checked here
+            // rather than trusted.
+            let back: toml::Table = toml::from_str(&body).context("reading back requirements")?;
+            anyhow::ensure!(
+                back.get("mcp_servers").is_some_and(toml::Value::is_table)
+                    && back
+                        .get("plugins")
+                        .and_then(|p| p.get(NO_PLUGIN))
+                        .and_then(|p| p.get("mcp_servers"))
+                        .is_some_and(toml::Value::is_table),
+                "the rendered requirements.toml lost an allowlist:\n{body}"
+            );
+            Ok(body)
+        }
+        // `[]` under the lock admits nothing. Each entry is one matcher:
+        // Claude compares the command and its arguments exactly.
+        PolicyFormat::ClaudeManaged => {
+            let allowed: Vec<serde_json::Value> = servers
+                .values()
+                .map(|s| {
+                    let command: Vec<&str> = std::iter::once(s.command.as_str())
+                        .chain(s.args.iter().map(String::as_str))
+                        .collect();
+                    serde_json::json!({ "serverCommand": command })
+                })
+                .collect();
+            pretty(serde_json::json!({
+                "allowManagedMcpServersOnly": true,
+                "allowedMcpServers": allowed,
+                "disableClaudeAiConnectors": true,
+            }))
+        }
+    }
+}
+
+/// Where Codex sends the ChatGPT tokens and fetches an enterprise's bundle.
+/// Pinned in the policy so no layer a session writes can move it.
+const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/";
+
+/// A plugin name no plugin has, holding an empty server list.
+const NO_PLUGIN: &str = "omh-none";
 
 /// Inverse of `mcp`: read a harness's own config back into canonical form.
 ///
@@ -1834,6 +1960,145 @@ mod tests {
     use super::*;
 
     use std::io::Write;
+
+    // ── policy ──────────────────────────────────────────────────────────────
+
+    fn server(command: &str, args: &[&str]) -> Server {
+        Server {
+            command: command.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            env: BTreeMap::from([("PATH".into(), "/planted".into())]),
+        }
+    }
+
+    /// Two of omh's shapes and one of yours, with an argument a careless
+    /// writer would mangle — and one server with no arguments at all, which
+    /// Codex's matcher still needs `args = []` for.
+    fn staged() -> BTreeMap<String, Server> {
+        BTreeMap::from([
+            ("omh-codegraph".into(), server("codegraph", &["serve", "--x=\"a b\""])),
+            ("omh-memory".into(), server("omh", &["mcp"])),
+            ("mine".into(), server("/opt/bin/mine", &[])),
+        ])
+    }
+
+    fn codex_policy(servers: &BTreeMap<String, Server>) -> toml::Table {
+        let body = policy(PolicyFormat::CodexRequirements, servers).unwrap();
+        toml::from_str(&body).unwrap_or_else(|e| panic!("not TOML ({e}):\n{body}"))
+    }
+
+    /// What Codex compares, read back the way Codex reads it: the matcher
+    /// form, never the bare `command = "…"` that ignores arguments.
+    fn codex_identity(entry: &toml::Value) -> (String, Vec<String>) {
+        let command = &entry["identity"]["command"];
+        let executable = command["executable"].as_str().unwrap().to_string();
+        let args = command["args"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no `args` array, which Codex requires: {entry}"))
+            .iter()
+            .map(|m| {
+                assert_eq!(m["match"].as_str(), Some("exact"), "{m}");
+                m["value"].as_str().unwrap().to_string()
+            })
+            .collect();
+        (executable, args)
+    }
+
+    #[test]
+    fn codex_allows_exactly_the_staged_servers_by_command_and_arguments() {
+        let servers = staged();
+        let doc = codex_policy(&servers);
+        let listed = doc["mcp_servers"].as_table().expect("an `[mcp_servers]` table");
+        assert_eq!(
+            listed.keys().collect::<Vec<_>>(),
+            servers.keys().collect::<Vec<_>>()
+        );
+        for (name, s) in &servers {
+            assert_eq!(
+                codex_identity(&listed[name]),
+                (s.command.clone(), s.args.clone()),
+                "{name}"
+            );
+        }
+    }
+
+    /// Codex filters nothing when the table is absent, so an empty selection
+    /// must still say "nothing" — and so must every plugin.
+    #[test]
+    fn codex_keeps_an_allowlist_with_nothing_on_it() {
+        let doc = codex_policy(&BTreeMap::new());
+        assert_eq!(
+            doc.get("mcp_servers").and_then(toml::Value::as_table),
+            Some(&toml::Table::new()),
+            "{doc}"
+        );
+        let plugins = doc["plugins"].as_table().expect("a `[plugins]` table");
+        assert!(
+            plugins
+                .values()
+                .any(|p| p.get("mcp_servers").is_some_and(|m| m.as_table() == Some(&toml::Table::new()))),
+            "no plugin entry holding an empty allowlist: {doc}"
+        );
+    }
+
+    #[test]
+    fn codex_runs_managed_hooks_only_and_keeps_its_tokens_at_chatgpt() {
+        let doc = codex_policy(&staged());
+        assert_eq!(doc["allow_managed_hooks_only"].as_bool(), Some(true));
+        assert_eq!(
+            doc["chatgpt_base_url"].as_str(),
+            Some("https://chatgpt.com/backend-api/")
+        );
+        // A requirements `[hooks]` table beside another layer's `managed_dir`
+        // is a composition error, and Codex refuses to start.
+        assert!(doc.get("hooks").is_none(), "{doc}");
+    }
+
+    fn claude_policy(servers: &BTreeMap<String, Server>) -> serde_json::Value {
+        let body = policy(PolicyFormat::ClaudeManaged, servers).unwrap();
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("not JSON ({e}):\n{body}"))
+    }
+
+    #[test]
+    fn claude_allows_exactly_the_staged_servers_by_command_and_arguments() {
+        let servers = staged();
+        let doc = claude_policy(&servers);
+        assert_eq!(doc["allowManagedMcpServersOnly"], true);
+        let mut allowed: Vec<Vec<String>> = doc["allowedMcpServers"]
+            .as_array()
+            .expect("an `allowedMcpServers` list")
+            .iter()
+            .map(|e| {
+                assert_eq!(e.as_object().unwrap().len(), 1, "one matcher per entry: {e}");
+                serde_json::from_value(e["serverCommand"].clone()).unwrap()
+            })
+            .collect();
+        let mut want: Vec<Vec<String>> = servers
+            .values()
+            .map(|s| std::iter::once(s.command.clone()).chain(s.args.clone()).collect())
+            .collect();
+        allowed.sort();
+        want.sort();
+        assert_eq!(allowed, want);
+    }
+
+    #[test]
+    #[ignore]
+    fn show_the_policies() {
+        for format in [PolicyFormat::CodexRequirements, PolicyFormat::ClaudeManaged] {
+            println!("{}", policy(format, &staged()).unwrap());
+            println!("{}", policy(format, &BTreeMap::new()).unwrap());
+        }
+    }
+
+    /// `[]` under the lock is "none", which is what an empty selection means.
+    #[test]
+    fn claude_keeps_an_allowlist_with_nothing_on_it_and_no_connectors() {
+        let doc = claude_policy(&BTreeMap::new());
+        assert_eq!(doc["allowManagedMcpServersOnly"], true);
+        assert_eq!(doc["allowedMcpServers"], serde_json::json!([]));
+        assert_eq!(doc["disableClaudeAiConnectors"], true);
+    }
 
     // ── codex ───────────────────────────────────────────────────────────────
 

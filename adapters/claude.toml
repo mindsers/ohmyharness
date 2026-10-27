@@ -132,3 +132,24 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # said out loud is a decision omh can render and `omh why` can explain.
 [capabilities.hooks.refuse]
 template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","permissionDecision":"deny","permissionDecisionReason":$m}}'"""
+
+# What a session may load, decided by the launch and not by the session.
+#
+# A drop-in under `managed-settings.d`, which 2.1.300 reads: managed settings
+# sit above every file a session can write. `allowManagedMcpServersOnly` with
+# an `allowedMcpServers` list of the servers the launch staged, each a
+# `serverCommand` — the command and its arguments, compared exactly. Measured
+# in the 2.1.300 image: `["/bin/true", "a", "b"]` admitted its server, while
+# the same command with other arguments and another command were left out of
+# `claude mcp list`. So a server a session adds with `claude mcp add -s user`
+# does not load in the next one.
+#
+# `disableClaudeAiConnectors`: a connector is matched by its URL, never by
+# name, and allowlisting that URL would let a session put its own server
+# there. So claude.ai connectors do not load in a session — a policy, not a
+# side effect. All three keys are read from every admin source, so they hold
+# beside an organisation's own managed settings; an organisation's list
+# replaces omh's.
+[policy]
+path   = "/etc/claude-code/managed-settings.d/omh.json"
+format = "claude-managed"

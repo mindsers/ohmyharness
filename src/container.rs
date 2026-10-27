@@ -699,6 +699,12 @@ pub fn plan(
         }
     }
 
+    // The harness's policy layer, and the files masked behind it. After the
+    // credentials, because a mask lands inside the account's directory.
+    if let Some(policy) = &adapter.policy {
+        stage_policy(policy, profile, opts, &stage, staging, &rules_doc, adapter, &mut mounts)?;
+    }
+
     // The harness's transcripts, over a per-session directory omh owns, so a
     // review can read what the agent did without reaching into the container.
     // Writable — the harness writes here — and only for a real session (a
@@ -778,6 +784,57 @@ pub fn plan(
         rules: rules_report,
         tty: opts.tty,
     })
+}
+
+/// Stage the policy and mount it read-only where the harness reads it, then
+/// an empty read-only file over every path it masks.
+///
+/// Written for every launch, never behind [`carries`]: the allowlist matters
+/// most when it is empty, since a harness with no allowlist admits anything.
+/// Its servers are the MCP document's own — the same [`crate::render::servers`]
+/// call, when that document is staged at all, and none when it is not.
+#[allow(clippy::too_many_arguments)]
+fn stage_policy(
+    policy: &crate::adapter::Policy,
+    profile: &Profile,
+    opts: &Options,
+    stage: &Path,
+    staging: Staging,
+    rules_doc: &str,
+    adapter: &Adapter,
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    let sources = profile.sources(Capability::Mcp)?;
+    let servers = if carries(Capability::Mcp, &sources, rules_doc, &opts.omh, adapter) {
+        crate::render::servers(&sources, &opts.omh, &opts.repo)?
+    } else {
+        BTreeMap::new()
+    };
+    let body = crate::render::policy(policy.format, &servers)?;
+    let file = stage.join("policy.rendered");
+    let mask = stage.join("masked");
+    if staging == Staging::Apply {
+        std::fs::create_dir_all(stage)?;
+        std::fs::write(&file, body).context("staging the harness's policy")?;
+        if !policy.mask.is_empty() {
+            std::fs::write(&mask, "")?;
+        }
+    }
+    mounts.push(Mount {
+        host: file,
+        guest: PathBuf::from(&policy.path),
+        read_only: true,
+        file: true,
+    });
+    for path in &policy.mask {
+        mounts.push(Mount {
+            host: mask.clone(),
+            guest: expand(path, GUEST_HOME),
+            read_only: true,
+            file: true,
+        });
+    }
+    Ok(())
 }
 
 /// What staging needs that does not change from one capability to the next.
@@ -2806,6 +2863,155 @@ mod tests {
             composed_rules(&p).contains(crate::shadow::ARRANGEMENT),
             "and omh's rules sections are part of the same features"
         );
+    }
+
+    /// Every server the harness is handed, as `[command, args…]`, read out of
+    /// the document it is handed — empty when none is staged.
+    fn handed(p: &Plan, adapter: &Adapter) -> BTreeMap<String, Vec<String>> {
+        let binding = adapter.supports(Capability::Mcp).unwrap();
+        let guest = expand(&binding.path, GUEST_HOME);
+        let Some(mount) = p.mounts.iter().find(|m| m.guest == guest) else {
+            return BTreeMap::new();
+        };
+        let body = std::fs::read_to_string(&mount.host).unwrap();
+        crate::render::parse(binding.render, &body)
+            .unwrap()
+            .into_iter()
+            .map(|(name, s)| (name, std::iter::once(s.command).chain(s.args).collect()))
+            .collect()
+    }
+
+    /// What the policy admits, as `[command, args…]`, keyed by name where the
+    /// harness matches by name too.
+    fn admitted(p: &Plan, adapter: &Adapter) -> Vec<(Option<String>, Vec<String>)> {
+        let policy = adapter.policy.as_ref().unwrap();
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new(&policy.path))
+            .unwrap_or_else(|| panic!("{} mounts no policy at {}", adapter.name, policy.path));
+        assert!(mount.read_only && mount.file, "{mount:?}");
+        let body = std::fs::read_to_string(&mount.host).unwrap();
+        let mut out: Vec<(Option<String>, Vec<String>)> = match policy.format {
+            crate::adapter::PolicyFormat::CodexRequirements => {
+                let doc: toml::Table = toml::from_str(&body).unwrap();
+                doc["mcp_servers"]
+                    .as_table()
+                    .unwrap_or_else(|| panic!("no allowlist at all:\n{body}"))
+                    .iter()
+                    .map(|(name, e)| {
+                        let c = &e["identity"]["command"];
+                        let argv = std::iter::once(c["executable"].as_str().unwrap())
+                            .chain(
+                                c["args"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|a| a["value"].as_str().unwrap()),
+                            )
+                            .map(String::from)
+                            .collect();
+                        (Some(name.clone()), argv)
+                    })
+                    .collect()
+            }
+            crate::adapter::PolicyFormat::ClaudeManaged => {
+                let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+                doc["allowedMcpServers"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("no allowlist at all:\n{body}"))
+                    .iter()
+                    .map(|e| (None, serde_json::from_value(e["serverCommand"].clone()).unwrap()))
+                    .collect()
+            }
+        };
+        out.sort();
+        out
+    }
+
+    /// **The lock admits exactly what the launch staged**, on every harness
+    /// that has one, however the repo selects — including nothing at all, where
+    /// the policy must still be written: an absent allowlist admits anything.
+    ///
+    /// The allowlist and the document come from one list. A server staged and
+    /// not admitted is an omh feature the lock turns off; one admitted and not
+    /// staged is a hole a session can fill.
+    #[test]
+    fn the_policy_admits_exactly_the_servers_a_launch_stages() {
+        let adapters: Vec<Adapter> = Adapter::load_dir(Path::new(ADAPTERS))
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.policy.is_some())
+            .collect();
+        let names: Vec<&str> = adapters.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["claude", "codex"], "which harnesses have a policy");
+
+        let cases: [(&str, &[&str]); 3] = [
+            ("mcp = [\"m\"]\n", &[]),
+            ("mcp = []\n", &[]),
+            ("mcp = []\n", &["memory", "codegraph"]),
+        ];
+        for adapter in &adapters {
+            for (table, off) in cases {
+                let fx = fixture();
+                std::fs::write(
+                    fx.paths.root.join("mcp.json"),
+                    r#"{"mcpServers":{"m":{"command":"m","args":["--a","b"]},"n":{"command":"n"}}}"#,
+                )
+                .unwrap();
+                selects(&fx, table);
+                let decided = decided_with(off.iter().map(|f| f.to_string()).collect());
+                let p = plan_with(&fx, adapter, decided);
+
+                let mut want: Vec<(Option<String>, Vec<String>)> = handed(&p, adapter)
+                    .into_iter()
+                    .map(|(name, argv)| {
+                        let by_name = adapter.policy.as_ref().unwrap().format
+                            == crate::adapter::PolicyFormat::CodexRequirements;
+                        (by_name.then_some(name), argv)
+                    })
+                    .collect();
+                want.sort();
+                assert_eq!(
+                    admitted(&p, adapter),
+                    want,
+                    "{} with `{}` and {off:?} off",
+                    adapter.name,
+                    table.trim()
+                );
+            }
+        }
+    }
+
+    /// A file a session could write and the harness trusts on its next start
+    /// is hidden behind an empty one it cannot: mounted after the account it
+    /// sits in, read-only, a file.
+    #[test]
+    fn a_masked_path_is_an_empty_file_the_session_cannot_write() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/codex/default");
+        let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
+        let masks = &adapter.policy.as_ref().unwrap().mask;
+        assert!(!masks.is_empty(), "codex masks its cloud bundle cache");
+
+        let p = plan_account(&fx, "codex", Some(account));
+        for mask in masks {
+            let guest = expand(mask, GUEST_HOME);
+            let at = p
+                .mounts
+                .iter()
+                .position(|m| m.guest == guest)
+                .unwrap_or_else(|| panic!("{} is not masked", guest.display()));
+            let m = &p.mounts[at];
+            assert!(m.read_only && m.file, "{m:?}");
+            assert_eq!(std::fs::read(&m.host).unwrap(), b"", "{m:?}");
+            let holder = p
+                .mounts
+                .iter()
+                .position(|c| !c.file && guest.starts_with(&c.guest) && c.guest != Path::new("/"))
+                .expect("the account directory holding it is mounted");
+            assert!(holder < at, "the mask must come after {:?}", p.mounts[holder]);
+        }
     }
 
     /// Codex runs omh's own servers' tools without asking, and yours as Codex

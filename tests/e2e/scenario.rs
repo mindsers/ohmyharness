@@ -90,6 +90,10 @@ const SCENARIOS: &[Scenario] = &[
         run: transcript,
     },
     Scenario {
+        name: "a server the session adds itself does not load",
+        run: planted_server,
+    },
+    Scenario {
         name: "omh doctor passes in the session's repo",
         run: doctor,
     },
@@ -663,6 +667,68 @@ fn transcript(s: &Session) {
             "not recorded, and not said why: {after}"
         ),
         _ => panic!("omh read no transcript and said nothing about why: {after}"),
+    }
+}
+
+/// A server the agent adds — with the harness's own command, or into the file
+/// directly — lands in the account, which every later session on it reads. The policy omh fills from
+/// the launch leaves it out, and keeps omh's own in. Same command as an omh
+/// server would not help: the lock compares arguments too.
+///
+/// One session is enough: the policy is read at every start of the harness,
+/// and `mcp list` is a start. Harnesses with no policy omh fills are skipped.
+fn planted_server(s: &Session) {
+    let (add, list, remove) = match s.harness.name {
+        "codex" => (
+            "codex mcp add e2e-planted -- /bin/true",
+            "codex mcp list --json",
+            "codex mcp remove e2e-planted",
+        ),
+        // Written into the file rather than through `claude mcp add`, which
+        // refuses under the lock ("not allowed by enterprise policy") — a
+        // session is not held to the CLI. `cat >` keeps the bind-mounted inode.
+        "claude" => (
+            r#"jq '.mcpServers["e2e-planted"] = {"command":"/bin/true","args":[]}' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
+            "claude mcp list",
+            r#"jq 'del(.mcpServers["e2e-planted"])' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
+        ),
+        _ => return,
+    };
+    ok(&s.sh(add), add);
+    let listed = s.sh(list);
+    let _ = s.sh(remove);
+    let listed = ok(&listed, list);
+    match s.harness.name {
+        "codex" => {
+            let servers: Vec<Value> = serde_json::from_str(&listed)
+                .unwrap_or_else(|e| panic!("{list} is not JSON ({e}): {listed}"));
+            let named = |name: &str| {
+                servers
+                    .iter()
+                    .find(|v| v["name"] == name)
+                    .unwrap_or_else(|| panic!("{name} is not listed: {listed}"))
+            };
+            let planted = named("e2e-planted");
+            assert!(
+                planted["enabled"] == false
+                    && planted["disabled_reason"]
+                        .as_str()
+                        .is_some_and(|r| r.contains("requirements")),
+                "the planted server loads: {planted}"
+            );
+            for own in ["omh-codegraph", "omh-memory"] {
+                assert_eq!(named(own)["enabled"], true, "{own}: {listed}");
+            }
+        }
+        _ => {
+            assert!(
+                !listed.contains("e2e-planted"),
+                "the planted server loads: {listed}"
+            );
+            for own in ["omh-codegraph", "omh-memory"] {
+                assert!(listed.contains(own), "{own} is not listed: {listed}");
+            }
+        }
     }
 }
 

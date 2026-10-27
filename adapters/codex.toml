@@ -171,3 +171,32 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # "Command blocked by PreToolUse hook: <reason>".
 [capabilities.hooks.refuse]
 template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","permissionDecision":"deny","permissionDecisionReason":$m}}'"""
+
+# What a session may load, decided by the launch and not by the session.
+#
+# `requirements.toml` sits above every config layer, `-c` included, and holds
+# an `[mcp_servers]` allowlist: a server not on it, or on it with another
+# command or other arguments, loads disabled — `codex mcp list --json` gives
+# it `"disabled_reason": "requirements (/etc/codex/requirements.toml)"`. It
+# is the list the launch staged, by name and exact command and arguments, so a
+# server a session adds with `codex mcp add` does not load in the next one.
+# Always written, even empty: with no table Codex filters nothing.
+#
+# `allow_managed_hooks_only` stops user- and project-layer hooks. omh's own run
+# from `/etc/codex/config.toml`, the system layer, which counts as managed —
+# measured firing with the lock on. `chatgpt_base_url` is pinned, since it is
+# where Codex sends the ChatGPT tokens. An empty plugin allowlist holds every
+# plugin's servers to it too (`filter_plugin_mcp_servers_by_requirements` in
+# `codex-rs/core/src/config/mod.rs` at `rust-v0.162.1`). Never a `[hooks]`
+# table: two `managed_dir`s across layers and Codex refuses to start.
+#
+# An enterprise account caches its cloud bundle in `~/.codex`, writable, signed
+# with a key in Codex's public source: a session could forge one that loosens
+# every later session. Masked read-only, Codex warns it cannot write the cache
+# and fetches the bundle at every start — measured, a read-only garbage cache
+# does not stop a non-enterprise start. An enterprise account offline does not
+# start at all.
+[policy]
+path   = "/etc/codex/requirements.toml"
+format = "codex-requirements"
+mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]

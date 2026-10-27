@@ -130,6 +130,7 @@ ready  = "Connected"           # what that answer calls a server it loaded
 | `transcripts` | where the harness writes its transcripts. omh mounts a per-session directory over it, so `omh sNN` can read what the agent did and what it cost | none, and omh says *not recorded* rather than showing an empty session |
 | `[tools]` | how the harness names `edit`, `read`, `shell` and `search` — see [Hooks](#hooks-three-maps-and-a-template) | none |
 | `[capabilities.<class>]` | one binding per capability the harness can express | none |
+| `[policy]` | the harness's own policy file, which omh fills on every launch — see [below](#policy-what-a-session-may-load) | none |
 
 `creds` names a directory rather than the token file because a bind-mounted
 *file* cannot be replaced by rename, and every tool saves its token by writing a
@@ -146,6 +147,44 @@ temporary file and renaming it over.
 | `verify` | the harness's own command for listing what it loaded, run by `omh doctor` inside the sandbox | not asked |
 | `ready` | the word `verify`'s output uses for a server the harness took up | not asked |
 | `events`, `fields`, `fields-by-tool`, `inject`, `refuse` | `hooks` only — see [Hooks](#hooks-three-maps-and-a-template) | none |
+
+### `[policy]`: what a session may load
+
+```toml
+# adapters/codex.toml
+[policy]
+path   = "/etc/codex/requirements.toml"
+format = "codex-requirements"
+mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
+```
+
+The account directory is writable and shared by every session on it, so
+anything a session adds there — an MCP server through `codex mcp add` or
+`claude mcp add -s user`, a hook — would load in every later session. A
+harness's policy layer sits above every file a session can write, and omh
+fills it from the launch:
+
+| Field | What it says | Default |
+|---|---|---|
+| `path` | the absolute guest path the harness reads its policy from, outside `/work` and `$HOME` | required |
+| `format` | `codex-requirements` or `claude-managed` | required |
+| `mask` | guest paths a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
+
+The policy admits exactly the MCP servers the launch staged, by command and
+arguments compared exactly — and by name too, on Codex. It is written even when
+nothing is staged, because a harness with no allowlist admits anything.
+
+- **codex** — `requirements.toml`: the `[mcp_servers]` allowlist, an empty one
+  for every plugin, `allow_managed_hooks_only` (omh's hooks are in the system
+  layer and still run; a repo's `.codex/config.toml` hooks do not), and a
+  pinned `chatgpt_base_url`. An enterprise account's cloud bundle cache is
+  masked, so Codex fetches the bundle at every start, and offline it does not
+  start.
+- **claude** — a `managed-settings.d` drop-in: `allowManagedMcpServersOnly`,
+  `allowedMcpServers`, and `disableClaudeAiConnectors`. claude.ai connectors
+  do not load in a session: one is matched by its URL, and allowlisting that
+  URL would let a session put its own server there. An organisation's own
+  managed list replaces omh's.
 
 ### What omh refuses when it loads an adapter
 

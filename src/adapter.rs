@@ -87,6 +87,41 @@ pub struct Adapter {
     pub tools: BTreeMap<crate::hook::Tool, String>,
     #[serde(default)]
     pub capabilities: BTreeMap<Capability, Binding>,
+    /// The harness's own policy layer, filled by omh so a session cannot load
+    /// what the launch did not select. Absent where a harness has none omh
+    /// fills yet.
+    #[serde(default)]
+    pub policy: Option<Policy>,
+}
+
+/// A file the harness reads as policy — above anything a session can write —
+/// and the files a session must not be able to leave behind for the next one.
+///
+/// Not a [`Binding`]: a policy has no layers, no selection, no import and
+/// nothing to parse back. It is derived from what the launch stages, which is
+/// the whole of what it says.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    /// Absolute guest path the harness reads its policy from. Outside `/work`
+    /// and `$HOME`, in the image omh builds.
+    pub path: String,
+    pub format: PolicyFormat,
+    /// Guest paths a session can write and the harness trusts on its next
+    /// start. Each is hidden behind an empty read-only file. `$HOME` is
+    /// expanded per image.
+    #[serde(default)]
+    pub mask: Vec<String>,
+}
+
+/// What a policy file is written as, which is a claim about one harness.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyFormat {
+    /// Codex's `requirements.toml`.
+    CodexRequirements,
+    /// A Claude Code `managed-settings.d` drop-in.
+    ClaudeManaged,
 }
 
 /// The capability classes a profile can carry. Ordered as declared, which is
