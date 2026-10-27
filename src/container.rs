@@ -873,7 +873,11 @@ pub(crate) fn admitted(
     repo: &crate::settings::RepoPolicy,
     adapter: &Adapter,
 ) -> Result<BTreeMap<String, crate::render::Server>> {
-    if carries(Capability::Mcp, sources, rules_doc, own, adapter) {
+    // Both gates the document goes through: a harness with no MCP binding is
+    // handed nothing, whatever the profile carries.
+    if adapter.supports(Capability::Mcp).is_some()
+        && carries(Capability::Mcp, sources, rules_doc, own, adapter)
+    {
         crate::render::servers(sources, own, repo)
     } else {
         Ok(BTreeMap::new())
@@ -3050,6 +3054,110 @@ mod tests {
             p.policy
         );
         assert!(plan_for(&fx, "claude").policy.is_empty());
+    }
+
+    /// A dry run writes no policy and no mask, on every harness that has them.
+    #[test]
+    fn a_dry_run_stages_no_policy_and_no_mask() {
+        for adapter in Adapter::load_dir(Path::new(ADAPTERS)).unwrap() {
+            let Some(policy) = &adapter.policy else {
+                continue;
+            };
+            let fx = fixture();
+            let (own, repo) = decided_from(&fx);
+            let p = plan(
+                &fx.paths,
+                &fx.profile,
+                &adapter,
+                &fx.session,
+                &[],
+                Options {
+                    staging: Staging::Skip,
+                    persist: crate::persist::Mode::None,
+                    tty: true,
+                    account_dir: None,
+                    memory_bin: None,
+                    base: None,
+                    omh: own,
+                    repo,
+                    image: crate::image::tag_for(&adapter, None),
+                    resolves: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+            let guests = std::iter::once(PathBuf::from(&policy.path))
+                .chain(policy.mask.iter().map(|m| expand(m, GUEST_HOME)));
+            for guest in guests {
+                let m = p
+                    .mounts
+                    .iter()
+                    .find(|m| m.guest == guest)
+                    .unwrap_or_else(|| panic!("{}: the plan names {guest:?}", adapter.name));
+                assert!(!m.host.exists(), "{}: a dry run wrote {m:?}", adapter.name);
+            }
+        }
+    }
+
+    /// What the notice could not read reaches the plan said as such, and so
+    /// does what it read in the account.
+    #[test]
+    fn what_the_notice_reads_and_cannot_reaches_the_plan() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.session.worktree.join(".codex")).unwrap();
+        std::os::unix::fs::symlink("/nowhere", fx.session.worktree.join(".codex/config.toml"))
+            .unwrap();
+        let account = fx.paths.root.join("creds/codex/default");
+        let cache = account.join(".codex/cloud-config-bundle-cache.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, r#"{"signature":"x"}"#).unwrap();
+
+        let p = plan_account(&fx, "codex", Some(account));
+        assert!(
+            p.policy
+                .iter()
+                .any(|n| n.starts_with("could not check") && n.contains(".codex/config.toml")),
+            "{:#?}",
+            p.policy
+        );
+        assert!(
+            p.policy
+                .iter()
+                .any(|n| n.contains("does not start offline")),
+            "{:#?}",
+            p.policy
+        );
+    }
+
+    /// A harness with a policy and no MCP document is handed no server, so its
+    /// policy admits none — never omh's servers, which nothing staged.
+    #[test]
+    fn a_policy_with_no_mcp_document_beside_it_admits_nothing() {
+        let (dir, _) = without_hooks();
+        let plain = std::fs::read_to_string(dir.path().join("plain.toml")).unwrap();
+        let mcp = plain.find("[capabilities.mcp]").expect("claude has mcp");
+        let next = plain[mcp + 1..].find("\n[").unwrap() + mcp + 2;
+        std::fs::write(
+            dir.path().join("plain.toml"),
+            format!(
+                "{}{}\n[policy]\npath = \"/etc/plain.json\"\nformat = \"claude-managed\"\n",
+                &plain[..mcp],
+                &plain[next..]
+            ),
+        )
+        .unwrap();
+        let adapter = Adapter::find(dir.path(), "plain").unwrap();
+        assert!(adapter.supports(Capability::Mcp).is_none());
+
+        let fx = fixture();
+        let p = plan_with(&fx, &adapter, decided_from(&fx));
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new("/etc/plain.json"))
+            .expect("the policy is written whatever is staged");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mount.host).unwrap()).unwrap();
+        assert_eq!(doc["allowedMcpServers"], serde_json::json!([]), "{doc}");
     }
 
     /// A file a session could write and the harness trusts on its next start

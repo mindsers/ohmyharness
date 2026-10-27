@@ -577,17 +577,38 @@ impl Adapter {
         let Some(policy) = &self.policy else {
             return Ok(());
         };
+        let walks = |p: &str| {
+            Path::new(p)
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        };
         let at = &policy.path;
+        let shown = path.display();
         anyhow::ensure!(
-            at.starts_with('/') && !at.starts_with("/work/") && !at.starts_with("/home/"),
-            "adapter {}: `[policy] path = {at:?}` must be absolute, outside /work and $HOME \
-             — a session can write both",
-            path.display()
+            at.starts_with('/'),
+            "adapter {shown}: `[policy] path = {at:?}` must be absolute — it is a literal \
+             path in the image, never expanded"
         );
-        if let Some(mask) = policy.mask.iter().find(|m| !m.starts_with("$HOME/")) {
-            anyhow::bail!(
-                "adapter {}: `[policy] mask` entry {mask:?} must start with $HOME/",
-                path.display()
+        anyhow::ensure!(
+            !walks(at),
+            "adapter {shown}: `[policy] path = {at:?}` has no `..` to walk — name the file"
+        );
+        // The image's admin layer, which no mount omh makes writable reaches:
+        // `/work`, the harness's home and `/omh` all do.
+        anyhow::ensure!(
+            Path::new(at).starts_with("/etc"),
+            "adapter {shown}: `[policy] path = {at:?}` must be under /etc/ — a session \
+             writes /work, the harness's home and omh's own mounts"
+        );
+        for mask in &policy.mask {
+            anyhow::ensure!(
+                mask.starts_with("$HOME/"),
+                "adapter {shown}: `[policy]` mask entry {mask:?} must start with $HOME/"
+            );
+            anyhow::ensure!(
+                !walks(mask),
+                "adapter {shown}: `[policy]` mask entry {mask:?} has a `..` — it is joined \
+                 into the account directory on the host"
             );
         }
         Ok(())
@@ -1323,11 +1344,24 @@ render = "concat"
     /// the harness's home — the only place a session's write can outlast it.
     #[test]
     fn a_policy_a_session_could_reach_is_refused() {
+        // Each refused for its own reason, named in a message no other case
+        // shares — a shared message would let any one rule stand in for all.
         for (policy, names) in [
-            ("path = \"etc/x.toml\"", "absolute"),
-            ("path = \"/work/x.toml\"", "/work"),
-            ("path = \"$HOME/x.toml\"", "$HOME"),
-            ("path = \"/etc/x.toml\"\nmask = [\"/tmp/cache\"]", "$HOME"),
+            ("path = \"etc/x.toml\"", "must be absolute"),
+            ("path = \"$HOME/x.toml\"", "must be absolute"),
+            ("path = \"/etc/../work/x.toml\"", "no `..`"),
+            ("path = \"/work/x.toml\"", "under /etc/"),
+            ("path = \"/work\"", "under /etc/"),
+            ("path = \"/home/agent/x.toml\"", "under /etc/"),
+            ("path = \"/omh/memory/x.toml\"", "under /etc/"),
+            (
+                "path = \"/etc/x.toml\"\nmask = [\"/tmp/cache\"]",
+                "start with $HOME/",
+            ),
+            (
+                "path = \"/etc/x.toml\"\nmask = [\"$HOME/.codex/../../tmp/x\"]",
+                "mask entry \"$HOME/.codex/../../tmp/x\" has a `..`",
+            ),
         ] {
             let d = tempfile::tempdir().unwrap();
             write(

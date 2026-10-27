@@ -14157,10 +14157,35 @@ fn a_system_path_ejects_under_system() {
     );
     // The launch's policy is part of what a launch writes, and it names the
     // same servers the document beside it does.
-    let policy = std::fs::read_to_string(out.join("system/etc/codex/requirements.toml"))
-        .expect("and the requirements a launch writes, under system/");
+    let policy: toml::Table =
+        std::fs::read_to_string(out.join("system/etc/codex/requirements.toml"))
+            .expect("and the requirements a launch writes, under system/")
+            .parse()
+            .unwrap();
+    assert_eq!(
+        policy["mcp_servers"]["demo"]["identity"]["command"]["executable"].as_str(),
+        Some("demo-server"),
+        "{policy}"
+    );
+
+    // Claude's is a system path too.
+    let out = sb.home.join("ejected-claude");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
     assert!(
-        policy.contains("[mcp_servers.demo.identity.command]"),
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let policy: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("system/etc/claude-code/managed-settings.d/omh.json"))
+            .expect("and claude's managed settings, under system/"),
+    )
+    .unwrap();
+    assert!(
+        policy["allowedMcpServers"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({"serverCommand": ["demo-server"]})),
         "{policy}"
     );
 }

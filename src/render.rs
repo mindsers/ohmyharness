@@ -2068,6 +2068,10 @@ mod tests {
         let servers = staged();
         let doc = claude_policy(&servers);
         assert_eq!(doc["allowManagedMcpServersOnly"], true);
+        assert_eq!(
+            doc["disableClaudeAiConnectors"], true,
+            "with servers staged too"
+        );
         let mut allowed: Vec<Vec<String>> = doc["allowedMcpServers"]
             .as_array()
             .expect("an `allowedMcpServers` list")
