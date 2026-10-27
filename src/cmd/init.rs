@@ -480,7 +480,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // `report::Init` for why this is not printed as it happens.
     let mut summary = report::Init::default();
 
-    let adapters = refresh_catalogue(&paths, ctx)?;
+    let adapters = refresh_catalogue(&paths, ctx)?.adapters;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -1058,7 +1058,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 /// shipped fix lands over the old copy, and an edit of yours is kept as
 /// `.yours` (see `install_bundled`). This is the one place that list lives, so
 /// `init` and `upgrade` cannot refresh different things.
-pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<String>> {
+pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Refreshed> {
     // Adapters first: a fresh install has none, so `omh <harness>` would fail
     // no matter what else ran.
     let adapters = install_bundled_adapters(paths, ctx)?;
@@ -1078,23 +1078,50 @@ pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<Str
     // The catalogue's own entries, for the reason the files above are managed:
     // a shipped fix has to reach an existing install. Yours are untouched.
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    // `warn`, not `progress`, for the reason `say_what_moved_off_the_old_key`
-    // gives: your file changed, once, and `--json` hides progress.
-    let removed =
-        config::remove_own_servers(paths, &manifest.servers(), &manifest.retired_servers())?;
-    for server in removed {
-        let edit = if server.edited {
-            " It differed from omh's definition, and your edit is not kept."
-        } else {
-            ""
+    let taken_out = config::remove_own_servers(paths, &manifest, false)?;
+    say_what_was_taken_out(&taken_out, false, ctx);
+    Ok(Refreshed {
+        adapters,
+        taken_out,
+    })
+}
+
+/// What [`refresh_catalogue`] did beyond the managed files.
+pub(crate) struct Refreshed {
+    /// The adapter names, which `init` needs to detect a harness and `upgrade`
+    /// reports on.
+    pub adapters: Vec<String>,
+    /// omh's servers taken out of your `mcp.json`.
+    pub taken_out: Vec<config::Removed>,
+}
+
+/// One line per server of omh's taken out of your catalogue — or, on a
+/// preview, that would be.
+///
+/// `warn`, not `progress`, for the reason `say_what_moved_off_the_old_key`
+/// gives: a file of yours changed, once, and `--json` hides progress.
+pub(crate) fn say_what_was_taken_out(taken_out: &[config::Removed], preview: bool, ctx: &out::Ctx) {
+    let verb = if preview { "would take" } else { "took" };
+    for server in taken_out {
+        let kept = match (server.differs, preview) {
+            (true, false) => {
+                " It was not what omh ships now, so your catalogue as it was is saved as \
+                 mcp.json.yours."
+            }
+            (true, true) => {
+                " It is not what omh ships now, so your catalogue as it is would be saved \
+                 as mcp.json.yours."
+            }
+            (false, _) => "",
         };
         ctx.warn(&format!(
-            "took the `{}` server out of your catalogue — it is omh's, part of a feature \
-             omh generates at launch, and switched with `omh set <feature> on|off`.{edit}",
-            server.name
+            "{verb} the `{name}` server out of your catalogue — the name is omh's: the \
+             {feature} feature's server is generated at launch, and `omh set {feature} \
+             on|off` switches it.{kept}",
+            name = server.name,
+            feature = server.feature,
         ));
     }
-    Ok(adapters)
 }
 
 /// Adapters ship with omh but live in `~/.omh`. Without this a fresh install

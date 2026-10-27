@@ -1108,33 +1108,65 @@ pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
 /// sections. An earlier omh seeded them into `~/.omh/mcp.json`, which made a
 /// server the one part of a feature you could edit or delete on its own — and
 /// a deleted one took the hooks and the section with it while the rest of the
-/// feature stayed mounted. So the copies go, under the names they have now
-/// (`own`, the manifest's servers) and the names they had (`retired`, old to
-/// new), and each is answered with whether it differed from omh's definition:
-/// that is an edit of yours, and it is not kept.
+/// feature stayed mounted. So the copies go, under the names the manifest's
+/// servers have now and the names they had.
+///
+/// **Yours stay exactly as written.** The file is edited as JSON, not read
+/// into the servers omh models and written back, so a field omh has no use for
+/// — on a server of yours or beside `mcpServers` — survives; it is written
+/// whole to a sibling and renamed over, so a failed write leaves the old file.
+///
+/// **Nothing is lost.** A copy that differs from what omh ships now — an
+/// argument an older omh shipped, or a server of yours under a name omh holds
+/// — leaves the file as it was saved as `mcp.json.yours`, the rule every
+/// managed file follows. Who made the difference omh cannot know, and the
+/// answer does not guess.
+///
+/// `dry_run` answers the same and writes nothing.
 pub fn remove_own_servers(
     paths: &Paths,
-    own: &BTreeMap<String, Server>,
-    retired: &BTreeMap<String, String>,
+    manifest: &crate::base::Manifest,
+    dry_run: bool,
 ) -> Result<Vec<Removed>> {
     let path = mcp_path(paths);
-    let mut all = read_servers(&path)?;
+    let Some(raw) = read_layer(&path)? else {
+        return Ok(Vec::new());
+    };
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
+        return Ok(Vec::new());
+    };
+    let ships = manifest.servers();
     let mut removed = Vec::new();
-    let names = own
-        .keys()
-        .map(|name| (name.clone(), name.clone()))
-        .chain(retired.iter().map(|(old, new)| (old.clone(), new.clone())));
-    for (name, is) in names {
-        if let Some(held) = all.remove(&name) {
-            removed.push(Removed {
-                edited: own.get(&is) != Some(&held),
-                name,
-            });
+    for entry in manifest
+        .entries
+        .iter()
+        .filter(|e| e.kind == crate::base::Kind::Mcp)
+    {
+        for name in std::iter::once(&entry.name).chain(&entry.was) {
+            if let Some(held) = servers.remove(name) {
+                let held: Option<Server> = serde_json::from_value(held).ok();
+                removed.push(Removed {
+                    name: name.clone(),
+                    feature: entry.feature.clone(),
+                    differs: held.as_ref() != ships.get(&entry.name),
+                });
+            }
         }
     }
-    if !removed.is_empty() {
-        write_servers(&path, &all)?;
+    if removed.is_empty() || dry_run {
+        return Ok(removed);
     }
+    if removed.iter().any(|r| r.differs) {
+        let backup = path.with_file_name("mcp.json.yours");
+        std::fs::write(&backup, &raw)
+            .with_context(|| format!("saving your catalogue as {}", backup.display()))?;
+    }
+    let written = path.with_file_name(".mcp.json.omh-new");
+    std::fs::write(&written, serde_json::to_string_pretty(&doc)? + "\n")
+        .with_context(|| format!("writing {}", written.display()))?;
+    std::fs::rename(&written, &path).with_context(|| format!("writing {}", path.display()))?;
     Ok(removed)
 }
 
@@ -1143,8 +1175,11 @@ pub fn remove_own_servers(
 pub struct Removed {
     /// The name your catalogue held it under.
     pub name: String,
-    /// It differed from omh's definition — an edit of yours, now gone.
-    pub edited: bool,
+    /// The feature whose server it is.
+    pub feature: String,
+    /// It was not what omh ships now, so the file as it was is in
+    /// `mcp.json.yours`.
+    pub differs: bool,
 }
 
 pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
@@ -1984,50 +2019,47 @@ mod tests {
     }
 
     /// omh's servers leave your catalogue under every name they had, and
-    /// yours stay: what is taken is answered with whether it was an edit of
-    /// yours, since that edit is what goes with it.
+    /// yours stay: what is taken is answered with its feature and whether it
+    /// was what omh ships now — when it was not, the file as it was is kept.
     #[test]
     fn omhs_servers_leave_the_catalogue_and_yours_stay() {
         let (_d, paths) = fixture();
-        let server = |c: &str| Server {
-            command: c.into(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-        };
-        let own = BTreeMap::from([
-            ("omh-codegraph".to_string(), server("cbm")),
-            ("omh-memory".to_string(), server("omh")),
-        ]);
-        let retired = BTreeMap::from([
-            ("codegraph".to_string(), "omh-codegraph".to_string()),
-            ("memory".to_string(), "omh-memory".to_string()),
-        ]);
-        seed(
-            &paths,
-            Layer::Personal,
-            "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"cbm"},"omh-memory":{"command":"edited"},
-                              "mine":{"command":"m"}}}"#,
+        let manifest = crate::base::Manifest::shipped().unwrap();
+        let body = r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},
+                              "omh-memory":{"command":"edited"},
+                              "mine":{"command":"m"}}}"#;
+        seed(&paths, Layer::Personal, "mcp.json", body);
+
+        let preview = remove_own_servers(&paths, &manifest, true).unwrap();
+        assert_eq!(preview.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(mcp_path(&paths)).unwrap(),
+            body,
+            "a preview writes nothing"
         );
 
-        let removed = remove_own_servers(&paths, &own, &retired).unwrap();
+        let removed = remove_own_servers(&paths, &manifest, false).unwrap();
+        let mut by_name: Vec<(&str, &str, bool)> = removed
+            .iter()
+            .map(|r| (r.name.as_str(), r.feature.as_str(), r.differs))
+            .collect();
+        by_name.sort();
         assert_eq!(
-            removed,
+            by_name,
             [
-                Removed {
-                    name: "omh-memory".into(),
-                    edited: true
-                },
-                Removed {
-                    name: "codegraph".into(),
-                    edited: false
-                },
+                ("codegraph", "codegraph", false),
+                ("omh-memory", "memory", true)
             ]
         );
         let held = read_servers(&mcp_path(&paths)).unwrap();
         assert_eq!(held.keys().collect::<Vec<_>>(), ["mine"]);
+        assert_eq!(
+            std::fs::read_to_string(paths.root.join("mcp.json.yours")).unwrap(),
+            body,
+            "one copy differed, so the file as it was is kept"
+        );
         assert!(
-            remove_own_servers(&paths, &own, &retired)
+            remove_own_servers(&paths, &manifest, false)
                 .unwrap()
                 .is_empty(),
             "nothing the second time"

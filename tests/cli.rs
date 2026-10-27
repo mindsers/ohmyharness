@@ -749,10 +749,13 @@ exit 0
 
 /// omh's servers are generated from the base set, so `omh upgrade` takes the
 /// copies an earlier omh seeded into `~/.omh/mcp.json` out of it — under the
-/// names they have now and the ones they had — and leaves yours. Each is named
-/// on stderr, `--json` or not, and a copy you had edited says the edit is not
-/// kept: it was the one part of a feature you could change on its own, and
-/// that is what ends here.
+/// names they have now and the ones they had — and leaves yours, every field
+/// of them. Each is named on stderr, `--json` or not, and in the JSON report.
+///
+/// A copy that differed from what omh ships now is not thrown away: the file
+/// as it was is saved as `mcp.json.yours`, as every managed file is, and the
+/// line says so without saying who changed it — an older omh shipped other
+/// arguments, and a server of yours may sit under one of the names.
 #[test]
 fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
     let sb = sandbox();
@@ -761,14 +764,12 @@ fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
     let _log = sb.fake_docker();
     std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
     let catalogue = sb.home.join(".omh/mcp.json");
-    std::fs::write(
-        &catalogue,
-        r#"{"mcpServers":{
+    let before = r#"{"mcpServers":{
              "codegraph":{"command":"codebase-memory-mcp"},
              "omh-memory":{"command":"omh","args":["memory","serve","--edited"]},
-             "mine":{"command":"my-server","args":["--flag"]}}}"#,
-    )
-    .unwrap();
+             "mine":{"command":"my-server","args":["--flag"],"timeout":30}},
+           "theirs":true}"#;
+    std::fs::write(&catalogue, before).unwrap();
 
     let out = sb.omh(&["--json", "upgrade"]);
     assert!(
@@ -786,6 +787,16 @@ fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
         .collect();
     assert_eq!(names, ["mine"], "omh's out, yours kept: {doc}");
     assert_eq!(doc["mcpServers"]["mine"]["args"][0], "--flag", "{doc}");
+    assert_eq!(
+        doc["mcpServers"]["mine"]["timeout"], 30,
+        "a field omh does not model is yours too: {doc}"
+    );
+    assert_eq!(doc["theirs"], true, "and so is the rest of the file: {doc}");
+    assert_eq!(
+        std::fs::read_to_string(sb.home.join(".omh/mcp.json.yours")).unwrap(),
+        before,
+        "the file as it was, because one copy differed"
+    );
 
     let said = String::from_utf8_lossy(&out.stderr);
     for name in ["`codegraph`", "`omh-memory`"] {
@@ -793,15 +804,23 @@ fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
     }
     assert!(
         said.lines()
-            .any(|l| l.contains("`omh-memory`") && l.contains("not kept")),
-        "and that the edit is gone: {said}"
+            .any(|l| l.contains("`omh-memory`") && l.contains("mcp.json.yours")),
+        "and where the differing copy went: {said}"
     );
     assert!(
-        !said
-            .lines()
-            .any(|l| l.contains("`codegraph`") && l.contains("not kept")),
-        "an untouched copy loses nothing: {said}"
+        !said.contains("your edit"),
+        "omh cannot know who changed it: {said}"
     );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    let mut taken: Vec<&str> = report["taken_out"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no `taken_out` in {report}"))
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    taken.sort();
+    assert_eq!(taken, ["codegraph", "omh-memory"], "{report}");
 
     let out = sb.omh(&["upgrade"]);
     assert!(out.status.success());
@@ -809,6 +828,64 @@ fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
         !String::from_utf8_lossy(&out.stderr).contains("catalogue"),
         "and nothing to say the second time: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A preview says what an upgrade would take out of your catalogue, and takes
+/// nothing: the one edit `upgrade` makes to a file of yours is the one a
+/// preview most has to show.
+#[test]
+fn a_previewed_upgrade_names_what_it_would_take_out_and_writes_nothing() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    let catalogue = sb.home.join(".omh/mcp.json");
+    let before = r#"{"mcpServers":{"memory":{"command":"omh"},"mine":{"command":"m"}}}"#;
+    std::fs::write(&catalogue, before).unwrap();
+
+    let out = sb.omh(&["--dry-run", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&catalogue).unwrap(), before);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.lines()
+            .any(|l| l.contains("`memory`") && l.contains("would")),
+        "names what it would take out: {said}"
+    );
+}
+
+/// A catalogue omh cannot read stops `omh upgrade` before it writes anything,
+/// naming the server: refreshed adapters and a base set beside a refusal read
+/// as though nothing happened.
+#[test]
+fn a_catalogue_upgrade_cannot_read_stops_it_before_any_write() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"remote":{"url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    let adapter = sb.home.join(".omh/adapters/claude.toml");
+    let shipped = std::fs::read_to_string(&adapter).unwrap();
+    std::fs::write(&adapter, format!("{shipped}\n# yours\n")).unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(!out.status.success(), "a catalogue it cannot read");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("`remote`"), "names the server: {said}");
+    assert!(
+        !sb.home.join(".omh/adapters/claude.toml.yours").exists(),
+        "and refreshed nothing first: {said}"
     );
 }
 

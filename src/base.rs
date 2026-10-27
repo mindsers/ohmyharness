@@ -405,15 +405,6 @@ impl Manifest {
         self.entries.iter().find(|e| e.name == name)
     }
 
-    /// Every name a server of omh's used to have, to the name it has now.
-    pub fn retired_servers(&self) -> BTreeMap<String, String> {
-        self.entries
-            .iter()
-            .filter(|e| e.kind == Kind::Mcp)
-            .flat_map(|e| e.was.iter().map(|old| (old.clone(), e.name.clone())))
-            .collect()
-    }
-
     /// Every name omh owns, by capability, each pointing at its feature.
     ///
     /// One derivation with two readers — `own`'s `reserved`, which stops a file

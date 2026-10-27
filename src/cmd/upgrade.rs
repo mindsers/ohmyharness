@@ -48,13 +48,21 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
     // a committed file rewritten. A refusal after all that reads as though
     // nothing happened.
     crate::cmd::session::resolved(&paths)?;
+    // And your catalogue, for the same reason: the refresh below rewrites it,
+    // and a server omh cannot read is named here, before anything else is.
+    config::servers(&paths)?;
 
     // Refresh first — moving the pins is what moves the tags. A dry run reads
-    // the catalogue as it stands and writes nothing.
-    let refreshed = if dry_run {
-        Vec::new()
+    // the catalogue as it stands and writes nothing, but still says which of
+    // omh's servers it would take out of yours, against the base set it would
+    // install.
+    let (refreshed, taken_out) = if dry_run {
+        let would = config::remove_own_servers(&paths, &crate::base::Manifest::shipped()?, true)?;
+        crate::cmd::init::say_what_was_taken_out(&would, true, ctx);
+        (Vec::new(), would)
     } else {
-        refresh_catalogue(&paths, ctx)?
+        let done = refresh_catalogue(&paths, ctx)?;
+        (done.adapters, done.taken_out)
     };
 
     // Classify — and, on a real run, rebuild — each installed adapter, and
@@ -219,6 +227,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         provision: Some(provision),
         harnesses,
         refreshed,
+        taken_out: taken_out.into_iter().map(|r| r.name).collect(),
         stale_sessions,
         sessions_unchecked,
         dry_run,
