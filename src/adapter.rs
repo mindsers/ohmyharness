@@ -103,8 +103,8 @@ pub struct Adapter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
-    /// Absolute guest path the harness reads its policy from. Outside `/work`
-    /// and `$HOME`, in the image omh builds.
+    /// Guest path the harness reads its policy from: a literal, never
+    /// expanded, under `/etc` in the image omh builds — see `check_policy`.
     pub path: String,
     pub format: PolicyFormat,
     /// Guest paths a session can write and the harness trusts on its next
@@ -569,10 +569,12 @@ impl Adapter {
     }
 
     /// The policy is above everything a session writes only if a session
-    /// cannot write it: an absolute path in the image, outside `/work` and the
-    /// harness's home. A mask is the other way round — it hides a file in the
-    /// home, where the account is, and `auth::prepare` lays its mountpoint
-    /// down there.
+    /// cannot write it: an absolute path under `/etc`, the image's admin layer,
+    /// which none of the mounts omh makes writable reaches (`/work`, the
+    /// harness's home, `/omh`). A mask is the other way round — it hides a file
+    /// in the home, where the account is, and `auth::prepare` lays its
+    /// mountpoint down there. Neither may walk with `..`: `auth::prepare` and
+    /// `omh eject` join both into host paths.
     fn check_policy(&self, path: &Path) -> Result<()> {
         let Some(policy) = &self.policy else {
             return Ok(());
@@ -1341,7 +1343,9 @@ render = "concat"
     }
 
     /// A policy lives where no session writes, and a mask hides something in
-    /// the harness's home — the only place a session's write can outlast it.
+    /// the harness's home — the one place a session's write reaches the later
+    /// sessions of every repo. Neither walks with `..`: both are joined into
+    /// host paths.
     #[test]
     fn a_policy_a_session_could_reach_is_refused() {
         // Each refused for its own reason, named in a message no other case

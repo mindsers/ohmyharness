@@ -317,16 +317,22 @@ fn mcp_approving(
 // ── policy ──────────────────────────────────────────────────────────────────
 
 /// The harness's policy file: the servers this launch staged are the only ones
-/// it may load, by name and by exact command and arguments.
+/// it may load, by exact command and arguments — and by name too, on Codex.
+/// Claude Code's `serverCommand` carries no name, and neither harness compares
+/// `env`: an entry with omh's command and arguments and its own `env` passes
+/// (risk 1b).
 ///
 /// `servers` is what [`servers`] made for the MCP document — the allowlist and
 /// the document are the same list, or the lock turns off a server omh staged.
 pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Result<String> {
     match format {
         // The matcher form, `{ executable, args = [{ match = "exact", … }] }`,
-        // compares every argument in place and their count. The bare
-        // `command = "…"` form compares the executable alone, which would admit
-        // omh's own command with arguments a session chose.
+        // compares every argument in place and their count (measured in
+        // 0.162.1: other arguments, or one more, load disabled). The bare
+        // `command = "…"` form compares the executable alone (read in Codex's
+        // source), which would admit omh's own command with arguments a
+        // session chose. `args` has no default there, so `args = []` is
+        // written for a server with none.
         PolicyFormat::CodexRequirements => {
             #[derive(Serialize)]
             struct Exact<'a> {
@@ -436,7 +442,10 @@ pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Resul
 /// Pinned in the policy so no layer a session writes can move it.
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/";
 
-/// A plugin name no plugin has, holding an empty server list.
+/// A plugin name omh does not expect to exist. Its entry is there so that some
+/// plugin entry has `mcp_servers` set, which holds every plugin to its own
+/// list (read in Codex's source); a plugin that did have this name gets an
+/// empty list anyway.
 const NO_PLUGIN: &str = "omh-none";
 
 /// Inverse of `mcp`: read a harness's own config back into canonical form.
@@ -1972,7 +1981,8 @@ mod tests {
 
     /// Two of omh's shapes and one of yours, with an argument a careless
     /// writer would mangle — and one server with no arguments at all, which
-    /// Codex's matcher still needs `args = []` for.
+    /// Codex's matcher still needs `args = []` for (it has no default, read in
+    /// Codex's source).
     fn staged() -> BTreeMap<String, Server> {
         BTreeMap::from([
             (
@@ -2046,15 +2056,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_runs_managed_hooks_only_and_keeps_its_tokens_at_chatgpt() {
+    fn codex_requirements_set_managed_hooks_only_and_pin_chatgpt_base_url() {
         let doc = codex_policy(&staged());
         assert_eq!(doc["allow_managed_hooks_only"].as_bool(), Some(true));
         assert_eq!(
             doc["chatgpt_base_url"].as_str(),
             Some("https://chatgpt.com/backend-api/")
         );
-        // A requirements `[hooks]` table beside another layer's `managed_dir`
-        // is a composition error, and Codex refuses to start.
+        // A requirements `[hooks]` table whose `managed_dir` differs from another
+        // layer's is a composition error, and Codex refuses to start (read in
+        // Codex's source).
         assert!(doc.get("hooks").is_none(), "{doc}");
     }
 
@@ -2098,6 +2109,8 @@ mod tests {
         assert_eq!(allowed, want);
     }
 
+    /// Prints both policies for a reader:
+    /// `cargo test show_the_policies -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn show_the_policies() {

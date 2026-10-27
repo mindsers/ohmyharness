@@ -166,19 +166,21 @@ fills it from the launch:
 
 | Field | What it says | Default |
 |---|---|---|
-| `path` | the absolute guest path the harness reads its policy from, outside `/work` and `$HOME` | required |
+| `path` | the guest path the harness reads its policy from: absolute, under `/etc/`, with no `..` — a literal, never expanded | required |
 | `format` | `codex-requirements` or `claude-managed` | required |
-| `mask` | guest paths a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
+| `mask` | guest paths under `$HOME/`, with no `..`, that a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
 
 The policy admits exactly the MCP servers the launch staged, by command and
-arguments compared exactly — and by name too, on Codex. It is written even when
+arguments compared exactly — and by name too, on Codex. Neither harness
+compares `env`, which is still open ([risk 1b](/concepts/risks/#1b-the-account-directory-is-writable-and-every-repo-shares-it)). It is written even when
 nothing is staged, because a harness with no allowlist admits anything. What it
 stops in your checkout or account — a repo's own `.codex/config.toml` servers
 or hooks, an enterprise bundle cache — is named at launch and by `omh doctor`,
 and `omh eject` writes it out under `system/`.
 
-- **codex** — `requirements.toml`: the `[mcp_servers]` allowlist, an empty one
-  for every plugin, `allow_managed_hooks_only` (omh's hooks are in the system
+- **codex** — `requirements.toml`: the `[mcp_servers]` allowlist, an entry
+  that holds every plugin's servers to a list of their own — empty for any
+  plugin not named — `allow_managed_hooks_only` (omh's hooks are in the system
   layer and still run; a repo's `.codex/config.toml` hooks do not), and a
   pinned `chatgpt_base_url`. An enterprise account's cloud bundle cache is
   masked, so Codex fetches the bundle at every start, and offline it does not

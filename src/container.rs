@@ -821,8 +821,9 @@ pub fn plan(
 ///
 /// Written for every launch, never behind [`carries`]: the allowlist matters
 /// most when it is empty, since a harness with no allowlist admits anything.
-/// Its servers are the MCP document's own — the same [`crate::render::servers`]
-/// call, when that document is staged at all, and none when it is not.
+/// Its servers are the MCP document's own — [`crate::render::servers`] on the
+/// same inputs, through [`admitted`], when that document is staged at all, and
+/// none when it is not.
 #[allow(clippy::too_many_arguments)]
 fn stage_policy(
     policy: &crate::adapter::Policy,

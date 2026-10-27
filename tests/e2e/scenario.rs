@@ -671,12 +671,16 @@ fn transcript(s: &Session) {
 }
 
 /// A server the agent adds — with the harness's own command, or into the file
-/// directly — lands in the account, which every later session on it reads. The policy omh fills from
-/// the launch leaves it out, and keeps omh's own in. Same command as an omh
-/// server would not help: the lock compares arguments too.
+/// directly — lands in the harness's home: the account, on a real launch, which
+/// every later session on it reads. The policy omh fills from the launch loads
+/// it disabled (Codex) or leaves it out of the list (Claude Code), and keeps
+/// omh's own in. On Claude Code a server with omh's own command and one more
+/// argument is left out too: the lock compares every argument, not only the
+/// command — though not `env` (risk 1b).
 ///
 /// One session is enough: the policy is read at every start of the harness,
-/// and `mcp list` is a start. Harnesses with no policy omh fills are skipped.
+/// and `mcp list` is a start. Harnesses other than codex and claude are
+/// skipped — add one here when its adapter gains `[policy]`.
 fn planted_server(s: &Session) {
     let (add, list, remove) = match s.harness.name {
         "codex" => (
@@ -685,12 +689,14 @@ fn planted_server(s: &Session) {
             "codex mcp remove e2e-planted",
         ),
         // Written into the file rather than through `claude mcp add`, which
-        // refuses under the lock ("not allowed by enterprise policy") — a
-        // session is not held to the CLI. `cat >` keeps the bind-mounted inode.
+        // refuses under the lock ("not allowed by enterprise policy", measured
+        // by hand in 2.1.300) — a session is not held to the CLI. `cat >` keeps
+        // the inode, as a session in a real account must: there
+        // `~/.claude.json` is a bind-mounted file.
         "claude" => (
-            r#"jq '.mcpServers["e2e-planted"] = {"command":"/bin/true","args":[]}' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
+            r#"jq '.mcpServers["e2e-planted"] = {"command":"/bin/true","args":[]} | .mcpServers["e2e-argv"] = {"command":"omh","args":["memory","serve","--notes","/omh/memory","--e2e"]}' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
             "claude mcp list",
-            r#"jq 'del(.mcpServers["e2e-planted"])' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
+            r#"jq 'del(.mcpServers["e2e-planted"], .mcpServers["e2e-argv"])' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
         ),
         _ => return,
     };
@@ -721,10 +727,9 @@ fn planted_server(s: &Session) {
             }
         }
         _ => {
-            assert!(
-                !listed.contains("e2e-planted"),
-                "the planted server loads: {listed}"
-            );
+            for planted in ["e2e-planted", "e2e-argv"] {
+                assert!(!listed.contains(planted), "{planted} loads: {listed}");
+            }
             for own in ["omh-codegraph", "omh-memory"] {
                 assert!(listed.contains(own), "{own} is not listed: {listed}");
             }

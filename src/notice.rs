@@ -343,10 +343,15 @@ pub fn policy(
             .and_then(toml::Value::as_table)
             .map(|t| {
                 t.keys()
+                    // `untrusted` keeps newlines, for git's multi-line
+                    // messages; a server name has none to keep, and one would
+                    // start a line that reads as omh's.
                     .map(|k| crate::out::untrusted(k).replace('\n', "\u{fffd}"))
                     .collect()
             })
             .unwrap_or_default();
+        // What Codex does with the project layer is read in its source; the
+        // measurement was the user layer (`codex mcp add`).
         if !servers.is_empty() {
             said.push(format!(
                 "this repo's .codex/config.toml declares MCP servers ({}) — Codex loads them \
@@ -359,7 +364,7 @@ pub fn policy(
             said.push(
                 "this repo's .codex/config.toml declares hooks, which do not run — Codex runs \
                  managed hooks only, and omh's are the managed ones. A hook goes in \
-                 .omh/hooks/, in omh's words"
+                 .omh/hooks/ or your catalogue, in omh's words"
                     .into(),
             );
         }

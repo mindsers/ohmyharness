@@ -1850,8 +1850,9 @@ pub(crate) fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
 ///
 /// Once per launch, which `say_rules` is not: `run` says the rules before its
 /// dry-run return and `session_up` says them again. So this is called where
-/// each path says it once — `session_up` for a real launch or attach, `run`'s
-/// dry run, and `omh doctor`.
+/// each path says it once — `session_up` for a launch that starts the
+/// container (a reattach to a running one says nothing new), `run`'s dry run,
+/// and `omh doctor`.
 pub(crate) fn say_policy(plan: &container::Plan, ctx: &out::Ctx) {
     for note in &plan.policy {
         ctx.warn(note);

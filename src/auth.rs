@@ -186,8 +186,9 @@ pub fn mounts(
 /// Create the files a bind mount needs to land as files.
 ///
 /// Also lays down mountpoints for any capability nested inside a credential
-/// directory: Docker refuses to create one inside a bind-mounted host directory
-/// ("is outside of rootfs") and the whole launch fails.
+/// directory, and for any path `[policy] mask` hides there: Docker refuses to
+/// create one inside a bind-mounted host directory ("is outside of rootfs")
+/// and the whole launch fails.
 ///
 /// Docker turns a mount of a non-existent host path into a *directory*, so a
 /// first login would write its token into a folder the harness cannot read.

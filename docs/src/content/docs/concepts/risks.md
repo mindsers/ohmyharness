@@ -100,17 +100,26 @@ Codex omh fills the harness's own policy layer on every launch — see
 [`[policy]`](/reference/adapters/#policy-what-a-session-may-load) — and it
 admits exactly the servers the launch staged, by command and arguments. A
 server a session adds with `codex mcp add` stays in the account and loads
-disabled, in that session and every later one; on Claude Code `claude mcp add`
-refuses it, and one written into `~/.claude.json` directly is left out.
-`tests/e2e` asserts both. Codex also runs managed hooks only, so a hook
-written into `~/.codex/config.toml` does not run either.
+disabled in that session, and in every later one, since every launch writes
+the same policy. On Claude Code `claude mcp add` refuses it (measured by hand
+on 2.1.300), and one written into `~/.claude.json` directly is left out — so
+is one with omh's own command and one more argument. `tests/e2e` asserts the
+Codex case and the direct writes. Codex also runs managed hooks only, so a hook
+written into `~/.codex/config.toml` does not run either (read in Codex's
+source; nothing in `tests/e2e` plants one).
 
 **Still open:**
 
 - on Claude Code, an entry in `~/.claude.json` with the *same* command and
   arguments as one of omh's servers and an `env` of its own passes the lock —
-  the allowlist does not compare `env`. A per-session `~/.claude.json` closes
-  it, and is the next step of #197;
+  the allowlist does not compare `env` (measured in #197). A per-session
+  `~/.claude.json` closes it, tracked in #197 §0;
+- on Codex the same: the requirements identity compares neither `env` nor
+  `cwd` (read in Codex's source), and a per-session `config.toml` closes it,
+  also tracked in #197 §0;
+- an enterprise account's cloud bundle composes above omh's requirements: its
+  allowlist is the union of both, and an organisation's
+  `allow_managed_hooks_only = false` wins over omh's (read in Codex's source);
 - the instruction files and omp's hook directory above. The mitigation for
   those is read-only overlays inside the account directory, the way omh
   already mounts its own files there.

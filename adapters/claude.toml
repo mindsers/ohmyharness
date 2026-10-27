@@ -135,22 +135,29 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 
 # What a session may load, decided by the launch and not by the session.
 #
-# A drop-in under `managed-settings.d`, which 2.1.300 reads: managed settings
-# sit above every file a session can write. `allowManagedMcpServersOnly` with
-# an `allowedMcpServers` list of the servers the launch staged, each a
-# `serverCommand` — the command and its arguments, compared exactly. Measured
-# in the 2.1.300 image: `["/bin/true", "a", "b"]` admitted its server, while
-# the same command with other arguments and another command were left out of
-# `claude mcp list`. Under the lock `claude mcp add` refuses outright ("not
-# allowed by enterprise policy"), and a server a session writes into
-# `~/.claude.json` itself is left out — measured both ways in `tests/e2e`.
+# Claims below are labelled: [measured] in the 2.1.300 image, [e2e] held by
+# `tests/e2e`, [bin] read in the 2.1.300 binary, [docs] code.claude.com.
+#
+# A drop-in under `managed-settings.d`, which 2.1.300 reads [measured]: managed
+# settings sit above every file a session can write [docs].
+# `allowManagedMcpServersOnly` with an `allowedMcpServers` list of the servers
+# the launch staged, each a `serverCommand` — the command and its arguments,
+# compared exactly, with no name: `["/bin/true", "a", "b"]` admitted its
+# server, while the same command with other arguments and another command were
+# left out of `claude mcp list` [measured]. `env` is not compared, so an entry
+# with omh's command and arguments and an `env` of its own passes (risk 1b).
+# Under the lock `claude mcp add` refuses outright ("not allowed by enterprise
+# policy") [measured, by hand]; a server a session writes into `~/.claude.json`
+# itself is left out, and so is one with omh's own command and one more
+# argument [e2e].
 #
 # `disableClaudeAiConnectors`: a connector is matched by its URL, never by
-# name, and allowlisting that URL would let a session put its own server
+# name [bin], and allowlisting that URL would let a session put its own server
 # there. So claude.ai connectors do not load in a session — a policy, not a
-# side effect. All three keys are read from every admin source, so they hold
-# beside an organisation's own managed settings; an organisation's list
-# replaces omh's.
+# side effect. `allowManagedMcpServersOnly` and `disableClaudeAiConnectors` are
+# read from every admin source, so they hold beside an organisation's own
+# managed settings; `allowedMcpServers` does not merge — an organisation's list
+# replaces omh's [docs, not measured].
 [policy]
 path   = "/etc/claude-code/managed-settings.d/omh.json"
 format = "claude-managed"
