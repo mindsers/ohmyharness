@@ -1839,9 +1839,15 @@ pub(crate) fn work_state(
 /// `doctor` compose the same document, and a fallback announced on one path in
 /// three is the same silence the notice exists to break. Only when there is
 /// something to say — a line printed every launch is a line nobody reads.
+///
+/// What the harness's policy stops rides along, on the same terms: it is
+/// decided in the plan, and every path that builds one prints from here.
 pub(crate) fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
     for notice in plan.rules.notices() {
         ctx.warn(&notice.to_string());
+    }
+    for note in &plan.policy {
+        ctx.warn(note);
     }
 }
 

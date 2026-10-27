@@ -564,7 +564,33 @@ impl Adapter {
         }
         adapter.check_login(&path)?;
         adapter.check_hook_maps(&path)?;
+        adapter.check_policy(&path)?;
         Ok(adapter)
+    }
+
+    /// The policy is above everything a session writes only if a session
+    /// cannot write it: an absolute path in the image, outside `/work` and the
+    /// harness's home. A mask is the other way round — it hides a file in the
+    /// home, where the account is, and `auth::prepare` lays its mountpoint
+    /// down there.
+    fn check_policy(&self, path: &Path) -> Result<()> {
+        let Some(policy) = &self.policy else {
+            return Ok(());
+        };
+        let at = &policy.path;
+        anyhow::ensure!(
+            at.starts_with('/') && !at.starts_with("/work/") && !at.starts_with("/home/"),
+            "adapter {}: `[policy] path = {at:?}` must be absolute, outside /work and $HOME \
+             — a session can write both",
+            path.display()
+        );
+        if let Some(mask) = policy.mask.iter().find(|m| !m.starts_with("$HOME/")) {
+            anyhow::bail!(
+                "adapter {}: `[policy] mask` entry {mask:?} must start with $HOME/",
+                path.display()
+            );
+        }
+        Ok(())
     }
 
     /// A harness proves a login one way, not two.
@@ -1291,6 +1317,31 @@ render = "concat"
             err.contains("token") && err.contains("token-probe"),
             "the refusal must name both halves so it can be acted on: {err}"
         );
+    }
+
+    /// A policy lives where no session writes, and a mask hides something in
+    /// the harness's home — the only place a session's write can outlast it.
+    #[test]
+    fn a_policy_a_session_could_reach_is_refused() {
+        for (policy, names) in [
+            ("path = \"etc/x.toml\"", "absolute"),
+            ("path = \"/work/x.toml\"", "/work"),
+            ("path = \"$HOME/x.toml\"", "$HOME"),
+            ("path = \"/etc/x.toml\"\nmask = [\"/tmp/cache\"]", "$HOME"),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "p.toml",
+                &format!(
+                    "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
+                     [policy]\nformat = \"claude-managed\"\n{policy}\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
+            assert!(err.contains(names), "{policy}: {err}");
+        }
     }
 
     #[test]

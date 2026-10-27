@@ -334,7 +334,7 @@ fn has_real_content(dir: &std::path::Path) -> bool {
 }
 
 /// Whether a file holds nothing but what `prepare` put there.
-fn is_placeholder(content: &str) -> bool {
+pub(crate) fn is_placeholder(content: &str) -> bool {
     matches!(content.trim(), "" | "{}")
 }
 

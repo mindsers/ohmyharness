@@ -144,17 +144,33 @@ pub(crate) fn eject(
         }
     }
 
+    let mut wrote: Vec<report::EjectedFile> = wrote
+        .into_iter()
+        .map(|(cap, at, wrote)| report::EjectedFile {
+            capability: cap.to_string(),
+            at: at.display().to_string(),
+            wrote,
+        })
+        .collect();
+
+    // The policy a launch writes beside those documents, from the same list of
+    // servers. A system path, so it lands under `system/`.
+    if let Some(policy) = &adapter.policy {
+        let sources = profile.sources(Capability::Mcp)?;
+        let servers = crate::container::admitted(&sources, &rules_doc, &own, &repo, &adapter)?;
+        let at = to.join("system").join(policy.path.trim_start_matches('/'));
+        write_file(&at, &render::policy(policy.format, &servers)?, dry_run)?;
+        wrote.push(report::EjectedFile {
+            capability: "policy".into(),
+            at: at.display().to_string(),
+            wrote: report::Wrote::Document,
+        });
+    }
+
     ctx.say(&report::Ejected {
         harness: adapter.name.to_string(),
         to: to.display().to_string(),
-        wrote: wrote
-            .into_iter()
-            .map(|(cap, at, wrote)| report::EjectedFile {
-                capability: cap.to_string(),
-                at: at.display().to_string(),
-                wrote,
-            })
-            .collect(),
+        wrote,
         dropped,
         sandboxed,
         unreadable,

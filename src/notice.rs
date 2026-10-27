@@ -292,6 +292,67 @@ fn read_dir(dir: &Path) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// What a harness's policy stops that this checkout or this account carries.
+///
+/// The policy omh writes changes what a session loads, and a change nobody is
+/// told about is found later as a server that silently is not there. So each
+/// thing it stops is named at launch — only when there is one: a repo with no
+/// `.codex/config.toml` hears nothing.
+///
+/// `worktree` is what the session sees as `/work`; `account` the account
+/// directory it mounts, if any.
+pub fn policy(
+    policy: &crate::adapter::Policy,
+    worktree: &Path,
+    account: Option<&Path>,
+) -> Result<Vec<String>> {
+    let mut said = Vec::new();
+    if policy.format != crate::adapter::PolicyFormat::CodexRequirements {
+        return Ok(said);
+    }
+    // A file Codex itself cannot parse is Codex's to report, and it will: this
+    // names what the policy stops, not what is broken.
+    let project =
+        read(&worktree.join(".codex/config.toml"))?.and_then(|raw| raw.parse::<toml::Table>().ok());
+    if let Some(doc) = project {
+        let servers: Vec<&str> = doc
+            .get("mcp_servers")
+            .and_then(toml::Value::as_table)
+            .map(|t| t.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        if !servers.is_empty() {
+            said.push(format!(
+                "this repo's .codex/config.toml declares MCP servers ({}) — Codex loads them \
+                 disabled, since omh's requirements admit only what this launch staged. Put \
+                 one in your catalogue and select it to use it",
+                servers.join(", ")
+            ));
+        }
+        if doc.contains_key("hooks") {
+            said.push(
+                "this repo's .codex/config.toml declares hooks, which do not run — Codex runs \
+                 managed hooks only, and omh's are the managed ones. A hook goes in \
+                 .omh/hooks/, in omh's words"
+                    .into(),
+            );
+        }
+    }
+    if let Some(account) = account {
+        for mask in &policy.mask {
+            let held = read(&account.join(mask.trim_start_matches("$HOME/")))?;
+            if held.is_some_and(|c| !crate::auth::is_placeholder(&c)) {
+                said.push(
+                    "this account caches an enterprise cloud bundle, which omh hides from the \
+                     session — a session could rewrite it for the next one. Codex fetches the \
+                     bundle at every start instead, and does not start offline"
+                        .into(),
+                );
+            }
+        }
+    }
+    Ok(said)
+}
+
 fn read(path: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => Ok(Some(raw)),
@@ -303,6 +364,53 @@ fn read(path: &Path) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn codex_policy() -> crate::adapter::Policy {
+        crate::adapter::Adapter::find(
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters")),
+            "codex",
+        )
+        .unwrap()
+        .policy
+        .unwrap()
+    }
+
+    /// What the policy stops is named, server by server, and only when the
+    /// checkout or the account carries it.
+    #[test]
+    fn what_codexs_policy_stops_is_named_at_launch() {
+        let policy = codex_policy();
+        let work = tempfile::tempdir().unwrap();
+        let account = tempfile::tempdir().unwrap();
+        assert!(
+            super::policy(&policy, work.path(), Some(account.path()))
+                .unwrap()
+                .is_empty(),
+            "nothing to stop, nothing said"
+        );
+
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(
+            work.path().join(".codex/config.toml"),
+            "[mcp_servers.linear]\ncommand = \"l\"\n\n[[hooks.Stop]]\n",
+        )
+        .unwrap();
+        let cache = account.path().join(".codex/cloud-config-bundle-cache.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "{}").unwrap();
+        let said = super::policy(&policy, work.path(), Some(account.path())).unwrap();
+        assert_eq!(said.len(), 2, "{said:#?}");
+        assert!(said[0].contains("linear"), "{said:#?}");
+        assert!(said[1].contains("hooks"), "{said:#?}");
+
+        // The placeholder omh lays down is not a cache; a real one is.
+        std::fs::write(&cache, r#"{"signature":"x"}"#).unwrap();
+        let said = super::policy(&policy, work.path(), Some(account.path())).unwrap();
+        assert!(
+            said.iter().any(|s| s.contains("does not start offline")),
+            "{said:#?}"
+        );
+    }
 
     struct Fx {
         _dir: tempfile::TempDir,

@@ -36,6 +36,9 @@ pub struct Plan {
     pub dropped_hooks: Vec<crate::hook::Dropped>,
     /// What composing the project's rules turned up that the user should hear.
     pub rules: crate::rules::Report,
+    /// What the harness's policy stops that this checkout or account carries,
+    /// to be said at launch — see [`crate::notice::policy`].
+    pub policy: Vec<String>,
     /// Interactive harnesses need a terminal; a captured probe must not ask.
     pub tty: bool,
 }
@@ -701,8 +704,26 @@ pub fn plan(
 
     // The harness's policy layer, and the files masked behind it. After the
     // credentials, because a mask lands inside the account's directory.
+    let mut policy_notes = Vec::new();
     if let Some(policy) = &adapter.policy {
-        stage_policy(policy, profile, opts, &stage, staging, &rules_doc, adapter, &mut mounts)?;
+        stage_policy(
+            policy,
+            profile,
+            opts,
+            &stage,
+            staging,
+            &rules_doc,
+            adapter,
+            &mut mounts,
+        )?;
+        // Never fatal: an unreadable file costs the notice, not the session.
+        policy_notes =
+            crate::notice::policy(policy, &session.worktree, opts.account_dir.as_deref())
+                .unwrap_or_else(|e| {
+                    vec![format!(
+                        "could not check what omh's policy stops here — {e:#}"
+                    )]
+                });
     }
 
     // The harness's transcripts, over a per-session directory omh owns, so a
@@ -782,6 +803,7 @@ pub fn plan(
         dropped,
         dropped_hooks,
         rules: rules_report,
+        policy: policy_notes,
         tty: opts.tty,
     })
 }
@@ -805,11 +827,7 @@ fn stage_policy(
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
     let sources = profile.sources(Capability::Mcp)?;
-    let servers = if carries(Capability::Mcp, &sources, rules_doc, &opts.omh, adapter) {
-        crate::render::servers(&sources, &opts.omh, &opts.repo)?
-    } else {
-        BTreeMap::new()
-    };
+    let servers = admitted(&sources, rules_doc, &opts.omh, &opts.repo, adapter)?;
     let body = crate::render::policy(policy.format, &servers)?;
     let file = stage.join("policy.rendered");
     let mask = stage.join("masked");
@@ -835,6 +853,23 @@ fn stage_policy(
         });
     }
     Ok(())
+}
+
+/// The servers a harness's policy admits: the MCP document's own, when that
+/// document is handed over at all, and none when it is not. One function for
+/// the launch and `omh eject`, which must not disagree about it.
+pub(crate) fn admitted(
+    sources: &[PathBuf],
+    rules_doc: &str,
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+    adapter: &Adapter,
+) -> Result<BTreeMap<String, crate::render::Server>> {
+    if carries(Capability::Mcp, sources, rules_doc, own, adapter) {
+        crate::render::servers(sources, own, repo)
+    } else {
+        Ok(BTreeMap::new())
+    }
 }
 
 /// What staging needs that does not change from one capability to the next.
@@ -1349,6 +1384,7 @@ pub(crate) fn sample_plan() -> Plan {
         dropped: vec![],
         dropped_hooks: vec![],
         rules: Default::default(),
+        policy: vec![],
         tty: true,
     }
 }
@@ -2921,7 +2957,12 @@ mod tests {
                     .as_array()
                     .unwrap_or_else(|| panic!("no allowlist at all:\n{body}"))
                     .iter()
-                    .map(|e| (None, serde_json::from_value(e["serverCommand"].clone()).unwrap()))
+                    .map(|e| {
+                        (
+                            None,
+                            serde_json::from_value(e["serverCommand"].clone()).unwrap(),
+                        )
+                    })
                     .collect()
             }
         };
@@ -2983,6 +3024,26 @@ mod tests {
         }
     }
 
+    /// What the policy stops in this checkout reaches the plan every launch
+    /// path prints from — the session's worktree, which is `/work`.
+    #[test]
+    fn what_the_policy_stops_in_the_worktree_reaches_the_plan() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.session.worktree.join(".codex")).unwrap();
+        std::fs::write(
+            fx.session.worktree.join(".codex/config.toml"),
+            "[mcp_servers.linear]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        let p = plan_for(&fx, "codex");
+        assert!(
+            p.policy.iter().any(|n| n.contains("linear")),
+            "{:?}",
+            p.policy
+        );
+        assert!(plan_for(&fx, "claude").policy.is_empty());
+    }
+
     /// A file a session could write and the harness trusts on its next start
     /// is hidden behind an empty one it cannot: mounted after the account it
     /// sits in, read-only, a file.
@@ -3010,7 +3071,11 @@ mod tests {
                 .iter()
                 .position(|c| !c.file && guest.starts_with(&c.guest) && c.guest != Path::new("/"))
                 .expect("the account directory holding it is mounted");
-            assert!(holder < at, "the mask must come after {:?}", p.mounts[holder]);
+            assert!(
+                holder < at,
+                "the mask must come after {:?}",
+                p.mounts[holder]
+            );
         }
     }
 

@@ -14155,6 +14155,14 @@ fn a_system_path_ejects_under_system() {
         out.join("system/etc/codex/managed_config.toml").is_file(),
         "and its MCP servers, in the other system file Codex reads"
     );
+    // The launch's policy is part of what a launch writes, and it names the
+    // same servers the document beside it does.
+    let policy = std::fs::read_to_string(out.join("system/etc/codex/requirements.toml"))
+        .expect("and the requirements a launch writes, under system/");
+    assert!(
+        policy.contains("[mcp_servers.demo.identity.command]"),
+        "{policy}"
+    );
 }
 
 /// The exit. Write out the raw per-harness config and step aside.

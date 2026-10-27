@@ -172,7 +172,10 @@ fills it from the launch:
 
 The policy admits exactly the MCP servers the launch staged, by command and
 arguments compared exactly — and by name too, on Codex. It is written even when
-nothing is staged, because a harness with no allowlist admits anything.
+nothing is staged, because a harness with no allowlist admits anything. What it
+stops in your checkout or account — a repo's own `.codex/config.toml` servers
+or hooks, an enterprise bundle cache — is named at launch and by `omh doctor`,
+and `omh eject` writes it out under `system/`.
 
 - **codex** — `requirements.toml`: the `[mcp_servers]` allowlist, an empty one
   for every plugin, `allow_managed_hooks_only` (omh's hooks are in the system

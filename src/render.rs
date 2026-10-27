@@ -395,8 +395,7 @@ pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Resul
                     },
                 )]),
             };
-            let body =
-                toml::to_string_pretty(&doc).context("rendering codex requirements.toml")?;
+            let body = toml::to_string_pretty(&doc).context("rendering codex requirements.toml")?;
             // An absent table is no allowlist at all. A serializer that drops
             // empty maps would turn "none" into "any", so it is checked here
             // rather than trusted.
@@ -1976,7 +1975,10 @@ mod tests {
     /// Codex's matcher still needs `args = []` for.
     fn staged() -> BTreeMap<String, Server> {
         BTreeMap::from([
-            ("omh-codegraph".into(), server("codegraph", &["serve", "--x=\"a b\""])),
+            (
+                "omh-codegraph".into(),
+                server("codegraph", &["serve", "--x=\"a b\""]),
+            ),
             ("omh-memory".into(), server("omh", &["mcp"])),
             ("mine".into(), server("/opt/bin/mine", &[])),
         ])
@@ -2008,7 +2010,9 @@ mod tests {
     fn codex_allows_exactly_the_staged_servers_by_command_and_arguments() {
         let servers = staged();
         let doc = codex_policy(&servers);
-        let listed = doc["mcp_servers"].as_table().expect("an `[mcp_servers]` table");
+        let listed = doc["mcp_servers"]
+            .as_table()
+            .expect("an `[mcp_servers]` table");
         assert_eq!(
             listed.keys().collect::<Vec<_>>(),
             servers.keys().collect::<Vec<_>>()
@@ -2034,9 +2038,9 @@ mod tests {
         );
         let plugins = doc["plugins"].as_table().expect("a `[plugins]` table");
         assert!(
-            plugins
-                .values()
-                .any(|p| p.get("mcp_servers").is_some_and(|m| m.as_table() == Some(&toml::Table::new()))),
+            plugins.values().any(|p| p
+                .get("mcp_servers")
+                .is_some_and(|m| m.as_table() == Some(&toml::Table::new()))),
             "no plugin entry holding an empty allowlist: {doc}"
         );
     }
@@ -2069,13 +2073,21 @@ mod tests {
             .expect("an `allowedMcpServers` list")
             .iter()
             .map(|e| {
-                assert_eq!(e.as_object().unwrap().len(), 1, "one matcher per entry: {e}");
+                assert_eq!(
+                    e.as_object().unwrap().len(),
+                    1,
+                    "one matcher per entry: {e}"
+                );
                 serde_json::from_value(e["serverCommand"].clone()).unwrap()
             })
             .collect();
         let mut want: Vec<Vec<String>> = servers
             .values()
-            .map(|s| std::iter::once(s.command.clone()).chain(s.args.clone()).collect())
+            .map(|s| {
+                std::iter::once(s.command.clone())
+                    .chain(s.args.clone())
+                    .collect()
+            })
             .collect();
         allowed.sort();
         want.sort();
