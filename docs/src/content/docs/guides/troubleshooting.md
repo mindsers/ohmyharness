@@ -95,6 +95,11 @@ see [Something else](#something-else).
 | **Codex** | |
 | `Failed to set trust for /work … failed to persist config.toml` | [Update omh and upgrade](#codex-says-failed-to-set-trust-for-work--failed-to-persist-configtoml) |
 | `could not find bubblewrap on PATH`, or `bwrap: No permissions to create a new namespace` | [Update omh and upgrade](#codex-says-could-not-find-bubblewrap-on-path-and-commands-fail-with-bwrap-no-permissions-to-create-a-new-namespace) |
+| A server is `disabled` with `requirements (/etc/codex/requirements.toml)`, or a repo's `.codex/config.toml` hooks do not run | [Put it in your catalogue](#a-server-is-disabled-by-requirements-etccodexrequirementstoml) |
+| Codex does not start offline on an enterprise account | [Expected](#codex-does-not-start-offline-on-an-enterprise-account) |
+| **Claude Code** | |
+| `claude mcp add` says "not allowed by enterprise policy" | [Put it in your catalogue](#claude-mcp-add-says-not-allowed-by-enterprise-policy) |
+| claude.ai connectors are missing in a session | [Expected](#claudeai-connectors-are-missing-in-a-session) |
 | **Your setup in the session** | |
 | The agent does not see your rules or skills | [Run `omh doctor`, then read the launch line](#the-harness-starts-but-does-not-see-my-rules-or-skills) |
 | One skill is missing, and the launch says `1 catalogue entry is not selected here` | [Select it with `omh use`](#a-skill-i-have-is-not-reaching-the-agent) |
@@ -551,6 +556,56 @@ command and every file edit failed.
 
 Codex's sandbox is then turned off in `/etc/codex/config.toml`, and omh's
 container is the sandbox.
+
+#### A server is disabled by `requirements (/etc/codex/requirements.toml)`
+
+omh writes Codex's requirements on every launch, and they admit exactly the MCP
+servers the launch staged: yours that this repo selects, and omh's own. A
+server added inside a session with `codex mcp add`, one declared in a repo's
+`.codex/config.toml`, or one left in your account's `~/.codex/config.toml` by
+another repo's session is not one this launch staged, so it loads disabled — in
+every later session too, since each launch writes its requirements afresh from
+what it stages. (A server in your catalogue that this repo does not select is
+not handed to Codex at all.) The same file runs managed hooks
+only: omh's, from `/etc/codex/config.toml`. A repo's `.codex/config.toml`
+hooks and the ones in your account do not run (read in Codex's source). omh
+names what a repo's `.codex/config.toml` declares at launch and in `omh doctor`.
+
+To use a server in sessions, put it in your catalogue and select it — see
+[`[use]`](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue).
+A hook goes in `.omh/hooks/` or your catalogue, in omh's words.
+
+#### Codex does not start offline on an enterprise account
+
+An enterprise account (a ChatGPT login on a Business, Enterprise or Edu plan)
+caches its organisation's cloud bundle in `~/.codex`. A session could forge
+that cache, so omh hides it behind a read-only file: Codex fetches the bundle
+at every start instead, and with no network it does not start. That is what
+Codex's source says it does; no enterprise account has been run to measure it.
+omh names a cached bundle at launch and in `omh doctor`.
+
+### Claude Code
+
+#### `claude mcp add` says "not allowed by enterprise policy"
+
+omh writes a managed-settings drop-in on every launch,
+`/etc/claude-code/managed-settings.d/omh.json`, and it admits exactly the MCP
+servers the launch staged, by command and arguments. Inside a session
+`claude mcp add` refuses a server not on that list (measured by hand on
+2.1.300, at one scope), and one written into `~/.claude.json` by hand is left
+out of `claude mcp list`. To use a server in sessions, put it in your catalogue
+and select it.
+
+An organisation that delivers its own managed `allowedMcpServers` replaces
+omh's list (Claude Code's docs; not measured). If it leaves out one of omh's
+servers, that omh feature does not load; `omh doctor`'s `mcp-loaded` row
+names it.
+
+#### claude.ai connectors are missing in a session
+
+Expected: they are switched off in sessions, deliberately (read in the 2.1.300
+binary; not measured). Claude Code matches a connector by its URL, and allowing
+that URL would let a session put its own server there.
 
 ### Your setup in the session
 

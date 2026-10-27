@@ -292,6 +292,152 @@ fn read_dir(dir: &Path) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
+/// The repo's own Codex config, relative to `/work`.
+pub const PROJECT_CONFIG: &str = ".codex/config.toml";
+
+/// Where what a session will see as `/work` is read from.
+pub enum Work<'a> {
+    /// The session's own worktree. The agent writes it, so it is read held.
+    Worktree(&'a Path),
+    /// The branch a new session's worktree is made from — before there is one
+    /// (a dry run), or where the sandbox's `/work` is not the repo's at all
+    /// (`omh doctor`'s scratch).
+    Base { repo: &'a Path, base: &'a str },
+}
+
+/// What Codex's policy stops in this repo's `.codex/config.toml`, and the
+/// account's masked bundle cache when it holds a real one.
+///
+/// The policy omh writes changes what a session loads, and a change nobody is
+/// told about is found later as a server that silently is not there. So each
+/// thing it stops is named at launch — only when there is one: a repo with no
+/// `.codex/config.toml` hears nothing. Not named: servers and hooks in the
+/// account's own `~/.codex/config.toml`, and Claude Code's `~/.claude.json` —
+/// the lock stops those too.
+///
+/// Each read stands alone. One that cannot be made is said as such, in its own
+/// line, and costs nothing the others found.
+pub fn policy(
+    policy: &crate::adapter::Policy,
+    work: Work<'_>,
+    account: Option<&Path>,
+) -> Vec<String> {
+    let mut said = Vec::new();
+    if policy.format != crate::adapter::PolicyFormat::CodexRequirements {
+        return said;
+    }
+    const PROJECT: &str = PROJECT_CONFIG;
+    let raw = match work {
+        Work::Worktree(root) => read_held(root, PROJECT),
+        Work::Base { repo, base } => crate::rules::at_base(repo, base, PROJECT),
+    };
+    let raw = raw.unwrap_or_else(|e| {
+        said.push(format!(
+            "could not check this repo's {PROJECT} — {e:#}. The MCP servers and hooks it \
+             declares, which Codex no longer loads, went unnamed"
+        ));
+        None
+    });
+    // A file Codex itself cannot parse is Codex's to report: this names what
+    // the policy stops, not what is broken.
+    if let Some(doc) = raw.and_then(|raw| raw.parse::<toml::Table>().ok()) {
+        let servers: Vec<String> = doc
+            .get("mcp_servers")
+            .and_then(toml::Value::as_table)
+            .map(|t| {
+                t.keys()
+                    // `untrusted` keeps newlines, for git's multi-line
+                    // messages; a server name has none to keep, and one would
+                    // start a line that reads as omh's.
+                    .map(|k| crate::out::untrusted(k).replace('\n', "\u{fffd}"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // What Codex does with the project layer is read in its source; the
+        // measurement was the user layer (`codex mcp add`).
+        if !servers.is_empty() {
+            said.push(format!(
+                "this repo's .codex/config.toml declares MCP servers ({}) — Codex loads them \
+                 disabled, since omh's requirements admit only what this launch staged. Put \
+                 one in your catalogue and select it to use it",
+                servers.join(", ")
+            ));
+        }
+        if doc.contains_key("hooks") {
+            said.push(
+                "this repo's .codex/config.toml declares hooks, which do not run — Codex runs \
+                 managed hooks only, and omh's are the managed ones. A hook goes in \
+                 .omh/hooks/ or your catalogue, in omh's words"
+                    .into(),
+            );
+        }
+    }
+    // Codex has one mask, the cloud bundle cache, so the words are its own; a
+    // second mask needs words of its own.
+    if let Some(account) = account {
+        for mask in &policy.mask {
+            let rel = mask.trim_start_matches("$HOME/");
+            match read_held(account, rel) {
+                Ok(Some(c)) if !crate::auth::is_placeholder(&c) => said.push(
+                    "this account caches an enterprise cloud bundle, which omh hides from the \
+                     session — a session could rewrite it for the next one. Codex fetches the \
+                     bundle at every start instead and, by Codex's source, does not start offline"
+                        .into(),
+                ),
+                Ok(_) => {}
+                Err(e) => said.push(format!(
+                    "could not check this account's ~/{rel} — {e:#}. Whether Codex can start \
+                     offline went unsaid"
+                )),
+            }
+        }
+    }
+    said
+}
+
+/// Far more than any config or bundle cache this reads, and far less than
+/// anything a session could use to stall a launch.
+const HELD_CAP: u64 = 1 << 20;
+
+/// `root/rel`, read the way a file the sandbox can write is read: through
+/// [`crate::held`], one name at a time, never following a link, a regular
+/// file only — a pipe would block the launch — and no more than [`HELD_CAP`].
+/// `root` is omh's own (the worktree, the account), so holding starts there.
+fn read_held(root: &Path, rel: &str) -> Result<Option<String>> {
+    use std::io::Read;
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let what = || format!("reading {}", root.join(rel).display());
+    let names: Vec<&str> = rel.split('/').collect();
+    let (file, dirs) = names.split_last().expect("split yields one name");
+    let mut dir = match crate::held::Dir::open(root) {
+        Ok(d) => d,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(what),
+    };
+    for name in dirs {
+        dir = match dir.sub(std::ffi::OsStr::new(name)) {
+            Ok(d) => d,
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => return Err(e).with_context(what),
+        };
+    }
+    let held = match dir.file(std::ffi::OsStr::new(file)) {
+        Ok(f) => f,
+        Err(e) if gone(&e) => return Ok(None),
+        Err(e) => return Err(e).with_context(what),
+    };
+    let mut bytes = Vec::new();
+    held.take(HELD_CAP + 1)
+        .read_to_end(&mut bytes)
+        .with_context(what)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= HELD_CAP,
+        "{} is larger than omh reads",
+        root.join(rel).display()
+    );
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 fn read(path: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => Ok(Some(raw)),
@@ -303,6 +449,110 @@ fn read(path: &Path) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn codex_policy() -> crate::adapter::Policy {
+        crate::adapter::Adapter::find(
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters")),
+            "codex",
+        )
+        .unwrap()
+        .policy
+        .unwrap()
+    }
+
+    /// The checkout and the account are both written from the sandbox, so
+    /// what the notice reads there is the agent's: a link is not followed, a
+    /// file too large is not read whole, and a name never reaches the terminal
+    /// as an escape sequence.
+    #[test]
+    fn what_the_policy_notice_reads_is_the_agents() {
+        let policy = codex_policy();
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(
+            host.path().join("elsewhere.toml"),
+            "[mcp_servers.followed]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::os::unix::fs::symlink(
+            host.path().join("elsewhere.toml"),
+            work.path().join(".codex/config.toml"),
+        )
+        .unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), None);
+        assert!(
+            !format!("{said:?}").contains("followed"),
+            "a link was followed: {said:?}"
+        );
+
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        let huge = format!(
+            "[mcp_servers.huge]\ncommand = \"l\"\n#{}\n",
+            "x".repeat(8 << 20)
+        );
+        std::fs::write(work.path().join(".codex/config.toml"), huge).unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), None);
+        assert!(
+            !format!("{said:?}").contains("huge"),
+            "an oversized file was read whole: {said:?}"
+        );
+
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(
+            work.path().join(".codex/config.toml"),
+            "[mcp_servers.\"a\\u001b[2Jb\"]\ncommand = \"l\"\n[mcp_servers.\"c\\nomh: forged\"]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), None);
+        assert!(said.iter().any(|s| s.contains('a')), "{said:?}");
+        assert!(!said.iter().any(|s| s.contains('\u{1b}')), "{said:?}");
+        assert!(
+            !said.iter().any(|s| s.contains('\n')),
+            "a name spoofs a line: {said:?}"
+        );
+    }
+
+    /// What the policy stops is named, server by server, and only when the
+    /// checkout or the account carries it.
+    #[test]
+    fn what_codexs_policy_stops_is_named_at_launch() {
+        let policy = codex_policy();
+        let work = tempfile::tempdir().unwrap();
+        let account = tempfile::tempdir().unwrap();
+        assert!(
+            super::policy(&policy, Work::Worktree(work.path()), Some(account.path())).is_empty(),
+            "nothing to stop, nothing said"
+        );
+
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(
+            work.path().join(".codex/config.toml"),
+            "[mcp_servers.linear]\ncommand = \"l\"\n\n[[hooks.Stop]]\n",
+        )
+        .unwrap();
+        let cache = account.path().join(".codex/cloud-config-bundle-cache.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "{}").unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
+        assert_eq!(said.len(), 2, "{said:#?}");
+        assert!(said.iter().any(|s| s.contains("linear")), "{said:#?}");
+        assert!(
+            said.iter().any(|s| s.contains("declares hooks")),
+            "{said:#?}"
+        );
+
+        // The placeholder omh lays down is not a cache; a real one is.
+        std::fs::write(&cache, r#"{"signature":"x"}"#).unwrap();
+        let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
+        assert!(
+            said.iter().any(|s| s.contains("does not start offline")),
+            "{said:#?}"
+        );
+    }
 
     struct Fx {
         _dir: tempfile::TempDir,
@@ -689,5 +939,104 @@ mod tests {
 
         let err = result.expect_err("unreadable is not empty").to_string();
         assert!(err.contains("hooks"), "must name the path: {err}");
+    }
+
+    /// One read that cannot be made costs that read's note, said as such —
+    /// never the notes the other reads already found.
+    #[test]
+    fn a_read_that_fails_is_said_and_the_others_still_are() {
+        let policy = codex_policy();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(
+            work.path().join(".codex/config.toml"),
+            "[mcp_servers.linear]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        let account = tempfile::tempdir().unwrap();
+        let cache = account.path().join(".codex/cloud-config-bundle-cache.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/nowhere", &cache).unwrap();
+
+        let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
+        assert!(said.iter().any(|s| s.contains("linear")), "{said:#?}");
+        assert!(
+            said.iter()
+                .any(|s| s.starts_with("could not check") && s.contains("cloud-config-bundle")),
+            "{said:#?}"
+        );
+    }
+
+    /// git that cannot answer is said as such, never read as "no file".
+    #[test]
+    fn a_base_git_cannot_read_is_said_not_taken_for_absence() {
+        let not_a_repo = tempfile::tempdir().unwrap();
+        let work = Work::Base {
+            repo: not_a_repo.path(),
+            base: "main",
+        };
+        let said = super::policy(&codex_policy(), work, None);
+        assert!(
+            said.iter()
+                .any(|s| s.starts_with("could not check") && s.contains(PROJECT_CONFIG)),
+            "{said:#?}"
+        );
+    }
+
+    /// A config that declares no server is not told it declares some.
+    #[test]
+    fn a_config_with_no_servers_and_no_hooks_says_nothing() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(work.path().join(".codex")).unwrap();
+        std::fs::write(work.path().join(".codex/config.toml"), "model = \"o3\"\n").unwrap();
+        let said = super::policy(&codex_policy(), Work::Worktree(work.path()), None);
+        assert!(said.is_empty(), "{said:#?}");
+    }
+
+    /// Before a session has a worktree — a dry run, `omh doctor` — what it will
+    /// hold is the base branch's: a file only in the working tree is not
+    /// named, a committed one is.
+    #[test]
+    fn before_a_worktree_the_base_branch_is_what_is_read() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(args)
+                .envs([
+                    ("GIT_AUTHOR_NAME", "t"),
+                    ("GIT_AUTHOR_EMAIL", "t@t"),
+                    ("GIT_COMMITTER_NAME", "t"),
+                    ("GIT_COMMITTER_EMAIL", "t@t"),
+                ])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(repo.path().join(".codex")).unwrap();
+        std::fs::write(
+            repo.path().join(".codex/config.toml"),
+            "[mcp_servers.on-the-branch]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "c"]);
+        std::fs::write(
+            repo.path().join(".codex/config.toml"),
+            "[mcp_servers.only-here]\ncommand = \"l\"\n",
+        )
+        .unwrap();
+
+        let work = Work::Base {
+            repo: repo.path(),
+            base: "main",
+        };
+        let said = super::policy(&codex_policy(), work, None);
+        assert!(
+            said.iter().any(|s| s.contains("on-the-branch")),
+            "{said:#?}"
+        );
+        assert!(!said.iter().any(|s| s.contains("only-here")), "{said:#?}");
     }
 }

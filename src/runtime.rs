@@ -1092,6 +1092,7 @@ mod tests {
             dropped: vec![],
             dropped_hooks: vec![],
             rules: Default::default(),
+            policy: vec![],
             tty: true,
         }
     }

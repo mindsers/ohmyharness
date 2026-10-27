@@ -14155,6 +14155,39 @@ fn a_system_path_ejects_under_system() {
         out.join("system/etc/codex/managed_config.toml").is_file(),
         "and its MCP servers, in the other system file Codex reads"
     );
+    // The launch's policy is part of what a launch writes, and it names the
+    // same servers the document beside it does.
+    let policy: toml::Table =
+        std::fs::read_to_string(out.join("system/etc/codex/requirements.toml"))
+            .expect("and the requirements a launch writes, under system/")
+            .parse()
+            .unwrap();
+    assert_eq!(
+        policy["mcp_servers"]["demo"]["identity"]["command"]["executable"].as_str(),
+        Some("demo-server"),
+        "{policy}"
+    );
+
+    // Claude's is a system path too.
+    let out = sb.home.join("ejected-claude");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let policy: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("system/etc/claude-code/managed-settings.d/omh.json"))
+            .expect("and claude's managed settings, under system/"),
+    )
+    .unwrap();
+    assert!(
+        policy["allowedMcpServers"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({"serverCommand": ["demo-server"]})),
+        "{policy}"
+    );
 }
 
 /// The exit. Write out the raw per-harness config and step aside.
@@ -16273,6 +16306,144 @@ fn a_launch_mounts_the_credentials_of_the_adapter_it_resolved() {
             mount.contains("/creds/claude/"),
             "the account was resolved out of creds/claude and mounted from \
              somewhere else — the agent starts logged out: {mount}"
+        );
+    }
+}
+
+/// A repo whose own `.codex/config.toml` declares a server — committed, so a
+/// launch's worktree has it too, or left in the working tree only.
+fn repo_declaring_a_codex_server(sb: &Sandbox, commit: bool) {
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::create_dir_all(sb.repo.join(".codex")).unwrap();
+    std::fs::write(
+        sb.repo.join(".codex/config.toml"),
+        "[mcp_servers.repo-linear]\ncommand = \"l\"\n",
+    )
+    .unwrap();
+    let steps: Vec<&[&str]> = match commit {
+        true => vec![&["add", "-A"], &["commit", "-qm", "repo"]],
+        false => vec![&["commit", "-q", "--allow-empty", "-m", "root"]],
+    };
+    for args in steps {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .envs([
+                ("GIT_AUTHOR_NAME", "t"),
+                ("GIT_AUTHOR_EMAIL", "t@t"),
+                ("GIT_COMMITTER_NAME", "t"),
+                ("GIT_COMMITTER_EMAIL", "t@t"),
+            ])
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+}
+
+fn printed(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// What Codex's policy stops in this repo is said once: on a dry run, and on a
+/// launch, which says the rules twice.
+#[test]
+fn what_codexs_policy_stops_here_is_said_once_before_a_launch() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+
+    let out = sb.omh(&["new", "codex", "--dry-run"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert_eq!(
+        printed(&out).matches("repo-linear").count(),
+        1,
+        "the server this repo declares is named, once: {}",
+        printed(&out)
+    );
+
+    let out = sb.omh(&["new", "codex"]);
+    assert_eq!(
+        printed(&out).matches("repo-linear").count(),
+        1,
+        "on a launch: {}",
+        printed(&out)
+    );
+}
+
+/// A dry run describes the launch it stands for, and a launch's worktree is
+/// made from the default branch: a `.codex/config.toml` only in the working
+/// tree is not one the session will have, so it is not named.
+#[test]
+fn a_dry_run_names_only_what_the_launch_would_be_handed() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    // The branch has `repo-linear`; the working tree has moved on.
+    std::fs::write(
+        sb.repo.join(".codex/config.toml"),
+        "[mcp_servers.only-here]\ncommand = \"l\"\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["new", "codex", "--dry-run"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("repo-linear"), "{}", printed(&out));
+    assert!(!printed(&out).contains("only-here"), "{}", printed(&out));
+}
+
+/// `omh doctor` says it too. Its probe runs in a scratch `/work`, which holds
+/// nothing of the repo's, so what it names has to come from the repo itself.
+#[test]
+fn omh_doctor_names_what_codexs_policy_stops_here() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, true);
+    sb.fake_docker_answering_doctor(&[], &[]);
+    for argv in [
+        &["doctor", "--dry-run", "--harness", "codex"][..],
+        &["doctor", "--harness", "codex"][..],
+    ] {
+        let out = sb.omh(argv);
+        assert_eq!(
+            printed(&out).matches("repo-linear").count(),
+            1,
+            "{argv:?}: {}",
+            printed(&out)
+        );
+    }
+}
+
+/// A `.codex/config.toml` the repo carries in reaches the session though no
+/// branch has it, so the dry run and `omh doctor` name it as the launch does.
+#[test]
+fn a_carried_codex_config_is_named_before_a_launch_too() {
+    for doctor in [false, true] {
+        let sb = sandbox();
+        repo_declaring_a_codex_server(&sb, false);
+        std::fs::write(sb.repo.join(".gitignore"), ".codex/\n").unwrap();
+        let (_log, argv): (_, &[&str]) = match doctor {
+            false => (Some(sb.fake_docker()), &["new", "codex", "--dry-run"]),
+            true => {
+                sb.fake_docker_answering_doctor(&[], &[]);
+                (None, &["doctor", "--dry-run", "--harness", "codex"])
+            }
+        };
+        // After the stand-in, which writes this repo's settings itself.
+        let settings = sb.repo.join(".omh/settings.toml");
+        let mut body = std::fs::read_to_string(&settings).unwrap_or_default();
+        body.push_str("carry_in = [\".codex/config.toml\"]\n");
+        std::fs::write(&settings, body).unwrap();
+        let out = sb.omh(argv);
+        assert_eq!(
+            printed(&out).matches("repo-linear").count(),
+            1,
+            "{argv:?}: {}",
+            printed(&out)
         );
     }
 }

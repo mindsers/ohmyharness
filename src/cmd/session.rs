@@ -252,6 +252,7 @@ pub(crate) fn session_up(
     }
 
     say_rules(&plan, ctx);
+    say_policy(&plan, ctx);
     image::ensure_stack(
         backend,
         adapter,
@@ -1845,6 +1846,19 @@ pub(crate) fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
     }
 }
 
+/// Say what the harness's policy stops in this checkout or account.
+///
+/// Once per launch, which `say_rules` is not: `run` says the rules before its
+/// dry-run return and `session_up` says them again. So this is called where
+/// each path says it once — `session_up` for a launch that starts the
+/// container (a reattach to a running one says nothing new), `run`'s dry run,
+/// and `omh doctor`.
+pub(crate) fn say_policy(plan: &container::Plan, ctx: &out::Ctx) {
+    for note in &plan.policy {
+        ctx.warn(note);
+    }
+}
+
 /// Drop a session's graph entry from the shared index, while its container is
 /// still around to do it.
 ///
@@ -2211,6 +2225,7 @@ pub(crate) fn run(
     // launching*, which is the one thing `Staging::Skip` means that is not
     // about writing.
     if !staging.is_apply() {
+        say_policy(&plan, ctx);
         // What the agent is given, read off the plan's own mounts — so the
         // report cannot describe a launch other than the one that would happen.
         let mut reads: Vec<(String, String)> = Vec::new();

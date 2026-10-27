@@ -121,6 +121,18 @@ impl Dir {
         Ok(file)
     }
 
+    /// Make `name` with `body`, only if nothing has that name — not a file,
+    /// not a link, dangling or not.
+    pub(crate) fn create_new(&self, name: &OsStr, body: &[u8]) -> io::Result<()> {
+        use std::io::Write as _;
+        let mut file = open_under(
+            &self.fd,
+            &step(name)?,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )?;
+        file.write_all(body)
+    }
+
     /// Put `body` at `name`, replacing whatever has that name.
     ///
     /// Written beside and renamed over. A rename replaces a link instead of

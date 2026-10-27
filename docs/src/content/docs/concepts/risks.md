@@ -36,7 +36,7 @@ them, because a risk that vanishes teaches nobody what it cost.
 | Risk | Where it stands |
 |---|---|
 | [1. The credential model is weaker than `sbx`'s](#1-the-credential-model-is-weaker-than-sbxs) | open — gated on the `sbx` backend |
-| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | open — argued, not measured |
+| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | narrowed — MCP servers, and Codex's hooks, are held to the launch's |
 | [2. A sandbox protects the host, not the repo](#2-a-sandbox-protects-the-host-not-the-repo) | inherent |
 | [2b. The sandbox's repository is agent-writable](#2b-the-sandboxs-repository-is-agent-writable-its-push-wall-is-a-signpost) | narrowed |
 | [2c. ~~`omh sNN rm` destroys the agent's own commits~~](#2c-omh-snn-rm-destroys-the-agents-own-commits) | closed in #58 |
@@ -95,13 +95,38 @@ So an agent in one repo can leave instructions, a server or a hook there, and
 every later session of every repo on that account loads it — where `carry_in`
 may have put that repo's secrets in reach.
 
-**Argued, not measured.** The paths come from the adapters; whether each
-harness reads these files from the mount, at launch, is a claim about external
-software that only `tests/e2e` or a real session can settle. The mitigation is
-not built: read-only overlays for the instruction, MCP and hook paths inside
-the account directory, the way omh already mounts its own files there. Until
-then, an account used for untrusted repos is best kept separate from one used
-for work — `omh auth <harness> -n <name>` captures as many as you like.
+**Narrowed for MCP servers and Codex's hooks** (#197). On Claude Code and
+Codex omh fills the harness's own policy layer on every launch — see
+[`[policy]`](/reference/adapters/#policy-what-a-session-may-load) — and it
+admits exactly the servers the launch staged, by command and arguments. A
+server a session adds with `codex mcp add` stays in the account and loads
+disabled in that session, and in every later one, since every launch writes
+its policy afresh from what it stages. On Claude Code `claude mcp add` refuses
+it (measured by hand on 2.1.300, at one scope), and one written into
+`~/.claude.json` directly is left out — so
+is one with omh's own command and one more argument. `tests/e2e` asserts the
+Codex case and the direct writes. Codex also runs managed hooks only, so a hook
+written into `~/.codex/config.toml` does not run either (read in Codex's
+source; nothing in `tests/e2e` plants one).
+
+**Still open:**
+
+- on Claude Code, an entry in `~/.claude.json` with the *same* command and
+  arguments as one of omh's servers and an `env` of its own passes the lock —
+  the allowlist does not compare `env` (measured in #197). A per-session
+  `~/.claude.json` closes it, tracked in #197 §0;
+- on Codex the same: the requirements identity compares neither `env` nor
+  `cwd` (read in Codex's source), and a per-session `config.toml` closes it,
+  also tracked in #197 §0;
+- an enterprise account's cloud bundle composes above omh's requirements: its
+  allowlist is the union of both, and an organisation's
+  `allow_managed_hooks_only = false` wins over omh's (read in Codex's source);
+- the instruction files and omp's hook directory above. The mitigation for
+  those is read-only overlays inside the account directory, the way omh
+  already mounts its own files there.
+
+Until then, an account used for untrusted repos is best kept separate from one
+used for work — `omh auth <harness> -n <name>` captures as many as you like.
 
 ### 2. A sandbox protects the host, not the repo
 

@@ -117,7 +117,9 @@ ready  = "enabled"
 # omh's hooks go in the **system** layer, which Codex runs as managed. From the
 # user layer (`~/.codex/config.toml`) a hook runs only once Codex has recorded
 # a `trusted_hash` for it; measured, the same hook fired from `/etc/codex` and
-# not from `~/.codex`. Yours stay in `~/.codex`, under Codex's own trust.
+# not from `~/.codex`. Yours in `~/.codex` and a repo's in `.codex/` no longer
+# run at all [src, see `[policy]` below]: managed hooks only, and omh's are
+# those.
 #
 # The same file trusts `/work`, and turns Codex's own sandbox off, on every
 # launch whatever hooks there are. Codex sandboxes commands with bubblewrap,
@@ -171,3 +173,45 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # "Command blocked by PreToolUse hook: <reason>".
 [capabilities.hooks.refuse]
 template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","permissionDecision":"deny","permissionDecisionReason":$m}}'"""
+
+# What a session may load, decided by the launch and not by the session.
+#
+# Claims below are labelled: [measured] in the 0.162.1 image, [src] read in
+# Codex's source at `rust-v0.162.1` (and #197), [e2e] held by `tests/e2e`.
+#
+# `requirements.toml` sits above every config layer, `-c` included [src], and
+# holds an `[mcp_servers]` allowlist: a server not on it, or on it with other
+# arguments or one argument more, loads disabled — `codex mcp list --json`
+# gives it `"disabled_reason": "requirements (/etc/codex/requirements.toml)"`
+# [measured]; the executable is compared the same way [src]. It is the list
+# the launch staged, by name and exact command and arguments, so a server a
+# session adds with `codex mcp add` loads disabled in that session [e2e], and
+# in every later one, since every launch writes this file afresh from what it
+# stages. Always written, even empty: with no table Codex filters nothing
+# [src]. The identity compares neither `env` nor `cwd` [src]: an entry with
+# omh's command and arguments and its own `env` passes (risk 1b, #197 §0).
+#
+# `allow_managed_hooks_only` stops user- and project-layer hooks [src]; nothing
+# in `tests/e2e` plants one. omh's own run from `/etc/codex/config.toml`, the
+# system layer, which counts as managed: #197 measured `SessionStart` and
+# `UserPromptSubmit` firing with the lock on, and `every_event` passes with it
+# [e2e]. `chatgpt_base_url` is pinned, since it is where Codex sends the
+# ChatGPT tokens [src]. The `omh-none` plugin entry holds every plugin's servers
+# to a list of their own, empty for any plugin not named
+# (`filter_plugin_mcp_servers_by_requirements` in
+# `codex-rs/core/src/config/mod.rs`) [src] — the e2e driver turns plugins off,
+# so nothing runs it. Never a `[hooks]` table: a requirements `managed_dir`
+# that differs from another layer's is a composition error, and Codex refuses
+# to start [src].
+#
+# An enterprise account caches its cloud bundle in `~/.codex`, writable, signed
+# with a key in Codex's public source [src]: a session could forge one that
+# loosens every later session. Masked read-only, Codex warns it cannot write
+# the cache and fetches the bundle at every start [src]; an enterprise account
+# offline does not start at all [src, inferred — no enterprise account was run].
+# The empty mask does not stop a non-enterprise start: every codex e2e scenario
+# runs with it mounted [e2e], as #197 measured with a garbage one.
+[policy]
+path   = "/etc/codex/requirements.toml"
+format = "codex-requirements"
+mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
