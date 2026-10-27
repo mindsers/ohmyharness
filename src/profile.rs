@@ -419,7 +419,8 @@ impl Paths {
         self.root.join(Capability::Hooks.source())
     }
 
-    /// The base set as shipped: what `init` seeds and what `omh why` explains.
+    /// The base set as shipped: what every launch generates from and what
+    /// `omh why` explains.
     /// Versioned files, oldest kept, so an upgrade can eventually diff two.
     pub fn base(&self) -> PathBuf {
         self.root.join("base")
@@ -1099,7 +1100,13 @@ impl Profile {
         let mut out: Vec<String> = Vec::new();
         for source in self.sources(cap)? {
             if cap == Capability::Mcp {
-                out.extend(crate::render::parse_layers(&[source])?.into_keys());
+                // omh's servers are part of omh, never of your catalogue.
+                let omhs = crate::base::server_names()?;
+                out.extend(
+                    crate::render::parse_layers(&[source])?
+                        .into_keys()
+                        .filter(|name| !omhs.contains(name)),
+                );
                 continue;
             }
             out.extend(listed(&source, cap)?.into_iter().map(|(name, _)| name));

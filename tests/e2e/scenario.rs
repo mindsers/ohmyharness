@@ -577,12 +577,15 @@ fn memory_round_trip(s: &Session) {
         "evidence": "image:current",
         "answers": ["what did the e2e suite record"],
     });
-    let wrote = s.turn("Remember it.", &(s.harness.mcp)("memory", "remember", note));
+    let wrote = s.turn(
+        "Remember it.",
+        &(s.harness.mcp)("omh-memory", "remember", note),
+    );
     ran(&wrote);
     let recalled = s.turn(
         "Recall it.",
         &(s.harness.mcp)(
-            "memory",
+            "omh-memory",
             "recall",
             serde_json::json!({ "question": "what did the e2e suite record" }),
         ),
@@ -606,7 +609,7 @@ fn code_graph_answers(s: &Session) {
     let project = format!("{}-s01", s.id);
     let turn = s.turn(
         "List the projects.",
-        &(s.harness.mcp)("codegraph", "list_projects", serde_json::json!({})),
+        &(s.harness.mcp)("omh-codegraph", "list_projects", serde_json::json!({})),
     );
     ran(&turn);
     let results = turn.results();
@@ -691,6 +694,28 @@ fn doctor(s: &Session) {
         s.harness.name,
         crate::sandbox::text(&out)
     );
+    // Asked, not merely not failed: a check doctor skips is a row missing,
+    // which the assertion above reads as a pass. The memory probe, the
+    // document omh's servers are rendered into, and — where the harness can
+    // be asked — whether it loaded them under their `omh-…` names. The last
+    // two were skipped on every install with no `mcp.json` of its own.
+    let rows: Vec<&str> = documents
+        .iter()
+        .flat_map(|d| d["checks"].as_array().into_iter().flatten())
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let asked = ["claude", "codex"].contains(&s.harness.name);
+    for row in ["memory", "mcp"]
+        .into_iter()
+        .chain(asked.then_some("mcp-loaded"))
+    {
+        assert!(
+            rows.contains(&row),
+            "omh doctor never checked `{row}` on {}: {rows:?}\n{}",
+            s.harness.name,
+            crate::sandbox::text(&out)
+        );
+    }
     assert_eq!(
         documents.len(),
         1,

@@ -10,8 +10,8 @@
 //! same one — a benchmark over a stochastic metric would have dressed the second
 //! as the first, which is why there isn't one.
 //!
-//! The manifest is the single source of truth: `omh init` seeds from it and
-//! `omh why` explains from it, so they cannot disagree.
+//! The manifest is the single source of truth: every launch generates from it
+//! and `omh why` explains from it, so they cannot disagree.
 
 use crate::hook::Field;
 use crate::render::Server;
@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 
 /// The base set as data.
 ///
-/// `omh init` seeds from this and `omh why` explains from it, so the two cannot
-/// disagree about what is installed or why. Keeping the rationale in a shipped
+/// Every launch generates from this and `omh why` explains from it, so the two
+/// cannot disagree about what is installed or why. Keeping the rationale in a shipped
 /// file rather than in the binary also means the opinion is reviewable by the
 /// people it is imposed on.
 #[derive(Debug, Default, Deserialize)]
@@ -62,12 +62,22 @@ pub struct Entry {
     pub because: String,
     /// A default nobody can leave is a cage.
     pub remove: String,
-    /// For `mcp` entries: what `init` seeds. Also the baseline that decides
-    /// whether the user's copy counts as modified.
+    /// For `mcp` entries: the command every launch runs the server as.
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Names this entry shipped under before. Servers only, each name one
+    /// entry's alone and nobody's now — `check_names` refuses anything else.
+    ///
+    /// A `~/.omh/mcp.json` an earlier omh seeded holds a copy under one, and
+    /// `init` and `upgrade` take it out by that name as by the current one.
+    /// The name stays omh's everywhere a name could be yours
+    /// ([`Manifest::reserved`]): refused by `[use]`, `omh use`, `settings mcp
+    /// add`, `rm` and `import`, and as `[mcp.<name>.env]`. It is not in
+    /// [`Manifest::owns`]: nothing under it is run or approved as omh's.
+    #[serde(default)]
+    pub was: Vec<String>,
     #[serde(default)]
     pub measured: Vec<Measured>,
     #[serde(default)]
@@ -282,12 +292,15 @@ impl Manifest {
             )
         })?;
 
-        // A manifest that parses but names nothing seeds an empty base set and
-        // reports success, leaving every session running hooks that point at a
-        // server which is not installed. Fail here rather than there.
+        // A manifest that parses but names nothing is an empty base set: the
+        // launch would refuse later, naming a hook rather than this file. Fail
+        // here, where the file can be named.
         if manifest.entries.is_empty() {
             anyhow::bail!("{} declares no base-set entries", path.display());
         }
+        manifest
+            .check_names()
+            .with_context(|| path.display().to_string())?;
         manifest.path = Some(path);
         Ok(manifest)
     }
@@ -306,9 +319,48 @@ impl Manifest {
                 newest = Some((version, manifest));
             }
         }
-        newest
+        let manifest = newest
             .map(|(_, m)| m)
-            .context("omh carries no usable base manifest")
+            .context("omh carries no usable base manifest")?;
+        manifest.check_names().context("omh's own base set")?;
+        Ok(manifest)
+    }
+
+    /// Refuse a name that is not one entry's alone, within its kind — a
+    /// current name held twice, or a name used before that is someone's now
+    /// or two entries' at once.
+    ///
+    /// Every reader looks an entry up by name: `omh why` answers for the
+    /// feature a name belongs to, `upgrade` judges a catalogue copy against
+    /// the definition its name points at, and the refusals name a feature's
+    /// switch. A name answering to two entries makes each of them pick one,
+    /// and not always the same one. Servers only for `was`: nothing renames a
+    /// hook or a rules section, so a `was` there would be reserved and never
+    /// read.
+    fn check_names(&self) -> Result<()> {
+        let mut seen: BTreeMap<(crate::adapter::Capability, &str), &str> = BTreeMap::new();
+        for entry in &self.entries {
+            if let Some(holder) = seen.insert((entry.kind.capability(), &entry.name), &entry.name) {
+                anyhow::bail!("`{holder}` names two entries — a name is one entry's alone");
+            }
+        }
+        for entry in &self.entries {
+            for old in &entry.was {
+                anyhow::ensure!(
+                    entry.kind == Kind::Mcp,
+                    "`{}` says it was `{old}`, and only a server's name is ever moved",
+                    entry.name
+                );
+                if let Some(holder) = seen.insert((entry.kind.capability(), old), &entry.name) {
+                    anyhow::bail!(
+                        "`{}` says it was `{old}`, which is already `{holder}`'s — a name \
+                         used before belongs to one server and is nobody's now",
+                        entry.name
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Which manifest answered, and at what version.
@@ -321,7 +373,8 @@ impl Manifest {
         }
     }
 
-    /// The MCP servers `omh init` seeds, built from the manifest.
+    /// The MCP servers the manifest declares — what [`own`] generates for the
+    /// features on, and what `upgrade` tells a stale copy's edits by.
     ///
     /// There is no second definition in code to disagree with this one — that
     /// was the point of moving the base set into a file.
@@ -363,6 +416,12 @@ impl Manifest {
     /// be selected. The question both ask is "is this name omh's?", and two
     /// answers to it is how a feature gets taken apart by one of them while the
     /// other still thinks it is whole.
+    ///
+    /// The names an entry *used* to have are not in here: an owned name is one
+    /// `[use]` lets through whatever the list says, and an old name in a
+    /// catalogue names nothing of omh's to let through. They are omh's all the
+    /// same — [`Self::reserved`] is both together, and it is what anything
+    /// deciding whether a name is yours reads.
     pub fn owns(&self) -> crate::selection::Owned {
         let mut out = crate::selection::Owned::new();
         for entry in &self.entries {
@@ -373,10 +432,60 @@ impl Manifest {
         out
     }
 
+    /// The names entries used to have, by capability, each pointing at its
+    /// feature.
+    pub fn retired(&self) -> crate::selection::Owned {
+        let mut out = crate::selection::Owned::new();
+        for entry in &self.entries {
+            for old in &entry.was {
+                out.entry(entry.kind.capability())
+                    .or_default()
+                    .insert(old.clone(), entry.feature.clone());
+            }
+        }
+        out
+    }
+
+    /// Every name that is never yours: what omh [owns](Self::owns) and every
+    /// name it [used to have](Self::retired). `memory` stays omh's after its
+    /// server became `omh-memory` — it was never yours to add, import or
+    /// select, and a door that let it in left the others disagreeing about it:
+    /// `import` took one, `omh init` wrote it into `[use]`, and every command
+    /// after that refused the list `init` had just written.
+    pub fn reserved(&self) -> crate::selection::Owned {
+        let mut out = self.owns();
+        for (cap, names) in self.retired() {
+            out.entry(cap).or_default().extend(names);
+        }
+        out
+    }
+
     pub fn rejection(&self, name: &str) -> Option<&Rejected> {
         self.rejected.iter().find(|r| r.name == name)
     }
 }
+
+/// Every name that is omh's server, now or before, from the base set in the
+/// binary.
+///
+/// None of them is ever part of your catalogue: omh's servers are generated
+/// with their features, and a `mcp.json` an earlier omh seeded holds copies
+/// `omh upgrade` takes out. Read from the binary rather than `~/.omh/base`, so
+/// a stale copy there cannot hand one back to you.
+pub fn server_names() -> Result<BTreeSet<String>> {
+    Ok(Manifest::shipped()?
+        .reserved()
+        .remove(&crate::adapter::Capability::Mcp)
+        .unwrap_or_default()
+        .into_keys()
+        .collect())
+}
+
+/// The base-set feature the graph server is part of — what `[omh]` switches,
+/// and so what decides whether [`GRAPH_CACHE`] is mounted. The feature rather
+/// than the server's name, for `memory::tools::FEATURE`'s reason: the name is
+/// whatever `~/.omh/base` says.
+pub const GRAPH_FEATURE: &str = "codegraph";
 
 /// Where the graph server keeps its index inside the sandbox.
 ///
@@ -404,7 +513,7 @@ pub const GRAPH_BIN: &str = "codebase-memory-mcp";
 
 // The MCP servers and their rationale are not here: they are
 // `Manifest::servers()` and `Manifest::rationale()`, read from the base-set
-// file. One file that `init` seeds from and `why` explains from cannot
+// file. One file that launches generate from and `why` explains from cannot
 // contradict itself; a hardcoded list beside it can.
 
 /// The graph UI runs **once per repo**, not once per session.
@@ -923,7 +1032,7 @@ fn note_taking() -> String {
 /// `memory_bin` and `base` already follow: `plan` stays pure given a temp
 /// filesystem, and a probe inside it is a probe no test can reach.
 ///
-/// It used to carry `disabled_servers` and `mcp_env` as well, on the argument
+/// It used to carry the servers of switched-off features and `mcp_env` as well, on the argument
 /// that both are decisions about the rendered document arriving from outside
 /// `plan`. True, and not enough — they are decisions *this repo* made, which is
 /// the opposite of what this type's name claims, and the moment a third one
@@ -940,6 +1049,13 @@ fn note_taking() -> String {
 pub struct Own {
     pub hooks: Vec<Hook>,
     pub sections: Vec<Section>,
+    /// omh's MCP servers, for the features on here, by name — generated from
+    /// the manifest at launch like the hooks and the sections, and never read
+    /// from your catalogue. Seeded into `~/.omh/mcp.json`, a server was the one
+    /// part of a feature you could edit or delete on its own, and a deleted
+    /// one took the hooks and the rules section with it while the rest of the
+    /// feature stayed mounted.
+    pub servers: BTreeMap<String, crate::render::Server>,
     /// Every hook name the manifest owns, whether or not its feature is on.
     ///
     /// A file in a layer answering to one of these is never read. With the
@@ -958,47 +1074,18 @@ pub struct Own {
 /// combination that manufactures confident wrong answers — so it is
 /// unrepresentable rather than warned about.
 ///
-/// Two ways a feature is off, and they are different acts:
-///
-/// - **switched off here**, by `[omh]`. Nothing is uninstalled.
-/// - **removed**, by its server leaving your profile — `mcp.json` edited by
-///   hand, since `omh settings rm` refuses omh's own servers. The hooks and the
-///   rules section go with it, and nothing but `mcp.json` changed — so that is
-///   kept here or nowhere. Before generation the hooks were files and removing
-///   the server left four of them behind; generating them unconditionally
-///   would have rebuilt that defect with no file left to delete.
-///
-/// `installed` is the servers the resolved profile declares. A feature with no
-/// server of its own — `git-notice` — is unaffected by it.
+/// One way a feature is off: `[omh]`. Every part of it is generated here —
+/// server, hooks, section — so there is no part a catalogue could hold, edit or
+/// take away on its own. There used to be a second way, a server deleted from
+/// `mcp.json` by hand, and it was half of one: the hooks and the section went,
+/// the index volume stayed mounted, and `omh info --repo` still said `on`.
 ///
 /// Fails rather than filters when the binary ships a hook or a section this
 /// manifest does not describe. That is omh disagreeing with itself, not a
 /// preference somebody expressed, and the two were the same silent `false`:
 /// the entry was not generated *and* `reserved` blocked any layer file from
 /// standing in, so it existed nowhere and nothing said so.
-pub fn own(
-    manifest: &Manifest,
-    off: &BTreeSet<String>,
-    installed: &BTreeSet<String>,
-) -> Result<Own> {
-    // A feature keeps its non-server parts only while a server it owns is
-    // still there. `any` rather than `all`: a feature with two servers and one
-    // removed is a judgement nothing here can make, and keeping it is the
-    // conservative half.
-    let gone: BTreeSet<&str> = manifest
-        .entries
-        .iter()
-        .filter(|e| e.kind == Kind::Mcp)
-        .fold(BTreeMap::<&str, bool>::new(), |mut acc, e| {
-            let present = installed.contains(&e.name);
-            *acc.entry(e.feature.as_str()).or_insert(false) |= present;
-            acc
-        })
-        .into_iter()
-        .filter(|(_, present)| !present)
-        .map(|(feature, _)| feature)
-        .collect();
-
+pub fn own(manifest: &Manifest, off: &BTreeSet<String>) -> Result<Own> {
     let on = |name: &str| -> Result<bool> {
         let entry = manifest.entry(name).with_context(|| {
             format!(
@@ -1006,12 +1093,21 @@ pub fn own(
                 manifest.source()
             )
         })?;
-        Ok(!off.contains(&entry.feature) && !gone.contains(entry.feature.as_str()))
+        Ok(!off.contains(&entry.feature))
     };
 
     let mut own = Own {
         hooks: Vec::new(),
         sections: Vec::new(),
+        servers: manifest
+            .servers()
+            .into_iter()
+            .filter(|(name, _)| {
+                manifest
+                    .entry(name)
+                    .is_some_and(|e| !off.contains(&e.feature))
+            })
+            .collect(),
         // Every hook the manifest owns, on or off — which is why this is built
         // from the manifest rather than from `hooks()`. A file answering to one
         // of these is never read, and with the feature off there would be
@@ -1431,22 +1527,17 @@ mod tests {
         }
     }
 
-    /// A feature's server gone from `mcp.json` has to take the hooks and the
-    /// rules section with it. Before generation the four hooks were files and
-    /// removing the server left them behind, nudging the agent toward
-    /// something that was gone; generation would have reintroduced exactly
-    /// that, because what omh generates was decided by the manifest alone.
-    ///
-    /// `omh settings rm` refuses omh's own servers now, but `mcp.json` is
-    /// yours to edit. A guard on the *string* of the `remove` field — which is
-    /// what shipped first — passed just as happily when the instruction did
-    /// nothing, so this asserts the behaviour instead.
+    /// A feature off here takes every part omh generates for it — its server
+    /// as much as its hooks and its section — and leaves the other features
+    /// whole. The server is generated, never read from a catalogue, so there
+    /// is no way to take it without the rest.
     #[test]
-    fn removing_a_feature_server_stops_generating_the_rest_of_it() {
+    fn a_feature_off_generates_none_of_its_parts() {
         let manifest = shipped();
-        let installed = BTreeSet::from(["memory".to_string()]);
-        let own = own(&manifest, &BTreeSet::new(), &installed).unwrap();
+        let off = BTreeSet::from(["codegraph".to_string()]);
+        let own = own(&manifest, &off).unwrap();
 
+        assert_eq!(own.servers.keys().collect::<Vec<_>>(), ["omh-memory"]);
         assert!(
             !own.hooks.iter().any(|h| h.name.starts_with("graph-")),
             "no graph hook may outlive its server: {:?}",
@@ -1456,13 +1547,19 @@ mod tests {
             !own.sections.iter().any(|s| s.name == "graph-rules"),
             "and neither may the section telling the agent to query it"
         );
-        assert!(
-            own.sections.iter().any(|s| s.name == "memory-rules"),
-            "memory is still installed, so its section stays"
-        );
-        assert!(
-            own.sections.iter().any(|s| s.name == "git-rules"),
-            "git-notice has no server to remove, so nothing about it changes"
+        assert!(own.sections.iter().any(|s| s.name == "memory-rules"));
+        assert!(own.sections.iter().any(|s| s.name == "git-rules"));
+    }
+
+    /// Every server the manifest declares is generated while its feature is
+    /// on, with the manifest's definition — there is nowhere else it comes
+    /// from.
+    #[test]
+    fn every_feature_on_generates_the_manifests_servers() {
+        let manifest = shipped();
+        assert_eq!(
+            own(&manifest, &BTreeSet::new()).unwrap().servers,
+            manifest.servers()
         );
     }
 
@@ -1480,7 +1577,7 @@ mod tests {
         let dir = manifest_dir(&[("2026.08.toml", &format!("version = \"2026.08\"{ONE_ENTRY}"))]);
         let manifest = Manifest::load_dir(dir.path()).unwrap();
 
-        let err = own(&manifest, &BTreeSet::new(), &BTreeSet::new())
+        let err = own(&manifest, &BTreeSet::new())
             .expect_err("the binary ships hooks this manifest never mentions");
         let err = format!("{err:#}");
         assert!(err.contains("graph-refresh"), "must name it: {err}");
@@ -1608,6 +1705,44 @@ command = "c"
         assert!(err.contains("omh init"), "must say the way out: {err}");
     }
 
+    /// Every reader looks an entry up by name — `omh why`, `upgrade` judging a
+    /// catalogue copy, the refusals naming a switch — so a name, current or
+    /// used before, has to be one entry's alone within its kind. A manifest
+    /// saying otherwise is refused where it is read, rather than resolved
+    /// differently by each reader.
+    #[test]
+    fn a_name_used_before_belongs_to_one_server_and_is_nobodys_now() {
+        let entry = |name: &str, kind: &str, was: &str| {
+            format!(
+                "[[entry]]\nname = \"{name}\"\nkind = \"{kind}\"\nfeature = \"f\"\n\
+                 since = \"2026.06\"\nbecause = \"b\"\nremove = \"r\"\ncommand = \"c\"\n\
+                 was = [{was}]\n"
+            )
+        };
+        for (body, named) in [
+            (
+                entry("omh-a", "mcp", "\"a\"") + &entry("omh-b", "mcp", "\"a\""),
+                "`a`",
+            ),
+            (
+                entry("omh-a", "mcp", "\"omh-b\"") + &entry("omh-b", "mcp", ""),
+                "`omh-b`",
+            ),
+            (entry("omh-a", "mcp", "\"omh-a\""), "`omh-a`"),
+            (entry("a-hook", "hook", "\"old-hook\""), "`old-hook`"),
+            // Two entries of one kind under one current name: the later one
+            // silently won every lookup by name.
+            (
+                entry("omh-a", "mcp", "") + &entry("omh-a", "mcp", ""),
+                "`omh-a`",
+            ),
+        ] {
+            let dir = manifest_dir(&[("2026.08.toml", &format!("version = \"2026.08\"\n{body}"))]);
+            let err = format!("{:#}", Manifest::load_dir(dir.path()).expect_err(&body));
+            assert!(err.contains(named), "must name it: {err}");
+        }
+    }
+
     /// A stray `.toml` sorting after the real manifest used to *become* the
     /// base set: `init` seeded `{}` and reported success, and `omh why` called
     /// omh's own entries the user's.
@@ -1633,10 +1768,9 @@ command = "c"
         assert_eq!(Manifest::load_dir(dir.path()).unwrap().version, "2027.10");
     }
 
-    /// The failure `the_document_init_seeds_actually_contains_the_base_set`
-    /// describes, arriving through the runtime path that test cannot see: a
-    /// manifest that parses but names nothing seeds an empty base set while
-    /// hooks still point at a server that is not installed.
+    /// A manifest that parses but names nothing is an empty base set: every
+    /// session comes up without a graph, and "no MCP servers" is a legitimate
+    /// state nothing downstream questions.
     #[test]
     fn a_manifest_naming_nothing_is_an_error_not_an_empty_base_set() {
         let dir = manifest_dir(&[("2026.08.toml", "version = \"2026.08\"\n")]);
@@ -1734,40 +1868,19 @@ command = "c"
         assert_eq!(
             declared,
             manifest.servers().len(),
-            "an mcp entry is missing its `command` and would seed nothing"
+            "an mcp entry is missing its `command` and would generate nothing"
         );
-    }
-
-    /// Exactly the document `init` writes into the shared layer.
-    ///
-    /// A manifest that parses but yields an empty server map is silent on both
-    /// sides: init reports success, and every new sandbox simply comes up
-    /// without a graph. Nothing downstream notices, because "no MCP servers
-    /// configured" is a legitimate state.
-    #[test]
-    fn the_document_init_seeds_actually_contains_the_base_set() {
-        let manifest = shipped();
-        let body =
-            serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))
-                .unwrap();
-
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let servers = parsed["mcpServers"]
-            .as_object()
-            .expect("an mcpServers object");
-        assert!(!servers.is_empty(), "init would seed an empty base set");
-        assert_eq!(servers["codegraph"]["command"], GRAPH_BIN);
     }
 
     #[test]
     fn the_base_set_ships_a_code_graph() {
         let s = shipped().servers();
         assert!(
-            s.contains_key("codegraph"),
+            s.contains_key("omh-codegraph"),
             "got: {:?}",
             s.keys().collect::<Vec<_>>()
         );
-        assert_eq!(s["codegraph"].command, GRAPH_BIN);
+        assert_eq!(s["omh-codegraph"].command, GRAPH_BIN);
     }
 
     /// The manifest's arguments and the launcher's mounts have to name the
@@ -1785,7 +1898,7 @@ command = "c"
     fn the_memory_server_is_pointed_at_the_store_omh_mounts() {
         let manifest = shipped();
         let entry = manifest
-            .entry("memory")
+            .entry("omh-memory")
             .expect("the memory server is in the manifest");
         let args = entry.args.clone();
         assert!(
@@ -1793,6 +1906,25 @@ command = "c"
                 .any(|w| w[0] == "--notes" && w[1] == crate::memory::GUEST_MEMORY),
             "the server must read the directory omh mounts: {args:?}"
         );
+    }
+
+    /// `omh doctor` finds the memory server as the one server of the feature
+    /// `memory::tools::FEATURE` names, and the launcher mounts the note store
+    /// and the graph index by `FEATURE` and `GRAPH_FEATURE`: a feature of
+    /// another name and the mount is gated on a switch nothing flips; two
+    /// servers in it and the probe asks the wrong one or none.
+    #[test]
+    fn the_features_mounts_are_keyed_on_have_exactly_one_server() {
+        let manifest = shipped();
+        for feature in [crate::memory::tools::FEATURE, GRAPH_FEATURE] {
+            let servers: Vec<&str> = manifest
+                .entries
+                .iter()
+                .filter(|e| e.kind == Kind::Mcp && e.feature == feature)
+                .map(|e| e.name.as_str())
+                .collect();
+            assert_eq!(servers.len(), 1, "{feature}: {servers:?}");
+        }
     }
 
     /// A hand-typed byte count in this file has already been wrong by 5x — the
@@ -1821,7 +1953,7 @@ command = "c"
         let declared = shipped()
             .entries
             .iter()
-            .find(|e| e.name == "memory")
+            .find(|e| e.name == "omh-memory")
             .expect("the memory entry")
             .measured
             .iter()
@@ -1856,6 +1988,20 @@ command = "c"
                 );
             }
         }
+    }
+
+    /// A server omh ships is named for omh in every harness, so a policy can
+    /// tell it from one added inside a session: an allowlist is keyed by
+    /// name, and a bare `memory` is also what the reference memory server is
+    /// usually installed as.
+    #[test]
+    fn every_server_omh_ships_is_named_for_omh() {
+        let unprefixed: Vec<String> = shipped()
+            .servers()
+            .into_keys()
+            .filter(|name| !name.starts_with("omh-"))
+            .collect();
+        assert!(unprefixed.is_empty(), "not named `omh-…`: {unprefixed:?}");
     }
 
     /// Every entry has to be able to answer "why is this here", and the answer

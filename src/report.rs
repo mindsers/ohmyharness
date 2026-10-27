@@ -2357,7 +2357,7 @@ pub struct Using {
     pub unselected: Vec<String>,
     /// What a feature supplies here, which `[use]` never names.
     ///
-    /// A feature owns its server, so `codegraph` and `memory` are excluded from
+    /// A feature owns its server, so `omh-codegraph` and `omh-memory` are excluded from
     /// the selection — and the row read `mcp  nothing` in a repo whose features
     /// block said `codegraph on` and `memory on` two lines above it, and whose
     /// `omh info` listed both in the catalogue. Three true statements, one of
@@ -3744,6 +3744,9 @@ pub struct Upgraded {
     /// each catalogue file you had edited; those warnings print as they
     /// happen). Empty on a dry run, which refreshes nothing.
     pub refreshed: Vec<String>,
+    /// omh's servers taken out of your `mcp.json` — on a dry run, the ones
+    /// that would be. Each is also named on stderr as it happens.
+    pub taken_out: Vec<String>,
     /// Sessions still on an image this upgrade superseded — a relaunch away
     /// from the new one.
     pub stale_sessions: Vec<StaleSession>,
@@ -3840,6 +3843,7 @@ impl Report for Upgraded {
                 "outcome": outcome.key(),
             })).collect::<Vec<_>>(),
             "refreshed": self.refreshed,
+            "taken_out": self.taken_out,
             "stale": self.stale_sessions.iter().map(|s| match &s.image {
                 StaleImage::Known(tag) => json!({ "id": s.id, "image": tag }),
                 StaleImage::Unknown(why) => json!({ "id": s.id, "image": null, "unreadable": why }),

@@ -465,19 +465,20 @@ pub(crate) fn doctor_cmd(
         // The one claim about this image no test can settle: whether the root
         // omh embedded actually got into the store the toolchains read.
         checks.extend(doctor::ca_check(sandbox.ca.as_ref().map(image::Root::pem)));
-        // Only if the resolved profile actually declares it: a check for a server
-        // nobody configured would fail honestly and mean nothing.
-        //
-        // Read through `render::parse_layers` rather than `config::servers`, which
-        // returns only each server's *command* — the arguments are what say which
-        // directories it will look in, and those are the whole point of the check.
-        let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp)?)?;
-        // Not when this repo has switched the feature off: the server is left out
-        // of the document on purpose, so checking for it is checking a claim omh
+        // The memory server as omh generates it, with the arguments that say
+        // which directory it reads — the whole point of the check. Absent only
+        // when this repo switched the feature off: the server is left out of
+        // the document on purpose, and checking for it would check a claim omh
         // deliberately did not make.
-        if let Some(server) = declared
-            .get(memory::tools::SERVER_KEY)
-            .filter(|_| !repo.disabled_servers.contains(memory::tools::SERVER_KEY))
+        //
+        // Found by the name the base set in `~/.omh/base` gives it, which is
+        // `memory` until `omh upgrade` refreshes it.
+        let manifest = base::Manifest::load_dir(&paths.base())?;
+        if let Some(server) = manifest
+            .entries
+            .iter()
+            .find(|e| e.kind == base::Kind::Mcp && e.feature == memory::tools::FEATURE)
+            .and_then(|e| own.servers.get(&e.name))
         {
             checks.extend(doctor::memory_checks(server));
         }
@@ -690,19 +691,20 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
 
     let manifest = base::Manifest::load_dir(&paths.base())?;
 
-    // Servers and hooks are the same kind of thing here: installed, from a
-    // layer, chosen by omh or by you.
+    // Servers and hooks of yours, from the layer each won in. omh's are not
+    // among them: its features are generated, and answered for by the manifest.
     let mut installed = config::servers(&paths)?;
     installed.extend(config::hooks(&paths)?);
-
-    // What omh ships, for deciding whether your copy has been changed. MCP
-    // servers only: hooks and rules sections are generated at launch, so there
-    // is nothing of yours to compare — a file of that name is a leftover, and
-    // the `Generated` verdict names it as one rather than as your edit.
-    let baselines: std::collections::BTreeMap<String, String> = manifest
-        .entries
-        .iter()
-        .filter_map(|e| e.command.clone().map(|c| (e.name.clone(), c)))
+    // And what sits under omh's names, by kind, for the feature's answer to
+    // name as not read: hook files, and server copies an earlier omh seeded.
+    let copies = config::hooks(&paths)?
+        .into_iter()
+        .map(|h| (adapter::Capability::Hooks, h))
+        .chain(
+            config::omhs_server_copies(&paths)?
+                .into_iter()
+                .map(|s| (adapter::Capability::Mcp, s)),
+        )
         .collect();
 
     // Hooks that belong to a detected ecosystem are omh's opinion about that
@@ -746,8 +748,8 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
     let catalog = why::Catalog {
         off: settings::resolve(&paths, &manifest)?.off,
         manifest: &manifest,
-        baselines,
         installed,
+        copies,
         derived,
     };
     ctx.say(&report::Why {

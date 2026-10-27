@@ -747,61 +747,145 @@ exit 0
     }
 }
 
-/// `omh upgrade` re-reads omh's own servers from the manifest, so a release
-/// that changes one's arguments reaches an existing install.
+/// omh's servers are generated from the base set, so `omh upgrade` takes the
+/// copies an earlier omh seeded into `~/.omh/mcp.json` out of it — under the
+/// names they have now and the ones they had — and leaves yours, every field
+/// of them. Each is named on stderr, `--json` or not, and in the JSON report.
 ///
-/// `init` seeds `~/.omh/mcp.json` with `write_if_absent` and nothing refreshed
-/// it, so the memory server kept the arguments it was seeded with — in 0.14
-/// `--team … --local …`, which the binary that reads them now refuses. Only
-/// omh's own entries: the file is yours, and a server you added is yours to
-/// keep.
+/// A copy that differed from what omh ships now is not thrown away: the file
+/// as it was is saved as `mcp.json.yours`, as every managed file is, and the
+/// line says so without saying who changed it — an older omh shipped other
+/// arguments, and a server of yours may sit under one of the names.
 #[test]
-fn upgrade_refreshes_omhs_own_servers() {
+fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     let _log = sb.fake_docker();
-    std::fs::write(
-        sb.home.join(".omh/mcp.json"),
-        r#"{"mcpServers":{
-             "memory":{"command":"omh","args":["memory","serve","--team","/work/.omh/notes","--local","/omh/notes/local"]},
-             "mine":{"command":"my-server","args":["--flag"]}}}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        sb.repo.join(".omh/seeded-by"),
-        "0.1.0
-",
-    )
-    .unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    let catalogue = sb.home.join(".omh/mcp.json");
+    let before = r#"{"mcpServers":{
+             "codegraph":{"command":"codebase-memory-mcp"},
+             "omh-memory":{"command":"omh","args":["memory","serve","--edited"]},
+             "mine":{"command":"my-server","args":["--flag"],"timeout":30}},
+           "theirs":true}"#;
+    std::fs::write(&catalogue, before).unwrap();
 
-    let out = sb.omh(&["upgrade"]);
+    let out = sb.omh(&["--json", "upgrade"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-
     let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap())
-            .unwrap();
-    let args = doc["mcpServers"]["memory"]["args"].to_string();
-    assert!(
-        args.contains("--notes") && args.contains("/omh/memory") && !args.contains("--team"),
-        "omh's own server follows the manifest: {args}"
-    );
+        serde_json::from_str(&std::fs::read_to_string(&catalogue).unwrap()).unwrap();
+    let names: Vec<&str> = doc["mcpServers"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(names, ["mine"], "omh's out, yours kept: {doc}");
+    assert_eq!(doc["mcpServers"]["mine"]["args"][0], "--flag", "{doc}");
     assert_eq!(
-        doc["mcpServers"]["mine"]["command"], "my-server",
-        "and yours is left exactly as you have it: {doc}"
+        doc["mcpServers"]["mine"]["timeout"], 30,
+        "a field omh does not model is yours too: {doc}"
     );
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
+    assert_eq!(doc["theirs"], true, "and so is the rest of the file: {doc}");
+    assert_eq!(
+        std::fs::read_to_string(sb.home.join(".omh/mcp.json.yours")).unwrap(),
+        before,
+        "the file as it was, because one copy differed"
+    );
+
+    let said = String::from_utf8_lossy(&out.stderr);
+    for name in ["`codegraph`", "`omh-memory`"] {
+        assert!(said.contains(name), "names {name}: {said}");
+    }
+    assert!(
+        said.lines()
+            .any(|l| l.contains("`omh-memory`") && l.contains("mcp.json.yours")),
+        "and where the differing copy went: {said}"
+    );
+    assert!(
+        !said.contains("your edit"),
+        "omh cannot know who changed it: {said}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    let mut taken: Vec<&str> = report["taken_out"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no `taken_out` in {report}"))
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    taken.sort();
+    assert_eq!(taken, ["codegraph", "omh-memory"], "{report}");
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("catalogue"),
+        "and nothing to say the second time: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// A preview says what an upgrade would take out of your catalogue, and takes
+/// nothing: the one edit `upgrade` makes to a file of yours is the one a
+/// preview most has to show.
+#[test]
+fn a_previewed_upgrade_names_what_it_would_take_out_and_writes_nothing() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    let catalogue = sb.home.join(".omh/mcp.json");
+    let before = r#"{"mcpServers":{"memory":{"command":"omh"},"mine":{"command":"m"}}}"#;
+    std::fs::write(&catalogue, before).unwrap();
+
+    let out = sb.omh(&["--dry-run", "upgrade"]);
     assert!(
-        said.contains("memory"),
-        "and it says what it changed: {said}"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&catalogue).unwrap(), before);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.lines()
+            .any(|l| l.contains("`memory`") && l.contains("would")),
+        "names what it would take out: {said}"
+    );
+}
+
+/// A catalogue omh cannot read stops `omh upgrade` before it writes anything,
+/// naming the server: refreshed adapters and a base set beside a refusal read
+/// as though nothing happened.
+#[test]
+fn a_catalogue_upgrade_cannot_read_stops_it_before_any_write() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"remote":{"url":"https://example.com/mcp"}}}"#,
+    )
+    .unwrap();
+    let adapter = sb.home.join(".omh/adapters/claude.toml");
+    let shipped = std::fs::read_to_string(&adapter).unwrap();
+    std::fs::write(&adapter, format!("{shipped}\n# yours\n")).unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(!out.status.success(), "a catalogue it cannot read");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("`remote`"), "names the server: {said}");
+    assert!(
+        !sb.home.join(".omh/adapters/claude.toml.yours").exists(),
+        "and refreshed nothing first: {said}"
     );
 }
 
@@ -3587,14 +3671,17 @@ fn use_refuses_a_feature_and_set_refuses_a_catalogue_entry() {
     sb.seed_base();
     sb.catalogue(&["skills/review-diff/SKILL.md"]);
 
-    let out = sb.omh(&["use", "mcp", "codegraph"]);
-    assert!(!out.status.success(), "codegraph is omh's, not yours");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("codegraph"), "must name it: {err}");
-    assert!(
-        err.contains("omh set codegraph off"),
-        "and point at the switch that does work: {err}"
-    );
+    // The server's name, and the one it had before, which is the feature's.
+    for name in ["omh-codegraph", "codegraph"] {
+        let out = sb.omh(&["use", "mcp", name]);
+        assert!(!out.status.success(), "{name} is omh's, not yours");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(name), "must name it: {err}");
+        assert!(
+            err.contains("omh set codegraph off"),
+            "and point at the switch that does work: {err}"
+        );
+    }
 
     // And the other direction, so the distinction is not one-way.
     let out = sb.omh(&["set", "review-diff", "off"]);
@@ -5169,7 +5256,10 @@ fn your_defaults_are_said_as_yours_and_omhs_own_as_omhs() {
             .unwrap_or_default()
             .to_string()
     };
-    assert!(line("codegraph").contains("omh's own"), "{said}");
+    assert!(
+        !said.contains("codegraph"),
+        "omh's are part of omh, not of your catalogue: {said}"
+    );
     assert!(line("linear").contains("your catalogue"), "{said}");
 
     let said = run(&["settings", "set", "codegraph", "maybe"]);
@@ -6875,13 +6965,15 @@ fn settings_rm_refuses_a_hook_omh_ships_and_takes_one_of_yours() {
     assert!(!sb.home.join(".omh/hooks/mine.json").exists());
 }
 
-/// A server omh ships is refused, as a hook it ships is: `codegraph` and
-/// `memory` are omh's features, and a feature is switched off — whole, in a
-/// repo — rather than taken apart from your catalogue.
+/// A server omh ships is refused, as a hook it ships is: `omh-codegraph` and
+/// `omh-memory` are omh's features', and a feature is switched off — whole, in
+/// a repo — rather than taken apart from your catalogue.
 ///
 /// Every server a shipped manifest declares, read off `base/` rather than
 /// named here, so the next feature's server is held to it as well — and with
 /// `--yes` and `--dry-run` both, since the screen previews before it asks.
+/// Under every name it used to have too: a catalogue `omh upgrade` has not yet
+/// cleaned holds a copy of omh's server under one.
 #[test]
 fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
     let sb = sandbox();
@@ -6895,14 +6987,15 @@ fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
             .unwrap();
         for e in doc["entry"].as_array().unwrap() {
             if e["kind"].as_str() == Some("mcp") {
-                owned.push((
-                    e["name"].as_str().unwrap().to_string(),
-                    e["feature"].as_str().unwrap().to_string(),
-                ));
+                let feature = e["feature"].as_str().unwrap().to_string();
+                let was = e.get("was").and_then(|w| w.as_array()).cloned();
+                for name in std::iter::once(&e["name"]).chain(was.iter().flatten()) {
+                    owned.push((name.as_str().unwrap().to_string(), feature.clone()));
+                }
             }
         }
     }
-    for server in ["codegraph", "memory"] {
+    for server in ["omh-codegraph", "omh-memory", "codegraph", "memory"] {
         assert!(owned.iter().any(|(n, _)| n == server), "{owned:?}");
     }
     let mut servers = serde_json::Map::new();
@@ -6955,7 +7048,9 @@ fn settings_rm_refuses_a_server_omh_ships_and_takes_one_of_yours() {
 /// in silence, so a second `linear` took the first one's arguments and its
 /// token with it — and replaced `codegraph`, which `rm` refuses to take out.
 /// `--replace` says you meant it, as it does for `mcp import`; omh's own
-/// servers are refused with it too, since `omh upgrade` puts them back.
+/// servers are refused with it too — under their names now and the ones they
+/// had — since a name of omh's is never yours and `omh upgrade` takes a
+/// server under one out of your catalogue.
 #[test]
 fn mcp_add_does_not_write_over_a_server() {
     let sb = sandbox();
@@ -7012,6 +7107,17 @@ fn mcp_add_does_not_write_over_a_server() {
     assert_eq!(held(), before);
 
     for argv in [
+        vec!["settings", "mcp", "add", "omh-codegraph", "echo"],
+        vec![
+            "settings",
+            "mcp",
+            "add",
+            "--replace",
+            "omh-codegraph",
+            "echo",
+        ],
+        vec!["settings", "mcp", "add", "omh-memory", "echo"],
+        // And the names they had before, which are omh's still.
         vec!["settings", "mcp", "add", "codegraph", "echo"],
         vec!["settings", "mcp", "add", "--replace", "codegraph", "echo"],
         vec!["settings", "mcp", "add", "memory", "echo"],
@@ -10101,6 +10207,20 @@ fn init_installs_every_directory_this_repo_ships() {
             );
         }
     }
+
+    // And no server catalogue: omh's servers are generated at launch, so a
+    // fresh install has no `mcp.json` until you add a server of your own. The
+    // repo's settings file, written just after where one used to be seeded,
+    // shows `init` got that far.
+    assert!(
+        sb.repo.join(".omh/settings.toml").exists(),
+        "init stopped before the point this checks"
+    );
+    assert!(
+        !sb.home.join(".omh/mcp.json").exists(),
+        "init seeded a server catalogue: {}",
+        std::fs::read_to_string(sb.home.join(".omh/mcp.json")).unwrap_or_default()
+    );
 }
 
 /// Provisioning stays behind the runtime check, and records nothing without it.
@@ -13677,6 +13797,157 @@ fn use_all_does_not_turn_on_a_guard() {
     assert!(!settings.contains("config-guard"), "got: {settings}");
 }
 
+/// A part of omh's features cannot be edited on its own: `settings edit` under
+/// the name of one of omh's hooks or rules sections used to open an editor on a
+/// new catalogue file of that name — one every launch then refuses. It is
+/// refused before any editor opens, naming the feature's switch.
+#[test]
+fn settings_edit_refuses_a_part_of_omhs_features() {
+    let sb = sandbox();
+    sb.seed_base();
+    for (cap, name, feature) in [
+        ("hooks", "graph-first", "codegraph"),
+        ("hooks", "graph-refresh", "codegraph"),
+        ("rules", "graph-rules", "codegraph"),
+        ("rules", "memory-rules", "memory"),
+    ] {
+        let out = sb.omh(&["settings", "edit", cap, name]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "`settings edit {cap} {name}` opened");
+        assert!(said.contains(&format!("omh set {feature} off")), "{said}");
+        assert!(
+            !sb.bin.join("editor.log").exists(),
+            "no editor was opened for {cap}/{name}"
+        );
+    }
+}
+
+/// omh's servers are part of omh, not of your catalogue, so nothing that lists
+/// or counts your catalogue names them — not even in a `mcp.json` an earlier
+/// omh seeded and `omh upgrade` has not cleaned yet.
+#[test]
+fn omhs_servers_are_never_counted_as_your_catalogue() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"omh-codegraph":{"command":"codebase-memory-mcp"},
+                          "memory":{"command":"omh"},"linear":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+
+    for argv in [
+        vec!["info"],
+        vec!["settings", "mcp", "ls"],
+        vec!["--json", "info"],
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            out.status.success(),
+            "`omh {}`: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.contains("linear"), "`omh {}`: {said}", argv.join(" "));
+        for omhs in ["omh-codegraph", "\"memory\"", " memory "] {
+            assert!(
+                !said.contains(omhs),
+                "`omh {}` counts {omhs} as yours: {said}",
+                argv.join(" ")
+            );
+        }
+    }
+}
+
+/// The names omh's servers had before they were named `omh-…` stay omh's, and
+/// every door agrees. `import` was the one that did not: a `memory` server —
+/// the name the reference memory server is usually installed under — landed
+/// beside `omh-memory`, `omh use --all` and `omh init` wrote it into `[use]`,
+/// and every command after that refused the file they had just written.
+#[test]
+fn a_name_omhs_servers_used_to_have_never_reaches_a_use_list() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let catalogue = fx.home.join(".omh/mcp.json");
+    std::fs::create_dir_all(catalogue.parent().unwrap()).unwrap();
+    std::fs::write(
+        &catalogue,
+        r#"{"mcpServers":{"omh-memory":{"command":"omh","args":["memory","serve","--notes","/omh/memory"]}}}"#,
+    )
+    .unwrap();
+    let theirs = fx.home.join("theirs.mcp.json");
+    std::fs::write(
+        &theirs,
+        r#"{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"]},
+                          "omh-codegraph":{"command":"a-graph-of-theirs"},
+                          "linear":{"command":"npx","args":["-y","mcp-remote"]}}}"#,
+    )
+    .unwrap();
+    let held = || -> Vec<String> {
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&catalogue).unwrap()).unwrap();
+        doc["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+
+    for replace in [false, true] {
+        let mut argv = vec!["settings", "mcp", "import", "claude", "--from"];
+        argv.push(theirs.to_str().unwrap());
+        if replace {
+            argv.push("--replace");
+        }
+        let out = fx.omh(&argv);
+        assert!(
+            out.status.success(),
+            "the rest of the file still imports: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(held(), ["linear", "omh-memory"], "`omh {}`", argv.join(" "));
+        let said = String::from_utf8_lossy(&out.stdout);
+        for name in ["memory", "omh-codegraph"] {
+            assert!(
+                said.lines()
+                    .any(|l| l.contains(name) && l.contains("omh's")),
+                "and it says why `{name}` was left out: {said}"
+            );
+        }
+    }
+
+    // `mcp.json` is yours to edit, so the old name can still be there.
+    std::fs::write(
+        &catalogue,
+        r#"{"mcpServers":{"omh-memory":{"command":"omh"},"memory":{"command":"npx"},
+                          "linear":{"command":"npx"}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nmcp = []\n").unwrap();
+    let out = fx.omh(&["use", "--all"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let settings = fx.settings();
+    assert!(
+        settings.contains("\"linear\"") && !settings.contains("\"memory\""),
+        "{settings}"
+    );
+    let out = fx.omh(&["info", "--repo"]);
+    assert!(
+        out.status.success(),
+        "the list omh wrote is one omh reads: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// Excluded from automatic expansion, never from being named. `catalogue_lists`
 /// narrows what `init`/`--all` write; `catalogue_names`, which validates a
 /// name you typed, does not — a guard is a real catalogue entry and `omh use
@@ -13954,6 +14225,45 @@ fn eject_writes_what_each_capability_renders_to() {
         said.contains("ejected") || said.contains(out.file_name().unwrap().to_str().unwrap()),
         "it has to say where the files went: {said}"
     );
+}
+
+/// omh's servers come out of `eject` like its hooks and rules sections — they
+/// are generated, not read from your catalogue, so a catalogue holding none of
+/// yours still ejects them. It ejected none: the document was skipped for a
+/// profile with no `mcp.json`, and Claude's settings came out approving a
+/// server nothing defined.
+#[test]
+fn eject_writes_omhs_servers_with_no_catalogue_of_yours() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    assert!(!sb.home.join(".omh/mcp.json").exists());
+    for harness in ["claude", "codex"] {
+        let out = sb.home.join(format!("ejected-{harness}"));
+        let ran = sb.omh(&["eject", harness, "--to", out.to_str().unwrap()]);
+        assert!(
+            ran.status.success(),
+            "eject {harness}: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let mut defines = Vec::new();
+        fn walk(at: &Path, into: &mut Vec<String>) {
+            for e in std::fs::read_dir(at).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    walk(&e.path(), into);
+                } else if let Ok(body) = std::fs::read_to_string(e.path()) {
+                    into.push(body);
+                }
+            }
+        }
+        walk(&out, &mut defines);
+        for server in ["omh-codegraph", "omh-memory"] {
+            assert!(
+                defines.iter().any(|b| b.contains(&format!("\"{server}\":"))
+                    || b.contains(&format!("mcp_servers.{server}"))),
+                "{harness}: no document defines {server}"
+            );
+        }
+    }
 }
 
 /// `--dry-run` runs everything and writes nothing.

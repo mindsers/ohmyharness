@@ -2129,7 +2129,7 @@ mod tests {
         let (_dir, paths) = paths();
         std::fs::write(
             config::mcp_path(&paths),
-            r#"{"mcpServers":{"memory":{"command":"omh","args":["memory","serve"]},"linear":{"command":"npx","args":["-y","mcp-remote","--header","Authorization: Bearer sk-arg"],"env":{"LINEAR_TOKEN":"sk-env"}}}}"#,
+            r#"{"mcpServers":{"omh-memory":{"command":"omh","args":["memory","serve"]},"linear":{"command":"npx","args":["-y","mcp-remote","--header","Authorization: Bearer sk-arg"],"env":{"LINEAR_TOKEN":"sk-env"}}}}"#,
         )
         .unwrap();
         let model = model(&paths);
@@ -2243,7 +2243,7 @@ mod tests {
         write(&paths.root.join("rules/house.md"), "# house\n");
         write(
             &config::mcp_path(&paths),
-            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},"linear":{"command":"npx"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"codebase-memory-mcp"},"linear":{"command":"npx"}}}"#,
         );
         write(
             &paths.root.join("default.toml"),
@@ -2293,7 +2293,7 @@ mod tests {
         assert!(page(&model, "servers")
             .rows
             .iter()
-            .all(|r| r.name != "codegraph"));
+            .all(|r| r.name != "omh-codegraph"));
         assert_eq!(row("servers", "linear").seeded, Some(true));
         assert_eq!(
             page(&model, "servers").seeds.as_deref(),
@@ -2389,20 +2389,20 @@ mod tests {
             owned.about
         );
         std::fs::remove_file(paths.root.join("hooks/graph-first.json")).unwrap();
-        // Owned is per kind: `memory` is omh's server, and a hook of yours.
+        // Owned is per kind: `omh-memory` is omh's server, and a hook of yours.
         write(
-            &paths.root.join("hooks/memory.json"),
+            &paths.root.join("hooks/omh-memory.json"),
             r#"{"on":"turn-end","run":"true"}"#,
         );
         let again = model(&paths);
         let yours = page(&again, "hooks")
             .rows
             .iter()
-            .find(|r| r.name == "memory")
+            .find(|r| r.name == "omh-memory")
             .unwrap()
             .clone();
         assert_eq!(yours.seeded, Some(true));
-        std::fs::remove_file(paths.root.join("hooks/memory.json")).unwrap();
+        std::fs::remove_file(paths.root.join("hooks/omh-memory.json")).unwrap();
 
         write(
             &paths.root.join("default.toml"),
@@ -3036,7 +3036,7 @@ mod tests {
     fn what_rm_refuses_is_marked_fixed() {
         let (_dir, paths) = paths();
         let shipped = settings::shipped_servers().unwrap();
-        assert!(shipped.contains_key("codegraph") && shipped.contains_key("memory"));
+        assert!(shipped.contains_key("omh-codegraph") && shipped.contains_key("omh-memory"));
         let mut servers = serde_json::Map::new();
         for name in shipped.keys() {
             servers.insert(name.clone(), serde_json::json!({ "command": "true" }));

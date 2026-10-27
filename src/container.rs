@@ -403,35 +403,7 @@ pub fn plan(
 
     for cap in Capability::ALL {
         let sources = profile.sources(cap)?;
-        // Every other capability is exactly what the profile carries. Rules are
-        // not: the project's own `AGENTS.md` is composed in, and it is often the
-        // only thing there — a fresh install has no rules layer of its own. So
-        // asking the profile whether to stage threw the repo's conventions away
-        // in the configuration a clone lands in, which is the bug this module
-        // was written to fix.
-        //
-        // Hooks are the same story: omh's five are generated from the manifest
-        // and belong to no layer at all, so a repo with no `hooks/` directory
-        // still has them to stage.
-        let carries_something = match cap {
-            Capability::Rules => !rules_doc.trim().is_empty(),
-            // And a `claude-settings` document is no longer only hooks: it also
-            // carries the approval without which the MCP document omh mounts is
-            // listed and never loaded. Skipping it when a repo has turned every
-            // hook off would turn that repo's MCP servers off with them, at a
-            // distance, through a file neither setting mentions.
-            Capability::Hooks => {
-                !sources.is_empty()
-                    || !opts.omh.hooks.is_empty()
-                    // Codex's system config likewise carries the trust without
-                    // which `/work` is prompted about and its rules skipped.
-                    || adapter.supports(cap).is_some_and(|b| {
-                        matches!(b.render, Render::ClaudeSettings | Render::CodexHooks)
-                    })
-            }
-            _ => !sources.is_empty(),
-        };
-        if !carries_something {
+        if !carries(cap, &sources, &rules_doc, &opts.omh, adapter) {
             continue;
         }
         if adapter.supports(cap).is_none() {
@@ -662,24 +634,26 @@ pub fn plan(
         });
     }
 
-    // The graph index, keyed by repo rather than harness — that is what lets
-    // it survive a container rebuild and a switch from Claude Code to opencode.
-    mounts.push(Mount {
-        host: PathBuf::from(paths.cache_volume()),
-        guest: PathBuf::from(crate::base::GRAPH_CACHE),
-        read_only: false,
-        file: false,
-    });
-
     // A feature is all or nothing, and that has to reach the mounts rather
     // than stopping at the documents. With `memory` off the agent was still
     // given a writable store it is never told about and a server binary
     // nothing spawns — the half-configured state the design calls
-    // unrepresentable.
-    let memory_on = !opts
-        .repo
-        .disabled_servers
-        .contains(crate::memory::tools::SERVER_KEY);
+    // unrepresentable. `codegraph` kept its index volume the same way.
+    let graph_on = !opts.repo.off.contains(crate::base::GRAPH_FEATURE);
+    let memory_on = !opts.repo.off.contains(crate::memory::tools::FEATURE);
+
+    // The graph index, keyed by repo rather than harness — that is what lets
+    // it survive a container rebuild and a switch from Claude Code to opencode.
+    // The volume is not removed when the feature is off, only not mounted, so
+    // switching it back on finds the index where it was.
+    if graph_on {
+        mounts.push(Mount {
+            host: PathBuf::from(paths.cache_volume()),
+            guest: PathBuf::from(crate::base::GRAPH_CACHE),
+            read_only: false,
+            file: false,
+        });
+    }
 
     // The local note store, keyed by repo like the graph cache and for the
     // same reason: it must survive a container rebuild, a harness switch and
@@ -1322,6 +1296,49 @@ pub(crate) fn sample_plan() -> Plan {
     }
 }
 
+/// Whether the harness is handed anything for `cap`: the one rule a launch and
+/// `omh eject` both follow, since an eject is the launch's documents written
+/// somewhere a harness can read without a container.
+///
+/// Every other capability is exactly what the profile carries. Rules are not:
+/// the project's own `AGENTS.md` is composed in, and it is often the only thing
+/// there — a fresh install has no rules layer of its own. So asking the
+/// profile whether to stage threw the repo's conventions away in the
+/// configuration a clone lands in, which is the bug this module was written to
+/// fix.
+///
+/// Hooks and servers are the same story: omh's are generated from the
+/// manifest and belong to no layer at all, so a catalogue with no `hooks/` or
+/// no `mcp.json` of yours still has them to hand over. Eject asked the profile
+/// alone, and wrote Claude's approval for a server it never defined.
+pub(crate) fn carries(
+    cap: Capability,
+    sources: &[PathBuf],
+    rules_doc: &str,
+    own: &crate::base::Own,
+    adapter: &Adapter,
+) -> bool {
+    match cap {
+        Capability::Rules => !rules_doc.trim().is_empty(),
+        // And a `claude-settings` document is no longer only hooks: it also
+        // carries the approval without which the MCP document omh mounts is
+        // listed and never loaded. Skipping it when a repo has turned every
+        // hook off would turn that repo's MCP servers off with them, at a
+        // distance, through a file neither setting mentions.
+        Capability::Hooks => {
+            !sources.is_empty()
+                || !own.hooks.is_empty()
+                // Codex's system config likewise carries the trust without
+                // which `/work` is prompted about and its rules skipped.
+                || adapter.supports(cap).is_some_and(|b| {
+                    matches!(b.render, Render::ClaudeSettings | Render::CodexHooks)
+                })
+        }
+        Capability::Mcp => !sources.is_empty() || !own.servers.is_empty(),
+        _ => !sources.is_empty(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1349,11 +1366,7 @@ mod tests {
     fn decided_from(fx: &Fx) -> (crate::base::Own, crate::settings::RepoPolicy) {
         let manifest = base_manifest();
         let repo = crate::settings::resolve(&fx.paths, manifest).unwrap();
-        let installed = manifest.servers().into_keys().collect();
-        (
-            crate::base::own(manifest, &repo.off, &installed).unwrap(),
-            repo,
-        )
+        (crate::base::own(manifest, &repo.off).unwrap(), repo)
     }
 
     /// The shipped manifest, parsed once. Same reason `hook::tests::shipped`
@@ -1364,16 +1377,13 @@ mod tests {
         CELL.get_or_init(|| crate::base::Manifest::load_dir(Path::new(BASE)).unwrap())
     }
 
-    /// Every server the manifest names is treated as installed unless a case
-    /// is about removal: `own` switches a feature off when its server is gone
-    /// from the profile, and a fixture that declared none would silently
-    /// disable everything.
+    /// What omh contributes and what this repo decided, with `off` switched
+    /// off and nothing else said.
     fn decided_with(
         off: std::collections::BTreeSet<String>,
     ) -> (crate::base::Own, crate::settings::RepoPolicy) {
         let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
-        let installed = manifest.servers().into_keys().collect();
-        let own = crate::base::own(&manifest, &off, &installed).unwrap();
+        let own = crate::base::own(&manifest, &off).unwrap();
         // Through the same constructor `settings::resolve` uses, so a fixture
         // cannot hold a different opinion about which servers a feature owns.
         (
@@ -2721,7 +2731,11 @@ mod tests {
         .unwrap();
         selects(&fx, "mcp = [\"linear\"]\n");
 
-        assert_eq!(staged_servers(&plan_for(&fx, "claude")), vec!["linear"]);
+        assert_eq!(
+            staged_servers(&plan_for(&fx, "claude")),
+            vec!["linear", "omh-codegraph", "omh-memory"],
+            "yours as named, and omh's, which `[use]` does not name"
+        );
         assert!(
             std::fs::read_to_string(fx.paths.root.join("mcp.json"))
                 .unwrap()
@@ -2766,7 +2780,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx.paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"omh-memory":{"command":"omh"},
                               "linear":{"command":"l"}}}"#,
         )
         .unwrap();
@@ -2778,7 +2792,7 @@ mod tests {
         let p = plan_for(&fx, "claude");
         assert_eq!(
             staged_servers(&p),
-            vec!["codegraph", "memory"],
+            vec!["omh-codegraph", "omh-memory"],
             "omh's own survive an empty list; `linear` is yours and does not"
         );
         let hooks = staged_hooks(&p);
@@ -2804,7 +2818,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx.paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"},"omh-memory":{"command":"omh"},
                               "linear":{"command":"l"}}}"#,
         )
         .unwrap();
@@ -2826,8 +2840,8 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
-        assert_eq!(mode("codegraph").as_deref(), Some("approve"), "{doc}");
-        assert_eq!(mode("memory").as_deref(), Some("approve"), "{doc}");
+        assert_eq!(mode("omh-codegraph").as_deref(), Some("approve"), "{doc}");
+        assert_eq!(mode("omh-memory").as_deref(), Some("approve"), "{doc}");
         assert_eq!(
             mode("linear"),
             None,
@@ -3304,6 +3318,226 @@ mod tests {
         );
     }
 
+    /// The note store, against a base set an older omh wrote — one that still
+    /// names the server `memory`, which is what `~/.omh/base` holds until `omh
+    /// upgrade` or `omh init` refreshes it. Keyed on the server's name, the
+    /// store would stay mounted with the feature off, because the name this
+    /// binary expects is not the one that manifest switches off.
+    #[test]
+    fn a_disabled_feature_takes_its_mounts_under_an_older_base_set_too() {
+        let shipped = std::fs::read_to_string(Path::new(BASE).join("2026.08.toml")).unwrap();
+        let older = shipped
+            .replace("name    = \"omh-memory\"", "name    = \"memory\"")
+            .replace("was     = [\"memory\"]\n", "");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("2026.08.toml"), older).unwrap();
+        let manifest = crate::base::Manifest::load_dir(dir.path()).unwrap();
+        assert!(
+            manifest.entry("memory").is_some() && manifest.entry("omh-memory").is_none(),
+            "the fixture must name the server as an older omh did"
+        );
+
+        // Both halves: off takes the store and the binary, on keeps them —
+        // keyed on a server name, either half could hold while the other broke.
+        for on in [false, true] {
+            let fx = fixture();
+            let bin = fake_server_binary(&fx);
+            let off: std::collections::BTreeSet<String> = if on {
+                Default::default()
+            } else {
+                ["memory".to_string()].into()
+            };
+            let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+            let p = plan(
+                &fx.paths,
+                &fx.profile,
+                &adapter,
+                &fx.session,
+                &[],
+                Options {
+                    staging: Staging::Apply,
+                    persist: crate::persist::Mode::None,
+                    tty: true,
+                    account_dir: None,
+                    memory_bin: Some(bin),
+                    base: None,
+                    omh: crate::base::own(&manifest, &off).unwrap(),
+                    repo: crate::settings::RepoPolicy::switching_off(&manifest, off),
+                    image: crate::image::tag_for(&adapter, None),
+                    resolves: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+            for guest in [
+                crate::memory::GUEST_MEMORY,
+                crate::memory::deliver::GUEST_BIN,
+            ] {
+                assert_eq!(
+                    p.mounts.iter().any(|m| m.guest == Path::new(guest)),
+                    on,
+                    "{guest} with memory {}: {:?}",
+                    if on { "on" } else { "off" },
+                    p.mounts
+                );
+            }
+        }
+    }
+
+    /// A catalogue `omh upgrade` has not cleaned still holds what an earlier
+    /// omh seeded: the graph server under its old name, and an edited copy
+    /// under its new one. Neither is staged — the harness is handed omh's
+    /// definition, once — and a server of yours beside them is untouched.
+    #[test]
+    fn copies_of_omhs_servers_in_your_catalogue_are_never_staged() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},
+                              "omh-codegraph":{"command":"my-fork"},
+                              "linear":{"command":"npx"}}}"#,
+        )
+        .unwrap();
+        let p = plan_for(&fx, "claude");
+        assert_eq!(
+            staged_servers(&p),
+            ["linear", "omh-codegraph", "omh-memory"],
+            "no second graph server under the old name"
+        );
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".mcp.json"))
+            .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mount.host).unwrap()).unwrap();
+        assert_eq!(
+            doc["mcpServers"]["omh-codegraph"]["command"],
+            crate::base::GRAPH_BIN,
+            "omh's definition, not the copy: {doc}"
+        );
+    }
+
+    /// Every part of a feature follows its switch, on every harness, and none
+    /// of it comes from your catalogue.
+    ///
+    /// Each part is found by something only it puts in what the sandbox is
+    /// handed: a file staged for the harness, or a mount. A hook this harness
+    /// cannot express counts as there when the launch names it dropped — that
+    /// is the honest outcome for it, and a switch that turned it off would
+    /// remove the name from that list too.
+    ///
+    /// The catalogue holds none of omh's servers on purpose. Seeded into it,
+    /// they were the one part a user could edit or delete on its own — and a
+    /// server deleted by hand took the hooks and the rules section with it
+    /// while the index volume stayed mounted.
+    #[test]
+    fn every_part_of_a_feature_follows_its_switch_on_every_harness() {
+        type Part = (&'static str, fn(&Plan, &str) -> bool);
+        let staged = |p: &Plan| -> String {
+            p.mounts
+                .iter()
+                .filter(|m| m.file && m.host.is_file())
+                .filter_map(|m| std::fs::read_to_string(&m.host).ok())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let dropped = |p: &Plan, hook: &str| p.dropped_hooks.iter().any(|d| d.name == hook);
+        // A server entry, in JSON or in Codex's TOML — not merely the name:
+        // Claude's `permissions.allow` spells `mcp__<name>` whether or not the
+        // document it approves carries the server.
+        fn serves(staged: &str, name: &str) -> bool {
+            staged.contains(&format!("\"{name}\":"))
+                || staged.contains(&format!("mcp_servers.{name}"))
+        }
+        let features: [(&str, Vec<Part>); 2] = [
+            (
+                crate::base::GRAPH_FEATURE,
+                vec![
+                    ("omh-codegraph", |_, s| serves(s, "omh-codegraph")),
+                    ("graph-refresh", |_, s| s.contains("index_repository")),
+                    ("graph-orient", |_, s| s.contains("get_architecture")),
+                    ("graph-rules", |_, s| {
+                        s.contains("This repo is indexed as a graph")
+                    }),
+                    ("graph-cache", |p, _| {
+                        p.mounts
+                            .iter()
+                            .any(|m| m.guest == Path::new(crate::base::GRAPH_CACHE))
+                    }),
+                ],
+            ),
+            (
+                crate::memory::tools::FEATURE,
+                vec![
+                    ("omh-memory", |_, s| serves(s, "omh-memory")),
+                    ("memory-rules", |_, s| s.contains("## Which graph to ask")),
+                    ("note store", |p, _| {
+                        p.mounts
+                            .iter()
+                            .any(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+                    }),
+                    ("server binary", |p, _| {
+                        p.mounts
+                            .iter()
+                            .any(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN))
+                    }),
+                ],
+            ),
+        ];
+        // The two graph nudges, which some harnesses cannot express.
+        let nudges = [
+            ("graph-first", "This repo has a code graph"),
+            ("graph-read", "is large. For one symbol"),
+        ];
+
+        // Every part of every feature is there exactly when *its own* feature
+        // is on — whichever one is switched off, and with none switched off.
+        // Checked across both features at once, so a switch that reached the
+        // other feature's parts fails as surely as one that missed its own.
+        for harness in ["claude", "codex", "omp", "opencode"] {
+            for off in [
+                None,
+                Some(crate::base::GRAPH_FEATURE),
+                Some(crate::memory::tools::FEATURE),
+            ] {
+                let fx = fixture();
+                // No catalogue servers at all — where most installs are once
+                // omh's left `mcp.json`, and the case that asked the profile
+                // whether to stage an MCP document at all.
+                std::fs::remove_file(fx.paths.root.join("mcp.json")).unwrap();
+                let bin = fake_server_binary(&fx);
+                let switch = off.map_or(String::new(), |f| format!("\n[omh]\n{f} = false\n"));
+                std::fs::write(
+                    fx.paths.repo.join(".omh/settings.toml"),
+                    format!("carry_in = [\".env\"]\n{switch}"),
+                )
+                .unwrap();
+                let p = plan_with_memory_bin(&fx, harness, Some(bin));
+                let text = staged(&p);
+                for (feature, parts) in &features {
+                    let on = off != Some(*feature);
+                    let state = if on { "on" } else { "off" };
+                    for (part, present) in parts {
+                        assert_eq!(
+                            present(&p, &text),
+                            on,
+                            "{harness}: `{part}` with {feature} {state}, {off:?} switched off"
+                        );
+                    }
+                    if *feature == crate::base::GRAPH_FEATURE {
+                        for (hook, says) in nudges {
+                            assert_eq!(
+                                text.contains(says) || dropped(&p, hook),
+                                on,
+                                "{harness}: `{hook}` with {feature} {state}, {off:?} switched off"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// A feature off in this repo takes its server, its hooks and its section
     /// of the rules together.
     ///
@@ -3316,7 +3550,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx.paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"codebase-memory-mcp"}}}"#,
         )
         .unwrap();
         let (own, repo) = decided_with(["codegraph".to_string()].into());
@@ -3369,6 +3603,16 @@ mod tests {
         assert!(
             !composed_rules(&p).contains("This repo is indexed as a graph"),
             "no graph section"
+        );
+        // And the index volume, which only the server reads: mounted with the
+        // feature off, it is a writable cache nothing in the session is told
+        // about — the half the memory store already had taken away.
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.guest == Path::new(crate::base::GRAPH_CACHE)),
+            "no graph index: {:?}",
+            p.mounts
         );
     }
 

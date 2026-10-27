@@ -1641,7 +1641,7 @@ pub fn checks(
     let mut out = Vec::new();
     for capability in Capability::ALL {
         let sources = profile.sources(capability)?;
-        // Two capabilities are mounted whether or not a layer sources them,
+        // Three capabilities are mounted whether or not a layer sources them,
         // because omh generates part of them from the base manifest. Asking
         // the profile is the same mistake `container::plan` made about rules:
         // it answers about the layers, and the question is about the mount.
@@ -1667,6 +1667,10 @@ pub fn checks(
         let generated = match capability {
             Capability::Rules => !own.sections.is_empty(),
             Capability::Hooks => true,
+            // omh's servers are generated, and `omh init` writes no `mcp.json`:
+            // asking the profile alone skipped both MCP checks on every fresh
+            // install, while the launch staged the servers all the same.
+            Capability::Mcp => !own.servers.is_empty(),
             _ => false,
         };
         if sources.is_empty() && !generated {
@@ -1688,7 +1692,7 @@ pub fn checks(
             Render::Concat => Expect::NonEmptyFile,
             Render::Dir => Expect::Entries(entry_names(&sources, capability, repo)?),
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-                Expect::Mentions(server_names(&sources, repo)?)
+                Expect::Mentions(server_names(&sources, own, repo)?)
             }
             Render::ClaudeSettings | Render::CodexHooks => Expect::NonEmptyFile,
             // A program gets a stronger check than a config file, not a weaker
@@ -1724,7 +1728,7 @@ pub fn checks(
         // trade the rest of this function makes: no check beats one that fails
         // forever and blames the harness for a question omh never asked.
         if let (Some(verify), Some(ready)) = (&binding.verify, &binding.ready) {
-            let names = server_names(&sources, repo)?;
+            let names = server_names(&sources, own, repo)?;
             let ask_from = expand(&binding.path, GUEST_HOME)
                 .parent()
                 .map(PathBuf::from)
@@ -1752,7 +1756,7 @@ pub fn checks(
 /// An entry this repo did not select is deliberately absent, for the reason
 /// `server_names` gives one capability over: demanding it makes `omh doctor`
 /// fail forever and blame the harness for obeying. That argument was applied to
-/// `disabled_servers` and not carried across when `[use]` landed, so a doctor
+/// switched-off features' servers and not carried across when `[use]` landed, so a doctor
 /// run in any curated repo reported `missing: <name>` — a false alarm in the
 /// one command CONTRIBUTING puts above the test suite.
 ///
@@ -1834,14 +1838,15 @@ fn hook_names(
 }
 
 /// What the document is expected to mention — which is what the launcher
-/// renders, not what the layers declare.
+/// renders, not what the layers declare, so it is read from the same function:
+/// `render::servers`.
 ///
 /// A server whose feature is off here is deliberately left out of that
-/// document, and so is one `[use] mcp` does not name — the same two retains
-/// `render` makes, in the same order. Demanding either makes `omh doctor` fail
-/// forever and blame the harness for obeying, which is the opposite of what
-/// this command is for. The second was missing until a repo whose `init`
-/// wrote `mcp = []` added a server and every doctor run went red over it.
+/// document, and so is one `[use] mcp` does not name. Demanding either makes
+/// `omh doctor` fail forever and blame the harness for obeying, which is the
+/// opposite of what this command is for. The second was missing until a repo
+/// whose `init` wrote `mcp = []` added a server and every doctor run went red
+/// over it — this re-derived the launcher's retains, and missed one.
 ///
 /// **A layer omh could not parse is an error, not an empty expectation.** This
 /// ended in `.unwrap_or_default()`, which spelled "every server is switched
@@ -1849,11 +1854,13 @@ fn hook_names(
 /// second one then built a check that demands nothing and prints `ok`.
 /// `parse_layers` propagates, like `profile::entries` and `doctor_cmd`; this
 /// was the one caller that did not.
-fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Result<Vec<String>> {
-    Ok(crate::render::parse_layers(sources)?
+fn server_names(
+    sources: &[PathBuf],
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+) -> Result<Vec<String>> {
+    Ok(crate::render::servers(sources, own, repo)?
         .into_keys()
-        .filter(|name| !repo.disabled_servers.contains(name))
-        .filter(|name| repo.selection.allows(Capability::Mcp, name))
         .collect())
 }
 
@@ -3578,10 +3585,9 @@ mod tests {
         write(catalogue.join("rules/tdd.md"), "rules");
         write(catalogue.join("skills/graphify/SKILL.md"), "s");
         write(catalogue.join("subagents/explorer.md"), "a");
-        write(
-            catalogue.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
-        );
+        // No `mcp.json`: what `omh init` leaves now that omh's servers are
+        // generated. A copy of one here was what kept the MCP checks alive
+        // while every fresh install had them skipped.
         Fx {
             _dir: dir,
             profile: Profile::resolve(&paths),
@@ -3602,9 +3608,8 @@ mod tests {
         })
     }
 
-    /// Every server the manifest names counts as installed: `own` also
-    /// switches a feature off when its server is gone from the profile, and a
-    /// fixture declaring none would disable everything for the wrong reason.
+    /// What omh contributes and what this repo decided, with `off` switched
+    /// off and nothing else said.
     ///
     /// The pair together, because a fixture that named a feature off without
     /// the servers it owns would let a check pass on a plan omh cannot build.
@@ -3612,8 +3617,7 @@ mod tests {
         off: std::collections::BTreeSet<String>,
     ) -> (crate::base::Own, crate::settings::RepoPolicy) {
         let manifest = base_manifest();
-        let installed = manifest.servers().into_keys().collect();
-        let own = crate::base::own(manifest, &off, &installed).unwrap();
+        let own = crate::base::own(manifest, &off).unwrap();
         (
             own,
             crate::settings::RepoPolicy::switching_off(manifest, off),
@@ -3720,8 +3724,8 @@ mod tests {
         .expect("claude stages mcp");
         assert_eq!(
             mcp.expect,
-            Expect::Mentions(vec![]),
-            "the only server in this profile is codegraph, and it is off here"
+            Expect::Mentions(vec!["omh-memory".to_string()]),
+            "omh-codegraph is off here; omh-memory is generated, the catalogue's or not"
         );
     }
 
@@ -3807,7 +3811,7 @@ mod tests {
         write(paths.root.join("commands/ship.md"), "c");
         write(
             paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"}}}"#,
         );
 
         use std::os::unix::fs::PermissionsExt;
@@ -3856,7 +3860,7 @@ mod tests {
         };
         write(
             paths.root.join("mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+            r#"{"mcpServers":{"omh-codegraph":{"command":"c"}}}"#,
         );
         // A hook file that is not a hook. `render::document` parses every one
         // it is handed, so this is the readable-but-unusable case — the one a
@@ -3927,7 +3931,7 @@ mod tests {
     ///
     /// The case above carried across to directories and not to servers. It is
     /// the ordinary configuration, not an edge: `omh init` writes `mcp = []`
-    /// when the catalogue holds only omh's own servers, so the first
+    /// when the catalogue holds no server of yours, so the first
     /// `omh settings mcp add` afterwards made every `omh doctor` in that repo
     /// fail on two rows, `mcp` and `mcp-loaded`, both `missing: linear`.
     #[test]
@@ -3935,7 +3939,7 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx._dir.path().join("home/mcp.json"),
-            r#"{"mcpServers":{"codegraph":{"command":"c"},"linear":{"command":"l"}}}"#,
+            r#"{"mcpServers":{"linear":{"command":"l"}}}"#,
         )
         .unwrap();
         let (own, mut repo) = decided();
@@ -3960,8 +3964,8 @@ mod tests {
             .expect("claude stages mcp");
         assert_eq!(
             mcp.expect,
-            Expect::Mentions(vec!["codegraph".to_string()]),
-            "codegraph is omh's and always goes in; linear was not selected here"
+            Expect::Mentions(vec!["omh-codegraph".to_string(), "omh-memory".to_string()]),
+            "omh's go in whatever `[use]` says; linear was not selected here"
         );
         let loaded = got
             .iter()
@@ -3970,7 +3974,7 @@ mod tests {
         match &loaded.expect {
             Expect::Loaded { names, .. } => assert_eq!(
                 names,
-                &vec!["codegraph".to_string()],
+                &vec!["omh-codegraph".to_string(), "omh-memory".to_string()],
                 "the harness is asked only about servers it was given"
             ),
             other => panic!("mcp-loaded asks the harness, not {other:?}"),
@@ -4170,7 +4174,10 @@ mod tests {
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
 
         let mcp = cs.iter().find(|c| c.name == "mcp").unwrap();
-        assert_eq!(mcp.expect, Expect::Mentions(vec!["codegraph".into()]));
+        assert_eq!(
+            mcp.expect,
+            Expect::Mentions(vec!["omh-codegraph".into(), "omh-memory".into()])
+        );
     }
 
     /// Regression: the check stripped `.md`, guessing at how a harness names a

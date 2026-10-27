@@ -79,7 +79,7 @@ what it found: stage-and-symlink for the mounts `sbx` cannot do natively,
 what was considered instead and how to remove it — and the four fields are
 enforced by a test rather than by convention, so an entry cannot be added
 without its reasoning. The base set moved out of the binary into a versioned
-manifest to make that possible; `init` seeds from it and `why` explains from it.
+manifest to make that possible; every launch generates from it and `why` explains from it.
 
 **What remains is the rollup:** what the **whole** set injects, measured in
 bytes, deterministically and without an LLM in the loop. Per-entry costs are

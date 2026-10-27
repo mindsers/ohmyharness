@@ -1,6 +1,6 @@
 # The base set — omh's opinion, as data.
 #
-# This file is the single source of truth: `omh init` seeds from it and
+# This file is the single source of truth: every launch generates from it and
 # `omh why` explains from it, so the two cannot disagree about what is
 # installed or why.
 #
@@ -18,10 +18,13 @@ version = "2026.08"
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[entry]]
-name    = "codegraph"
+name    = "omh-codegraph"
 kind    = "mcp"
 feature = "codegraph"
 since   = "2026.06"
+# Named for omh in every harness, so a policy keyed by server name can tell
+# omh's from one a session added. `codegraph` is what it was seeded as before.
+was     = ["codegraph"]
 because = "structural queries instead of re-grepping the repo every task"
 remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings set codegraph off` does the same for every repo `omh init` sets up after"
 command = "codebase-memory-mcp"
@@ -257,10 +260,11 @@ because    = "looks like a cheaper grep, but `--pattern 'fn unfilled' --mode com
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[entry]]
-name    = "memory"
+name    = "omh-memory"
 kind    = "mcp"
 feature = "memory"
 since   = "2026.08"
+was     = ["memory"]
 because = "what a session learned outlives it — a removed session leaves no transcript to grep"
 remove  = "omh set memory off — the feature and its server together. Your notes stay where they are; `omh settings set memory off` does the same for every repo `omh init` sets up after"
 command = "omh"

@@ -85,41 +85,8 @@ pub fn document(
     } = *ctx;
     match binding.render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-            let mut servers = merge_servers(sources)?;
-            // Checked against the catalogue as written, *before* the disabled
-            // ones are dropped. Checked after, an override for a feature this
-            // repo switched off reported "not in your catalogue" about a
-            // server that is plainly in it — advice pointing at
-            // `omh settings mcp ls`, which lists it, and no way forward.
-            for name in repo.mcp_env.keys() {
-                if !servers.contains_key(name) {
-                    anyhow::bail!(
-                        "[mcp.{name}.env] overrides a server that is not in your \
-                         catalogue — nothing would read it. `omh settings mcp ls` \
-                         lists what is there."
-                    );
-                }
-            }
-            // Two retains, deliberately not one condition: a server is dropped
-            // because its feature is off *here*, or because this repo never
-            // named it, and those are different sentences to say when somebody
-            // asks why a server is missing.
-            servers.retain(|name, _| !repo.disabled_servers.contains(name));
-            servers.retain(|name, _| repo.selection.allows(Capability::Mcp, name));
-            // Variable by variable, not entry by entry: a repo overriding one
-            // token must not silently inherit the rest of a catalogue entry it
-            // never saw. Named where it is applied rather than merged into the
-            // sources, so `omh info` still shows the catalogue as written.
-            //
-            // A server whose feature is off here is simply gone by now, so its
-            // override is a no-op rather than an error: switching a feature off
-            // is not a reason to make you delete a token you will want back.
-            for (name, env) in &repo.mcp_env {
-                if let Some(server) = servers.get_mut(name) {
-                    server.env.extend(env.clone());
-                }
-            }
-            let omhs = |name: &str| repo.selection.is_omhs(Capability::Mcp, name);
+            let servers = servers(sources, own, repo)?;
+            let omhs = |name: &str| own.servers.contains_key(name);
             Ok(mcp_approving(binding.render, &servers, &omhs)?.into())
         }
         // Both hook renders suppress before translating, and neither may skip
@@ -127,14 +94,9 @@ pub fn document(
         // about this repo, it is a rule about which harness you happened to
         // launch.
         Render::ClaudeSettings => {
-            // The servers omh ships and runs, minus those a feature switched
-            // off here — the ones it stages, and the only ones it vouches for.
-            let ours: Vec<&str> = repo
-                .selection
-                .omhs(Capability::Mcp)
-                .into_iter()
-                .filter(|name| !repo.disabled_servers.contains(*name))
-                .collect();
+            // The servers omh generates for the features on here — the ones
+            // it stages, and the only ones it vouches for.
+            let ours: Vec<&str> = own.servers.keys().map(String::as_str).collect();
             let mut hooks = merge_hooks(sources, own, repo)?;
             let mut dropped = suppressed_by_probe(&mut hooks, resolves);
             let (rendered, unspellable) = translate(&hooks, binding, tools, log)?;
@@ -217,6 +179,54 @@ struct CanonicalMcp {
 /// Merge by server name; later layers win.
 pub fn parse_layers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
     merge_servers(files)
+}
+
+/// Every server a session is handed: yours, as this repo takes them, then
+/// omh's for the features on here.
+///
+/// **The one place that list is made.** The documents, Claude's
+/// `permissions.allow`, Codex's approval and `omh doctor`'s expectation all
+/// read it; doctor re-deriving the retains is how it once demanded servers the
+/// launch had deliberately left out.
+///
+/// A name of omh's in your catalogue — `mcp.json` is yours to edit, and one
+/// written before omh stopped seeding it still holds copies — is dropped
+/// before omh's own go in, so the harness is handed omh's definition, once.
+pub fn servers(
+    sources: &[PathBuf],
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+) -> Result<BTreeMap<String, Server>> {
+    let mut servers = merge_servers(sources)?;
+    // Checked against the catalogue as written, *before* anything is dropped.
+    // Checked after, an override for a server this repo did not name reported
+    // "not in your catalogue" about a server that is plainly in it — advice
+    // pointing at `omh settings mcp ls`, which lists it, and no way forward.
+    for name in repo.mcp_env.keys() {
+        if !servers.contains_key(name) {
+            anyhow::bail!(
+                "[mcp.{name}.env] overrides a server that is not in your \
+                 catalogue — nothing would read it. `omh settings mcp ls` \
+                 lists what is there."
+            );
+        }
+    }
+    // A name that is omh's is never yours, whatever your file says: omh's
+    // current names are replaced below, and a name one of its servers used to
+    // have names nothing of yours.
+    servers.retain(|name, _| !repo.selection.is_reserved(Capability::Mcp, name));
+    servers.retain(|name, _| repo.selection.allows(Capability::Mcp, name));
+    // Variable by variable, not entry by entry: a repo overriding one token
+    // must not silently inherit the rest of a catalogue entry it never saw.
+    // Named where it is applied rather than merged into the sources, so
+    // `omh info` still shows the catalogue as written.
+    for (name, env) in &repo.mcp_env {
+        if let Some(server) = servers.get_mut(name) {
+            server.env.extend(env.clone());
+        }
+    }
+    servers.extend(own.servers.clone());
+    Ok(servers)
 }
 
 fn merge_servers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
@@ -2669,24 +2679,26 @@ mod tests {
             r#"{"on":"turn-end","run":"cargo test"}"#,
         );
         let adapter = claude_hooks();
-        let owned = crate::selection::Owned::from([(
-            Capability::Mcp,
-            BTreeMap::from([
-                ("codegraph".to_string(), "codegraph".to_string()),
-                ("memory".to_string(), "memory".to_string()),
-            ]),
-        )]);
-        let repo = crate::settings::RepoPolicy {
-            selection: crate::selection::Selection::owning(owned),
-            disabled_servers: ["memory".to_string()].into(),
+        // What `base::own` generates with `memory` off here: the graph's
+        // server and nothing of memory's.
+        let own = crate::base::Own {
+            servers: BTreeMap::from([(
+                "omh-codegraph".to_string(),
+                Server {
+                    command: "codebase-memory-mcp".into(),
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                },
+            )]),
             ..Default::default()
         };
+        let repo = crate::settings::RepoPolicy::default();
         let out = document(
             Capability::Hooks,
             hooks_binding(&adapter),
             &[dir.path().join("h")],
             &RenderContext {
-                own: &Default::default(),
+                own: &own,
                 repo: &repo,
                 tools: &adapter.tools,
                 resolves: &Default::default(),
@@ -2702,7 +2714,7 @@ mod tests {
         let allow: Vec<&str> = allow.iter().filter_map(|x| x.as_str()).collect();
         assert_eq!(
             allow,
-            vec!["mcp__codegraph"],
+            vec!["mcp__omh-codegraph"],
             "omh's own, and not the server whose feature is off here: {}",
             out.body
         );
@@ -4100,7 +4112,7 @@ try {{
         let said = drive_omp(
             &render(omp()),
             "tool_call",
-            r#"{ toolName: "write", input: { path: "xd://mcp__codegraph_list_projects", content: "{}" } }"#,
+            r#"{ toolName: "write", input: { path: "xd://mcp__omh_codegraph_list_projects", content: "{}" } }"#,
         );
         assert_eq!(
             said, "null",

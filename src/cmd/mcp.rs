@@ -29,12 +29,14 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
             env,
             replace,
         } => {
-            // omh's own: `omh upgrade` puts its definition back over yours,
-            // and `rm` refuses it for the same reason.
+            // omh's own, or a name one of its servers had: either is omh's,
+            // and `omh upgrade` takes a server under one out of your catalogue.
+            // `rm` and `import` refuse them too.
             if let Some(feature) = crate::cmd::settings::shipped_servers()?.get(name) {
                 anyhow::bail!(
-                    "the `{name}` server is omh's own — the {feature} feature, and \
-                     `omh upgrade` puts its definition back. To switch it off in a repo:\n  \
+                    "`{name}` is omh's own — the {feature} feature's server, or a name it \
+                     had — and `omh upgrade` would take a server of yours under it. To \
+                     switch the feature off in a repo:\n  \
                      omh set {feature} off\n\
                      and for every repo `omh init` sets up after:\n  \
                      omh settings set {feature} off"
@@ -116,6 +118,17 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                 )
             })?;
             let incoming = render::parse(binding.render, &raw)?;
+            // omh's names are not yours to import, under `--replace` or not —
+            // `mcp add` refuses them for the same reason. `memory` above all:
+            // the name a third-party memory server is usually installed under,
+            // and one `omh-memory` used to have, so it is still omh's.
+            let shipped = crate::cmd::settings::shipped_servers()?;
+            let (omhs, incoming): (
+                std::collections::BTreeMap<_, _>,
+                std::collections::BTreeMap<_, _>,
+            ) = incoming
+                .into_iter()
+                .partition(|(name, _)| shipped.contains_key(name));
 
             let outcome = config::mcp_import(paths, incoming, *force, dry_run)?;
             let wrote = (!dry_run && !outcome.added.is_empty())
@@ -138,6 +151,14 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                     name: name.clone(),
                     verdict: report::Verdict::Conflict,
                     detail: "differs — keeping yours; --replace to overwrite".into(),
+                }))
+                .chain(omhs.keys().map(|name| report::Considered {
+                    name: name.clone(),
+                    verdict: report::Verdict::Skipped,
+                    detail: format!(
+                        "the name is omh's — the {} feature's; import it under another",
+                        shipped[name]
+                    ),
                 }))
                 .collect();
 
@@ -173,17 +194,13 @@ pub(crate) fn repo_has_selection(paths: &Paths) -> Result<bool> {
 
 /// The catalogue's MCP servers, with whose each one is.
 pub(crate) fn show_servers(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
-    // omh's own are its features', not your catalogue's, though they sit in
-    // the same file: the screen files them under the feature, and so does this.
-    let shipped = crate::cmd::settings::shipped_servers()?;
+    // Yours alone: omh's are part of its features, not of your catalogue, and
+    // `config::servers` never lists them.
     ctx.say(&report::Servers {
         servers: config::servers(paths)?
             .into_iter()
             .map(|s| report::Setting {
-                whose: Some(match shipped.get(&s.key) {
-                    Some(feature) => format!("omh's own — the {feature} feature"),
-                    None => s.layer.whose().to_string(),
-                }),
+                whose: Some(s.layer.whose().to_string()),
                 key: s.key,
                 value: s.value,
             })

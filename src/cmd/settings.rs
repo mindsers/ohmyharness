@@ -472,9 +472,11 @@ pub(crate) fn say_what_still_switches(paths: &Paths, feature: &str, ctx: &out::C
 /// **Three vocabularies, and only one pair is disjoint.** Settings keys do not
 /// collide with feature names or entry names — `no_name_is_both_a_setting_and_a_feature`
 /// reads `key::KEYS` and every shipped manifest and fails the build if they
-/// ever do. Features and entries **overlap on purpose**: the manifest names a
-/// feature after its principal entry, so `codegraph` and `memory` are each
-/// both. That makes the order of the two manifest checks load-bearing, and
+/// ever do. Features and entries **may overlap**: a manifest can name a feature
+/// after its principal entry — the base set did, so `codegraph` and `memory`
+/// were each both until omh's servers were named `omh-…`, and a `~/.omh/base`
+/// an older omh wrote still says so. That makes the order of the two manifest
+/// checks load-bearing, and
 /// `a_feature_named_after_its_own_entry_resolves_as_the_feature` pins it —
 /// read as an entry, `omh set codegraph off` would be refused with
 /// `codegraph is part of the codegraph feature` and the feature would have no
@@ -538,11 +540,12 @@ pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
             return Names::Neither;
         }
     };
-    // Features before entries, and that order **is** load-bearing: the
-    // manifest names a feature after its principal entry, so `codegraph` and
-    // `memory` are each both. Read as an entry, `omh set codegraph off` would
-    // be refused with `codegraph is part of the codegraph feature` and the
-    // feature would have no spelling at all.
+    // Features before entries, and that order **is** load-bearing: a manifest
+    // may name a feature after its principal entry — the base set did, so
+    // `codegraph` and `memory` were each both until omh's servers were named
+    // `omh-…`, and a `~/.omh/base` an older omh wrote still does. Read as an
+    // entry, `omh set codegraph off` would be refused with `codegraph is part
+    // of the codegraph feature` and the feature would have no spelling at all.
     // `a_feature_named_after_its_own_entry_resolves_as_the_feature` pins it.
     if manifest.entries.iter().any(|e| e.feature == name) {
         return Names::AFeature;
@@ -1171,6 +1174,18 @@ pub(crate) fn edit_target(
         );
     }
     selection::validate_entry_name(name, cap, &dir)?;
+    // A part of one of omh's features is generated at launch and is not a file
+    // to edit. Opened anyway, the editor made a catalogue file of that name —
+    // one every launch then refused, as a file answering to a name omh ships.
+    if let Some(feature) = shipped_owned(cap)?.get(name) {
+        anyhow::bail!(
+            "{cap}/{name} is omh's — part of the `{feature}` feature, generated at launch \
+             and switched whole, not edited part by part. In a repo:\n  \
+             omh set {feature} off\n\
+             and for every repo `omh init` sets up after:\n  \
+             omh settings set {feature} off"
+        );
+    }
     // The file the kind is read as, by its exact name, first: the name joined
     // with `format!` and not `with_extension`, which replaces whatever follows
     // the last dot — `v1.2` became `v1.md`, another rule. And an exact match
@@ -1413,6 +1428,17 @@ pub(crate) fn rm(
         // add` and `mcp import` take any — so checking it as a path left
         // `org/x` in the catalogue with no command that could take it out.
         adapter::Capability::Mcp => {
+            // omh's, first: it is not in your catalogue to be found, and
+            // "no such server" would hide the switch that does work.
+            if let Some(feature) = shipped_servers()?.get(name) {
+                anyhow::bail!(
+                    "the `{name}` server is omh's own — the {feature} feature, which is \
+                     switched off whole rather than taken apart. In a repo:\n  \
+                     omh set {feature} off\n\
+                     and for every repo `omh init` sets up after:\n  \
+                     omh settings set {feature} off"
+                );
+            }
             let known: Vec<String> = config::servers(paths)?.into_iter().map(|s| s.key).collect();
             if !known.iter().any(|k| k == name) {
                 return Err(no_such_entry(cap, name, &known));
@@ -1437,20 +1463,6 @@ pub(crate) fn rm(
              and for every repo `omh init` sets up after:\n  \
              omh settings unuse hooks {name}"
         );
-    }
-    if cap == adapter::Capability::Mcp {
-        // Taking the server out took the feature's hooks and rules section with
-        // it, in every repo at once — `base::own` keeps that true for an
-        // `mcp.json` edited by hand, but no verb of omh's does it.
-        if let Some(feature) = shipped_servers()?.get(name) {
-            anyhow::bail!(
-                "the `{name}` server is omh's own — the {feature} feature, which is \
-                 switched off whole rather than taken apart. In a repo:\n  \
-                 omh set {feature} off\n\
-                 and for every repo `omh init` sets up after:\n  \
-                 omh settings set {feature} off"
-            );
-        }
     }
     let what = match &entry {
         Some(path) => path.display().to_string(),
@@ -1662,15 +1674,15 @@ pub(crate) fn shipped_servers() -> Result<std::collections::BTreeMap<String, Str
 /// From the manifests in the binary, as [`shipped_hooks`] is from its hooks,
 /// rather than `~/.omh/base`: what omh owns is not a file that a stray or
 /// unreadable copy could make removable.
+///
+/// The names an entry used to have count too — [`base::Manifest::reserved`].
 pub(crate) fn shipped_owned(
     cap: adapter::Capability,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     Ok(base::Manifest::shipped()?
-        .entries
-        .into_iter()
-        .filter(|e| e.kind.capability() == cap)
-        .map(|e| (e.name, e.feature))
-        .collect())
+        .reserved()
+        .remove(&cap)
+        .unwrap_or_default())
 }
 
 /// omh's features, from the manifests in the binary — what `[omh]` switches.

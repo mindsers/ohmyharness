@@ -265,7 +265,10 @@ because it is the command that looks at that again. It:
 
 1. refreshes the managed catalogue from the binary — adapters, the base set,
    editors, stacks, hooks, markers — keeping anything you edited as `.yours`,
-   just as `init` does;
+   just as `init` does. omh's own servers are generated at launch now, so a
+   copy an earlier omh seeded into `~/.omh/mcp.json` — under the name it has or
+   the one it had, `codegraph`, `memory` — is taken out, and named on stderr,
+   `--json` or not, with a word when it was an edit of yours;
 2. asks the sandbox again which of this repo's provides apply, and corrects
    [`[provision]`](/reference/configuration/#provision--what-your-sandbox-is-built-with)
    before it builds anything;
@@ -1840,30 +1843,52 @@ $ omh why codegraph
 ```
 
 ```text title="omh why codegraph"
-codegraph — omh's choice, in the base set since 2026.06
+codegraph — an omh feature, in the base set since 2026.06
 
-  because     structural queries instead of re-grepping the repo every task
-  part of     codegraph
-  brings      graph-orient, graph-first, graph-read, graph-refresh, graph-rules
-  costs       0.46s to index this repo, cold   measured 2026-08-06
-              index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
-              3.4 MB on disk                   measured 2026-08-06
-              the graph volume after a cold index of this repo
-  instead of  gitnexus            PolyForm-Noncommercial licence
-              codegraphcontext    needs a Neo4j service running
-              @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
-  installed   this repo
-  remove      omh set codegraph off — the feature, its server and its hooks
-              together. Nothing is uninstalled and the next repo gets it back
+  gathers     omh-codegraph   structural queries instead of re-grepping the repo every task
+              graph-orient    the agent is given the module map instead of discovering it by reading files
+              graph-first     structural questions answer in one call instead of an iterative grep
+              graph-read      one symbol instead of a whole file, when the file is big enough for that to matter
+              graph-refresh   the graph describes the code as it is now, not as the session found it
+              graph-rules     a graph the agent has not been told about is a graph it never queries — the four hooks fire while it is already doing something, and this is what is true before it starts
+  costs       omh-codegraph   0.46s to index this repo, cold             measured 2026-08-06
+                              index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
+                              3.4 MB on disk                             measured 2026-08-06
+                              the graph volume after a cold index of this repo
+              graph-orient    2,300 B per context rebuild                measured 2026-08-06
+                              get_architecture with four targeted aspects (2,138 B of payload) plus the hook's own framing prose
+              graph-first     243 B per grep                             measured 2026-08-07
+                              the nudge string for a `repo-sNN` project name, computed from the literals the hook ships — see the_grep_nudges_declared_cost_matches_the_string_it_ships
+              graph-read      1,511 B when it fires                      measured 2026-08-06
+                              get_code_snippet for one symbol, against reading the enclosing source file whole — this repo's largest was over 20x that. The file size is deliberately not recorded: it moves on every edit, and an earlier version of this line was already stale on the commit that wrote it.
+                              0 B when it does not                       measured 2026-08-06
+                              silent unless the target is source over 8,000 bytes
+              graph-refresh   0.14s per turn                             measured 2026-08-06
+                              incremental re-index of a session worktree at Stop
+              graph-rules     673 B in the agent's context, every turn   measured 2026-08-12
+                              the section as shipped, byte for byte. Computed by `every_rules_section_costs_what_it_says` against the string omh sends rather than typed in — a hand-written cost and the prose it describes have no relationship a test can check
+  instead of  omh-codegraph   gitnexus                      PolyForm-Noncommercial licence
+                              codegraphcontext              needs a Neo4j service running
+                              @sdsrs/code-graph             close second; needs a node runtime rather than a static binary
+              graph-orient    the `overview` aspect         6,173 B for the same orientation the four targeted aspects give in 2,138
+              graph-first     blocking grep outright        grep is right for a literal string, and a hook that blocks correct work gets disabled
+              graph-read      nudging on every Read         Read is the most frequent tool there is; a nudge on every call becomes noise the model tunes out
+              graph-refresh   indexing once at init         a session's worktree is not the checkout it started from; the graph would describe code the agent has since changed
+              graph-rules     the graph-orient hook alone   orientation is re-paid at every context rebuild and describes the modules; this names the tools and the project variable once. Different claims, and the hook's 2,300 B is the one that repeats
+  remove      omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings set codegraph off` does the same for every repo `omh init` sets up after
+
+  A feature is all or nothing: every part above is generated at
+  launch and switched together, and none of them is a file of yours.
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
 
 **Everything omh ships belongs to a feature**, and removal follows the feature:
 `omh set codegraph off` takes the server and its four hooks together.
-`omh why graph-first` answers "part of codegraph" from the other direction, and
-says `(off here)` when this repo has switched the feature off in
-`.omh/settings.toml`.
+Every name in a feature is the same question and gets this answer —
+`omh why omh-codegraph`, `omh why graph-first`, `omh why graph-rules` — since
+no part can be had on its own. It says `off in this repo` when this repo has
+switched the feature off in `.omh/settings.toml`.
 
 **Cost is measured; benefit is argued.** Every cost carries the date it was
 taken *and how*, and one predating the current base-set version is marked stale
@@ -1875,19 +1900,17 @@ see
 **A name matching nothing prints what *is* known** rather than guessing — the
 same rule as `omh s01 attach emacs`.
 
-### Seven answers, because authorship differs
+### Five answers, because authorship differs
 
 | | |
 |---|---|
-| **omh's choice** | in the base set, and your copy matches what omh ships |
-| **omh's own, generated at launch** | a hook or a rules section. Not a file anywhere — omh writes it into the session and nothing else, which is what lets a fix reach you with the upgrade. A leftover of the same name in your profile is named as no longer read |
-| **not what omh ships now** | omh's entry, and your copy differs. Both values shown, and **no claim about who changed it** — omh cannot tell an edit from an upgrade |
-| **not installed here** | in the base set, absent from your profile. Not an error |
+| **an omh feature** | a feature, asked by its name, a part's or a name a part had: every part with what it is for, what it costs and what was considered instead, and the one switch. No part has an answer of its own, because none can be had on its own. A leftover in your catalogue under a part's name — a hook file, or a server copy an older omh seeded — is named as no longer read |
 | **written by omh init** | derived from your repo, like `rust-format` from `Cargo.toml`. omh's writing, not omh's opinion |
 | **your choice** | you added it. **No rationale is offered** — omh does not have one and will not invent one |
 | **considered, not in the base set** | rejected, with the reasoning. `omh why gitnexus` explains the licence problem |
+| **nothing recorded** | a name omh does not know. It lists the names it does |
 
-That last row is why rejections are recorded at all: without them the same
+The rejections are why they are recorded at all: without them the same
 candidate gets re-litigated every time somebody rediscovers it.
 
 ## `omh set` · `omh unset`
@@ -2011,8 +2034,10 @@ omh: `graph-rules` is part of the `codegraph` feature, not a feature itself. A f
 Settings keys never collide with feature names, and a test fails the build if
 they ever do: `omh set <name>` writes two different shapes into one file, so a
 name meaning both could not be resolved by any error message. Feature and
-*entry* names do overlap on purpose — the manifest names a feature after its
-principal entry — and the feature reading wins.
+*entry* names may overlap — a base set may name a feature after its principal
+entry, as omh's did until its servers were named `omh-…` and as a
+`~/.omh/base` written by an older omh still does — and the feature reading
+wins.
 
 </details>
 
@@ -2056,8 +2081,8 @@ used, rather than writing the list back and reporting success for a typo.
 `omh use` refuses one your catalogue does not have, and names `omh settings
 edit` as the way to create it.
 
-**omh's own are not selectable in either direction** — `codegraph`, `memory`,
-the six generated hooks and their rules sections. `omh set <feature> on|off` is
+**omh's own are not selectable in either direction** — `omh-codegraph`,
+`omh-memory`, the six generated hooks and their rules sections. `omh set <feature> on|off` is
 their switch, because a feature is all or nothing. See
 [Configuration](/reference/configuration/#a-feature-is-not-selectable).
 
@@ -2205,7 +2230,7 @@ iTerm2.
 instead; an entry, its description; a hook, when it runs — as a column of its
 own — and what it does; a server, what it runs, its arguments counted and its
 environment named. Hooks are yours first, then omh's own, under a heading each.
-The servers page is yours alone: omh's own servers — `codegraph`, `memory` —
+The servers page is yours alone: omh's own servers — `omh-codegraph`, `omh-memory` —
 are parts of its features, switched with their hooks and rules on your defaults
 page and listed nowhere else. A key nothing reads is under one of its own, naming the key it was
 probably meant to be, and a skill with no `SKILL.md` or a link to nothing is
@@ -2290,7 +2315,7 @@ gitignored `settings.local.toml`, once git ignores it; the rest in the
 committed `settings.toml`. `[mcp.<name>.env]` is
 **refused**: a server's environment can be a token and the file `init` writes
 is committed. It already has a home — `omh settings mcp add <name> <command>
---env KEY=value` puts it on the server in `~/.omh/mcp.json`, where servers live.
+--env KEY=value` puts it on the server in `~/.omh/mcp.json`, where your servers live.
 
 **MCP lives under `omh settings` because MCP servers *are* configuration.** They
 live in your catalogue; a repo overrides a server's environment without
@@ -2313,7 +2338,10 @@ directory holding a `SKILL.md`, and that file is what opens, for a new skill as
 for one you have. A new skill nothing was saved into is taken back rather than
 left as an empty directory. A name is a name whole:
 `omh settings edit rules v1.2` opens `v1.2.md`. A server has no file of its
-own, so `omh settings edit mcp` takes no name and opens `mcp.json`.
+own, so `omh settings edit mcp` takes no name and opens `mcp.json`. A part of
+one of omh's features — `graph-first`, `graph-rules`, `memory-rules` — is
+refused before any editor opens: it is generated at launch, not a file to edit,
+and switched with its feature.
 
 **A new entry opens as its kind's shape** — front matter for a skill, a
 subagent or a command, a hook's JSON, a rule's heading — and one saved untouched
@@ -2332,7 +2360,7 @@ terminal it asks; anywhere else it needs `--yes`. A name two files answer to
 (`house.md` and `house.txt`) is refused rather than guessed at, and so is a
 hook omh ships: `omh upgrade` would put it back, so the refusal names
 `omh unuse hooks <name>`, which stops a repo running it. A server omh ships —
-`codegraph`, `memory` — is refused too: it is one of omh's features, switched
+`omh-codegraph`, `omh-memory` — is refused too: it is one of omh's features, switched
 off whole with `omh set <feature> off` rather than taken apart, and the screen
 does not offer to remove it. There is no trash, so before it asks it says
 what goes with the entry, that every repo taking it loses it at its next

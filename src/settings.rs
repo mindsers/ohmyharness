@@ -97,7 +97,12 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut provision: BTreeMap<String, bool> = BTreeMap::new();
-    let mut selection = crate::selection::Selection::owning(manifest.owns());
+    let mut selection =
+        crate::selection::Selection::owning(manifest.owns()).retiring(manifest.retired());
+    let omhs = manifest
+        .reserved()
+        .remove(&crate::adapter::Capability::Mcp)
+        .unwrap_or_default();
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
             continue;
@@ -158,7 +163,20 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         // the one an earlier layer set. A repo overriding a server's
         // environment; the catalogue's own env lives on the server in
         // `~/.omh/mcp.json`, which is the file that owns servers.
+        //
+        // Not omh's, under the name a server has or the one it had: a server
+        // of omh's is part of a feature, generated with the rest of it, and a
+        // repo changing its environment would change one part on its own.
         for (name, over) in file.mcp {
+            if let Some(feature) = omhs.get(&name) {
+                anyhow::bail!(
+                    "{}: `[mcp.{name}.env]` sets the environment of omh's own `{name}` \
+                     server — part of the {feature} feature, which is switched whole and \
+                     not configured part by part. Delete the table; to switch the \
+                     feature off here:\n  omh set {feature} off",
+                    path.display()
+                );
+            }
             mcp_env.entry(name).or_default().extend(over.env);
         }
         // Wholesale per capability, which is the opposite rule and deliberately
@@ -197,10 +215,6 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
 pub struct RepoPolicy {
     /// Features switched off here. Nothing is uninstalled.
     pub off: BTreeSet<String>,
-    /// Servers to drop from the rendered document even though `mcp.json` still
-    /// lists them — the servers those switched-off features own. The file is
-    /// left exactly as the user has it, and the next repo gets them back.
-    pub disabled_servers: BTreeSet<String>,
     /// Per-repo MCP environment, by server name, from `[mcp.<name>.env]`.
     ///
     /// An override rather than a redeclaration, which is the whole point: a
@@ -234,24 +248,17 @@ pub struct RepoPolicy {
 impl RepoPolicy {
     /// The policy of a repo that switched off exactly these features.
     ///
-    /// Public because the fixtures in `container` and `doctor` need it: a test
-    /// that builds `disabled_servers` by hand is a second opinion about which
-    /// servers a feature owns, and it can be wrong in the same direction as the
-    /// code. One derivation, and `resolve` goes through it too.
+    /// Public because the fixtures in `container` and `doctor` need it, and
+    /// `resolve` starts from it.
     pub fn switching_off(manifest: &Manifest, off: BTreeSet<String>) -> Self {
         Self {
-            disabled_servers: manifest
-                .entries
-                .iter()
-                .filter(|e| e.kind == crate::base::Kind::Mcp && off.contains(&e.feature))
-                .map(|e| e.name.clone())
-                .collect(),
             off,
             mcp_env: BTreeMap::new(),
             // Empty of choices but *not* of what omh owns. A `Selection::default()`
-            // here would let a fixture treat `codegraph` as an ordinary catalogue
+            // here would let a fixture treat `omh-codegraph` as an ordinary catalogue
             // entry, which is the one thing this type exists to prevent.
-            selection: crate::selection::Selection::owning(manifest.owns()),
+            selection: crate::selection::Selection::owning(manifest.owns())
+                .retiring(manifest.retired()),
             provision: BTreeMap::new(),
         }
     }
@@ -454,6 +461,46 @@ mod tests {
         let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
         assert_eq!(env["TOKEN"], "t");
         assert_eq!(env["REGION"], "eu");
+    }
+
+    /// omh's servers are part of its features, so a repo cannot set one's
+    /// environment on its own — under the name it has or the one it had. A
+    /// table that did was the one way left to change a part of a feature
+    /// without the rest; it is refused with the switch that does work.
+    #[test]
+    fn an_override_for_one_of_omhs_servers_is_refused() {
+        for (file, name) in [
+            ("settings.toml", "omh-codegraph"),
+            ("settings.local.toml", "codegraph"),
+            ("settings.toml", "omh-memory"),
+            ("settings.local.toml", "memory"),
+        ] {
+            let (_d, paths, m) = fixture();
+            write(
+                paths.repo.join(".omh").join(file),
+                &format!("[mcp.{name}.env]\nTOKEN = \"t\"\n"),
+            );
+            let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+            assert!(
+                err.contains(&format!("[mcp.{name}")),
+                "names the table: {err}"
+            );
+            assert!(err.contains("omh set"), "and the switch: {err}");
+        }
+    }
+
+    /// A `[use]` list naming one of omh's servers by the name it used to have
+    /// is refused as it was before the rename, rather than read as a server of
+    /// yours that nobody has.
+    #[test]
+    fn a_use_list_naming_a_servers_old_name_is_refused() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[use]\nmcp = [\"codegraph\"]\n",
+        );
+        let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+        assert!(err.contains("omh set codegraph off"), "{err}");
     }
 
     /// `[use]` is read from both repo files, and the later one replaces a

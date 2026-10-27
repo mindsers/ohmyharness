@@ -132,7 +132,7 @@ means.
 1  repo check                     fail fast, before any work
 2  ensure ~/.omh: the catalogue, bundled adapters, editors, the base set
 3  detect the stack; read the host for a harness *preference*
-4  write ~/.omh/mcp.json and <repo>/.omh: settings, [use], memory, a hook per stack
+4  write <repo>/.omh: settings, [use], memory, a hook per stack
 5  seed memory by derivation       README, manifests, git log, existing rules
 6  ensure the image                ← the real blocker; nothing runs without it
 7  index the code graph            background, resumable
@@ -166,8 +166,8 @@ The full report, with its last sections:
   this repo  /Users/you/code/your-project/.omh  (committed)
 
   base set (2026.08)
-    codegraph  structural queries instead of re-grepping the repo every task
-    memory     what a session learned outlives it — a removed session leaves no transcript to grep
+    omh-codegraph  structural queries instead of re-grepping the repo every task
+    omh-memory     what a session learned outlives it — a removed session leaves no transcript to grep
 
   omh why <name>  what it costs, what was considered instead, how to remove it
 

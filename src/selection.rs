@@ -24,10 +24,10 @@
 //! configured. `"*"` is "keep following the catalogue as it grows", said out
 //! loud.
 //!
-//! **A feature is not selectable, in any capability.** `init` seeds
-//! `manifest.servers()` into `~/.omh/mcp.json`, so `codegraph` and `memory` sit
-//! there looking exactly like servers you added. Naming one in `[use].mcp`
-//! without its hooks — or quietly omitting it — is a bundle taken apart, which
+//! **A feature is not selectable, in any capability.** Its server, hooks and
+//! rules section are generated together at launch, and none is an entry of
+//! your catalogue. Naming one in `[use]` without the rest — or quietly
+//! omitting it — is a bundle taken apart, which
 //! is the state `settings.rs` makes unrepresentable rather than warning about,
 //! and the state that shipped broken once when the graph hooks kept firing
 //! against a server dropped from the document. `[omh]` is the switch for those.
@@ -65,7 +65,7 @@ enum Chosen {
 ///
 /// **`Default` is test-only**, the arrangement `base::Own` already uses. A
 /// defaulted `Selection` knows nothing of what omh owns, so it treats
-/// `codegraph` as an ordinary catalogue entry — the one state this type exists
+/// `omh-codegraph` as an ordinary catalogue entry — the one state this type exists
 /// to prevent, and the one `settings.rs` writes a comment forbidding three
 /// lines above a struct that derived it. `owning` is the only door in.
 #[cfg_attr(test, derive(Default))]
@@ -86,8 +86,15 @@ pub struct Selection {
     ///   which is a different file and needs its own guard.
     ///
     /// The feature rather than a bare set, because the useful half of refusing
-    /// `[use] mcp = ["codegraph"]` is saying *which switch* does work.
+    /// `[use] mcp = ["omh-codegraph"]` is saying *which switch* does work.
     owned: Owned,
+    /// Names omh's entries used to have — `memory` for `omh-memory`.
+    ///
+    /// Still omh's, so refused by `read_list` and never reported as
+    /// unselected, like `owned`. Kept apart from it because `owned` is also
+    /// what `allows` lets through whatever a list says, and a server sitting
+    /// under an old name in a catalogue is not omh's server.
+    retired: Owned,
 }
 
 /// Capability to entry name to the feature that owns it.
@@ -100,7 +107,15 @@ impl Selection {
         Self {
             chosen: BTreeMap::new(),
             owned,
+            retired: Owned::new(),
         }
+    }
+
+    /// The names omh's entries used to have — [`crate::base::Manifest::retired`].
+    /// Before any `apply`, which is what refuses them.
+    pub fn retiring(mut self, retired: Owned) -> Self {
+        self.retired = retired;
+        self
     }
 
     /// Apply one layer's `[use]` table. Later layers replace earlier ones **per
@@ -148,7 +163,8 @@ impl Selection {
         let mut out = Vec::with_capacity(names.len());
         for name in names {
             validate_entry_name(name, cap, whence)?;
-            if let Some(feature) = self.owner(cap, name) {
+            let retired = self.retired.get(&cap).and_then(|r| r.get(name));
+            if let Some(feature) = self.owner(cap, name).or(retired.map(String::as_str)) {
                 bail!(
                     "{}: `[use] {cap}` names `{name}`, which is omh's — part of the \
                      `{feature}` feature. `[use]` names your entries; a feature is all \
@@ -199,6 +215,7 @@ impl Selection {
             Some(Chosen::These(_)) => available
                 .iter()
                 .filter(|n| !self.allows(cap, n))
+                .filter(|n| !self.retired.get(&cap).is_some_and(|r| r.contains_key(*n)))
                 .cloned()
                 .collect(),
             _ => Vec::new(),
@@ -223,18 +240,9 @@ impl Selection {
         self.owner(cap, name).is_some()
     }
 
-    /// Every entry of this capability omh owns, in name order.
-    ///
-    /// What a *feature* brings, whatever this repo selected: `[use]` names
-    /// your entries and never omh's. A feature switched off here is still
-    /// owned — the caller that cares (the servers Claude may run unasked)
-    /// checks `disabled_servers` for that.
-    pub fn omhs(&self, cap: Capability) -> Vec<&str> {
-        self.owned
-            .get(&cap)
-            .into_iter()
-            .flat_map(|entries| entries.keys().map(String::as_str))
-            .collect()
+    /// Is this name never yours — omh's own, or one its entries used to have?
+    pub fn is_reserved(&self, cap: Capability, name: &str) -> bool {
+        self.is_omhs(cap, name) || self.retired.get(&cap).is_some_and(|r| r.contains_key(name))
     }
 
     /// The feature that owns `name`, if omh does.
@@ -311,7 +319,10 @@ mod tests {
         BTreeMap::from([
             (
                 Capability::Mcp,
-                BTreeMap::from([entry("codegraph", "codegraph"), entry("memory", "memory")]),
+                BTreeMap::from([
+                    entry("omh-codegraph", "codegraph"),
+                    entry("omh-memory", "memory"),
+                ]),
             ),
             (
                 Capability::Hooks,
@@ -456,16 +467,16 @@ mod tests {
     }
 
     /// `[use]` names *your* entries. omh's belong to `[omh]`, and the rule holds
-    /// across every capability rather than for hooks alone: `init` seeds
-    /// `codegraph` and `memory` into `~/.omh/mcp.json`, where they look exactly
-    /// like servers you added.
+    /// across every capability rather than for hooks alone: `omh-codegraph`
+    /// and `omh-memory` are servers, named like servers you add, and generated
+    /// with their features rather than chosen from your catalogue.
     ///
     /// Selecting one without its hooks — or omitting it from a list that names
     /// the servers around it — is a feature taken apart, which is the one
     /// combination `settings.rs` refuses to let anybody express.
     #[test]
     fn a_name_omh_owns_is_not_selectable_in_any_capability() {
-        for (cap, name) in [("mcp", "codegraph"), ("hooks", "graph-first")] {
+        for (cap, name) in [("mcp", "omh-codegraph"), ("hooks", "graph-first")] {
             let err = refused(&[(cap, &[name])]);
             assert!(err.contains(name), "must name it: {err}");
             assert!(
@@ -480,8 +491,8 @@ mod tests {
     #[test]
     fn an_empty_selection_leaves_omhs_own_alone() {
         let s = selection(&[("mcp", &[]), ("hooks", &[])]);
-        assert!(s.allows(Capability::Mcp, "codegraph"));
-        assert!(s.allows(Capability::Mcp, "memory"));
+        assert!(s.allows(Capability::Mcp, "omh-codegraph"));
+        assert!(s.allows(Capability::Mcp, "omh-memory"));
         assert!(s.allows(Capability::Hooks, "graph-first"));
         assert!(
             !s.allows(Capability::Mcp, "linear"),
@@ -530,7 +541,7 @@ mod tests {
         );
     }
 
-    /// omh's own live in the catalogue's `mcp.json` and are governed elsewhere.
+    /// omh's own are its features', governed by `[omh]`, not by a list.
     /// Reporting them as unselected would send people to `omh use` for
     /// something `omh use` refuses to write.
     #[test]
@@ -539,9 +550,28 @@ mod tests {
         assert!(s
             .unselected(
                 Capability::Mcp,
-                &["codegraph".into(), "memory".into(), "linear".into()]
+                &["omh-codegraph".into(), "omh-memory".into(), "linear".into()]
             )
             .is_empty());
+    }
+
+    /// A name omh's server used to have is omh's too: never reported as
+    /// unselected, since `omh use` refuses it — and never let through as
+    /// omh's either: `allows` passes omh's own whatever a list says.
+    #[test]
+    fn a_name_omh_used_to_have_is_neither_unselected_nor_omhs_to_run() {
+        let retired = Owned::from([(
+            Capability::Mcp,
+            BTreeMap::from([("memory".to_string(), "memory".to_string())]),
+        )]);
+        let mut s = Selection::owning(owned()).retiring(retired);
+        let table = BTreeMap::from([("mcp".to_string(), vec!["linear".to_string()])]);
+        s.apply(&table, Path::new("settings.toml")).unwrap();
+        assert!(s
+            .unselected(Capability::Mcp, &["memory".into(), "linear".into()])
+            .is_empty());
+        assert!(!s.allows(Capability::Mcp, "memory"));
+        assert!(!s.is_omhs(Capability::Mcp, "memory"));
     }
 
     #[test]
