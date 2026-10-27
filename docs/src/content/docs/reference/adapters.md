@@ -170,6 +170,7 @@ container:
 | `path` | the guest path the harness reads its policy from: a file under `/etc/`, absolute, with no `..`, not under a `creds` or `transcripts` path and not a capability's own path — a literal, never expanded | required |
 | `format` | `codex-requirements` or `claude-managed` | required |
 | `mask` | guest paths strictly inside one of `creds`' directories, with no `..`, that a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
+| `copy` | `creds` file entries each session gets its own copy of, seeded from the account's without what names, switches or grants a server, and never written back — see [`~/.claude.json` is each session's own](/guides/accounts/#claudejson-is-each-sessions-own). `claude-managed` only | none |
 
 The policy admits exactly the MCP servers the launch staged, by command and
 arguments compared exactly — and by name too, on Codex. Neither harness

@@ -100,6 +100,7 @@ see [Something else](#something-else).
 | **Claude Code** | |
 | `claude mcp add` says "not allowed by enterprise policy" | [Put it in your catalogue](#claude-mcp-add-says-not-allowed-by-enterprise-policy) |
 | claude.ai connectors are missing in a session | [Expected](#claudeai-connectors-are-missing-in-a-session) |
+| A `/mcp` switch, a `/config` change or a `/login` from one session is gone in the next | [Expected](#a-mcp-switch-a-config-change-or-a-login-from-one-session-is-gone-in-the-next) |
 | **Your setup in the session** | |
 | The agent does not see your rules or skills | [Run `omh doctor`, then read the launch line](#the-harness-starts-but-does-not-see-my-rules-or-skills) |
 | One skill is missing, and the launch says `1 catalogue entry is not selected here` | [Select it with `omh use`](#a-skill-i-have-is-not-reaching-the-agent) |
@@ -606,6 +607,15 @@ names it.
 Expected: they are switched off in sessions, deliberately (read in the 2.1.300
 binary; not measured). Claude Code matches a connector by its URL, and allowing
 that URL would let a session put its own server there.
+
+#### A `/mcp` switch, a `/config` change or a `/login` from one session is gone in the next
+
+Expected: each session has its own `~/.claude.json`, seeded from the account's
+and never written back — see
+[`~/.claude.json` is each session's own](/guides/accounts/#claudejson-is-each-sessions-own).
+To turn a server off for good, `omh unuse mcp <name>`; to change the account a
+session logs in as, `omh auth claude`. A setting your account used to carry in
+`.claude.json` as `env` or `apiKeyHelper` no longer applies either.
 
 ### Your setup in the session
 

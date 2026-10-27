@@ -94,6 +94,10 @@ const SCENARIOS: &[Scenario] = &[
         run: planted_server,
     },
     Scenario {
+        name: "the session's ~/.claude.json is its own, seeded without what the account carries",
+        run: own_copy,
+    },
+    Scenario {
         name: "omh doctor passes in the session's repo",
         run: doctor,
     },
@@ -737,6 +741,36 @@ fn planted_server(s: &Session) {
             }
         }
     }
+}
+
+/// The account this session launched with carries what earlier sessions could
+/// leave in a shared `~/.claude.json` (see `driver::claude_account`): a server
+/// with omh-memory's command and arguments and a `PATH` of its own, the same
+/// under `/work`, and omh-memory switched off. None of it reaches this
+/// session, and nothing this session writes there reaches the account.
+///
+/// Only for a driver that launches with an account.
+fn own_copy(s: &Session) {
+    if s.harness.account.is_none() {
+        return;
+    }
+    let listed = ok(&s.sh("claude mcp list"), "claude mcp list");
+    for planted in ["e2e-envpath", "e2e-project"] {
+        assert!(!listed.contains(planted), "{planted} loads: {listed}");
+    }
+    let memory = listed
+        .lines()
+        .find(|l| l.starts_with("omh-memory"))
+        .unwrap_or_else(|| panic!("omh-memory is not listed: {listed}"));
+    assert!(memory.contains("Connected"), "omh-memory is off: {memory}");
+
+    let write = r#"jq '.mcpServers["e2e-leak"] = {"command":"/bin/true","args":[]}' ~/.claude.json > /tmp/leak && cat /tmp/leak > ~/.claude.json"#;
+    ok(&s.sh(write), write);
+    let account = std::fs::read_to_string(s.account().join(".claude.json")).unwrap();
+    assert!(
+        !account.contains("e2e-leak"),
+        "what the session wrote reached the account: {account}"
+    );
 }
 
 /// `omh doctor` for this harness, in the repo the session runs on: the same

@@ -216,6 +216,31 @@ thing and reading the error.
 
 </details>
 
+### `~/.claude.json` is each session's own
+
+One credential file is not the account's in a session: Claude Code's
+`~/.claude.json`. It holds MCP servers, the `/mcp` switches and permissions
+granted per project, and a session that wrote one there would hand it to every
+later session on the account — including a server with omh's own command and
+an `env.PATH` of its own, which the policy's allowlist passes. So each session
+gets a copy, seeded from the account's when it first launches:
+
+- **kept:** your identity (`oauthAccount`, `userID`), onboarding, and
+  everything else omh has no opinion on. Tokens stay in `.credentials.json`,
+  which is still the account's and refreshed in place;
+- **dropped:** every MCP server and switch on one, `allowedTools`, the legacy
+  `env` and `apiKeyHelper`, and the consents a session could leave — omh
+  trusts `/work` itself;
+- **never written back:** nothing a session changes there reaches the account
+  or another session. A `/mcp` switch lasts that session; `omh unuse` is the
+  lasting one. A `/login` inside a session refreshes the shared tokens, but
+  its identity is not kept — `omh auth claude` is how an account's identity
+  changes, and it writes the account's own file.
+
+The copy lives beside the session's staging, `~/.omh/run/<repo>/<session>/`,
+and goes with it at `omh sNN rm`. Changing the session's account seeds it
+again from the new one.
+
 ### `token` is what proves a login
 
 The adapter names the file that proves a login, and nothing else counts. A

@@ -570,6 +570,15 @@ pub(crate) fn doctor_cmd(
         let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
         crate::cmd::session::say_rules(&plan, ctx);
         crate::cmd::session::say_policy(&plan, ctx);
+        // The probe's own copies, fresh every run: its scratch keeps nothing.
+        if let Some(account_dir) = &account {
+            auth::seed_copies(
+                &adapter,
+                account_dir,
+                &container::session_home(&paths, &session, adapter.name.as_str()),
+                true,
+            )?;
+        }
         plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 
         plan.validate_for(&backend)?;

@@ -109,15 +109,22 @@ Codex case and the direct writes. Codex also runs managed hooks only, so a hook
 written into `~/.codex/config.toml` does not run either (read in Codex's
 source; nothing in `tests/e2e` plants one).
 
+**Closed on Claude Code** (#197): an entry in `~/.claude.json` with the
+*same* command and arguments as one of omh's servers and an `env` of its own
+passes the lock, since the allowlist compares no `env` (measured in #197). So
+each session now gets its own copy of `~/.claude.json`, seeded from the
+account's without any server, switch, permission grant or consent — see
+[`~/.claude.json` is each session's own](/guides/accounts/#claudejson-is-each-sessions-own).
+Nothing a session writes there reaches the account. `tests/e2e` launches with
+an account holding such an entry, omh-memory switched off, and asserts none of
+it reaches the session and nothing the session writes reaches the account.
+
 **Still open:**
 
-- on Claude Code, an entry in `~/.claude.json` with the *same* command and
-  arguments as one of omh's servers and an `env` of its own passes the lock —
-  the allowlist does not compare `env` (measured in #197). A per-session
-  `~/.claude.json` closes it, tracked in #197 §0;
-- on Codex the same: the requirements identity compares neither `env` nor
-  `cwd` (read in Codex's source), and a per-session `config.toml` closes it,
-  also tracked in #197 §0;
+- on Codex, the requirements identity compares neither `env` nor
+  `cwd` (read in Codex's source): an entry with omh's command and arguments
+  and an `env` of its own passes. A per-session `config.toml` closes it,
+  tracked in #197 §0;
 - an enterprise account's cloud bundle composes above omh's requirements: its
   allowlist is the union of both, and an organisation's
   `allow_managed_hooks_only = false` wins over omh's (read in Codex's source);

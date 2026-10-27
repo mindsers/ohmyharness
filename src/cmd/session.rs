@@ -227,6 +227,10 @@ pub(crate) fn session_up(
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
     say_selection(paths, profile, &opts.repo, ctx);
+    let seeding = match opts.copies {
+        container::Copies::Session => opts.account_dir.clone(),
+        container::Copies::Account => None,
+    };
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate_for(backend)?;
 
@@ -253,6 +257,16 @@ pub(crate) fn session_up(
 
     say_rules(&plan, ctx);
     say_policy(&plan, ctx);
+    // The session's own copies of account files, now that no running
+    // container holds them: after the reuse decision, never before it.
+    if let Some(account) = &seeding {
+        auth::seed_copies(
+            adapter,
+            account,
+            &container::session_home(paths, session, adapter.name.as_str()),
+            false,
+        )?;
+    }
     image::ensure_stack(
         backend,
         adapter,
