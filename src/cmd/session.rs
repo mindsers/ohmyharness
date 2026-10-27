@@ -227,9 +227,12 @@ pub(crate) fn session_up(
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
     say_selection(paths, profile, &opts.repo, ctx);
-    let seeding = match opts.copies {
-        container::Copies::Session => opts.account_dir.clone(),
-        container::Copies::Account => None,
+    // The session's copies of account files, read and checked now — before
+    // a running container is replaced — and written below, after the reuse
+    // decision, never into a file bind-mounted into a running container.
+    let seeds = match (opts.launch, &opts.account_dir) {
+        (container::Launch::Session, Some(account)) => auth::seeds(adapter, account)?,
+        _ => None,
     };
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate_for(backend)?;
@@ -257,15 +260,13 @@ pub(crate) fn session_up(
 
     say_rules(&plan, ctx);
     say_policy(&plan, ctx);
-    // The session's own copies of account files, now that no running
-    // container holds them: after the reuse decision, never before it.
-    if let Some(account) = &seeding {
-        auth::seed_copies(
-            adapter,
-            account,
-            &container::session_home(paths, session, adapter.name.as_str()),
-            false,
-        )?;
+    // Now that no running container holds them: after the reuse decision.
+    if let Some(seeds) = &seeds {
+        seeds.write(&container::session_home(
+            paths,
+            session,
+            adapter.name.as_str(),
+        ))?;
     }
     image::ensure_stack(
         backend,
@@ -449,7 +450,7 @@ pub(crate) fn attach(
             persist: persist::Mode::None,
             tty: false,
             account_dir: account,
-            copies: crate::container::Copies::Session,
+            launch: crate::container::Launch::Session,
             memory_bin: memory::deliver::available(&paths, ctx),
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
@@ -2123,6 +2124,10 @@ pub(crate) fn run(
         if staging.is_apply() {
             auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
         }
+        // An account file no session can be seeded from refuses here, before
+        // a worktree is made — and on a dry run, which would otherwise preview
+        // a launch that cannot happen. `session_up` reads it again to write.
+        auth::seeds(&adapter, account_dir)?;
     }
 
     // Always the trunk, never wherever HEAD happens to be: a session started on
@@ -2171,7 +2176,7 @@ pub(crate) fn run(
             .parse()?,
         tty: true,
         account_dir: account,
-        copies: crate::container::Copies::Session,
+        launch: crate::container::Launch::Session,
         memory_bin: memory::deliver::available(&paths, ctx),
         base: Some(base.clone()),
         omh: own,
