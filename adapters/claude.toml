@@ -175,3 +175,9 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 path   = "/etc/claude-code/managed-settings.d/omh.json"
 format = "claude-managed"
 copy   = ["$HOME/.claude.json"]
+# 2.1.300 reads `~/.claude/.config.json` *instead of* `~/.claude.json` when it
+# is a non-empty regular file (read in the binary, `W_()`) — and it sits in the
+# account's shared, writable `~/.claude/`. Measured in `tests/e2e`: a server
+# planted there loaded in a session despite its own copy. Masked behind an
+# empty file, Claude falls through to the copy.
+mask   = ["$HOME/.claude/.config.json"]

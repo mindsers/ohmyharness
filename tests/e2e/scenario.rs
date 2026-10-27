@@ -746,16 +746,34 @@ fn planted_server(s: &Session) {
 /// The account this session launched with carries what earlier sessions could
 /// leave in a shared `~/.claude.json` (see `driver::claude_account`): a server
 /// with omh-memory's command and arguments and a `PATH` of its own, the same
-/// under `/work`, and omh-memory switched off. None of it reaches this
-/// session, and nothing this session writes there reaches the account.
+/// under `/work` with a permission granted there, omh-memory switched off, and
+/// the same server in the legacy `~/.claude/.config.json`. The planted entry is
+/// one the policy's allowlist admits — checked first, so its absence below is
+/// the copy's doing and not the lock's. None of it reaches this session, and
+/// nothing this session writes there reaches the account.
 ///
 /// Only for a driver that launches with an account.
 fn own_copy(s: &Session) {
     if s.harness.account.is_none() {
         return;
     }
+    let (command, args) = crate::driver::omh_memory_argv();
+    let argv: Vec<String> = std::iter::once(command).chain(args).collect();
+    let policy = ok(
+        &s.sh("cat /etc/claude-code/managed-settings.d/omh.json"),
+        "the policy",
+    );
+    let policy: Value = serde_json::from_str(&policy).unwrap();
+    assert!(
+        policy["allowedMcpServers"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "serverCommand": argv })),
+        "the planted argv is not one the lock admits, so this proves nothing: {policy}"
+    );
+
     let listed = ok(&s.sh("claude mcp list"), "claude mcp list");
-    for planted in ["e2e-envpath", "e2e-project"] {
+    for planted in ["e2e-envpath", "e2e-project", "e2e-legacy"] {
         assert!(!listed.contains(planted), "{planted} loads: {listed}");
     }
     let memory = listed
@@ -763,6 +781,11 @@ fn own_copy(s: &Session) {
         .find(|l| l.starts_with("omh-memory"))
         .unwrap_or_else(|| panic!("omh-memory is not listed: {listed}"));
     assert!(memory.contains("Connected"), "omh-memory is off: {memory}");
+    let copy = ok(&s.sh("cat ~/.claude.json"), "the session's copy");
+    assert!(
+        !copy.contains("e2e-granted"),
+        "a permission was kept: {copy}"
+    );
 
     let write = r#"jq '.mcpServers["e2e-leak"] = {"command":"/bin/true","args":[]}' ~/.claude.json > /tmp/leak && cat /tmp/leak > ~/.claude.json"#;
     ok(&s.sh(write), write);

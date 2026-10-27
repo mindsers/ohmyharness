@@ -2575,8 +2575,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Regression: credentials mounted at `$HOME/.omh-creds`, which no harness
-    /// reads — so every session started logged out no matter what was captured.
     /// The plan, with `copies` and `session` chosen: the `.claude.json` mount.
     fn claude_json_mount(fx: &Fx, session: &Session, copies: Copies) -> Mount {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
@@ -2667,6 +2665,8 @@ mod tests {
         assert_eq!(policy_admits(&p, &adapter), vec![]);
     }
 
+    /// Regression: credentials mounted at `$HOME/.omh-creds`, which no harness
+    /// reads — so every session started logged out no matter what was captured.
     #[test]
     fn credentials_mount_where_the_harness_actually_looks() {
         let fx = fixture();

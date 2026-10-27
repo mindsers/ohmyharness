@@ -65,13 +65,20 @@ fn abs(file: &str) -> String {
     format!("/work/{file}")
 }
 
-/// omh-memory's command and arguments, as the base set ships them.
-fn omh_memory_argv() -> (String, Vec<String>) {
+/// omh-memory's command and arguments, as the newest base set that has it
+/// ships them — the file names are versions, so the last in order is newest.
+pub fn omh_memory_argv() -> (String, Vec<String>) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("base");
-    for f in std::fs::read_dir(&dir).unwrap() {
-        let raw = std::fs::read_to_string(f.unwrap().path()).unwrap();
-        let doc: toml::Table = toml::from_str(&raw).unwrap();
-        for e in doc["entry"].as_array().unwrap() {
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|f| f.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    for f in files.iter().rev() {
+        let doc: toml::Table = toml::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+        let entries = doc.get("entry").and_then(|e| e.as_array());
+        for e in entries.into_iter().flatten() {
             if e["name"].as_str() == Some("omh-memory") {
                 let args = e["args"].as_array().unwrap();
                 let args = args.iter().map(|a| a.as_str().unwrap().to_string());
@@ -87,7 +94,11 @@ fn omh_memory_argv() -> (String, Vec<String>) {
 /// - a server with omh-memory's own command and arguments and a `PATH` of its
 ///   own, which the policy's allowlist passes, since it compares no `env`;
 /// - the same under `/work`'s project, with permissions granted there;
-/// - omh-memory switched off, by `/mcp` and as a `.mcp.json` server.
+/// - omh-memory switched off, by `/mcp` and as a `.mcp.json` server, at the
+///   top and under `/work`;
+/// - the same server again in `~/.claude/.config.json`, the legacy file
+///   2.1.300 reads *instead of* `~/.claude.json` when it is not empty (read in
+///   the binary) — inside the account's shared `~/.claude/`.
 ///
 /// `.credentials.json` holds no login, only enough not to read as an empty
 /// account: the driver's key is in the environment.
@@ -104,11 +115,14 @@ fn claude_account() -> Vec<(&'static str, String)> {
         "projects": { "/work": {
             "mcpServers": { "e2e-project": planted },
             "disabledMcpServers": ["omh-memory"],
+            "disabledMcpjsonServers": ["omh-memory"],
             "allowedTools": ["Bash(e2e-granted)"],
         } },
     });
+    let legacy = json!({ "mcpServers": { "e2e-legacy": planted } });
     vec![
         (".claude.json", account.to_string()),
+        (".claude/.config.json", legacy.to_string()),
         (
             ".claude/.credentials.json",
             r#"{"e2e":"not a login"}"#.to_string(),

@@ -205,12 +205,12 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         .policy
         .iter()
         .flat_map(|p| p.mask.iter())
-        .map(|path| (path, false));
-    let bound = adapter
-        .capabilities
-        .values()
-        .map(|b| (&b.path, b.render == crate::adapter::Render::Dir));
-    for (path, is_dir) in bound.chain(masked) {
+        .map(|path| (path, Point::Empty));
+    let bound = adapter.capabilities.values().map(|b| match b.render {
+        crate::adapter::Render::Dir => (&b.path, Point::Dir),
+        _ => (&b.path, Point::File),
+    });
+    for (path, point) in bound.chain(masked) {
         let guest = crate::adapter::expand(path, guest_home);
         let Some(cred) = creds
             .iter()
@@ -221,7 +221,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         let Ok(relative) = guest.strip_prefix(&cred.guest) else {
             continue;
         };
-        mountpoint(&cred.host, relative, is_dir)?;
+        mountpoint(&cred.host, relative, point)?;
     }
 
     for cred in creds {
@@ -244,6 +244,18 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     Ok(())
 }
 
+/// What a mountpoint is for: a directory, a file a document lands on (laid
+/// with a placeholder the harness can parse), or a file a mask hides behind
+/// (laid empty — a harness may read a non-empty one wherever the mask is not
+/// mounted, and Claude prefers a non-empty `~/.claude/.config.json` to
+/// `~/.claude.json`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Point {
+    Dir,
+    File,
+    Empty,
+}
+
 /// A mountpoint at `relative` under a credential directory's `root`, which a
 /// session can write: a directory, or a file for a bind mount to land on.
 ///
@@ -255,7 +267,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
 /// a file where a directory goes, a directory or a pipe where a file goes —
 /// may be a session's, and is refused by name rather than written through or
 /// mounted over.
-fn mountpoint(root: &std::path::Path, relative: &std::path::Path, is_dir: bool) -> Result<()> {
+fn mountpoint(root: &std::path::Path, relative: &std::path::Path, point: Point) -> Result<()> {
     use std::path::Component;
     let refuse = |at: &std::path::Path, what: &str, e: std::io::Error| {
         anyhow::anyhow!(
@@ -278,7 +290,7 @@ fn mountpoint(root: &std::path::Path, relative: &std::path::Path, is_dir: bool) 
             )),
         })
         .collect::<Result<_>>()?;
-    let (leaf, above) = match is_dir {
+    let (leaf, above) = match point == Point::Dir {
         true => (None, &names[..]),
         false => match names.split_last() {
             Some((leaf, above)) => (Some(*leaf), above),
@@ -299,7 +311,13 @@ fn mountpoint(root: &std::path::Path, relative: &std::path::Path, is_dir: bool) 
     match dir.file(leaf) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir
-            .create_new(leaf, placeholder(&at).as_bytes())
+            .create_new(
+                leaf,
+                match point {
+                    Point::Empty => b"",
+                    _ => placeholder(&at).as_bytes(),
+                },
+            )
             .map_err(|e| refuse(&at, "could not be made", e)),
         Err(e) => Err(refuse(&at, "is not a regular file", e)),
     }
@@ -1685,6 +1703,10 @@ mod tests {
         for mask in masks {
             let rel = mask.trim_start_matches("$HOME/");
             assert!(d.path().join(rel).is_file(), "{mask} has no mountpoint");
+            // Empty, never `{}`: a harness may read a non-empty file there
+            // wherever the mask is not mounted — Claude prefers a non-empty
+            // `~/.claude/.config.json` to `~/.claude.json`.
+            assert_eq!(std::fs::read(d.path().join(rel)).unwrap(), b"", "{mask}");
         }
 
         let d = tempfile::tempdir().unwrap();
