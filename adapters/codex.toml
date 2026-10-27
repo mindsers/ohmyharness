@@ -118,7 +118,8 @@ ready  = "enabled"
 # user layer (`~/.codex/config.toml`) a hook runs only once Codex has recorded
 # a `trusted_hash` for it; measured, the same hook fired from `/etc/codex` and
 # not from `~/.codex`. Yours in `~/.codex` and a repo's in `.codex/` no longer
-# run at all: `[policy]` below allows managed hooks only, and omh's are those.
+# run at all [src, see `[policy]` below]: managed hooks only, and omh's are
+# those.
 #
 # The same file trusts `/work`, and turns Codex's own sandbox off, on every
 # launch whatever hooks there are. Codex sandboxes commands with bubblewrap,
@@ -179,13 +180,14 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # Codex's source at `rust-v0.162.1` (and #197), [e2e] held by `tests/e2e`.
 #
 # `requirements.toml` sits above every config layer, `-c` included [src], and
-# holds an `[mcp_servers]` allowlist: a server not on it, or on it with another
-# command or other arguments, loads disabled — `codex mcp list --json` gives
-# it `"disabled_reason": "requirements (/etc/codex/requirements.toml)"`
-# [measured]. It is the list the launch staged, by name and exact command and
-# arguments, so a server a session adds with `codex mcp add` loads disabled in
-# that session [e2e], and in every later one, since every launch writes the
-# same file. Always written, even empty: with no table Codex filters nothing
+# holds an `[mcp_servers]` allowlist: a server not on it, or on it with other
+# arguments or one argument more, loads disabled — `codex mcp list --json`
+# gives it `"disabled_reason": "requirements (/etc/codex/requirements.toml)"`
+# [measured]; the executable is compared the same way [src]. It is the list
+# the launch staged, by name and exact command and arguments, so a server a
+# session adds with `codex mcp add` loads disabled in that session [e2e], and
+# in every later one, since every launch writes this file afresh from what it
+# stages. Always written, even empty: with no table Codex filters nothing
 # [src]. The identity compares neither `env` nor `cwd` [src]: an entry with
 # omh's command and arguments and its own `env` passes (risk 1b, #197 §0).
 #

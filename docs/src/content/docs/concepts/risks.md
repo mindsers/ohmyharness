@@ -101,8 +101,9 @@ Codex omh fills the harness's own policy layer on every launch — see
 admits exactly the servers the launch staged, by command and arguments. A
 server a session adds with `codex mcp add` stays in the account and loads
 disabled in that session, and in every later one, since every launch writes
-the same policy. On Claude Code `claude mcp add` refuses it (measured by hand
-on 2.1.300), and one written into `~/.claude.json` directly is left out — so
+its policy afresh from what it stages. On Claude Code `claude mcp add` refuses
+it (measured by hand on 2.1.300, at one scope), and one written into
+`~/.claude.json` directly is left out — so
 is one with omh's own command and one more argument. `tests/e2e` asserts the
 Codex case and the direct writes. Codex also runs managed hooks only, so a hook
 written into `~/.codex/config.toml` does not run either (read in Codex's

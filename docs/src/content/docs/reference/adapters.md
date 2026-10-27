@@ -161,35 +161,39 @@ mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
 The account directory is writable and shared by every session on it, so
 anything a session adds there — an MCP server through `codex mcp add` or
 written into `~/.claude.json`, a hook — would load in every later session. A
-harness's policy layer sits above every file a session can write, and omh
-fills it from the launch:
+harness's policy layer is read from `/etc`, which omh fills from the launch
+with a read-only file, and nothing a session writes there outlives its
+container:
 
 | Field | What it says | Default |
 |---|---|---|
-| `path` | the guest path the harness reads its policy from: absolute, under `/etc/`, with no `..` — a literal, never expanded | required |
+| `path` | the guest path the harness reads its policy from: a file under `/etc/`, absolute, with no `..`, not under a `creds` or `transcripts` path and not a capability's own path — a literal, never expanded | required |
 | `format` | `codex-requirements` or `claude-managed` | required |
-| `mask` | guest paths under `$HOME/`, with no `..`, that a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
+| `mask` | guest paths strictly inside one of `creds`' directories, with no `..`, that a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
 
 The policy admits exactly the MCP servers the launch staged, by command and
 arguments compared exactly — and by name too, on Codex. Neither harness
 compares `env`, which is still open ([risk 1b](/concepts/risks/#1b-the-account-directory-is-writable-and-every-repo-shares-it)). It is written even when
-nothing is staged, because a harness with no allowlist admits anything. What it
-stops in your checkout or account — a repo's own `.codex/config.toml` servers
-or hooks, an enterprise bundle cache — is named at launch and by `omh doctor`,
-and `omh eject` writes it out under `system/`.
+nothing is staged, because a harness with no allowlist admits anything. On
+Codex, what the policy stops in your checkout or account — a repo's own
+`.codex/config.toml` servers or hooks, an enterprise bundle cache — is named at
+launch and by `omh doctor`. `omh eject` writes the policy itself under
+`system/`.
 
 - **codex** — `requirements.toml`: the `[mcp_servers]` allowlist, an entry
   that holds every plugin's servers to a list of their own — empty for any
   plugin not named — `allow_managed_hooks_only` (omh's hooks are in the system
-  layer and still run; a repo's `.codex/config.toml` hooks do not), and a
-  pinned `chatgpt_base_url`. An enterprise account's cloud bundle cache is
-  masked, so Codex fetches the bundle at every start, and offline it does not
-  start.
+  layer and still run; a repo's `.codex/config.toml` hooks do not, by Codex's
+  source), and a pinned `chatgpt_base_url`. An enterprise account's cloud
+  bundle cache is masked, so Codex fetches the bundle at every start — and, by
+  Codex's source, offline it does not start; no enterprise account has been
+  run.
 - **claude** — a `managed-settings.d` drop-in: `allowManagedMcpServersOnly`,
   `allowedMcpServers`, and `disableClaudeAiConnectors`. claude.ai connectors
-  do not load in a session: one is matched by its URL, and allowlisting that
-  URL would let a session put its own server there. An organisation's own
-  managed list replaces omh's.
+  are switched off in a session (read in the 2.1.300 binary; not measured):
+  one is matched by its URL, and allowlisting that URL would let a session put
+  its own server there. An organisation's own managed list replaces omh's
+  (Claude Code's docs; not measured).
 
 ### What omh refuses when it loads an adapter
 

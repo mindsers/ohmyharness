@@ -37,7 +37,8 @@ pub struct Plan {
     /// What composing the project's rules turned up that the user should hear.
     pub rules: crate::rules::Report,
     /// What the harness's policy stops that this checkout or account carries,
-    /// to be said at launch — see [`crate::notice::policy`].
+    /// and each read that could not be made to say so (a line beginning "could
+    /// not check"), to be said at launch — see [`crate::notice::policy`].
     pub policy: Vec<String>,
     /// Interactive harnesses need a terminal; a captured probe must not ask.
     pub tty: bool,

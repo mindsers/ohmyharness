@@ -561,10 +561,12 @@ container is the sandbox.
 
 omh writes Codex's requirements on every launch, and they admit exactly the MCP
 servers the launch staged: yours that this repo selects, and omh's own. A
-server added inside a session with `codex mcp add`, declared in a repo's
-`.codex/config.toml`, or in your catalogue and not selected here is not one
-this launch staged, so it loads disabled — and keeps loading disabled, since
-every launch writes the same requirements. The same file runs managed hooks
+server added inside a session with `codex mcp add`, one declared in a repo's
+`.codex/config.toml`, or one left in your account's `~/.codex/config.toml` by
+another repo's session is not one this launch staged, so it loads disabled — in
+every later session too, since each launch writes its requirements afresh from
+what it stages. (A server in your catalogue that this repo does not select is
+not handed to Codex at all.) The same file runs managed hooks
 only: omh's, from `/etc/codex/config.toml`. A repo's `.codex/config.toml`
 hooks and the ones in your account do not run (read in Codex's source). omh
 names what a repo's `.codex/config.toml` declares at launch and in `omh doctor`.
@@ -580,7 +582,7 @@ caches its organisation's cloud bundle in `~/.codex`. A session could forge
 that cache, so omh hides it behind a read-only file: Codex fetches the bundle
 at every start instead, and with no network it does not start. That is what
 Codex's source says it does; no enterprise account has been run to measure it.
-omh names a cached bundle at launch.
+omh names a cached bundle at launch and in `omh doctor`.
 
 ### Claude Code
 
@@ -589,20 +591,21 @@ omh names a cached bundle at launch.
 omh writes a managed-settings drop-in on every launch,
 `/etc/claude-code/managed-settings.d/omh.json`, and it admits exactly the MCP
 servers the launch staged, by command and arguments. Inside a session
-`claude mcp add` refuses any other server, and one written into
-`~/.claude.json` by hand is left out of `claude mcp list`. To use a server in
-sessions, put it in your catalogue and select it.
-
-#### claude.ai connectors are missing in a session
-
-Expected: they are off in sessions, deliberately. Claude Code matches a
-connector by its URL, and allowing that URL would let a session put its own
-server there.
+`claude mcp add` refuses a server not on that list (measured by hand on
+2.1.300, at one scope), and one written into `~/.claude.json` by hand is left
+out of `claude mcp list`. To use a server in sessions, put it in your catalogue
+and select it.
 
 An organisation that delivers its own managed `allowedMcpServers` replaces
 omh's list (Claude Code's docs; not measured). If it leaves out one of omh's
 servers, that omh feature does not load; `omh doctor`'s `mcp-loaded` row
 names it.
+
+#### claude.ai connectors are missing in a session
+
+Expected: they are switched off in sessions, deliberately (read in the 2.1.300
+binary; not measured). Claude Code matches a connector by its URL, and allowing
+that URL would let a session put its own server there.
 
 ### Your setup in the session
 

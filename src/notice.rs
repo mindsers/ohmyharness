@@ -381,7 +381,7 @@ pub fn policy(
                 Ok(Some(c)) if !crate::auth::is_placeholder(&c) => said.push(
                     "this account caches an enterprise cloud bundle, which omh hides from the \
                      session — a session could rewrite it for the next one. Codex fetches the \
-                     bundle at every start instead, and does not start offline"
+                     bundle at every start instead and, by Codex's source, does not start offline"
                         .into(),
                 ),
                 Ok(_) => {}
@@ -539,8 +539,11 @@ mod tests {
         std::fs::write(&cache, "{}").unwrap();
         let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
         assert_eq!(said.len(), 2, "{said:#?}");
-        assert!(said[0].contains("linear"), "{said:#?}");
-        assert!(said[1].contains("hooks"), "{said:#?}");
+        assert!(said.iter().any(|s| s.contains("linear")), "{said:#?}");
+        assert!(
+            said.iter().any(|s| s.contains("declares hooks")),
+            "{said:#?}"
+        );
 
         // The placeholder omh lays down is not a cache; a real one is.
         std::fs::write(&cache, r#"{"signature":"x"}"#).unwrap();
@@ -964,6 +967,22 @@ mod tests {
         );
     }
 
+    /// git that cannot answer is said as such, never read as "no file".
+    #[test]
+    fn a_base_git_cannot_read_is_said_not_taken_for_absence() {
+        let not_a_repo = tempfile::tempdir().unwrap();
+        let work = Work::Base {
+            repo: not_a_repo.path(),
+            base: "main",
+        };
+        let said = super::policy(&codex_policy(), work, None);
+        assert!(
+            said.iter()
+                .any(|s| s.starts_with("could not check") && s.contains(PROJECT_CONFIG)),
+            "{said:#?}"
+        );
+    }
+
     /// A config that declares no server is not told it declares some.
     #[test]
     fn a_config_with_no_servers_and_no_hooks_says_nothing() {
@@ -998,14 +1017,14 @@ mod tests {
         std::fs::create_dir_all(repo.path().join(".codex")).unwrap();
         std::fs::write(
             repo.path().join(".codex/config.toml"),
-            "[mcp_servers.committed]\ncommand = \"l\"\n",
+            "[mcp_servers.on-the-branch]\ncommand = \"l\"\n",
         )
         .unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "c"]);
         std::fs::write(
             repo.path().join(".codex/config.toml"),
-            "[mcp_servers.uncommitted]\ncommand = \"l\"\n",
+            "[mcp_servers.only-here]\ncommand = \"l\"\n",
         )
         .unwrap();
 
@@ -1014,7 +1033,10 @@ mod tests {
             base: "main",
         };
         let said = super::policy(&codex_policy(), work, None);
-        assert!(said.iter().any(|s| s.contains("committed")), "{said:#?}");
-        assert!(!said.iter().any(|s| s.contains("uncommitted")), "{said:#?}");
+        assert!(
+            said.iter().any(|s| s.contains("on-the-branch")),
+            "{said:#?}"
+        );
+        assert!(!said.iter().any(|s| s.contains("only-here")), "{said:#?}");
     }
 }

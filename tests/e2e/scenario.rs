@@ -694,7 +694,9 @@ fn planted_server(s: &Session) {
         // the inode, as a session in a real account must: there
         // `~/.claude.json` is a bind-mounted file.
         "claude" => (
-            r#"jq '.mcpServers["e2e-planted"] = {"command":"/bin/true","args":[]} | .mcpServers["e2e-argv"] = {"command":"omh","args":["memory","serve","--notes","/omh/memory","--e2e"]}' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
+            // `e2e-argv` is omh-memory as this launch staged it, plus one
+            // argument — read from the document, so it follows the manifest.
+            r#"jq -e '.mcpServers["omh-memory"].command' /work/.mcp.json > /dev/null && jq --slurpfile doc /work/.mcp.json '.mcpServers["e2e-planted"] = {"command":"/bin/true","args":[]} | .mcpServers["e2e-argv"] = ($doc[0].mcpServers["omh-memory"] | .args += ["--e2e"])' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
             "claude mcp list",
             r#"jq 'del(.mcpServers["e2e-planted"], .mcpServers["e2e-argv"])' ~/.claude.json > /tmp/planted && cat /tmp/planted > ~/.claude.json"#,
         ),

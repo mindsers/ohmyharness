@@ -87,19 +87,20 @@ pub struct Adapter {
     pub tools: BTreeMap<crate::hook::Tool, String>,
     #[serde(default)]
     pub capabilities: BTreeMap<Capability, Binding>,
-    /// The harness's own policy layer, filled by omh so a session cannot load
-    /// what the launch did not select. Absent where a harness has none omh
-    /// fills yet.
+    /// The harness's own policy layer, filled by omh so a session cannot add a
+    /// server the launch did not stage — compared by command and arguments,
+    /// not `env` (risk 1b). Absent where a harness has none omh fills yet.
     #[serde(default)]
     pub policy: Option<Policy>,
 }
 
-/// A file the harness reads as policy — above anything a session can write —
-/// and the files a session must not be able to leave behind for the next one.
+/// A file the harness reads as policy — above anything a session can leave
+/// behind — and the files a session must not be able to leave behind for the
+/// next one.
 ///
 /// Not a [`Binding`]: a policy has no layers, no selection, no import and
-/// nothing to parse back. It is derived from what the launch stages, which is
-/// the whole of what it says.
+/// nothing to parse back. Its allowlist is derived from what the launch
+/// stages; the rest of it is fixed per format (see `render::policy`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -108,8 +109,8 @@ pub struct Policy {
     pub path: String,
     pub format: PolicyFormat,
     /// Guest paths a session can write and the harness trusts on its next
-    /// start. Each is hidden behind an empty read-only file. `$HOME` is
-    /// expanded per image.
+    /// start, each strictly inside one of `creds`' directories. Each is hidden
+    /// behind an empty read-only file. `$HOME` is expanded per image.
     #[serde(default)]
     pub mask: Vec<String>,
 }
@@ -568,13 +569,15 @@ impl Adapter {
         Ok(adapter)
     }
 
-    /// The policy is above everything a session writes only if a session
-    /// cannot write it: an absolute path under `/etc`, the image's admin layer,
+    /// The policy is above everything a session leaves behind only if a
+    /// session cannot replace it: a file under `/etc`, the image's admin layer,
     /// which none of the mounts omh makes writable reaches (`/work`, the
-    /// harness's home, `/omh`). A mask is the other way round — it hides a file
-    /// in the home, where the account is, and `auth::prepare` lays its
-    /// mountpoint down there. Neither may walk with `..`: `auth::prepare` and
-    /// `omh eject` join both into host paths.
+    /// harness's home, `/omh`), and not under one this adapter makes writable
+    /// (`creds`, `transcripts`) or at a capability's own path. A mask is the
+    /// other way round — it hides a file the account keeps, strictly inside a
+    /// `creds` directory, where `auth::prepare` lays its mountpoint. Neither
+    /// may walk with `..`: `auth::prepare` joins a mask into the account
+    /// directory on the host, and `omh eject` joins the path under `system/`.
     fn check_policy(&self, path: &Path) -> Result<()> {
         let Some(policy) = &self.policy else {
             return Ok(());
@@ -595,17 +598,55 @@ impl Adapter {
             !walks(at),
             "adapter {shown}: `[policy] path = {at:?}` has no `..` to walk — name the file"
         );
-        // The image's admin layer, which no mount omh makes writable reaches:
-        // `/work`, the harness's home and `/omh` all do.
+        // The image's admin layer. The mounts omh makes writable are `/work`,
+        // the harness's home and `/omh`, and none of them is under `/etc` —
+        // unless this adapter puts one there, which is refused next.
+        let file = Path::new(at);
         anyhow::ensure!(
-            Path::new(at).starts_with("/etc"),
-            "adapter {shown}: `[policy] path = {at:?}` must be under /etc/ — a session \
-             writes /work, the harness's home and omh's own mounts"
+            file.starts_with("/etc") && file.components().count() > 2,
+            "adapter {shown}: `[policy] path = {at:?}` must name a file under /etc/ — a \
+             session writes /work, the harness's home and omh's own mounts"
         );
+        // Compared as written: the path is a literal under `/etc`, so only an
+        // absolute template can name it — one under `$HOME` never does.
+        let writable = self
+            .creds
+            .iter()
+            .map(|c| c.trim_end_matches('/'))
+            .chain(self.transcripts.as_deref());
+        for mount in writable {
+            anyhow::ensure!(
+                !file.starts_with(mount),
+                "adapter {shown}: `[policy] path = {at:?}` is under a path omh mounts \
+                 writable ({mount}) — a session could replace it"
+            );
+        }
+        let bound = self
+            .capabilities
+            .values()
+            .flat_map(|b| std::iter::once(&b.path).chain(b.also.iter()));
+        for target in bound {
+            anyhow::ensure!(
+                Path::new(target) != file,
+                "adapter {shown}: `[policy] path = {at:?}` is a capability's path too — \
+                 two mounts at one path"
+            );
+        }
+        // A mask hides a file the account keeps — inside one of the directories
+        // `creds` mounts writable, never one of them whole, never outside.
+        let dirs: Vec<&str> = self
+            .creds
+            .iter()
+            .filter(|c| c.ends_with('/'))
+            .map(String::as_str)
+            .collect();
         for mask in &policy.mask {
             anyhow::ensure!(
-                mask.starts_with("$HOME/"),
-                "adapter {shown}: `[policy]` mask entry {mask:?} must start with $HOME/"
+                dirs.iter()
+                    .any(|d| mask.strip_prefix(d).is_some_and(|rest| !rest.is_empty())),
+                "adapter {shown}: `[policy]` mask entry {mask:?} must be strictly inside one \
+                 of this adapter's credential directories ({})",
+                dirs.join(", ")
             );
             anyhow::ensure!(
                 !walks(mask),
@@ -1348,23 +1389,52 @@ render = "concat"
     /// host paths.
     #[test]
     fn a_policy_a_session_could_reach_is_refused() {
-        // Each refused for its own reason, named in a message no other case
-        // shares — a shared message would let any one rule stand in for all.
-        for (policy, names) in [
-            ("path = \"etc/x.toml\"", "must be absolute"),
-            ("path = \"$HOME/x.toml\"", "must be absolute"),
-            ("path = \"/etc/../work/x.toml\"", "no `..`"),
-            ("path = \"/work/x.toml\"", "under /etc/"),
-            ("path = \"/work\"", "under /etc/"),
-            ("path = \"/home/agent/x.toml\"", "under /etc/"),
-            ("path = \"/omh/memory/x.toml\"", "under /etc/"),
+        // Each rule refuses in words no other rule uses — a shared message
+        // would let any one rule stand in for all.
+        const CREDS: &str = "creds = [\"$HOME/.p/\"]";
+        for (top, policy, names) in [
+            (CREDS, "path = \"etc/x.toml\"", "must be absolute"),
+            (CREDS, "path = \"$HOME/x.toml\"", "must be absolute"),
+            (CREDS, "path = \"/etc/../work/x.toml\"", "no `..`"),
+            (CREDS, "path = \"/work/x.toml\"", "a file under /etc/"),
+            (CREDS, "path = \"/work\"", "a file under /etc/"),
+            (CREDS, "path = \"/home/agent/x.toml\"", "a file under /etc/"),
+            (CREDS, "path = \"/omh/memory/x.toml\"", "a file under /etc/"),
+            (CREDS, "path = \"/etc\"", "a file under /etc/"),
             (
-                "path = \"/etc/x.toml\"\nmask = [\"/tmp/cache\"]",
-                "start with $HOME/",
+                "creds = [\"/etc/p/\"]",
+                "path = \"/etc/p/x.toml\"",
+                "under a path omh mounts writable",
             ),
             (
-                "path = \"/etc/x.toml\"\nmask = [\"$HOME/.codex/../../tmp/x\"]",
-                "mask entry \"$HOME/.codex/../../tmp/x\" has a `..`",
+                "transcripts = \"/etc/p\"",
+                "path = \"/etc/p/x.toml\"",
+                "under a path omh mounts writable",
+            ),
+            (
+                CREDS,
+                "path = \"/etc/x.toml\"\n\n[capabilities.mcp]\npath = \"/etc/x.toml\"\nrender = \"codex-toml\"",
+                "is a capability's path too",
+            ),
+            (
+                CREDS,
+                "path = \"/etc/x.toml\"\nmask = [\"/tmp/cache\"]",
+                "strictly inside one of this adapter's credential directories",
+            ),
+            (
+                CREDS,
+                "path = \"/etc/x.toml\"\nmask = [\"$HOME/elsewhere/cache\"]",
+                "strictly inside one of this adapter's credential directories",
+            ),
+            (
+                CREDS,
+                "path = \"/etc/x.toml\"\nmask = [\"$HOME/.p\"]",
+                "strictly inside one of this adapter's credential directories",
+            ),
+            (
+                CREDS,
+                "path = \"/etc/x.toml\"\nmask = [\"$HOME/.p/../../tmp/x\"]",
+                "mask entry \"$HOME/.p/../../tmp/x\" has a `..`",
             ),
         ] {
             let d = tempfile::tempdir().unwrap();
@@ -1372,13 +1442,13 @@ render = "concat"
                 d.path(),
                 "p.toml",
                 &format!(
-                    "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\n\n\
+                    "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\n{top}\n\n\
                      [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
                      [policy]\nformat = \"claude-managed\"\n{policy}\n"
                 ),
             );
             let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
-            assert!(err.contains(names), "{policy}: {err}");
+            assert!(err.contains(names), "{top} / {policy}: {err}");
         }
     }
 

@@ -16383,11 +16383,18 @@ fn what_codexs_policy_stops_here_is_said_once_before_a_launch() {
 fn a_dry_run_names_only_what_the_launch_would_be_handed() {
     let sb = sandbox();
     let _log = sb.fake_docker();
-    repo_declaring_a_codex_server(&sb, false);
+    repo_declaring_a_codex_server(&sb, true);
+    // The branch has `repo-linear`; the working tree has moved on.
+    std::fs::write(
+        sb.repo.join(".codex/config.toml"),
+        "[mcp_servers.only-here]\ncommand = \"l\"\n",
+    )
+    .unwrap();
 
     let out = sb.omh(&["new", "codex", "--dry-run"]);
     assert!(out.status.success(), "{}", printed(&out));
-    assert!(!printed(&out).contains("repo-linear"), "{}", printed(&out));
+    assert!(printed(&out).contains("repo-linear"), "{}", printed(&out));
+    assert!(!printed(&out).contains("only-here"), "{}", printed(&out));
 }
 
 /// `omh doctor` says it too. Its probe runs in a scratch `/work`, which holds

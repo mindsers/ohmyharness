@@ -259,7 +259,7 @@ fn mountpoint(root: &std::path::Path, relative: &std::path::Path, is_dir: bool) 
     use std::path::Component;
     let refuse = |at: &std::path::Path, what: &str, e: std::io::Error| {
         anyhow::anyhow!(
-            "{} {what} — omh mounts there, and will not make anything through or \
+            "{} {what} — a mount lands there, and omh will not make anything through or \
              over whatever this is ({e}). Remove it and launch again",
             at.display()
         )

@@ -417,8 +417,9 @@ pub fn policy(format: PolicyFormat, servers: &BTreeMap<String, Server>) -> Resul
             );
             Ok(body)
         }
-        // `[]` under the lock admits nothing. Each entry is one matcher:
-        // Claude compares the command and its arguments exactly.
+        // `[]` under the lock admits nothing (Claude Code's docs; not
+        // measured). Each entry is one matcher: Claude compares the command
+        // and its arguments exactly.
         PolicyFormat::ClaudeManaged => {
             let allowed: Vec<serde_json::Value> = servers
                 .values()
