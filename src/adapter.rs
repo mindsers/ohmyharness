@@ -141,6 +141,21 @@ impl PolicyFormat {
         }
     }
 
+    /// Whether this harness takes an account's provider file (`provider.rs`),
+    /// rendered into a layer the session cannot write.
+    pub fn reads_provider(self) -> bool {
+        self.provider_source().is_some()
+    }
+
+    /// Where this harness keeps its own provider on the host, for `omh auth
+    /// --import` to read — `None` for one that takes no provider file.
+    pub fn provider_source(self) -> Option<&'static str> {
+        match self {
+            Self::CodexRequirements => Some("$HOME/.codex/config.toml"),
+            Self::ClaudeManaged => None,
+        }
+    }
+
     /// The account files `render::scrub` knows how to seed a session's copy
     /// of, for this format — what `[policy] copy` may name. Beside the format
     /// rather than in `render`, which `adapter` does not reach.

@@ -191,7 +191,13 @@ launch and by `omh doctor`. `omh eject` writes the policy itself under
   source), and a pinned `chatgpt_base_url`. An enterprise account's cloud
   bundle cache is masked, so Codex fetches the bundle at every start — and, by
   Codex's source, offline it does not start; no enterprise account has been
-  run.
+  run. The account's model provider, `provider.toml` at the account's root,
+  is rendered into the system layer beside omh's hooks, held to
+  `model_provider` and the fields of `[model_providers.*]` — see
+  [A model provider of your own](/guides/accounts/#a-model-provider-of-your-own).
+  Codex uses it from there (`tests/e2e`: every codex turn's provider comes
+  from it), unless the account's own `~/.codex/config.toml` names another,
+  which ranks above it (Codex's source).
 - **claude** — a `managed-settings.d` drop-in: `allowManagedMcpServersOnly`,
   `allowedMcpServers`, and `disableClaudeAiConnectors`. claude.ai connectors
   are switched off in a session (read in the 2.1.300 binary; not measured):
@@ -308,7 +314,7 @@ its error text.
 | `concat` | rules | join the sections into one document, staged and mounted read-only |
 | `mcp-json`, `codex-toml`, `opencode-json` | mcp | reshape the canonical server list |
 | `claude-settings` | hooks | reshape the canonical hook list |
-| `codex-hooks` | hooks | write Codex's `[[hooks.<Event>]]` tables into its system layer, `/etc/codex/config.toml`, which Codex runs as managed |
+| `codex-hooks` | hooks | write Codex's `[[hooks.<Event>]]` tables into its system layer, `/etc/codex/config.toml`, which Codex runs as managed — with the account's model provider beside them, when it has one |
 | `opencode-plugin`, `omp-plugin` | hooks | generate a JavaScript module |
 
 **Nothing is written into the worktree.** `concat`, and any `path` under `/work`

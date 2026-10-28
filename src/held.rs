@@ -46,6 +46,16 @@ fn step(name: &OsStr) -> io::Result<CString> {
 
 /// `openat`, with the result owned or the reason kept.
 fn open_under(dir: &File, name: &CString, flags: libc::c_int) -> io::Result<File> {
+    open_under_mode(dir, name, flags, 0o666)
+}
+
+/// [`open_under`], creating with `mode` rather than what `fs::write` asks for.
+fn open_under_mode(
+    dir: &File,
+    name: &CString,
+    flags: libc::c_int,
+    mode: libc::c_uint,
+) -> io::Result<File> {
     // SAFETY: `dir` is an open descriptor that outlives the call, and `name`
     // is a NUL-terminated string that does too. The mode is read only when
     // `O_CREAT` is among the flags, and is what `fs::write` would ask for.
@@ -54,7 +64,7 @@ fn open_under(dir: &File, name: &CString, flags: libc::c_int) -> io::Result<File
             dir.as_raw_fd(),
             name.as_ptr(),
             flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o666 as libc::c_uint,
+            mode,
         )
     };
     if fd < 0 {
@@ -142,6 +152,17 @@ impl Dir {
     /// uid on some hosts, and a temporary file's `0600` is a file the agent
     /// cannot open.
     pub(crate) fn replace(&self, name: &OsStr, body: &[u8]) -> io::Result<()> {
+        self.replace_mode(name, body, 0o666)
+    }
+
+    /// [`Dir::replace`], for a file only the user may read — one holding a
+    /// token. Created `0600`, so no moment exists where the umask lets anyone
+    /// else open it, before or after the rename.
+    pub(crate) fn replace_private(&self, name: &OsStr, body: &[u8]) -> io::Result<()> {
+        self.replace_mode(name, body, 0o600)
+    }
+
+    fn replace_mode(&self, name: &OsStr, body: &[u8], mode: libc::c_uint) -> io::Result<()> {
         use std::io::Write as _;
         let name = step(name)?;
         let mut part = name.as_bytes().to_vec();
@@ -157,10 +178,11 @@ impl Dir {
         // Whatever a run that died left at the temporary name goes first;
         // `unlinkat` removes a link rather than what it points at.
         unsafe { libc::unlinkat(dir, part.as_ptr(), 0) };
-        let mut file = open_under(
+        let mut file = open_under_mode(
             &self.fd,
             &part,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            mode,
         )?;
         let written = file.write_all(body);
         drop(file);
@@ -185,6 +207,28 @@ mod tests {
 
     fn name(s: &str) -> &OsStr {
         OsStr::new(s)
+    }
+
+    /// A private file is the user's alone from its first byte, and stays so
+    /// when it replaces one that was not.
+    #[test]
+    fn a_private_replacement_is_the_users_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("token"), "old").unwrap();
+        std::fs::set_permissions(
+            d.path().join("token"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let held = Dir::open(d.path()).unwrap();
+        held.replace_private(name("token"), b"secret").unwrap();
+        let mode = std::fs::metadata(d.path().join("token"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read(d.path().join("token")).unwrap(), b"secret");
     }
 
     /// The whole point, stated once: what was opened is what is used.

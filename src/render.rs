@@ -67,6 +67,9 @@ pub struct RenderContext<'a> {
     /// probe, and (per `container::plan`) a scratch session with no branch,
     /// which never mounts the shadow gitdir this path would point into.
     pub log: Option<&'a str>,
+    /// The account's provider file, checked by `provider::read`, for the one
+    /// render that carries it: Codex's System layer.
+    pub provider: Option<&'a toml::Table>,
 }
 
 /// Render a capability into the shape this harness parses.
@@ -82,6 +85,7 @@ pub fn document(
         tools,
         resolves,
         log,
+        provider,
     } = *ctx;
     match binding.render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
@@ -137,7 +141,7 @@ pub fn document(
             dropped.extend(unspellable);
             let rendered_hooks = rendered.keys().cloned().collect();
             Ok(Document {
-                body: codex_hooks(&rendered, binding)?,
+                body: codex_hooks(&rendered, binding, provider)?,
                 dropped,
                 rendered_hooks,
             })
@@ -1755,7 +1759,11 @@ pub fn parse_hooks_as(
 }
 
 /// Codex's `[[hooks.<Event>]]` tables, each command inside [`codex_guard`].
-fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> Result<String> {
+fn codex_hooks(
+    hooks: &BTreeMap<String, hook::Rendered>,
+    binding: &Binding,
+    provider: Option<&toml::Table>,
+) -> Result<String> {
     #[derive(Serialize)]
     struct Handler<'a> {
         r#type: &'a str,
@@ -1829,7 +1837,17 @@ fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> R
             }],
         });
     }
-    toml::to_string(&doc).context("rendering codex hooks")
+    let Some(provider) = provider else {
+        return toml::to_string(&doc).context("rendering codex hooks");
+    };
+    // The account's provider, beside omh's keys: `provider::read` has held it to
+    // `model_provider` and `[model_providers.*]`, and neither collides with
+    // a key above.
+    let mut table = toml::Table::try_from(&doc).context("rendering codex hooks")?;
+    for (key, value) in provider {
+        table.insert(key.clone(), value.clone());
+    }
+    toml::to_string(&table).context("rendering codex hooks")
 }
 
 /// A hook command as Codex must run it.
@@ -2329,6 +2347,7 @@ mod tests {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap()
@@ -2391,6 +2410,52 @@ mod tests {
             "the run never ran: {out:?}\n{}",
             stop[0].1
         );
+    }
+
+    /// The account's provider reaches the System layer as written, beside
+    /// omh's own keys — and never anything that would make that layer a
+    /// second managed hooks source (`managed_dir`), which Codex refuses to
+    /// start with when another layer names one too.
+    #[test]
+    fn the_accounts_provider_lands_in_codexs_system_layer() {
+        let provider: toml::Table = toml::from_str(
+            "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+             base_url = \"https://example.invalid/openai\"\n",
+        )
+        .unwrap();
+        let adapter = codex();
+        let doc = document(
+            Capability::Hooks,
+            adapter.supports(Capability::Hooks).unwrap(),
+            &[],
+            &RenderContext {
+                own: &crate::base::Own::default(),
+                repo: &crate::settings::RepoPolicy::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+                provider: Some(&provider),
+            },
+        )
+        .unwrap();
+        let body: toml::Table = toml::from_str(&doc.body).unwrap();
+        assert_eq!(
+            body["model_provider"].as_str(),
+            Some("azure"),
+            "{}",
+            doc.body
+        );
+        assert_eq!(
+            body["model_providers"], provider["model_providers"],
+            "{}",
+            doc.body
+        );
+        assert_eq!(body["sandbox_mode"].as_str(), Some("danger-full-access"));
+        assert!(!doc.body.contains("managed_dir"), "{}", doc.body);
+
+        let none = codex_document(&[]);
+        let body: toml::Table = toml::from_str(&none.body).unwrap();
+        assert!(body.get("model_provider").is_none() && body.get("model_providers").is_none());
     }
 
     /// `[[hooks.<Event>]]` tables, a `matcher` only where the hook narrows —
@@ -3075,6 +3140,7 @@ mod tests {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -3116,6 +3182,7 @@ mod tests {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -3170,6 +3237,7 @@ mod tests {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -3216,6 +3284,7 @@ mod tests {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -3286,6 +3355,7 @@ mod tests {
                 tools: &adapter.tools,
                 resolves: &measured,
                 log: None,
+                provider: None,
             },
         )
         .unwrap()
@@ -3349,6 +3419,7 @@ mod tests {
                     tools,
                     resolves: &measured,
                     log: None,
+                    provider: None,
                 },
             )
             .unwrap();
@@ -3422,6 +3493,7 @@ mod tests {
                     tools,
                     resolves: &Default::default(),
                     log: Some(crate::shadow::GUEST_EVENTS),
+                    provider: None,
                 },
             )
             .unwrap();
@@ -3484,6 +3556,7 @@ mod tests {
                 tools: &omp().tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap()
@@ -3763,6 +3836,7 @@ template = 'return { block: true, reason: {{text}} }'
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap_err()
@@ -4054,6 +4128,7 @@ template = 'return { block: true, reason: {{text}} }'
                 tools: &omp().tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .map(|d| d.body)
@@ -4238,6 +4313,7 @@ try {{
                 tools: &opencode().tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap()
@@ -4511,6 +4587,7 @@ try {{
                     tools: &a.tools,
                     resolves: &Default::default(),
                     log: None,
+                    provider: None,
                 },
             )
             .unwrap()
@@ -4644,6 +4721,7 @@ try {{
                     tools: &a.tools,
                     resolves: &Default::default(),
                     log: None,
+                    provider: None,
                 },
             )
             .unwrap()
@@ -4811,6 +4889,7 @@ try {{
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -4863,6 +4942,7 @@ try {{
                     tools: &a.tools,
                     resolves: &Default::default(),
                     log: None,
+                    provider: None,
                 },
             )
             .unwrap()
@@ -4910,6 +4990,7 @@ try {{
                 tools: &opencode().tools,
                 resolves: &Default::default(),
                 log: Some(log.to_str().unwrap()),
+                provider: None,
             },
         )
         .unwrap();
@@ -4938,6 +5019,7 @@ try {{
                 tools: &omp().tools,
                 resolves: &Default::default(),
                 log: Some(log.to_str().unwrap()),
+                provider: None,
             },
         )
         .unwrap();
@@ -4979,6 +5061,7 @@ try {{
                 tools: &omp().tools,
                 resolves: &Default::default(),
                 log: Some(log.to_str().unwrap()),
+                provider: None,
             },
         )
         .unwrap();
@@ -5019,6 +5102,7 @@ try {{
                 tools: &opencode().tools,
                 resolves: &Default::default(),
                 log: Some(log.to_str().unwrap()),
+                provider: None,
             },
         )
         .unwrap();
@@ -5372,6 +5456,7 @@ try {{
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -5407,6 +5492,7 @@ try {{
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap_err();
@@ -5575,6 +5661,7 @@ try {{
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap_err();

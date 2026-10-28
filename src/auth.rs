@@ -97,7 +97,15 @@ pub fn accounts(paths: &Paths, adapter: &Adapter) -> Result<Vec<String>> {
 pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     // Defined in terms of `unfilled` so the two answers can never disagree —
     // they did, and `omh auth` failed while `omh info` listed the account.
-    unfilled(adapter, &dir(paths, adapter, account), GUEST_HOME).is_empty()
+    // An account holding only its model provider is one too: a provider's
+    // token is the login for a harness pointed at it (#197 §6).
+    let dir = dir(paths, adapter, account);
+    let provider = adapter
+        .policy
+        .as_ref()
+        .is_some_and(|p| p.format.reads_provider())
+        && dir.join(crate::provider::FILE).is_file();
+    provider || unfilled(adapter, &dir, GUEST_HOME).is_empty()
 }
 
 /// Which account to use. Ambiguity is an error, never a guess — silently
@@ -420,7 +428,6 @@ fn copy_intact(dir: &std::path::Path, rel: &str) -> bool {
 /// `body` at `rel` under `dir`, atomically and without following a link, mode
 /// `0600`.
 fn place(dir: &std::path::Path, rel: &str, body: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     let at = dir.join(rel);
     let names: Vec<&std::ffi::OsStr> = std::path::Path::new(rel).iter().collect();
     let Some((leaf, above)) = names.split_last() else {
@@ -430,10 +437,8 @@ fn place(dir: &std::path::Path, rel: &str, body: &str) -> Result<()> {
     for name in above {
         held = held.sub_or_create(name)?;
     }
-    held.replace(leaf, body.as_bytes())
-        .with_context(|| format!("writing {}", at.display()))?;
-    std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("restricting {}", at.display()))
+    held.replace_private(leaf, body.as_bytes())
+        .with_context(|| format!("writing {}", at.display()))
 }
 
 /// The account's `~/.claude.json` and its kin: read as the agent's, and a JSON

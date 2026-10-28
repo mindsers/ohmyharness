@@ -298,8 +298,15 @@ pub(crate) enum Cmd {
         account: String,
         /// Copy the login this machine already has instead of logging in
         /// again — for a harness whose login cannot finish inside a sandbox.
+        /// Codex's own model provider comes along, from `~/.codex/config.toml`.
         #[arg(long)]
         import: bool,
+        /// Take the account's model provider from this file — a Codex
+        /// `config.toml` or a provider file — and log nothing in. Kept where no
+        /// session can write it; an environment variable it reads is read now,
+        /// once, and a command it runs is refused.
+        #[arg(long, value_name = "FILE")]
+        provider: Option<std::path::PathBuf>,
     },
     /// What you have here: harnesses, editors, sessions, your catalogue.
     Info {

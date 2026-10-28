@@ -521,6 +521,7 @@ mod rendered {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();
@@ -946,6 +947,7 @@ mod rendered {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap()
@@ -973,6 +975,7 @@ mod rendered {
                 tools: &adapter.tools,
                 resolves: &Default::default(),
                 log: None,
+                provider: None,
             },
         )
         .unwrap();

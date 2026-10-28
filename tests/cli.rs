@@ -14168,6 +14168,30 @@ fn a_system_path_ejects_under_system() {
         "{policy}"
     );
 
+    // The account's model provider is part of what a launch writes there —
+    // and leaves eject with every secret redacted.
+    let account = sb.home.join(".omh/creds/codex/default");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(
+        account.join("provider.toml"),
+        "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+         base_url = \"https://example.invalid/openai\"\nexperimental_bearer_token = \"sk-secret\"\n",
+    )
+    .unwrap();
+    let out = sb.home.join("ejected-provider");
+    let ran = sb.omh(&["eject", "codex", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let system = std::fs::read_to_string(out.join("system/etc/codex/config.toml")).unwrap();
+    assert!(system.contains("model_provider = \"azure\""), "{system}");
+    assert!(
+        !system.contains("sk-secret"),
+        "a token was ejected: {system}"
+    );
+
     // Claude's is a system path too.
     let out = sb.home.join("ejected-claude");
     let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
@@ -16432,6 +16456,185 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// `--provider` for a harness that takes none is refused before anything is
+/// touched: the account's own files are as they were.
+#[test]
+fn a_provider_for_a_harness_that_takes_none_touches_nothing() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let account = sb.home.join(".omh/creds/claude/default");
+    std::fs::create_dir_all(&account).unwrap();
+    let planted = r#"{"mcpServers":{"planted":{"command":"x"}}}"#;
+    std::fs::write(account.join(".claude.json"), planted).unwrap();
+    let file = sb.home.join("provider.toml");
+    std::fs::write(&file, "model_provider = \"p\"\n").unwrap();
+
+    let out = sb.omh(&["auth", "claude", "--provider", file.to_str().unwrap()]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("codex only"), "{}", printed(&out));
+    assert_eq!(
+        std::fs::read_to_string(account.join(".claude.json")).unwrap(),
+        planted,
+        "a refused --provider changed the account"
+    );
+    assert!(
+        !account.join(".claude").exists(),
+        "a refused --provider prepared the account: {:?}",
+        files_under(&account)
+    );
+}
+
+/// `omh auth codex --provider` keeps the provider a Codex config names in a
+/// file of the account's own, resolved for a sandbox and readable by the user
+/// alone, and the account counts as captured on it; a launch hands it to Codex
+/// in the System layer; a command it runs is refused, and nothing is kept.
+#[test]
+fn a_provider_authored_for_an_account_reaches_its_launches() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let config = sb.home.join("their-codex.toml");
+    std::fs::write(
+        &config,
+        "model = \"o3\"\nmodel_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+         base_url = \"https://example.invalid/openai\"\nenv_key = \"E2E_AZURE_KEY\"\n",
+    )
+    .unwrap();
+
+    let refused = sb.home.join("runs-a-command.toml");
+    std::fs::write(
+        &refused,
+        "model_provider = \"p\"\n[model_providers.p]\nname = \"P\"\nauth = { command = \"/bin/token\" }\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["auth", "codex", "--provider", refused.to_str().unwrap()]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("auth"), "{}", printed(&out));
+    let kept = sb.home.join(".omh/creds/codex/default/provider.toml");
+    assert!(!kept.exists(), "a refused provider was kept");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .args(["auth", "codex", "--provider", config.to_str().unwrap()])
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("E2E_AZURE_KEY", "sk-from-the-shell")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        !printed(&out).contains("sk-from-the-shell"),
+        "a value was printed"
+    );
+    let body = std::fs::read_to_string(&kept).unwrap();
+    assert!(
+        body.contains("sk-from-the-shell") && !body.contains("env_key"),
+        "{body}"
+    );
+    assert!(!body.contains("o3"), "only the provider is kept: {body}");
+    let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+
+    let info = sb.omh(&["info", "--json"]);
+    assert!(printed(&info).contains("default"), "{}", printed(&info));
+
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["new", "codex"]);
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let host = mounted_at(&seen, "/etc/codex/config.toml")
+        .unwrap_or_else(|| panic!("no System layer: {}", printed(&out)));
+    let system = std::fs::read_to_string(&host).unwrap();
+    assert!(system.contains("model_provider = \"azure\""), "{system}");
+
+    // One Codex would run as managed refuses the launch, by file and key.
+    std::fs::write(&kept, "notify = [\"x\"]\n").unwrap();
+    let out = sb.omh(&["new", "codex"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("provider.toml") && printed(&out).contains("`notify`"),
+        "{}",
+        printed(&out)
+    );
+}
+
+/// `omh doctor` has a row for the account's provider file: the provider it
+/// selects, by name — and a file that would refuse every codex start, by file
+/// and key, before any image is built for a probe that could not launch.
+#[test]
+fn doctor_names_the_accounts_provider_and_a_broken_one() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, false);
+    let log = sb.fake_docker_answering_doctor(&[], &[]);
+    let account = sb.home.join(".omh/creds/codex/default");
+    std::fs::create_dir_all(&account).unwrap();
+    let provider = account.join("provider.toml");
+    std::fs::write(
+        &provider,
+        "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+         base_url = \"https://example.invalid/openai\"\nexperimental_bearer_token = \"sk-secret\"\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    let row = json_documents(&out.stdout)
+        .iter()
+        .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+        .find(|c| c["name"] == "model provider")
+        .unwrap_or_else(|| panic!("no provider row: {}", printed(&out)));
+    assert_eq!(row["ok"], serde_json::json!(true), "{row}");
+    let detail = row["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("azure") && detail.contains("provider.toml"),
+        "{detail}"
+    );
+    assert!(!printed(&out).contains("sk-secret"), "{}", printed(&out));
+    // A provider and no login: there is no token to probe, and a probe of
+    // one that is not there fails as a token that will not persist.
+    let names: Vec<serde_json::Value> = json_documents(&out.stdout)
+        .iter()
+        .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+        .map(|c| c["name"].clone())
+        .collect();
+    assert!(
+        !names.contains(&serde_json::json!("token")),
+        "a login was probed on an account with none: {names:?}"
+    );
+    // With one, it is.
+    std::fs::create_dir_all(account.join(".codex")).unwrap();
+    std::fs::write(
+        account.join(".codex/auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"k"}"#,
+    )
+    .unwrap();
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    let probed = json_documents(&out.stdout)
+        .iter()
+        .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+        .any(|c| c["name"] == "token");
+    assert!(probed, "a login went unprobed: {}", printed(&out));
+    std::fs::remove_file(account.join(".codex/auth.json")).unwrap();
+
+    std::fs::write(&provider, "notify = [\"x\"]\n").unwrap();
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["doctor", "--harness", "codex"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    let said = printed(&out);
+    let line = said
+        .lines()
+        .find(|l| l.contains("model provider"))
+        .unwrap_or_else(|| panic!("no provider row: {said}"));
+    assert!(
+        line.contains("provider.toml") && line.contains("notify"),
+        "{line}"
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !seen.contains("build"),
+        "a probe that cannot launch was built for: {seen}"
+    );
+}
+
 /// What a `docker` argv mounted at `guest`, from the stand-in's log.
 fn mounted_at(log: &str, guest: &str) -> Option<String> {
     log.split_whitespace()
@@ -17587,6 +17790,15 @@ const EXERCISES: &[Exercise] = &[
         argv: &["auth", "claude", "--name", "work", "--import"],
         needs: Needs::Repo,
         expect: Expect::Ok,
+        runtime: true,
+    },
+    // A file that is not there: refused, naming it, and nothing kept. That a
+    // real one is kept and launched with is
+    // `a_provider_authored_for_an_account_reaches_its_launches`.
+    Exercise {
+        argv: &["auth", "codex", "--provider", "no-such-provider.toml"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["no-such-provider.toml"]),
         runtime: true,
     },
     Exercise {

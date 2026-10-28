@@ -97,6 +97,7 @@ see [Something else](#something-else).
 | `could not find bubblewrap on PATH`, or `bwrap: No permissions to create a new namespace` | [Update omh and upgrade](#codex-says-could-not-find-bubblewrap-on-path-and-commands-fail-with-bwrap-no-permissions-to-create-a-new-namespace) |
 | A server is `disabled` with `requirements (/etc/codex/requirements.toml)`, or a repo's `.codex/config.toml` hooks do not run | [Put it in your catalogue](#a-server-is-disabled-by-requirements-etccodexrequirementstoml) |
 | Codex does not start offline on an enterprise account | [Expected](#codex-does-not-start-offline-on-an-enterprise-account) |
+| A launch stops on `provider.toml`, or `omh doctor`'s `model provider` row is `✗` | [Fix the account's provider file](#a-launch-stops-on-providertoml) |
 | **Claude Code** | |
 | `claude mcp add` says "not allowed by enterprise policy" | [Put it in your catalogue](#claude-mcp-add-says-not-allowed-by-enterprise-policy) |
 | claude.ai connectors are missing in a session | [Expected](#claudeai-connectors-are-missing-in-a-session) |
@@ -584,6 +585,27 @@ that cache, so omh hides it behind a read-only file: Codex fetches the bundle
 at every start instead, and with no network it does not start. That is what
 Codex's source says it does; no enterprise account has been run to measure it.
 omh names a cached bundle at launch and in `omh doctor`.
+
+#### A launch stops on `provider.toml`
+
+The account's [provider file](/guides/accounts/#a-model-provider-of-your-own)
+holds something omh will not put in Codex's System layer, or is not TOML:
+
+```
+omh: /Users/you/.omh/creds/codex/work/provider.toml
+  because `notify` is not a provider key — a provider file holds `model_provider` and `[model_providers.<id>]` only, since omh renders it into the layer Codex treats as managed
+```
+
+Every launch on the account stops until it is fixed, `omh doctor` among them.
+Write it again from a file that holds the provider:
+
+```console
+$ omh auth codex --name work --provider ~/.codex/config.toml
+```
+
+A field that reads the environment (`env_key`), runs a command (`auth`) or
+reads an AWS profile has to be settled on the host, which `--provider` does —
+or, for a command, refuses: put the token it produces in the file by hand.
 
 ### Claude Code
 
