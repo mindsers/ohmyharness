@@ -16456,6 +16456,35 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// `--provider` for a harness that takes none is refused before anything is
+/// touched: the account's own files are as they were.
+#[test]
+fn a_provider_for_a_harness_that_takes_none_touches_nothing() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let account = sb.home.join(".omh/creds/claude/default");
+    std::fs::create_dir_all(&account).unwrap();
+    let planted = r#"{"mcpServers":{"planted":{"command":"x"}}}"#;
+    std::fs::write(account.join(".claude.json"), planted).unwrap();
+    let file = sb.home.join("provider.toml");
+    std::fs::write(&file, "model_provider = \"p\"\n").unwrap();
+
+    let out = sb.omh(&["auth", "claude", "--provider", file.to_str().unwrap()]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("codex only"), "{}", printed(&out));
+    assert_eq!(
+        std::fs::read_to_string(account.join(".claude.json")).unwrap(),
+        planted,
+        "a refused --provider changed the account"
+    );
+    assert!(
+        !account.join(".claude").exists(),
+        "a refused --provider prepared the account: {:?}",
+        files_under(&account)
+    );
+}
+
 /// `omh auth codex --provider` keeps the provider a Codex config names in a
 /// file of the account's own, resolved for a sandbox and readable by the user
 /// alone, and the account counts as captured on it; a launch hands it to Codex

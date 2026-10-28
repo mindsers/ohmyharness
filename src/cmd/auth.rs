@@ -43,6 +43,14 @@ pub(crate) fn auth_cmd(
     }
 
     auth::validate_name(account)?;
+    // Before anything is touched: a refusal leaves the account as it was.
+    let source = adapter
+        .policy
+        .as_ref()
+        .and_then(|p| p.format.provider_source());
+    if provider.is_some() && source.is_none() {
+        anyhow::bail!("{harness} takes no provider file — omh keeps one for codex only, so far");
+    }
     let account_dir = auth::dir(&paths, &adapter, account);
     let already = auth::is_captured(&paths, &adapter, account);
     // Before `prepare`, which then lays a placeholder where a file was set
@@ -56,10 +64,6 @@ pub(crate) fn auth_cmd(
     // from the file named, or with `--import` from the host's own config.
     // Authored before any login, and independent of one.
     let home = dirs::home_dir().context("no home directory")?;
-    let source = adapter
-        .policy
-        .as_ref()
-        .and_then(|p| p.format.provider_source());
     let provided = match (provider, import, source) {
         (Some(file), _, Some(_)) => {
             let raw = std::fs::read_to_string(file)
@@ -67,9 +71,6 @@ pub(crate) fn auth_cmd(
             let doc = author_provider(&raw, &account_dir)
                 .with_context(|| format!("{}", file.display()))?;
             Some(doc.with_context(|| format!("{} defines no model provider", file.display()))?)
-        }
-        (Some(_), _, None) => {
-            anyhow::bail!("{harness} takes no provider file — omh keeps one for codex only, so far")
         }
         (None, true, Some(source)) => {
             let host = crate::adapter::expand_host(source, &home, &paths.repo);
