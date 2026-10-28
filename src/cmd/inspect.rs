@@ -470,7 +470,13 @@ pub(crate) fn doctor_cmd(
             &repo,
             &sandbox.resolves,
         )?);
-        if account.is_some() {
+        // A login to probe, not merely an account: one can hold only its model
+        // provider, and a probe of a token that is not there fails as a token
+        // that will not persist.
+        let logged_in = account
+            .as_deref()
+            .is_some_and(|a| auth::unfilled(&adapter, a, auth::GUEST_HOME).is_empty());
+        if logged_in {
             checks.extend(doctor::credential_checks(&adapter));
         }
         // The one claim about this image no test can settle: whether the root
@@ -626,7 +632,11 @@ pub(crate) fn doctor_cmd(
             .as_ref()
             .map(|a| a.file_name().unwrap_or_default().to_string_lossy().into());
         ctx.progress(&match &account_name {
-            Some(a) => format!("checking {name} in {} as {a}…", sandbox.tag),
+            Some(a) if logged_in => format!("checking {name} in {} as {a}…", sandbox.tag),
+            Some(a) => format!(
+                "checking {name} in {} as {a} — no login there, so credentials go unchecked…",
+                sandbox.tag
+            ),
             None => format!(
                 "checking {name} in {} — no account, so credentials go unchecked…",
                 sandbox.tag

@@ -16579,6 +16579,31 @@ fn doctor_names_the_accounts_provider_and_a_broken_one() {
         "{detail}"
     );
     assert!(!printed(&out).contains("sk-secret"), "{}", printed(&out));
+    // A provider and no login: there is no token to probe, and a probe of
+    // one that is not there fails as a token that will not persist.
+    let names: Vec<serde_json::Value> = json_documents(&out.stdout)
+        .iter()
+        .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+        .map(|c| c["name"].clone())
+        .collect();
+    assert!(
+        !names.contains(&serde_json::json!("token")),
+        "a login was probed on an account with none: {names:?}"
+    );
+    // With one, it is.
+    std::fs::create_dir_all(account.join(".codex")).unwrap();
+    std::fs::write(
+        account.join(".codex/auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"k"}"#,
+    )
+    .unwrap();
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    let probed = json_documents(&out.stdout)
+        .iter()
+        .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+        .any(|c| c["name"] == "token");
+    assert!(probed, "a login went unprobed: {}", printed(&out));
+    std::fs::remove_file(account.join(".codex/auth.json")).unwrap();
 
     std::fs::write(&provider, "notify = [\"x\"]\n").unwrap();
     std::fs::write(&log, "").unwrap();
@@ -17761,7 +17786,7 @@ const EXERCISES: &[Exercise] = &[
         argv: &["auth", "codex", "--provider", "no-such-provider.toml"],
         needs: Needs::Repo,
         expect: Expect::Refuses(&["no-such-provider.toml"]),
-        runtime: false,
+        runtime: true,
     },
     Exercise {
         argv: &["graph"],
