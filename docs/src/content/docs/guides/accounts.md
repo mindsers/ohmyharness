@@ -340,7 +340,8 @@ each session gets a copy of its own:
 - **not kept:** everything else — `[mcp_servers]`, `developer_instructions`,
   `model_provider`, `[features]`, `profiles`, `[projects]`, hooks. They last
   the session that wrote them. A feature you toggle lasts that session, and
-  `-- -p <name>` finds no profile;
+  `-- -p <name>` finds no `[profiles.<name>]` table (a
+  `~/.codex/<name>.config.toml` profile file still loads);
 - **how:** the account's `config.toml` is a link to `/omh/prefs/config.toml`,
   and each session mounts its own copy there. Codex resolves the link before
   it saves, and saves into the session's copy (`tests/e2e`: `codex mcp add`
@@ -386,8 +387,7 @@ Each step can be interrupted: the next launch finishes the job.
 
 - while a session started by an older omh still mounts the account — it would
   rename over the link, or keep reading the shared file. `omh sNN down` it
-  first. A runtime that keeps no labels on its sandboxes (`sbx`) cannot be
-  asked, and that refuses too;
+  first. `omh auth codex` asks the same, once per account;
 - when the file selects a model provider other than OpenAI and the account
   has no [provider file](#a-model-provider-of-your-own): every later session
   would quietly send its turns to OpenAI instead. The refusal names the fix,
@@ -401,6 +401,11 @@ After the migration, a real file where the link goes was put there by a
 session: it is linked again, said, and nothing in it is kept.
 
 </details>
+
+**Codex on `sbx` waits for #199.** Laying the link — the first launch of any
+codex account, new or not — asks which sandboxes still mount the account,
+and `sbx` keeps no labels to answer from, so that launch refuses. `sbx` does
+not run omh's links yet either.
 
 ### `token` is what proves a login
 

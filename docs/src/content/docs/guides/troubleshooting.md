@@ -645,13 +645,13 @@ omh: /Users/you/.omh/creds/codex/work is in use by omh-api-3f9a2c1b-s02, started
 Stop it — `omh s02 down` in the repo it belongs to, or `docker rm -f` the name
 — and launch again. Once an account has migrated this is never asked again.
 With a runtime that keeps no labels on its sandboxes (`sbx`) omh cannot tell
-which are running, and says so instead.
+which are running, and says so instead: codex on `sbx` waits for #199.
 
 #### A Codex setting from one session is gone in the next
 
 Expected, unless it is a preference. A session's `config.toml` is its own: a
 server added with `codex mcp add`, a feature toggled, `developer_instructions`,
-a profile last that session. Your
+a `[profiles]` table last that session. Your
 [preferences](/guides/accounts/#codexconfigtoml-is-each-sessions-own) — the
 model, its reasoning effort, the `tui` settings — reach the account when Codex
 exits in your terminal and at `omh sNN down` and `rm`, and omh says which. A

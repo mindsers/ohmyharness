@@ -360,8 +360,8 @@ impl Sandbox {
     /// anything it did not recognise, so `doctor`'s volume filter could never
     /// be exercised — replacing it with `!n.is_empty()` was green, and would
     /// have shipped a doctor that lists every volume on the machine.
-    /// `<bin>/mounting` answers the `omh.mounts` label query — the running
-    /// sandboxes and what each mounts, one `name<TAB>"json"` line each.
+    /// `<bin>/labels-<name>` is what `inspect -f` answers for that container
+    /// — its labels as JSON — where the shim otherwise answers `true`.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
@@ -380,8 +380,9 @@ impl Sandbox {
                  done; exit 0; fi\n\
                  case \"$*\" in *--pull=never*) [ -f {probe_refuses} ] && {{ \
                  echo 'no such image' >&2; exit 125; }} ;; esac\n\
+                 if [ \"$1\" = inspect ] && [ \"$2\" = -f ]; then for a in \"$@\"; do \
+                 [ -f {bin}/labels-\"$a\" ] && {{ cat {bin}/labels-\"$a\"; exit 0; }}; done; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
-                 case \"$*\" in *label=omh.mounts*) cat {mounting} 2>/dev/null; exit 0 ;; esac\n\
                  if [ \"$1\" = ps ]; then cat {containers} 2>/dev/null; fi\n\
                  if [ \"$1\" = volume ]; then cat {volumes} 2>/dev/null; fi\nexit 0\n",
                 log = log.display(),
@@ -390,7 +391,6 @@ impl Sandbox {
                 probe_refuses = self.bin.join("docker-probe-refuses").display(),
                 check_fails = self.bin.join("docker-check-fails").display(),
                 containers = self.bin.join("containers").display(),
-                mounting = self.bin.join("mounting").display(),
                 volumes = self.bin.join("volumes").display(),
                 bin = self.bin.display()
             ),
@@ -521,7 +521,6 @@ exit 0
                  # across three branches, each time saying only `init failed`.\n\
                  if [ \"$1\" = build ]; then cat >> {recipes}; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
-                 case \"$*\" in *label=omh.mounts*) exit 0 ;; esac\n\
                  if [ \"$1\" = ps ]; then cat {containers}; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
                 log = log.display(),
@@ -15319,7 +15318,6 @@ if [ "$1" = run ]; then
   fi
 fi
 if [ "$1" = inspect ]; then echo true; fi
-case "$*" in *label=omh.mounts*) exit 0 ;; esac
 if [ "$1" = ps ]; then cat @CONTAINERS@ 2>/dev/null; fi
 exit 0
 "#
@@ -16744,21 +16742,22 @@ fn a_session_still_on_the_account_stops_its_migration() {
     sb.fake_docker();
     repo_declaring_a_codex_server(&sb, true);
     let account = codex_account_with_a_shared_config(&sb, "model = \"a\"\n");
+    std::fs::write(sb.bin.join("containers"), "omh-elsewhere-s03\n").unwrap();
     std::fs::write(
-        sb.bin.join("mounting"),
-        format!(
-            "omh-elsewhere-s03\t{}\n",
-            serde_json::json!(format!(
+        sb.bin.join("labels-omh-elsewhere-s03"),
+        serde_json::json!({
+            "omh.mounts": format!(
                 "rw {} -> /home/agent/.codex\nrw /x -> /work",
                 account.join(".codex").display()
-            ))
-        ),
+            )
+        })
+        .to_string(),
     )
     .unwrap();
     let out = sb.omh(&["new", "codex"]);
     assert!(!out.status.success(), "{}", printed(&out));
     assert!(
-        printed(&out).contains("omh-elsewhere-s03"),
+        printed(&out).contains("is in use by omh-elsewhere-s03"),
         "{}",
         printed(&out)
     );

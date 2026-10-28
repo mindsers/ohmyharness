@@ -342,9 +342,10 @@ pub(crate) fn session_up(
 }
 
 /// The running sandboxes whose mounts reach `dir`, by name, across every
-/// repo — read off each one's `omh.mounts` stamp. A runtime that keeps no
-/// labels, or one that does not answer, is an error: "could not tell", never
-/// "none".
+/// repo — read off each one's `omh.mounts` stamp, the way a launch reads its
+/// own: the running set, then each `omh-` container's labels. A runtime that
+/// keeps no labels, or one that does not answer for a container, is an
+/// error: "could not tell", never "none".
 pub(crate) fn sessions_mounting(
     backend: &runtime::Backend,
     dir: &std::path::Path,
@@ -354,38 +355,24 @@ pub(crate) fn sessions_mounting(
         "{} keeps no labels on a sandbox, so omh cannot read what a running one mounts",
         backend.program()
     );
-    let out = backend.output(&[
-        "ps",
-        "--filter",
-        "label=omh.mounts",
-        "--format",
-        "{{.Names}}\t{{json (.Label \"omh.mounts\")}}",
-    ])?;
-    anyhow::ensure!(
-        out.status.success(),
-        "{} ps did not answer: {}",
-        backend.program(),
-        crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
-    );
+    let running = image::running_set(backend).map_err(|why| anyhow::anyhow!(why))?;
     let mut names = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let (name, mounts) = line
-            .split_once('\t')
-            .with_context(|| format!("unreadable sandbox listing: {line:?}"))?;
-        let mounts: String =
-            serde_json::from_str(mounts).with_context(|| format!("unreadable mounts on {name}"))?;
-        let reaches = mounts.lines().any(|m| {
-            let host = m
-                .strip_prefix("rw ")
-                .or_else(|| m.strip_prefix("ro "))
-                .and_then(|m| m.split(" -> ").next());
-            host.is_some_and(|h| std::path::Path::new(h).starts_with(dir))
+    for name in running.iter().filter(|n| n.starts_with("omh-")) {
+        let labels = match image::container_stamp(backend, name) {
+            image::Stamp::Read(labels) => labels,
+            image::Stamp::Unknown(why) => anyhow::bail!("{name}: {why}"),
+        };
+        let reaches = labels.get("omh.mounts").is_some_and(|mounts| {
+            mounts.lines().any(|m| {
+                let host = m
+                    .strip_prefix("rw ")
+                    .or_else(|| m.strip_prefix("ro "))
+                    .and_then(|m| m.split(" -> ").next());
+                host.is_some_and(|h| std::path::Path::new(h).starts_with(dir))
+            })
         });
         if reaches {
-            names.push(name.to_string());
+            names.push(name.clone());
         }
     }
     Ok(names)

@@ -506,6 +506,17 @@ impl Account {
         let _lock = kept_dir
             .lock(OsStr::new(LOCK))
             .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?;
+        // Read under the lock: a launch that took it first may have finished
+        // the migration this one was checked for — and its sandbox, now
+        // running, is not one from before the link.
+        if !self.marked
+            && matches!(
+                kept_dir.entry(OsStr::new(MARKER)),
+                Ok(crate::held::Entry::File)
+            )
+        {
+            return Ok(Vec::new());
+        }
         if self.needs_quiet() {
             let running = running().map_err(|e| {
                 e.context(format!(
@@ -985,6 +996,26 @@ base_url = "https://example.invalid"
         std::fs::remove_file(account.join("provider.toml")).unwrap();
         std::fs::write(&file, "model_provider = \"openai\"\n").unwrap();
         check(&codex(), &account).unwrap().unwrap();
+    }
+
+    /// Two first launches on one account: the one that takes the lock second
+    /// finds the migration done, and neither asks about running sessions —
+    /// whose new-style sandbox it would otherwise take for an old one — nor
+    /// migrates again.
+    #[test]
+    fn a_migration_another_launch_finished_is_not_done_twice() {
+        let (_root, account, file) = account();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "model = \"a\"\n").unwrap();
+        let first = check(&codex(), &account).unwrap().unwrap();
+        let second = check(&codex(), &account).unwrap().unwrap();
+        first.apply(&none_running).unwrap();
+        let backup = account.join("preferences/config.toml.before-omh");
+        std::fs::write(&backup, "the first launch's").unwrap();
+        second
+            .apply(&|| Ok(vec!["omh-repo-s01".into()]))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "the first launch's");
     }
 
     /// A session from before the link still mounting the account would
