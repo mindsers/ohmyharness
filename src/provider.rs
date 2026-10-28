@@ -247,36 +247,36 @@ pub fn redacted(doc: &toml::Table) -> toml::Table {
     doc
 }
 
-/// The host `url` names: after its scheme and userinfo, before its port.
+/// The host `url` names: after its scheme and userinfo, before its port. For
+/// the loopback refusal, which saves a provider that could not answer, not a
+/// boundary: a form it misses imports a provider that fails at its first turn.
 fn host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     match host.strip_prefix('[') {
         Some(v6) => &host[..v6.find(']').map_or(host.len(), |end| end + 2)],
-        None => host.split(':').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default().trim_end_matches('.'),
     }
 }
 
 /// `url` without what can hold a credential: its userinfo and its query each
-/// become `<redacted>`, and a fragment goes.
+/// become `<redacted>`, and a fragment goes. Erring wide, since parsers
+/// disagree on where an authority ends: everything before the last `@` is
+/// redacted, and a value with no scheme is redacted whole.
 fn redacted_url(url: &str) -> String {
     let url = url.split('#').next().unwrap_or_default();
     let (url, query) = match url.split_once('?') {
         Some((url, _)) => (url, "?<redacted>"),
         None => (url, ""),
     };
-    let url = match url.split_once("://") {
-        Some((scheme, rest)) => {
-            let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-            match authority.rsplit_once('@') {
-                Some((_, host)) => format!("{scheme}://<redacted>@{host}{path}"),
-                None => format!("{scheme}://{rest}"),
-            }
-        }
-        None => url.to_string(),
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<redacted>".into();
     };
-    format!("{url}{query}")
+    match rest.rsplit_once('@') {
+        Some((_, after)) => format!("{scheme}://<redacted>@{after}{query}"),
+        None => format!("{scheme}://{rest}{query}"),
+    }
 }
 
 #[cfg(test)]
@@ -429,6 +429,7 @@ command = "x"
             ("base_url = \"http://LOCALHOST:8080\"", "LOCALHOST"),
             ("base_url = \"http://127.0.0.2:8080\"", "127.0.0.2"),
             ("base_url = \"http://[::1]:8080\"", "[::1]"),
+            ("base_url = \"http://localhost.:8080\"", "localhost"),
         ] {
             let config =
                 format!("model_provider = \"p\"\n[model_providers.p]\nname = \"P\"\n{provider}\n");
@@ -461,5 +462,19 @@ command = "x"
         }
         assert!(shown.contains("https://<redacted>@example.com/v1?<redacted>"), "{shown}");
         assert!(shown.contains("https://example.com/models?<redacted>"), "{shown}");
+
+        // Read as a stricter parser might: a backslash ends an authority for
+        // one parser and not another, so everything before the last `@` goes;
+        // a value with no scheme goes whole.
+        for (url, kept) in [
+            (r"https://u:pb\@example.com/v1", "https://<redacted>@example.com/v1"),
+            ("u:pc@example.com/v1", "<redacted>"),
+        ] {
+            let doc = table(&format!(
+                "[model_providers.p]\nname = \"P\"\nbase_url = '{url}'\n"
+            ));
+            let shown = redacted(&doc)["model_providers"]["p"]["base_url"].clone();
+            assert_eq!(shown.as_str(), Some(kept), "{url}");
+        }
     }
 }
