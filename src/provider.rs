@@ -109,10 +109,21 @@ pub fn read(account_dir: &Path) -> Result<Option<toml::Table>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let doc: toml::Table =
-        toml::from_str(&raw).with_context(|| format!("{} is not TOML", path.display()))?;
+    let doc = parse(&raw).with_context(|| format!("{}", path.display()))?;
     validate(&doc).with_context(|| format!("{}", path.display()))?;
     Ok(Some(doc))
+}
+
+/// `raw` as a TOML table, or where it stops being one — by line and column
+/// only: the parser's own message quotes the line, and the line can be a token.
+fn parse(raw: &str) -> Result<toml::Table> {
+    toml::from_str(raw).map_err(|e: toml::de::Error| {
+        let at = e.span().map_or(0, |s| s.start).min(raw.len());
+        let before = &raw.as_bytes()[..at];
+        let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+        let column = at - before.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1) + 1;
+        anyhow::anyhow!("is not TOML at line {line}, column {column}")
+    })
 }
 
 /// The provider tables of a Codex `config.toml` — the host's, or a file the
@@ -123,7 +134,7 @@ pub fn from_codex_config(
     raw: &str,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Option<toml::Table>> {
-    let config: toml::Table = toml::from_str(raw).context("not TOML")?;
+    let config = parse(raw)?;
     let mut doc = toml::Table::new();
     if let Some(selected) = config.get("model_provider") {
         doc.insert("model_provider".into(), selected.clone());
@@ -357,6 +368,14 @@ query_params = { api-version = "2025-04-01-preview" }
         std::fs::write(d.path().join(FILE), "model_provider = ").unwrap();
         let err = format!("{:#}", read(d.path()).unwrap_err());
         assert!(err.contains(FILE), "{err}");
+        // By place, never by quoting the line: the line can be a token.
+        let leaks = "[model_providers.p]\nname = \"P\"\nexperimental_bearer_token = \"sk-leak\n";
+        std::fs::write(d.path().join(FILE), leaks).unwrap();
+        let err = format!("{:#}", read(d.path()).unwrap_err());
+        assert!(err.contains("line 3") && !err.contains("sk-leak"), "{err}");
+        let env = |_: &str| None;
+        let err = format!("{:#}", from_codex_config(leaks, &env).unwrap_err());
+        assert!(err.contains("line 3") && !err.contains("sk-leak"), "{err}");
         std::fs::write(d.path().join(FILE), "notify = [\"x\"]\n").unwrap();
         let err = format!("{:#}", read(d.path()).unwrap_err());
         assert!(err.contains(FILE) && err.contains("notify"), "{err}");
