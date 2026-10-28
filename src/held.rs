@@ -22,7 +22,7 @@ use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 /// A directory, held open.
@@ -42,6 +42,26 @@ fn step(name: &OsStr) -> io::Result<CString> {
         ));
     }
     CString::new(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+/// What has a name in a held directory, as [`Dir::entry`] sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Entry {
+    Absent,
+    File,
+    Dir,
+    /// A link, and where it points — read, not followed.
+    Link(std::path::PathBuf),
+    /// A pipe, a socket, a device.
+    Other,
+}
+
+/// The temporary name something is laid at before it is renamed over `name`.
+fn part_of(name: &CString) -> io::Result<CString> {
+    let mut part = name.as_bytes().to_vec();
+    part.splice(0..0, *b".");
+    part.extend_from_slice(format!(".{}.omh-part", std::process::id()).as_bytes());
+    CString::new(part).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
 /// `openat`, with the result owned or the reason kept.
@@ -162,14 +182,94 @@ impl Dir {
         self.replace_mode(name, body, 0o600)
     }
 
+    /// What has `name` here, looked at without following it — a link is
+    /// itself, and where it points is read, never visited.
+    pub(crate) fn entry(&self, name: &OsStr) -> io::Result<Entry> {
+        let name = step(name)?;
+        // SAFETY: `stat` is plain data, written whole by a successful call.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: as `open_under` — an open descriptor and a C string, both
+        // outliving the call — and `st` is ours to write.
+        let r = unsafe {
+            libc::fstatat(
+                self.fd.as_raw_fd(),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if r != 0 {
+            let why = io::Error::last_os_error();
+            return match why.kind() {
+                io::ErrorKind::NotFound => Ok(Entry::Absent),
+                _ => Err(why),
+            };
+        }
+        Ok(match st.st_mode & libc::S_IFMT {
+            libc::S_IFREG => Entry::File,
+            libc::S_IFDIR => Entry::Dir,
+            libc::S_IFLNK => {
+                let mut buf = vec![0u8; libc::PATH_MAX as usize];
+                // SAFETY: as above, with `buf` ours and its length the bound.
+                let n = unsafe {
+                    libc::readlinkat(
+                        self.fd.as_raw_fd(),
+                        name.as_ptr(),
+                        buf.as_mut_ptr().cast(),
+                        buf.len(),
+                    )
+                };
+                if n < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                buf.truncate(n as usize);
+                Entry::Link(std::ffi::OsString::from_vec(buf).into())
+            }
+            _ => Entry::Other,
+        })
+    }
+
+    /// Make `name` a link to `target`, replacing the file or link that has
+    /// the name: laid beside and renamed over, so the name is never missing
+    /// and never anything else. A directory there is refused — a rename does
+    /// not replace one with a link — and left as it is.
+    pub(crate) fn link_over(&self, name: &OsStr, target: &Path) -> io::Result<()> {
+        let name = step(name)?;
+        let part = part_of(&name)?;
+        let target = CString::new(target.as_os_str().as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let dir = self.fd.as_raw_fd();
+        // SAFETY, for the calls below: `dir` is this struct's own open
+        // descriptor, and the three names are C strings that outlive them.
+        unsafe { libc::unlinkat(dir, part.as_ptr(), 0) };
+        if unsafe { libc::symlinkat(target.as_ptr(), dir, part.as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        match unsafe { libc::renameat(dir, part.as_ptr(), dir, name.as_ptr()) } {
+            0 => Ok(()),
+            _ => {
+                let why = io::Error::last_os_error();
+                unsafe { libc::unlinkat(dir, part.as_ptr(), 0) };
+                Err(why)
+            }
+        }
+    }
+
+    /// An exclusive lock on `name` here, the file made if it is missing and
+    /// never a link followed to one — held until the file is dropped.
+    pub(crate) fn lock(&self, name: &OsStr) -> io::Result<File> {
+        let file = open_under_mode(&self.fd, &step(name)?, libc::O_RDWR | libc::O_CREAT, 0o600)?;
+        // SAFETY: the descriptor is the file's own, open for the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(file)
+    }
+
     fn replace_mode(&self, name: &OsStr, body: &[u8], mode: libc::c_uint) -> io::Result<()> {
         use std::io::Write as _;
         let name = step(name)?;
-        let mut part = name.as_bytes().to_vec();
-        part.splice(0..0, *b".");
-        part.extend_from_slice(format!(".{}.omh-part", std::process::id()).as_bytes());
-        let part =
-            CString::new(part).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let part = part_of(&name)?;
         let dir = self.fd.as_raw_fd();
 
         // SAFETY, for the three calls below: `dir` is this struct's own open
@@ -207,6 +307,59 @@ mod tests {
 
     fn name(s: &str) -> &OsStr {
         OsStr::new(s)
+    }
+
+    /// What has a name is said without following it: a link is a link, to
+    /// wherever, dangling or not.
+    #[test]
+    fn an_entry_is_what_has_the_name_not_what_it_points_at() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("file"), "x").unwrap();
+        std::fs::create_dir(d.path().join("dir")).unwrap();
+        symlink(d.path().join("file"), d.path().join("to-file")).unwrap();
+        symlink("/omh/prefs/config.toml", d.path().join("dangling")).unwrap();
+        let held = Dir::open(d.path()).unwrap();
+        assert_eq!(held.entry(name("absent")).unwrap(), Entry::Absent);
+        assert_eq!(held.entry(name("file")).unwrap(), Entry::File);
+        assert_eq!(held.entry(name("dir")).unwrap(), Entry::Dir);
+        assert_eq!(
+            held.entry(name("to-file")).unwrap(),
+            Entry::Link(d.path().join("file"))
+        );
+        assert_eq!(
+            held.entry(name("dangling")).unwrap(),
+            Entry::Link("/omh/prefs/config.toml".into())
+        );
+        assert!(held.entry(name("../x")).is_err(), "a route is not a name");
+    }
+
+    /// A link laid over a file or over another link replaces it whole, in
+    /// one rename, and points exactly where it was asked to; a directory with
+    /// the name is refused rather than laid beside or into.
+    #[test]
+    fn a_link_replaces_what_has_its_name_and_never_a_directory() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("config.toml"), "planted").unwrap();
+        symlink(d.path().join("elsewhere"), d.path().join("wrong")).unwrap();
+        std::fs::create_dir(d.path().join("dir")).unwrap();
+        let held = Dir::open(d.path()).unwrap();
+        let target = Path::new("/omh/prefs/config.toml");
+        for at in ["config.toml", "wrong", "new"] {
+            held.link_over(name(at), target).unwrap();
+            assert_eq!(
+                std::fs::read_link(d.path().join(at)).unwrap(),
+                target,
+                "{at}"
+            );
+        }
+        assert!(held.link_over(name("dir"), target).is_err());
+        assert!(d.path().join("dir").is_dir());
+        let left: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("omh-part"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     /// A private file is the user's alone from its first byte, and stays so

@@ -116,7 +116,7 @@ pub fn read(account_dir: &Path) -> Result<Option<toml::Table>> {
 
 /// `raw` as a TOML table, or where it stops being one — by line and column
 /// only: the parser's own message quotes the line, and the line can be a token.
-fn parse(raw: &str) -> Result<toml::Table> {
+pub(crate) fn parse(raw: &str) -> Result<toml::Table> {
     toml::from_str(raw).map_err(|e: toml::de::Error| {
         let at = e.span().map_or(0, |s| s.start).min(raw.len());
         let before = &raw.as_bytes()[..at];
@@ -286,7 +286,7 @@ fn host(url: &str) -> &str {
 /// become `<redacted>`, and a fragment goes. Erring wide, since parsers
 /// disagree on where an authority ends: everything before the last `@` is
 /// redacted, and a value with no scheme is redacted whole.
-fn redacted_url(url: &str) -> String {
+pub(crate) fn redacted_url(url: &str) -> String {
     let url = url.split('#').next().unwrap_or_default();
     let (url, query) = match url.split_once('?') {
         Some((url, _)) => (url, "?<redacted>"),

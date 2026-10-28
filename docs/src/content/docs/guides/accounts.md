@@ -137,11 +137,11 @@ omh prints provider names, never values. `omh eject` writes the provider with
 its token, headers and query parameters as `<redacted>`, and a URL's userinfo
 and query too.
 
-**Your own `~/.codex/config.toml` still wins where it says otherwise.** Codex
-ranks its System layer below the user's config (read in Codex's source,
-0.162.1), so a `model_provider` in the account's `~/.codex/config.toml` beats
-the account's provider file. Until sessions get their own copy of that file,
-leave the provider out of it.
+**Nothing in a session's own config outranks it.** Codex ranks its System
+layer below the user's `config.toml` (read in Codex's source, 0.162.1), but a
+session's `config.toml` is its own copy and holds only your preferences —
+`model_provider` is never one — so the provider file is what selects. See
+[`~/.codex/config.toml` is each session's own](#codexconfigtoml-is-each-sessions-own).
 
 `omh doctor` has a row for it:
 
@@ -322,6 +322,90 @@ Claude Code 2.1.300 also reads `~/.claude/.config.json` *instead of*
 shared `~/.claude/`; omh hides it behind an empty read-only file in every
 session (read in the binary; a server planted there loaded in `tests/e2e`
 until it was masked).
+
+### `~/.codex/config.toml` is each session's own
+
+Codex keeps its config in the account, at `~/.codex/config.toml`, and saves
+into it as it runs. A session that wrote a server with an `env` of its own,
+`developer_instructions`, a provider or a trust there would hand it to every
+later session on the account. So the account keeps only your preferences, and
+each session gets a copy of its own:
+
+- **kept:** the keys the codex adapter declares under
+  [`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps) —
+  `model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`,
+  `service_tier` and the `tui` settings (theme, keymap, status line, terminal
+  title, session picker, transcript, agents overview, pet) — and the notices
+  Codex records once you dismiss one;
+- **not kept:** everything else — `[mcp_servers]`, `developer_instructions`,
+  `model_provider`, `[features]`, `profiles`, `[projects]`, hooks. They last
+  the session that wrote them. A feature you toggle lasts that session, and
+  `-- -p <name>` finds no `[profiles.<name>]` table (a
+  `~/.codex/<name>.config.toml` profile file still loads);
+- **how:** the account's `config.toml` is a link to `/omh/prefs/config.toml`,
+  and each session mounts its own copy there. Codex resolves the link before
+  it saves, and saves into the session's copy (`tests/e2e`: `codex mcp add`
+  writes there and leaves the link).
+
+**What a session changed among its preferences reaches the account without
+asking** — when Codex exits in your terminal, or you detach from it, at
+`omh sNN down` and at `omh sNN rm`; changed keys only, and a value another
+session kept meanwhile is named as replaced. omh says what it kept, and names
+what the session wrote that is not a preference. A session that ended with
+nobody watching — the idle reap, a reboot — keeps its changes at its next
+`down` or `rm`; `omh prune` of a checkout that is gone does not. A later omh
+asks before keeping (#197).
+
+A session relaunched on another account keeps what it changed into the old
+one first, then starts again from the new one. The account's kept values are
+at `~/.omh/creds/codex/<account>/preferences/config.toml`; a session's copy at
+`~/.omh/run/<repo>/<session>/.preferences/codex/live/config.toml`, and it goes
+with the session at `omh sNN rm`.
+
+<details>
+<summary>The first launch after upgrading: the migration</summary>
+
+An account captured by an older omh holds a real, shared `config.toml`. The
+first launch on it:
+
+1. backs it up, `0600`, to
+   `~/.omh/creds/codex/<account>/preferences/config.toml.before-omh` — never as
+   a `*.config.toml`, which Codex would load as a profile;
+2. keeps its preferences as the account's;
+3. lays the link, and records that it did.
+
+It says what it kept and what it dropped, by key, never by value:
+
+```
+omh: codex's config.toml is per session from now on — kept model, tui.theme, dropped developer_instructions, mcp_servers; the file as it was is at /Users/you/.omh/creds/codex/work/preferences/config.toml.before-omh
+```
+
+`omh new --dry-run` and `omh doctor` say what it will do, and do none of it.
+Each step can be interrupted: the next launch finishes the job.
+
+**It refuses, and changes nothing:**
+
+- while a session started by an older omh still mounts the account — it would
+  rename over the link, or keep reading the shared file. `omh sNN down` it
+  first. `omh auth codex` asks the same, once per account;
+- when the file selects a model provider other than OpenAI and the account
+  has no [provider file](#a-model-provider-of-your-own): every later session
+  would quietly send its turns to OpenAI instead. The refusal names the fix,
+  which reads the provider out of that same file:
+
+  ```console
+  $ omh auth codex --name work --provider ~/.omh/creds/codex/work/.codex/config.toml
+  ```
+
+After the migration, a real file where the link goes was put there by a
+session: it is linked again, said, and nothing in it is kept.
+
+</details>
+
+**Codex on `sbx` waits for #199.** Laying the link — the first launch of any
+codex account, new or not — asks which sandboxes still mount the account,
+and `sbx` keeps no labels to answer from, so that launch refuses. `sbx` does
+not run omh's links yet either.
 
 ### `token` is what proves a login
 

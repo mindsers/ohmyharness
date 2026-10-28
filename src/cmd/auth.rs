@@ -207,6 +207,10 @@ fn login_in_sandbox(
     crate::ssh::ensure_host_key(&paths.keys())?;
 
     let (own, repo) = crate::cmd::session::resolved(paths)?;
+    // The account's preferences, as a session has them: checked before
+    // anything starts, then migrated and seeded — into the login's own copy,
+    // under `scratch/` — before the login does.
+    let prefs = crate::prefs::check(adapter, account_dir)?;
 
     let plan = container::plan(
         paths,
@@ -248,6 +252,16 @@ fn login_in_sandbox(
         },
     )?;
     plan.validate_for(&backend)?;
+    let home = container::prefs_home(paths, &session, harness);
+    if let Some(prefs) = &prefs {
+        let running = || crate::cmd::session::sessions_mounting(&backend, account_dir);
+        for note in prefs.apply(&running)? {
+            ctx.warn(&note);
+        }
+        for note in prefs.seed(adapter, &home)? {
+            ctx.warn(&note);
+        }
+    }
     image::ensure_network(&backend, &plan.network)?;
     let _network_cleanup = NetworkCleanup {
         backend: &backend,
@@ -268,6 +282,12 @@ fn login_in_sandbox(
         }
     ));
     let status = backend.command().args(backend.args(&plan)).status()?;
+    // What the login chose among its preferences — a theme picked at a first
+    // start — was chosen at the terminal, by the user: kept.
+    match crate::prefs::keep(adapter, &home) {
+        Ok(notes) => notes.iter().for_each(|n| ctx.warn(n)),
+        Err(e) => ctx.warn(&format!("{e:#}")),
+    }
     if let Err(e) = session.remove(&paths.repo, "", &paths.shadows()) {
         // A leftover `auth` worktree is a session `omh s` would list and offer
         // as a real one. Removed so the login leaves nothing behind.

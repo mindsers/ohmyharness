@@ -215,3 +215,50 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 path   = "/etc/codex/requirements.toml"
 format = "codex-requirements"
 mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
+
+# The keys of `~/.codex/config.toml` that are yours — a model, a theme — kept
+# per account and copied into each session (omh's `prefs`). Everything else a
+# session writes there — a server, `developer_instructions`, a provider, a
+# trust — lasts that session. Read in Codex's source at the version above
+# (`config/src/types.rs`, `ConfigToml`); the two tables declared whole,
+# `tui.keymap` and `notice.model_migrations`, hold key bindings and model
+# slugs, nothing that runs.
+#
+# `link`: the account's `config.toml` is a link to `/omh/prefs/config.toml`,
+# which each container mounts from its session's own copy. Codex saves by
+# writing beside the file and renaming over it, which a mounted file refuses
+# ("failed to persist config.toml"); it resolves the link first and renames
+# inside the mounted directory.
+[preferences]
+mount = "link"
+
+[preferences.files]
+"$HOME/.codex/config.toml" = [
+  "model",
+  "model_reasoning_effort",
+  "plan_mode_reasoning_effort",
+  "service_tier",
+  "tui.theme",
+  "tui.keymap",
+  "tui.status_line",
+  "tui.status_line_use_colors",
+  "tui.terminal_title",
+  "tui.session_picker_view",
+  "tui.fullscreen_transcript",
+  "tui.agents_overview_grouping",
+  "tui.pet",
+]
+
+# Notices Codex records once a prompt is dismissed, and its model-availability
+# bookkeeping. Not `notice.hide_full_access_warning`, which acknowledges a
+# consent and omh renders itself. Which of these Codex writes on a first start
+# on its own is not measured.
+[preferences.quiet]
+"$HOME/.codex/config.toml" = [
+  "tui.model_availability_nux",
+  "notice.fast_default_opt_out",
+  "notice.hide_rate_limit_model_nudge",
+  "notice.hide_gpt5_1_migration_prompt",
+  'notice."hide_gpt-5.1-codex-max_migration_prompt"',
+  "notice.model_migrations",
+]

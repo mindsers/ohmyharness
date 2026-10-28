@@ -174,10 +174,17 @@ pub const CLAUDE: Driver = Driver {
     drops: &["graph-first"],
 };
 
-/// A Codex account holding only a provider file, which selects the fake model:
-/// omh renders it into `/etc/codex/config.toml`, so every turn of every codex
-/// scenario is a turn through the account's provider — none is named on the
-/// command line. No retries, so a turn that fails says so at once.
+/// A Codex account as one before this omh left it:
+/// - a provider file selecting the fake model, which omh renders into
+///   `/etc/codex/config.toml` — every turn of every codex scenario is a turn
+///   through the account's provider, none named on the command line;
+/// - a real, shared `~/.codex/config.toml` holding the model — a known slug,
+///   because an unknown one is not offered `apply_patch`, Codex's only edit —
+///   beside `developer_instructions` a session could have planted there. The
+///   launch migrates it: the model is kept, read through the link from the
+///   session's own copy, and the planted text is dropped.
+///
+/// No retries, so a turn that fails says so at once.
 fn codex_account() -> Vec<(&'static str, String)> {
     let provider = format!(
         "model_provider = \"fake\"\n\n[model_providers.fake]\nname = \"fake\"\n\
@@ -185,14 +192,19 @@ fn codex_account() -> Vec<(&'static str, String)> {
          request_max_retries = 0\nstream_max_retries = 0\n",
         crate::sandbox::fake_url()
     );
-    vec![("provider.toml", provider)]
+    vec![
+        ("provider.toml", provider),
+        (
+            ".codex/config.toml",
+            "model = \"gpt-5.5\"\ndeveloper_instructions = \"e2e-planted\"\n".to_string(),
+        ),
+    ]
 }
 
-/// Codex takes its provider from the account (`codex_account`), and the rest
-/// on the command line — the session layer, above `/etc/codex/config.toml`, so
-/// nothing here may name a key omh writes there. A known model slug, because
-/// an unknown one is not offered `apply_patch`, which is Codex's only edit. No
-/// `OPENAI_BASE_URL`: Codex does not read it.
+/// Codex takes its provider and its model from the account
+/// (`codex_account`), and the rest on the command line — the session layer,
+/// above `/etc/codex/config.toml`, so nothing here may name a key omh writes
+/// there. No `OPENAI_BASE_URL`: Codex does not read it.
 pub const CODEX: Driver = Driver {
     name: "codex",
     env: &[],
@@ -202,8 +214,6 @@ pub const CODEX: Driver = Driver {
             "codex",
             "exec",
             "--json",
-            "-m",
-            "gpt-5.5",
             "-c",
             r#"approval_policy="never""#,
             "-c",

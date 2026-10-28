@@ -234,6 +234,12 @@ pub(crate) fn session_up(
         (container::Launch::Session, Some(account)) => auth::seeds(adapter, account)?,
         _ => None,
     };
+    // The account's preferences, checked now and done after the reuse
+    // decision, for the same reason.
+    let prefs = match &opts.account_dir {
+        Some(account) => crate::prefs::check(adapter, account)?.map(|p| (p, account.clone())),
+        None => None,
+    };
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate_for(backend)?;
 
@@ -267,6 +273,15 @@ pub(crate) fn session_up(
             session,
             adapter.name.as_str(),
         ))?;
+    }
+    if let Some((prefs, account)) = &prefs {
+        for note in prefs.apply(&|| sessions_mounting(backend, account))? {
+            ctx.warn(&note);
+        }
+        let home = container::prefs_home(paths, session, adapter.name.as_str());
+        for note in prefs.seed(adapter, &home)? {
+            ctx.warn(&note);
+        }
     }
     image::ensure_stack(
         backend,
@@ -324,6 +339,43 @@ pub(crate) fn session_up(
         .spawn();
 
     Ok(name)
+}
+
+/// The running sandboxes whose mounts reach `dir`, by name, across every
+/// repo — read off each one's `omh.mounts` stamp, the way a launch reads its
+/// own: the running set, then each `omh-` container's labels. A runtime that
+/// keeps no labels, or one that does not answer for a container, is an
+/// error: "could not tell", never "none".
+pub(crate) fn sessions_mounting(
+    backend: &runtime::Backend,
+    dir: &std::path::Path,
+) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        backend.carries_labels(),
+        "{} keeps no labels on a sandbox, so omh cannot read what a running one mounts",
+        backend.program()
+    );
+    let running = image::running_set(backend).map_err(|why| anyhow::anyhow!(why))?;
+    let mut names = Vec::new();
+    for name in running.iter().filter(|n| n.starts_with("omh-")) {
+        let labels = match image::container_stamp(backend, name) {
+            image::Stamp::Read(labels) => labels,
+            image::Stamp::Unknown(why) => anyhow::bail!("{name}: {why}"),
+        };
+        let reaches = labels.get("omh.mounts").is_some_and(|mounts| {
+            mounts.lines().any(|m| {
+                let host = m
+                    .strip_prefix("rw ")
+                    .or_else(|| m.strip_prefix("ro "))
+                    .and_then(|m| m.split(" -> ").next());
+                host.is_some_and(|h| std::path::Path::new(h).starts_with(dir))
+            })
+        });
+        if reaches {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
 }
 
 /// Which harness `attach` rejoins as, from the session's own record.
@@ -691,6 +743,7 @@ pub(crate) fn down(
         let name = paths.container(i);
         match image::running_in(&up, &name) {
             image::Running::No => {
+                keep_preferences(&paths, i, ctx);
                 sessions.push((i.clone(), report::Stopped::WasNotRunning));
                 continue;
             }
@@ -719,6 +772,7 @@ pub(crate) fn down(
                 if let Err(e) = image::network_remove(&backend, &paths.session_network(i)) {
                     ctx.warn(&format!("{i}'s network was left behind: {e:#}"));
                 }
+                keep_preferences(&paths, i, ctx);
                 sessions.push((i.clone(), report::Stopped::Yes))
             }
             // Reported and carried on rather than returned: one container that
@@ -748,6 +802,28 @@ pub(crate) fn down(
         .join("; ")
     );
     Ok(())
+}
+
+/// What session `id` changed among its preferences, kept into its accounts
+/// — at `down` and `rm`, once nothing runs that could change them. Said, not
+/// failed: what is left in the session's copy is kept at the next of them.
+fn keep_preferences(paths: &Paths, id: &str, ctx: &out::Ctx) {
+    let dir = paths.runs().join(id).join(".preferences");
+    let harnesses = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => return ctx.warn(&format!("{id}: reading {}: {e}", dir.display())),
+    };
+    for entry in harnesses.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let kept = Adapter::find(&paths.adapters(), &name).and_then(|adapter| {
+            crate::prefs::keep(&adapter, &crate::home::Home::Kept(entry.path()))
+        });
+        match kept {
+            Ok(notes) => notes.iter().for_each(|n| ctx.warn(n)),
+            Err(e) => ctx.warn(&format!("{id}: {e:#}")),
+        }
+    }
 }
 
 /// The harness a session recorded, for reading its transcript shape. `None`
@@ -2128,6 +2204,15 @@ pub(crate) fn run(
         // a worktree is made — and on a dry run, which would otherwise preview
         // a launch that cannot happen. `session_up` reads it again to write.
         auth::seeds(&adapter, account_dir)?;
+        // The account's preferences the same way: a file that cannot be
+        // migrated refuses here, and a preview names what the launch does.
+        if let Some(prefs) = crate::prefs::check(&adapter, account_dir)? {
+            if !staging.is_apply() {
+                for note in prefs.pending() {
+                    ctx.warn(&note);
+                }
+            }
+        }
     }
 
     // Always the trunk, never wherever HEAD happens to be: a session started on
@@ -2353,6 +2438,12 @@ pub(crate) fn run(
         .command()
         .args(backend.exec_args(&name, &plan.argv, true))
         .status()?;
+    // Back in the terminal — an exit, or a detach under dtach: what the
+    // session changed among its preferences so far reaches the account.
+    match crate::prefs::keep(&adapter, &container::prefs_home(&paths, &session, &harness)) {
+        Ok(notes) => notes.iter().for_each(|n| ctx.warn(n)),
+        Err(e) => ctx.warn(&format!("{e:#}")),
+    }
     // `omh s01 diff`, not `omh diff`. There is no top-level `diff` — the name
     // is not a command, so it comes
     // back as ``unknown harness `diff` ``. This line has been wrong since it
@@ -2546,6 +2637,7 @@ pub(crate) fn rm(
     // leaving it costs nothing that breaks — but the `last-used` marker beside
     // it is what says a session ran here, and a marker with no session behind it
     // is how `omh s` learns to report a leftover that is not there any more.
+    keep_preferences(&paths, id, ctx);
     match std::fs::remove_dir_all(paths.runs().join(id)) {
         Ok(()) => went.push("the run directory".to_string()),
         // Never made, or already gone: not a removal that failed.

@@ -380,6 +380,35 @@ pub(crate) fn doctor_cmd(
                 "the account's provider file would refuse every {name} start"
             );
         }
+        // The account's preferences: what the next launch does to its file,
+        // which doctor says and does not do — and a file a launch would
+        // refuse fails the row, before any image work.
+        let prefs = match account.as_deref().map(|a| crate::prefs::check(&adapter, a)) {
+            None | Some(Ok(None)) => None,
+            Some(Ok(Some(prefs))) => {
+                let row = doctor::Outcome {
+                    name: "preferences".into(),
+                    ok: true,
+                    detail: prefs.summary(),
+                };
+                found.push(row.clone());
+                host.0.push(row);
+                Some(prefs)
+            }
+            Some(Err(e)) => {
+                let row = doctor::Outcome {
+                    name: "preferences".into(),
+                    ok: false,
+                    detail: format!("{e:#}")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                };
+                found.push(row.clone());
+                host.0.push(row);
+                anyhow::bail!("the account's {name} config would refuse every launch");
+            }
+        };
 
         // Resolved once and used for both the checks and the plan below, so the
         // probe cannot check a session different from the one it launches.
@@ -600,6 +629,12 @@ pub(crate) fn doctor_cmd(
                 &session,
                 adapter.name.as_str(),
             ))?;
+        }
+        if let Some(prefs) = prefs.as_ref().filter(|_| !dry_run) {
+            prefs.seed(
+                &adapter,
+                &container::prefs_home(&paths, &session, adapter.name.as_str()),
+            )?;
         }
         plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 

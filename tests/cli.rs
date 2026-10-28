@@ -360,6 +360,8 @@ impl Sandbox {
     /// anything it did not recognise, so `doctor`'s volume filter could never
     /// be exercised — replacing it with `!n.is_empty()` was green, and would
     /// have shipped a doctor that lists every volume on the machine.
+    /// `<bin>/labels-<name>` is what `inspect -f` answers for that container
+    /// — its labels as JSON — where the shim otherwise answers `true`.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
@@ -378,6 +380,8 @@ impl Sandbox {
                  done; exit 0; fi\n\
                  case \"$*\" in *--pull=never*) [ -f {probe_refuses} ] && {{ \
                  echo 'no such image' >&2; exit 125; }} ;; esac\n\
+                 if [ \"$1\" = inspect ] && [ \"$2\" = -f ]; then for a in \"$@\"; do \
+                 [ -f {bin}/labels-\"$a\" ] && {{ cat {bin}/labels-\"$a\"; exit 0; }}; done; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers} 2>/dev/null; fi\n\
                  if [ \"$1\" = volume ]; then cat {volumes} 2>/dev/null; fi\nexit 0\n",
@@ -16632,6 +16636,248 @@ fn doctor_names_the_accounts_provider_and_a_broken_one() {
     assert!(
         !seen.contains("build"),
         "a probe that cannot launch was built for: {seen}"
+    );
+}
+
+/// A codex account as a session before this omh left it: a login, and a
+/// shared `~/.codex/config.toml` holding a preference beside what a session
+/// could plant there. Returns the account directory.
+fn codex_account_with_a_shared_config(sb: &Sandbox, config: &str) -> PathBuf {
+    let account = sb.home.join(".omh/creds/codex/default");
+    std::fs::create_dir_all(account.join(".codex")).unwrap();
+    std::fs::write(
+        account.join(".codex/auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"k"}"#,
+    )
+    .unwrap();
+    std::fs::write(account.join(".codex/config.toml"), config).unwrap();
+    account
+}
+
+/// The first launch on an account migrates its shared `config.toml`: the
+/// declared keys are kept at the account's root, the rest is named and
+/// dropped, the file becomes the link, and the session reads its own copy at
+/// `/omh/prefs` — and `omh s01 down` keeps what the session changed among its
+/// preferences, and nothing else.
+#[test]
+fn a_codex_sessions_config_is_its_own_and_only_preferences_come_back() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = codex_account_with_a_shared_config(
+        &sb,
+        "model = \"gpt-5.5\"\ndeveloper_instructions = \"e2e-planted\"\n",
+    );
+    let shared = account.join(".codex/config.toml");
+
+    let out = sb.omh(&["new", "codex", "--dry-run"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("dropping developer_instructions"),
+        "a preview names the migration: {}",
+        printed(&out)
+    );
+    assert!(
+        std::fs::symlink_metadata(&shared).unwrap().is_file(),
+        "a preview changed the account"
+    );
+
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["new", "codex"]);
+    let said = printed(&out);
+    assert!(said.contains("dropped developer_instructions"), "{said}");
+    assert!(!said.contains("e2e-planted"), "a value was printed: {said}");
+    assert_eq!(
+        std::fs::read_link(&shared).ok(),
+        Some(PathBuf::from("/omh/prefs/config.toml")),
+        "{said}"
+    );
+    let kept = account.join("preferences/config.toml");
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "model = \"gpt-5.5\"\n"
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let live = mounted_at(&seen, "/omh/prefs")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("nothing at /omh/prefs: {said}"));
+    assert!(
+        live.ends_with(".preferences/codex/live"),
+        "{}",
+        live.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(live.join("config.toml")).unwrap(),
+        "model = \"gpt-5.5\"\n"
+    );
+
+    // The session changes a preference and plants something that is not one,
+    // and is still up when `down` stops it.
+    std::fs::write(
+        live.join("config.toml"),
+        "model = \"gpt-5.5-mini\"\nnotify = [\"/tmp/x\"]\n",
+    )
+    .unwrap();
+    let container = seen
+        .split_whitespace()
+        .find(|w| w.starts_with("omh-") && w.ends_with("-s01"))
+        .unwrap_or_else(|| panic!("no container named in: {seen}"));
+    std::fs::write(sb.bin.join("containers"), format!("{container}\n")).unwrap();
+    let out = sb.omh(&["s01", "down"]);
+    let said = printed(&out);
+    assert!(said.contains("kept 1 codex preference"), "{said}");
+    assert!(said.contains("not kept, not preferences: notify"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "model = \"gpt-5.5-mini\"\n"
+    );
+}
+
+/// A migration under a session still mounting the account would let it
+/// rename over the link: one running refuses the launch by name, and the
+/// account is as it was.
+#[test]
+fn a_session_still_on_the_account_stops_its_migration() {
+    let sb = sandbox();
+    sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = codex_account_with_a_shared_config(&sb, "model = \"a\"\n");
+    std::fs::write(sb.bin.join("containers"), "omh-elsewhere-s03\n").unwrap();
+    std::fs::write(
+        sb.bin.join("labels-omh-elsewhere-s03"),
+        serde_json::json!({
+            "omh.mounts": format!(
+                "rw {} -> /home/agent/.codex\nrw /x -> /work",
+                account.join(".codex").display()
+            )
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = sb.omh(&["new", "codex"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("is in use by omh-elsewhere-s03"),
+        "{}",
+        printed(&out)
+    );
+    assert!(
+        std::fs::symlink_metadata(account.join(".codex/config.toml"))
+            .unwrap()
+            .is_file()
+    );
+}
+
+/// A provider the account keeps nowhere but the shared file refuses the
+/// launch — a preview too — naming the command that keeps it, and that
+/// command run on that file lets the next launch through.
+#[test]
+fn a_provider_the_migration_would_lose_refuses_and_names_the_fix() {
+    let sb = sandbox();
+    sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = codex_account_with_a_shared_config(
+        &sb,
+        "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+         base_url = \"https://example.invalid/openai\"\n",
+    );
+    let shared = account.join(".codex/config.toml");
+    for argv in [&["new", "codex", "--dry-run"][..], &["new", "codex"]] {
+        let out = sb.omh(argv);
+        assert!(!out.status.success(), "{argv:?}: {}", printed(&out));
+        let fix = format!(
+            "omh auth codex --name default --provider {}",
+            shared.display()
+        );
+        assert!(printed(&out).contains(&fix), "{argv:?}: {}", printed(&out));
+    }
+    assert!(std::fs::symlink_metadata(&shared).unwrap().is_file());
+    let out = sb.omh(&[
+        "auth",
+        "codex",
+        "--name",
+        "default",
+        "--provider",
+        shared.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let out = sb.omh(&["new", "codex"]);
+    assert!(
+        std::fs::read_link(&shared).is_ok(),
+        "the launch after the fix migrated: {}",
+        printed(&out)
+    );
+}
+
+/// `omh auth codex` logs in the way a session reads: the account migrated,
+/// and the login's own copy under `scratch/`, never under `run/` where `omh
+/// s` would take it for a session.
+#[test]
+fn a_codex_login_reads_its_preferences_as_a_session_does() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account =
+        codex_account_with_a_shared_config(&sb, "model = \"gpt-5.5\"\nnotify = [\"/tmp/x\"]\n");
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["auth", "codex"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert_eq!(
+        std::fs::read_link(account.join(".codex/config.toml")).ok(),
+        Some(PathBuf::from("/omh/prefs/config.toml")),
+        "{}",
+        printed(&out)
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let live = mounted_at(&seen, "/omh/prefs").unwrap_or_else(|| panic!("{seen}"));
+    assert!(live.contains("/.omh/scratch/"), "{live}");
+    assert_eq!(
+        std::fs::read_to_string(PathBuf::from(&live).join("config.toml")).unwrap(),
+        "model = \"gpt-5.5\"\n"
+    );
+}
+
+/// `omh doctor` names what the next launch does to the account's file and
+/// does none of it — and a migration that would lose a provider is a failed
+/// row, with the fix.
+#[test]
+fn doctor_names_a_pending_migration_and_does_not_run_it() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, false);
+    sb.fake_docker_answering_doctor(&[], &[]);
+    let account = codex_account_with_a_shared_config(
+        &sb,
+        "model = \"gpt-5.5\"\ndeveloper_instructions = \"x\"\n",
+    );
+    let shared = account.join(".codex/config.toml");
+    let rows = |out: &std::process::Output| -> Vec<serde_json::Value> {
+        json_documents(&out.stdout)
+            .iter()
+            .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+            .filter(|c| c["name"] == "preferences")
+            .collect()
+    };
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    let [row] = rows(&out).try_into().unwrap_or_else(|r: Vec<_>| {
+        panic!("one preferences row, not {}: {}", r.len(), printed(&out))
+    });
+    assert_eq!(row["ok"], serde_json::json!(true), "{row}");
+    assert!(
+        row["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dropping developer_instructions"),
+        "{row}"
+    );
+    assert!(std::fs::symlink_metadata(&shared).unwrap().is_file());
+
+    std::fs::write(&shared, "model_provider = \"azure\"\n").unwrap();
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    let said = printed(&out);
+    assert!(
+        said.contains("omh auth codex --name default --provider"),
+        "{said}"
     );
 }
 

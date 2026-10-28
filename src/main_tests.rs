@@ -1350,10 +1350,10 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // Getting started was one page until it became two, and all fifteen
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
-        ("docs/src/content/docs/guides/accounts.md", 11),
+        ("docs/src/content/docs/guides/accounts.md", 12),
         ("docs/src/content/docs/guides/code-graph.md", 1),
         ("docs/src/content/docs/guides/editors.md", 4),
-        ("docs/src/content/docs/guides/troubleshooting.md", 14),
+        ("docs/src/content/docs/guides/troubleshooting.md", 15),
         ("docs/src/content/docs/project/decisions.md", 1),
         ("docs/src/content/docs/reference/adapters.md", 2), // + `omh doctor --harness` in adding a harness
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
@@ -2040,6 +2040,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/memory.rs", 2),
         ("src/memory/ingest.rs", 2),
         ("src/notice.rs", 2),
+        // `omh auth <harness> --name <account> --provider <file>`, when a
+        // migration would lose a provider, and `omh sNN down`, when a session
+        // still mounts the account.
+        ("src/prefs.rs", 2),
         // `omh s down`, in the refusal when a live sandbox blocks the move
         // off the pre-2026.08 repo key.
         ("src/profile.rs", 1),

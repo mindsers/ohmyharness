@@ -299,6 +299,23 @@ pub fn session_home(paths: &Paths, session: &Session, harness: &str) -> crate::a
     }
 }
 
+/// Where a session's preferences live (`prefs`): in its run directory for a
+/// real session, kept between its launches; under `scratch/` for `omh
+/// doctor`'s probe and `omh auth`'s login, seeded afresh each time. Dotted
+/// like `.home`.
+pub fn prefs_home(paths: &Paths, session: &Session, harness: &str) -> crate::home::Home {
+    match session.branch {
+        Some(_) => crate::home::Home::Kept(
+            paths
+                .runs()
+                .join(&session.id)
+                .join(".preferences")
+                .join(harness),
+        ),
+        None => crate::home::Home::Scratch(paths.scratch("prefs").join(&session.id).join(harness)),
+    }
+}
+
 /// Launch options that are not part of the profile.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -768,6 +785,17 @@ pub fn plan(
                 guest: cred.guest,
                 read_only: false,
                 file: cred.file,
+            });
+        }
+        // The harness's preferences: the account's file is a link to the same
+        // name here, and this is the session's own copy — seeded by
+        // `prefs::Account::seed` after the reuse decision, never by `plan`.
+        if adapter.preferences.is_some() {
+            mounts.push(Mount {
+                host: crate::prefs::live(&prefs_home(paths, session, adapter.name.as_str())),
+                guest: PathBuf::from(crate::prefs::GUEST),
+                read_only: false,
+                file: false,
             });
         }
     }
@@ -2068,26 +2096,64 @@ mod tests {
     #[test]
     fn with_an_account_every_writable_mount_is_one_of_these() {
         let fx = fixture();
-        let account = fx.paths.root.join("creds/claude/work");
-        let p = plan_account(&fx, "claude", Some(account.clone()));
-        let run = fx.paths.runs().join(&fx.session.id);
-        let allowed = |host: &Path| {
-            host.starts_with(&fx.session.worktree)
-                || host.starts_with(&account)
-                || host.starts_with(&run)
-                || host.starts_with(fx.paths.shadows())
-                || host == fx.paths.memory()
-                || host.is_relative()
-        };
-        for m in p.mounts.iter().filter(|m| !m.read_only) {
-            assert!(allowed(&m.host), "writable from elsewhere: {m:?}");
+        for harness in ["claude", "codex"] {
+            let account = fx.paths.root.join("creds").join(harness).join("work");
+            let p = plan_account(&fx, harness, Some(account.clone()));
+            let run = fx.paths.runs().join(&fx.session.id);
+            let allowed = |host: &Path| {
+                (host.starts_with(&account) && !host.starts_with(account.join("preferences")))
+                    || host.starts_with(&fx.session.worktree)
+                    || host.starts_with(&run)
+                    || host.starts_with(fx.paths.shadows())
+                    || host == fx.paths.memory()
+                    || host.is_relative()
+            };
+            for m in p.mounts.iter().filter(|m| !m.read_only) {
+                assert!(
+                    allowed(&m.host),
+                    "{harness}: writable from elsewhere: {m:?}"
+                );
+            }
+            assert!(
+                !p.mounts
+                    .iter()
+                    .any(|m| m.host == account.join(".claude.json")
+                        || m.host.starts_with(account.join("preferences"))
+                        || m.host == account.join(crate::provider::FILE)),
+                "{harness}: the account's own copied file, kept values or provider is mounted"
+            );
         }
-        assert!(
-            !p.mounts
-                .iter()
-                .any(|m| m.host == account.join(".claude.json")),
-            "the account's own copied file is mounted"
+    }
+
+    /// A codex session reads its preferences from its own copy, mounted at
+    /// `prefs::GUEST` from its run directory — and with no account there is
+    /// no link to read through, so nothing is mounted there.
+    #[test]
+    fn a_codex_sessions_preferences_are_its_own_copy() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/codex/work");
+        let p = plan_account(&fx, "codex", Some(account));
+        let at: Vec<_> = p
+            .mounts
+            .iter()
+            .filter(|m| m.guest == Path::new(crate::prefs::GUEST))
+            .collect();
+        let [m] = at.as_slice() else {
+            panic!("one mount at {}: {at:?}", crate::prefs::GUEST);
+        };
+        assert!(!m.read_only && !m.file, "{m:?}");
+        assert_eq!(
+            m.host,
+            fx.paths
+                .runs()
+                .join(&fx.session.id)
+                .join(".preferences/codex/live")
         );
+        let none = plan_account(&fx, "codex", None);
+        assert!(none
+            .mounts
+            .iter()
+            .all(|m| m.guest != Path::new(crate::prefs::GUEST)));
     }
 
     /// Every session gets its own network, named like its container. One
