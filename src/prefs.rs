@@ -447,6 +447,25 @@ impl Account {
                 .any(|f| !matches!(f.state, State::Ready | State::Finish))
     }
 
+    /// One line for `omh doctor`: what the next launch does to the account's
+    /// files, or what the account keeps.
+    pub fn summary(&self) -> String {
+        let pending = self.pending();
+        if !pending.is_empty() {
+            return pending.join("; ");
+        }
+        let kept: Vec<String> = self
+            .files
+            .iter()
+            .map(|f| format!("{} — the account keeps {}", f.declared.name, names(&f.kept)))
+            .collect();
+        crate::out::untrusted(&format!(
+            "{}'s config is per session: {}",
+            self.harness,
+            kept.join("; ")
+        ))
+    }
+
     /// What [`Account::apply`] would do, for a preview and `omh doctor`.
     pub fn pending(&self) -> Vec<String> {
         self.files

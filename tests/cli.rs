@@ -16790,6 +16790,74 @@ fn a_provider_the_migration_would_lose_refuses_and_names_the_fix() {
     );
 }
 
+/// `omh auth codex` logs in the way a session reads: the account migrated,
+/// and the login's own copy under `scratch/`, never under `run/` where `omh
+/// s` would take it for a session.
+#[test]
+fn a_codex_login_reads_its_preferences_as_a_session_does() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = codex_account_with_a_shared_config(
+        &sb,
+        "model = \"gpt-5.5\"\nnotify = [\"/tmp/x\"]\n",
+    );
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["auth", "codex"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert_eq!(
+        std::fs::read_link(account.join(".codex/config.toml")).ok(),
+        Some(PathBuf::from("/omh/prefs/config.toml")),
+        "{}",
+        printed(&out)
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let live = mounted_at(&seen, "/omh/prefs").unwrap_or_else(|| panic!("{seen}"));
+    assert!(live.contains("/.omh/scratch/"), "{live}");
+    assert_eq!(
+        std::fs::read_to_string(PathBuf::from(&live).join("config.toml")).unwrap(),
+        "model = \"gpt-5.5\"\n"
+    );
+}
+
+/// `omh doctor` names what the next launch does to the account's file and
+/// does none of it — and a migration that would lose a provider is a failed
+/// row, with the fix.
+#[test]
+fn doctor_names_a_pending_migration_and_does_not_run_it() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, false);
+    sb.fake_docker_answering_doctor(&[], &[]);
+    let account = codex_account_with_a_shared_config(
+        &sb,
+        "model = \"gpt-5.5\"\ndeveloper_instructions = \"x\"\n",
+    );
+    let shared = account.join(".codex/config.toml");
+    let rows = |out: &std::process::Output| -> Vec<serde_json::Value> {
+        json_documents(&out.stdout)
+            .iter()
+            .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+            .filter(|c| c["name"] == "preferences")
+            .collect()
+    };
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    let [row] = rows(&out).try_into().unwrap_or_else(|r: Vec<_>| {
+        panic!("one preferences row, not {}: {}", r.len(), printed(&out))
+    });
+    assert_eq!(row["ok"], serde_json::json!(true), "{row}");
+    assert!(
+        row["detail"].as_str().unwrap_or_default().contains("dropping developer_instructions"),
+        "{row}"
+    );
+    assert!(std::fs::symlink_metadata(&shared).unwrap().is_file());
+
+    std::fs::write(&shared, "model_provider = \"azure\"\n").unwrap();
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    let said = printed(&out);
+    assert!(said.contains("omh auth codex --name default --provider"), "{said}");
+}
+
 /// What a `docker` argv mounted at `guest`, from the stand-in's log.
 fn mounted_at(log: &str, guest: &str) -> Option<String> {
     log.split_whitespace()
