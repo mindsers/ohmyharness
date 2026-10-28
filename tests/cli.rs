@@ -16695,12 +16695,19 @@ fn a_codex_sessions_config_is_its_own_and_only_preferences_come_back() {
         "{said}"
     );
     let kept = account.join("preferences/config.toml");
-    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "model = \"gpt-5.5\"\n");
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "model = \"gpt-5.5\"\n"
+    );
     let seen = std::fs::read_to_string(&log).unwrap_or_default();
     let live = mounted_at(&seen, "/omh/prefs")
         .map(PathBuf::from)
         .unwrap_or_else(|| panic!("nothing at /omh/prefs: {said}"));
-    assert!(live.ends_with(".preferences/codex/live"), "{}", live.display());
+    assert!(
+        live.ends_with(".preferences/codex/live"),
+        "{}",
+        live.display()
+    );
     assert_eq!(
         std::fs::read_to_string(live.join("config.toml")).unwrap(),
         "model = \"gpt-5.5\"\n"
@@ -16750,10 +16757,16 @@ fn a_session_still_on_the_account_stops_its_migration() {
     .unwrap();
     let out = sb.omh(&["new", "codex"]);
     assert!(!out.status.success(), "{}", printed(&out));
-    assert!(printed(&out).contains("omh-elsewhere-s03"), "{}", printed(&out));
-    assert!(std::fs::symlink_metadata(account.join(".codex/config.toml"))
-        .unwrap()
-        .is_file());
+    assert!(
+        printed(&out).contains("omh-elsewhere-s03"),
+        "{}",
+        printed(&out)
+    );
+    assert!(
+        std::fs::symlink_metadata(account.join(".codex/config.toml"))
+            .unwrap()
+            .is_file()
+    );
 }
 
 /// A provider the account keeps nowhere but the shared file refuses the
@@ -16780,7 +16793,14 @@ fn a_provider_the_migration_would_lose_refuses_and_names_the_fix() {
         assert!(printed(&out).contains(&fix), "{argv:?}: {}", printed(&out));
     }
     assert!(std::fs::symlink_metadata(&shared).unwrap().is_file());
-    let out = sb.omh(&["auth", "codex", "--name", "default", "--provider", shared.to_str().unwrap()]);
+    let out = sb.omh(&[
+        "auth",
+        "codex",
+        "--name",
+        "default",
+        "--provider",
+        shared.to_str().unwrap(),
+    ]);
     assert!(out.status.success(), "{}", printed(&out));
     let out = sb.omh(&["new", "codex"]);
     assert!(
@@ -16798,10 +16818,8 @@ fn a_codex_login_reads_its_preferences_as_a_session_does() {
     let sb = sandbox();
     let log = sb.fake_docker();
     repo_declaring_a_codex_server(&sb, true);
-    let account = codex_account_with_a_shared_config(
-        &sb,
-        "model = \"gpt-5.5\"\nnotify = [\"/tmp/x\"]\n",
-    );
+    let account =
+        codex_account_with_a_shared_config(&sb, "model = \"gpt-5.5\"\nnotify = [\"/tmp/x\"]\n");
     std::fs::write(&log, "").unwrap();
     let out = sb.omh(&["auth", "codex"]);
     assert!(out.status.success(), "{}", printed(&out));
@@ -16846,7 +16864,10 @@ fn doctor_names_a_pending_migration_and_does_not_run_it() {
     });
     assert_eq!(row["ok"], serde_json::json!(true), "{row}");
     assert!(
-        row["detail"].as_str().unwrap_or_default().contains("dropping developer_instructions"),
+        row["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dropping developer_instructions"),
         "{row}"
     );
     assert!(std::fs::symlink_metadata(&shared).unwrap().is_file());
@@ -16855,7 +16876,10 @@ fn doctor_names_a_pending_migration_and_does_not_run_it() {
     let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
     assert!(!out.status.success(), "{}", printed(&out));
     let said = printed(&out);
-    assert!(said.contains("omh auth codex --name default --provider"), "{said}");
+    assert!(
+        said.contains("omh auth codex --name default --provider"),
+        "{said}"
+    );
 }
 
 /// What a `docker` argv mounted at `guest`, from the stand-in's log.

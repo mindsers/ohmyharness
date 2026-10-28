@@ -2109,7 +2109,10 @@ mod tests {
                     || host.is_relative()
             };
             for m in p.mounts.iter().filter(|m| !m.read_only) {
-                assert!(allowed(&m.host), "{harness}: writable from elsewhere: {m:?}");
+                assert!(
+                    allowed(&m.host),
+                    "{harness}: writable from elsewhere: {m:?}"
+                );
             }
             assert!(
                 !p.mounts

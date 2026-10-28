@@ -399,7 +399,10 @@ pub(crate) fn doctor_cmd(
                 let row = doctor::Outcome {
                     name: "preferences".into(),
                     ok: false,
-                    detail: format!("{e:#}").split_whitespace().collect::<Vec<_>>().join(" "),
+                    detail: format!("{e:#}")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
                 };
                 found.push(row.clone());
                 host.0.push(row);

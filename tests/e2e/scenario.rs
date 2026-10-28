@@ -775,16 +775,30 @@ fn own_config(s: &Session) {
         !Turn::seen(ask).contains("e2e-planted"),
         "the planted developer_instructions reached the model"
     );
-    let link = || ok(&s.sh("readlink ~/.codex/config.toml"), "readlink").trim().to_string();
+    let link = || {
+        ok(&s.sh("readlink ~/.codex/config.toml"), "readlink")
+            .trim()
+            .to_string()
+    };
     assert_eq!(link(), "/omh/prefs/config.toml");
     let add = "codex mcp add e2e-writer -- /bin/true";
     ok(&s.sh(add), add);
-    assert_eq!(link(), "/omh/prefs/config.toml", "codex's save replaced the link");
-    let live = ok(&s.sh("cat /omh/prefs/config.toml"), "cat /omh/prefs/config.toml");
+    assert_eq!(
+        link(),
+        "/omh/prefs/config.toml",
+        "codex's save replaced the link"
+    );
+    let live = ok(
+        &s.sh("cat /omh/prefs/config.toml"),
+        "cat /omh/prefs/config.toml",
+    );
     let _ = s.sh("codex mcp remove e2e-writer");
-    assert!(live.contains("e2e-writer"), "codex's save missed the session's copy: {live}");
-    let kept = std::fs::read_to_string(s.account().join("preferences/config.toml"))
-        .unwrap_or_default();
+    assert!(
+        live.contains("e2e-writer"),
+        "codex's save missed the session's copy: {live}"
+    );
+    let kept =
+        std::fs::read_to_string(s.account().join("preferences/config.toml")).unwrap_or_default();
     assert!(
         kept.contains("gpt-5.5") && !kept.contains("e2e-planted") && !kept.contains("e2e-writer"),
         "the account kept: {kept}"

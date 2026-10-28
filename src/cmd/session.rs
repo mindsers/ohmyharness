@@ -375,8 +375,8 @@ pub(crate) fn sessions_mounting(
         let (name, mounts) = line
             .split_once('\t')
             .with_context(|| format!("unreadable sandbox listing: {line:?}"))?;
-        let mounts: String = serde_json::from_str(mounts)
-            .with_context(|| format!("unreadable mounts on {name}"))?;
+        let mounts: String =
+            serde_json::from_str(mounts).with_context(|| format!("unreadable mounts on {name}"))?;
         let reaches = mounts.lines().any(|m| {
             let host = m
                 .strip_prefix("rw ")

@@ -301,35 +301,33 @@ pub fn key_path(s: &str) -> Result<KeyPath, String> {
 /// the account's provider file (`provider.rs`) holds instead. A key at, inside
 /// or around one is refused. Read in each harness's source at the version
 /// `adapters/` pins; a table is listed whole where any of it would qualify.
-pub const NEVER: &[(&str, &[&str])] = &[
-    (
-        "codex",
-        &[
-            "mcp_servers",
-            "notify",
-            "model_provider",
-            "model_providers",
-            "profile",
-            "profiles",
-            "features",
-            "developer_instructions",
-            "instructions",
-            "model_instructions_file",
-            "experimental_instructions_file",
-            "projects",
-            "hooks",
-            "approval_policy",
-            "sandbox_mode",
-            "sandbox_workspace_write",
-            "shell_environment_policy",
-            "tools",
-            "chatgpt_base_url",
-            "openai_base_url",
-            "notice.hide_full_access_warning",
-            "notice.hide_world_writable_warning",
-        ],
-    ),
-];
+pub const NEVER: &[(&str, &[&str])] = &[(
+    "codex",
+    &[
+        "mcp_servers",
+        "notify",
+        "model_provider",
+        "model_providers",
+        "profile",
+        "profiles",
+        "features",
+        "developer_instructions",
+        "instructions",
+        "model_instructions_file",
+        "experimental_instructions_file",
+        "projects",
+        "hooks",
+        "approval_policy",
+        "sandbox_mode",
+        "sandbox_workspace_write",
+        "shell_environment_policy",
+        "tools",
+        "chatgpt_base_url",
+        "openai_base_url",
+        "notice.hide_full_access_warning",
+        "notice.hide_world_writable_warning",
+    ],
+)];
 
 /// [`NEVER`]'s keys for `harness`, parsed.
 pub fn never_for(harness: &str) -> Vec<KeyPath> {
@@ -1823,7 +1821,10 @@ render = "concat"
     #[test]
     fn codexs_preferences_are_its_own_list_and_never_a_never_key() {
         let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
-        let prefs = codex.preferences.as_ref().expect("codex declares preferences");
+        let prefs = codex
+            .preferences
+            .as_ref()
+            .expect("codex declares preferences");
         assert_eq!(prefs.mount, PrefMount::Link);
         let declared = prefs.declared();
         let [file] = declared.as_slice() else {
@@ -1841,7 +1842,12 @@ render = "concat"
         );
         for key in file.keys.iter().chain(&file.quiet) {
             for never in never_for("codex") {
-                assert!(!related(key, &never), "{} is near never-key {}", dotted(key), never.join("."));
+                assert!(
+                    !related(key, &never),
+                    "{} is near never-key {}",
+                    dotted(key),
+                    never.join(".")
+                );
             }
         }
         const WHOLE_TABLES: &[&str] = &["tui.keymap", "notice.model_migrations"];
@@ -1898,7 +1904,17 @@ render = "concat"
             vec!["notice", "hide_gpt-5.1-codex-max_migration_prompt"]
         );
         assert_eq!(key_path("a.'b.c'").unwrap(), vec!["a", "b.c"]);
-        for bad in ["", ".", "a.", ".a", "a..b", "a b", "\"x", "a.\"\"", "a.\"b\\\"c\""] {
+        for bad in [
+            "",
+            ".",
+            "a.",
+            ".a",
+            "a..b",
+            "a b",
+            "\"x",
+            "a.\"\"",
+            "a.\"b\\\"c\"",
+        ] {
             assert!(key_path(bad).is_err(), "{bad:?}");
         }
     }

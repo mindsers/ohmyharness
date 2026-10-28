@@ -258,12 +258,7 @@ impl Dir {
     /// An exclusive lock on `name` here, the file made if it is missing and
     /// never a link followed to one — held until the file is dropped.
     pub(crate) fn lock(&self, name: &OsStr) -> io::Result<File> {
-        let file = open_under_mode(
-            &self.fd,
-            &step(name)?,
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?;
+        let file = open_under_mode(&self.fd, &step(name)?, libc::O_RDWR | libc::O_CREAT, 0o600)?;
         // SAFETY: the descriptor is the file's own, open for the call.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(io::Error::last_os_error());

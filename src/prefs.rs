@@ -151,7 +151,6 @@ pub fn dotted(key: &KeyPath) -> String {
 
 // ── On disk ─────────────────────────────────────────────────────────────────
 
-
 /// The most of a preferences file omh reads. Codex's own config is a few
 /// kilobytes; this is for a session that leaves a huge one to be read.
 const CAP: u64 = 1 << 20;
@@ -271,8 +270,7 @@ fn read_doc(dir: &crate::held::Dir, name: &OsStr) -> Result<Option<toml::Table>>
 fn kept(account: &Path, d: &Declared) -> Result<toml::Table> {
     let shown = || format!("{}", account.join(KEPT).join(&d.name).display());
     let rel = format!("{KEPT}/{}", d.name);
-    let Some((dir, leaf)) = hold_parent(account, &rel, false).with_context(shown)?
-    else {
+    let Some((dir, leaf)) = hold_parent(account, &rel, false).with_context(shown)? else {
         return Ok(toml::Table::new());
     };
     read_doc(&dir, leaf)
@@ -352,7 +350,9 @@ pub fn check(adapter: &Adapter, account: &Path) -> Result<Option<Account>> {
             crate::held::Entry::File if !marked => {
                 let cannot = || format!("{} cannot be migrated", shown.display());
                 let (dir, leaf) = found.as_ref().context("a file with no directory")?;
-                let raw = read_raw(dir, leaf).with_context(cannot)?.unwrap_or_default();
+                let raw = read_raw(dir, leaf)
+                    .with_context(cannot)?
+                    .unwrap_or_default();
                 let doc = parse_doc(&raw).with_context(cannot)?;
                 refuse_a_lost_provider(adapter, account, &shown, &doc)?;
                 let keys: Vec<_> = declared.all().collect();
@@ -604,7 +604,10 @@ impl Account {
             std::fs::create_dir_all(&dir)?;
             let held = crate::held::Dir::open(&dir)?;
             for f in &self.files {
-                held.replace(OsStr::new(&f.declared.name), toml::to_string(&f.kept)?.as_bytes())?;
+                held.replace(
+                    OsStr::new(&f.declared.name),
+                    toml::to_string(&f.kept)?.as_bytes(),
+                )?;
             }
         }
         crate::held::Dir::open(root)?.replace(OsStr::new(RECORD), this.as_bytes())?;
@@ -650,7 +653,9 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
     let account = match std::fs::read_to_string(root.join(RECORD)) {
         Ok(a) => PathBuf::from(a),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", root.join(RECORD).display())),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {}", root.join(RECORD).display()))
+        }
     };
     let shown_account = account
         .file_name()
@@ -675,7 +680,8 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
         let live = read_doc(live_dir, name)
             .map_err(could_not_tell)?
             .unwrap_or_default();
-        let base = read_doc(&crate::held::Dir::open(&root.join("base"))?, name)?.unwrap_or_default();
+        let base =
+            read_doc(&crate::held::Dir::open(&root.join("base"))?, name)?.unwrap_or_default();
         let mut account_kept = read_doc(&kept_dir, name)?.unwrap_or_default();
         let changes = changed(&base, &live, d.all());
         let mut kept_keys = Vec::new();
@@ -823,10 +829,7 @@ base_url = "https://example.invalid"
             ]
         );
         let odd = table("[notice]\n\"hide_gpt-5.1-codex-max_migration_prompt\" = true\n");
-        assert_eq!(
-            undeclared(&odd, &[]),
-            vec!["notice".to_string()]
-        );
+        assert_eq!(undeclared(&odd, &[]), vec!["notice".to_string()]);
         assert_eq!(
             dotted(&key_path("notice.\"a.b\"").unwrap()),
             "notice.\"a.b\""
@@ -867,19 +870,16 @@ base_url = "https://example.invalid"
     fn a_new_account_is_linked_from_the_start() {
         let (_root, account, file) = account();
         let checked = check(&codex(), &account).unwrap().unwrap();
-        assert!(
-            !account.exists(),
-            "checking made {}",
-            account.display()
-        );
+        assert!(!account.exists(), "checking made {}", account.display());
         checked.apply(&none_running).unwrap();
         assert_eq!(link_of(&file), Some(PathBuf::from(TARGET)));
         assert!(account.join("preferences/linked").is_file());
-        assert!(check(&codex(), &account).unwrap().unwrap().apply(&|| {
-            panic!("a ready account asks about running sessions")
-        })
-        .unwrap()
-        .is_empty());
+        assert!(check(&codex(), &account)
+            .unwrap()
+            .unwrap()
+            .apply(&|| { panic!("a ready account asks about running sessions") })
+            .unwrap()
+            .is_empty());
     }
 
     /// The account's real file, once: its declared keys kept, the rest
@@ -901,7 +901,10 @@ base_url = "https://example.invalid"
             "{pending}"
         );
         let notes = checked.apply(&none_running).unwrap().join("\n");
-        assert!(notes.contains("dropped developer_instructions, mcp_servers"), "{notes}");
+        assert!(
+            notes.contains("dropped developer_instructions, mcp_servers"),
+            "{notes}"
+        );
         assert!(!notes.contains("sk-planted"), "a value was named: {notes}");
 
         assert_eq!(link_of(&file), Some(PathBuf::from(TARGET)));
@@ -928,7 +931,11 @@ base_url = "https://example.invalid"
         // Stopped after keeping, before the link.
         std::fs::create_dir_all(account.join("preferences")).unwrap();
         std::fs::write(account.join("preferences/config.toml"), "model = \"a\"\n").unwrap();
-        check(&codex(), &account).unwrap().unwrap().apply(&none_running).unwrap();
+        check(&codex(), &account)
+            .unwrap()
+            .unwrap()
+            .apply(&none_running)
+            .unwrap();
         assert_eq!(link_of(&file), Some(PathBuf::from(TARGET)));
         assert_eq!(
             std::fs::read_to_string(account.join("preferences/config.toml")).unwrap(),
@@ -937,7 +944,10 @@ base_url = "https://example.invalid"
         // Stopped after the link, before the marker.
         std::fs::remove_file(account.join("preferences/linked")).unwrap();
         let checked = check(&codex(), &account).unwrap().unwrap();
-        assert!(!checked.needs_quiet(), "the link is there: nothing a session reads changes");
+        assert!(
+            !checked.needs_quiet(),
+            "the link is there: nothing a session reads changes"
+        );
         checked.apply(&|| panic!("asked")).unwrap();
         assert!(account.join("preferences/linked").is_file());
     }
@@ -959,7 +969,10 @@ base_url = "https://example.invalid"
                 && err.contains(&file.display().to_string()),
             "{err}"
         );
-        assert!(!err.contains("pa55") && !err.contains("key=k"), "a secret: {err}");
+        assert!(
+            !err.contains("pa55") && !err.contains("key=k"),
+            "a secret: {err}"
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), azure);
         assert!(!account.join("preferences").exists());
 
@@ -1007,7 +1020,11 @@ base_url = "https://example.invalid"
     #[test]
     fn after_the_link_a_real_file_is_tampering_and_never_kept() {
         let (_root, account, file) = account();
-        check(&codex(), &account).unwrap().unwrap().apply(&none_running).unwrap();
+        check(&codex(), &account)
+            .unwrap()
+            .unwrap()
+            .apply(&none_running)
+            .unwrap();
         std::fs::remove_file(&file).unwrap();
         std::fs::write(&file, "model = \"planted\"\n").unwrap();
         let notes = check(&codex(), &account)
@@ -1016,7 +1033,10 @@ base_url = "https://example.invalid"
             .apply(&|| panic!("asked"))
             .unwrap()
             .join("\n");
-        assert!(notes.contains("a file") && notes.contains("nothing in it kept"), "{notes}");
+        assert!(
+            notes.contains("a file") && notes.contains("nothing in it kept"),
+            "{notes}"
+        );
         assert_eq!(link_of(&file), Some(PathBuf::from(TARGET)));
         assert!(kept(&account, &codex().preferences.unwrap().declared()[0])
             .unwrap()
@@ -1075,18 +1095,30 @@ base_url = "https://example.invalid"
             checked.seed(&codex(), &home).unwrap()
         };
         seed(&work);
-        assert_eq!(std::fs::read_to_string(&at_live).unwrap(), "model = \"w\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"w\"\n"
+        );
         std::fs::write(&at_live, "model = \"mine\"\n").unwrap();
         seed(&work);
-        assert_eq!(std::fs::read_to_string(&at_live).unwrap(), "model = \"mine\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"mine\"\n"
+        );
 
         let notes = seed(&personal).join("\n");
-        assert!(notes.contains("kept 1 codex preference on account `work`: model"), "{notes}");
+        assert!(
+            notes.contains("kept 1 codex preference on account `work`: model"),
+            "{notes}"
+        );
         assert_eq!(
             std::fs::read_to_string(work.join("preferences/config.toml")).unwrap(),
             "model = \"mine\"\n"
         );
-        assert_eq!(std::fs::read_to_string(&at_live).unwrap(), "model = \"p\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"p\"\n"
+        );
     }
 
     /// What a session changed among its declared keys reaches the account,
@@ -1112,8 +1144,14 @@ base_url = "https://example.invalid"
         std::fs::write(work.join("preferences/config.toml"), "model = \"other\"\n").unwrap();
 
         let notes = keep(&codex(), &home).unwrap().join("\n");
-        assert!(notes.contains("model replaces the value another session kept"), "{notes}");
-        assert!(notes.contains("not kept, not preferences: developer_instructions"), "{notes}");
+        assert!(
+            notes.contains("model replaces the value another session kept"),
+            "{notes}"
+        );
+        assert!(
+            notes.contains("not kept, not preferences: developer_instructions"),
+            "{notes}"
+        );
         assert!(!notes.contains("planted"), "{notes}");
         let kept = std::fs::read_to_string(work.join("preferences/config.toml")).unwrap();
         assert_eq!(
