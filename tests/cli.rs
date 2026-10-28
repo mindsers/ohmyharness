@@ -16619,7 +16619,10 @@ fn doctor_names_the_accounts_provider_and_a_broken_one() {
         "{line}"
     );
     let seen = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(!seen.contains("build"), "a probe that cannot launch was built for: {seen}");
+    assert!(
+        !seen.contains("build"),
+        "a probe that cannot launch was built for: {seen}"
+    );
 }
 
 /// What a `docker` argv mounted at `guest`, from the stand-in's log.

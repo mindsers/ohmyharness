@@ -3524,8 +3524,7 @@ mod tests {
                 resolves: BTreeMap::new(),
             },
         )
-        .err()
-        .expect("a broken provider file refuses the launch");
+        .expect_err("a broken provider file refuses the launch");
         let err = format!("{err:#}");
         assert!(
             err.contains("provider.toml") && err.contains("notify"),

@@ -121,7 +121,12 @@ fn parse(raw: &str) -> Result<toml::Table> {
         let at = e.span().map_or(0, |s| s.start).min(raw.len());
         let before = &raw.as_bytes()[..at];
         let line = before.iter().filter(|b| **b == b'\n').count() + 1;
-        let column = at - before.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1) + 1;
+        let column = at
+            - before
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |i| i + 1)
+            + 1;
         anyhow::anyhow!("is not TOML at line {line}, column {column}")
     })
 }
@@ -264,10 +269,16 @@ pub fn redacted(doc: &toml::Table) -> toml::Table {
 fn host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
-    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     match host.strip_prefix('[') {
         Some(v6) => &host[..v6.find(']').map_or(host.len(), |end| end + 2)],
-        None => host.split(':').next().unwrap_or_default().trim_end_matches('.'),
+        None => host
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches('.'),
     }
 }
 
@@ -479,14 +490,23 @@ command = "x"
         for secret in ["pa55", "u:", "kq", "kc"] {
             assert!(!shown.contains(secret), "{secret}: {shown}");
         }
-        assert!(shown.contains("https://<redacted>@example.com/v1?<redacted>"), "{shown}");
-        assert!(shown.contains("https://example.com/models?<redacted>"), "{shown}");
+        assert!(
+            shown.contains("https://<redacted>@example.com/v1?<redacted>"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("https://example.com/models?<redacted>"),
+            "{shown}"
+        );
 
         // Read as a stricter parser might: a backslash ends an authority for
         // one parser and not another, so everything before the last `@` goes;
         // a value with no scheme goes whole.
         for (url, kept) in [
-            (r"https://u:pb\@example.com/v1", "https://<redacted>@example.com/v1"),
+            (
+                r"https://u:pb\@example.com/v1",
+                "https://<redacted>@example.com/v1",
+            ),
             ("u:pc@example.com/v1", "<redacted>"),
         ] {
             let doc = table(&format!(

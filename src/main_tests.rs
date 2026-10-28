@@ -1350,10 +1350,10 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // Getting started was one page until it became two, and all fifteen
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
-        ("docs/src/content/docs/guides/accounts.md", 10),
+        ("docs/src/content/docs/guides/accounts.md", 11),
         ("docs/src/content/docs/guides/code-graph.md", 1),
         ("docs/src/content/docs/guides/editors.md", 4),
-        ("docs/src/content/docs/guides/troubleshooting.md", 13),
+        ("docs/src/content/docs/guides/troubleshooting.md", 14),
         ("docs/src/content/docs/project/decisions.md", 1),
         ("docs/src/content/docs/reference/adapters.md", 2), // + `omh doctor --harness` in adding a harness
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
@@ -2012,7 +2012,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         //
         // One of them was written `omh s rm <id>`, which does not parse,
         // and the scan caught it.
-        ("src/doctor.rs", 7), // + `omh info --repo` in the `use` row's detail
+        // + `omh info --repo` in the `use` row's detail, and
+        // `omh auth <harness> --provider <file>` in a broken provider's.
+        ("src/doctor.rs", 8),
         // Four. One is the `# `omh set --local ca_cert`` line `ca_layer`
         // writes into the generated Dockerfile, telling whoever reads the
         // recipe where the certificate came from. **Not** either of
@@ -2041,6 +2043,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh s down`, in the refusal when a live sandbox blocks the move
         // off the pre-2026.08 repo key.
         ("src/profile.rs", 1),
+        // `omh auth codex --provider <file>`, in a provider field's refusal.
+        ("src/provider.rs", 1),
         ("src/render.rs", 1),
         // `select`'s refusal when only the unmeasured backend is present
         // names `omh doctor` as the way to check it first.
