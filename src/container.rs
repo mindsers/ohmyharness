@@ -299,6 +299,23 @@ pub fn session_home(paths: &Paths, session: &Session, harness: &str) -> crate::a
     }
 }
 
+/// Where a session's preferences live (`prefs`): in its run directory for a
+/// real session, kept between its launches; under `scratch/` for `omh
+/// doctor`'s probe and `omh auth`'s login, seeded afresh each time. Dotted
+/// like `.home`.
+pub fn prefs_home(paths: &Paths, session: &Session, harness: &str) -> crate::home::Home {
+    match session.branch {
+        Some(_) => crate::home::Home::Kept(
+            paths
+                .runs()
+                .join(&session.id)
+                .join(".preferences")
+                .join(harness),
+        ),
+        None => crate::home::Home::Scratch(paths.scratch("prefs").join(&session.id).join(harness)),
+    }
+}
+
 /// Launch options that are not part of the profile.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -775,11 +792,7 @@ pub fn plan(
         // `prefs::Account::seed` after the reuse decision, never by `plan`.
         if adapter.preferences.is_some() {
             mounts.push(Mount {
-                host: crate::prefs::live(&crate::prefs::home(
-                    paths,
-                    session,
-                    adapter.name.as_str(),
-                )),
+                host: crate::prefs::live(&prefs_home(paths, session, adapter.name.as_str())),
                 guest: PathBuf::from(crate::prefs::GUEST),
                 read_only: false,
                 file: false,

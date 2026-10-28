@@ -21,7 +21,7 @@
 pub const GUEST: &str = "/omh/prefs";
 
 use crate::adapter::{Adapter, Declared, KeyPath, PrefMount};
-use crate::auth::Home;
+use crate::home::Home;
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -170,22 +170,6 @@ const LOCK: &str = ".lock";
 
 /// In a session's preferences home: the account it was seeded from.
 const RECORD: &str = "account";
-
-/// Where a session's preferences live: in its run directory for a real
-/// session, kept between its launches; under `scratch/` for `omh doctor`'s
-/// probe and `omh auth`'s login, seeded afresh each time.
-pub fn home(paths: &crate::profile::Paths, session: &crate::session::Session, harness: &str) -> Home {
-    match session.branch {
-        Some(_) => Home::Kept(
-            paths
-                .runs()
-                .join(&session.id)
-                .join(".preferences")
-                .join(harness),
-        ),
-        None => Home::Scratch(paths.scratch("prefs").join(&session.id).join(harness)),
-    }
-}
 
 /// The directory a container mounts at [`GUEST`].
 pub fn live(home: &Home) -> PathBuf {
@@ -708,25 +692,6 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
                 left.join(", ")
             )));
         }
-    }
-    Ok(notes)
-}
-
-/// [`keep`] for every harness this session ran, from its run directory —
-/// at `down` and `rm`, which know the session and not the harness.
-pub fn keep_session(paths: &crate::profile::Paths, id: &str) -> Result<Vec<String>> {
-    let dir = paths.runs().join(id).join(".preferences");
-    let harnesses = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
-    };
-    let mut notes = Vec::new();
-    for entry in harnesses {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let adapter = crate::adapter::Adapter::find(&paths.adapters(), &name)?;
-        notes.extend(keep(&adapter, &Home::Kept(entry.path()))?);
     }
     Ok(notes)
 }

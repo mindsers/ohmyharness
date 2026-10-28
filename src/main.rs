@@ -24,6 +24,7 @@ mod facts;
 mod guard;
 mod hash;
 mod held;
+mod home;
 mod hook;
 mod idle;
 mod image;

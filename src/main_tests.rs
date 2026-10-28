@@ -2040,6 +2040,10 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/memory.rs", 2),
         ("src/memory/ingest.rs", 2),
         ("src/notice.rs", 2),
+        // `omh auth <harness> --name <account> --provider <file>`, when a
+        // migration would lose a provider, and `omh sNN down`, when a session
+        // still mounts the account.
+        ("src/prefs.rs", 2),
         // `omh s down`, in the refusal when a live sandbox blocks the move
         // off the pre-2026.08 repo key.
         ("src/profile.rs", 1),
