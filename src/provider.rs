@@ -50,6 +50,10 @@ const DATA: &[&str] = &[
 /// Fields whose values are secrets: never printed, and redacted on eject.
 pub const SECRET: &[&str] = &["experimental_bearer_token", "http_headers", "query_params"];
 
+/// Fields holding a URL, which can carry a secret in its userinfo or query:
+/// those parts are redacted, the rest kept to say where the provider is.
+const URLS: &[&str] = &["base_url", "model_catalog_url"];
+
 /// Check `doc` is a provider file and nothing else.
 pub fn validate(doc: &toml::Table) -> Result<()> {
     for key in doc.keys() {
@@ -177,14 +181,19 @@ pub fn from_codex_config(
             );
         }
         if let Some(url) = p.get("base_url").and_then(|u| u.as_str()) {
-            for local in ["127.0.0.1", "localhost", "[::1]", "0.0.0.0"] {
-                anyhow::ensure!(
-                    !url.contains(&format!("//{local}")),
-                    "`model_providers.{id}.base_url = \"{url}\"` is `{local}`, which in a \
-                     sandbox is the sandbox itself — nothing was imported. Name an address \
-                     the sandbox can reach (on Docker Desktop, `host.docker.internal`)"
-                );
-            }
+            let host = host(url);
+            let lower = host.to_ascii_lowercase();
+            let local = lower == "localhost"
+                || lower.ends_with(".localhost")
+                || lower.starts_with("127.")
+                || ["[::1]", "[::]", "0.0.0.0"].contains(&lower.as_str());
+            anyhow::ensure!(
+                !local,
+                "`model_providers.{id}.base_url = \"{}\"` is `{host}`, which in a sandbox is \
+                 the sandbox itself — nothing was imported. Name an address the sandbox can \
+                 reach (on Docker Desktop, `host.docker.internal`)",
+                redacted_url(url)
+            );
         }
         out.insert(id.clone(), p.into());
     }
@@ -215,6 +224,12 @@ pub fn redacted(doc: &toml::Table) -> toml::Table {
                 continue;
             };
             for (field, value) in provider.iter_mut() {
+                if URLS.contains(&field.as_str()) {
+                    if let toml::Value::String(url) = value {
+                        *url = redacted_url(url);
+                    }
+                    continue;
+                }
                 if !SECRET.contains(&field.as_str()) {
                     continue;
                 }
@@ -230,6 +245,38 @@ pub fn redacted(doc: &toml::Table) -> toml::Table {
         }
     }
     doc
+}
+
+/// The host `url` names: after its scheme and userinfo, before its port.
+fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    match host.strip_prefix('[') {
+        Some(v6) => &host[..v6.find(']').map_or(host.len(), |end| end + 2)],
+        None => host.split(':').next().unwrap_or_default(),
+    }
+}
+
+/// `url` without what can hold a credential: its userinfo and its query each
+/// become `<redacted>`, and a fragment goes.
+fn redacted_url(url: &str) -> String {
+    let url = url.split('#').next().unwrap_or_default();
+    let (url, query) = match url.split_once('?') {
+        Some((url, _)) => (url, "?<redacted>"),
+        None => (url, ""),
+    };
+    let url = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+            match authority.rsplit_once('@') {
+                Some((_, host)) => format!("{scheme}://<redacted>@{host}{path}"),
+                None => format!("{scheme}://{rest}"),
+            }
+        }
+        None => url.to_string(),
+    };
+    format!("{url}{query}")
 }
 
 #[cfg(test)]
@@ -377,12 +424,22 @@ command = "x"
             ("aws = { profile = \"p\" }", "aws"),
             ("base_url = \"http://127.0.0.1:11434/v1\"", "127.0.0.1"),
             ("base_url = \"http://localhost:8080\"", "localhost"),
+            // Behind a userinfo, in capitals, anywhere in 127/8.
+            ("base_url = \"http://u:pa55@127.0.0.1/v1\"", "127.0.0.1"),
+            ("base_url = \"http://LOCALHOST:8080\"", "LOCALHOST"),
+            ("base_url = \"http://127.0.0.2:8080\"", "127.0.0.2"),
+            ("base_url = \"http://[::1]:8080\"", "[::1]"),
         ] {
             let config =
                 format!("model_provider = \"p\"\n[model_providers.p]\nname = \"P\"\n{provider}\n");
             let err = from_codex_config(&config, &env).unwrap_err().to_string();
             assert!(err.contains(named), "{named}: {err}");
+            assert!(!err.contains("pa55"), "the refusal printed a secret: {err}");
         }
+        // A name that only starts like one is a host.
+        let config = "model_provider = \"p\"\n[model_providers.p]\nname = \"P\"\n\
+                      base_url = \"https://localhost.example.com/v1\"\n";
+        from_codex_config(config, &env).unwrap();
     }
 
     /// Nothing shown or ejected carries a secret.
@@ -391,5 +448,18 @@ command = "x"
         let shown = toml::to_string(&redacted(&table(AZURE))).unwrap();
         assert!(!shown.contains("sk-secret"), "{shown}");
         assert!(shown.contains("example.openai.azure.com"), "{shown}");
+
+        // A URL can carry a credential too: in its userinfo, or its query.
+        let doc = table(
+            "[model_providers.p]\nname = \"P\"\n\
+             base_url = \"https://u:pa55@example.com/v1?api-key=kq#f\"\n\
+             model_catalog_url = \"https://example.com/models?token=kc\"\n",
+        );
+        let shown = toml::to_string(&redacted(&doc)).unwrap();
+        for secret in ["pa55", "u:", "kq", "kc"] {
+            assert!(!shown.contains(secret), "{secret}: {shown}");
+        }
+        assert!(shown.contains("https://<redacted>@example.com/v1?<redacted>"), "{shown}");
+        assert!(shown.contains("https://example.com/models?<redacted>"), "{shown}");
     }
 }
