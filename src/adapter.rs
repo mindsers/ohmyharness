@@ -92,6 +92,11 @@ pub struct Adapter {
     /// not `env` (risk 1b). Absent where a harness has none omh fills yet.
     #[serde(default)]
     pub policy: Option<Policy>,
+    /// The keys of the harness's own config that are the user's preferences,
+    /// kept per account and copied into each session (`prefs`) — so nothing
+    /// else a session writes there reaches the next one.
+    #[serde(default)]
+    pub preferences: Option<Preferences>,
 }
 
 /// A file the harness reads as policy — above anything a session can leave
@@ -165,6 +170,181 @@ impl PolicyFormat {
             Self::ClaudeManaged => &["$HOME/.claude.json"],
         }
     }
+}
+
+/// The keys of a harness's own config that are the user's preferences — a
+/// model, a theme — kept per account and copied into each session, where the
+/// harness writes them freely (`prefs`). Nothing else a session writes in
+/// that file reaches another session.
+///
+/// **The rule a key is judged by:** a preference never names a program or a
+/// capability, never grants a consent, a trust or a permission, and never
+/// carries text the harness puts in front of the model. [`NEVER`] spells out
+/// what that rules out, per harness, whatever a later release adds to it, and
+/// `check_preferences` refuses an adapter declaring a key at, inside or
+/// around one. Every list is explicit: a loose one is how a file read
+/// through a planted link would be kept.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preferences {
+    /// How a session's copy reaches the harness.
+    pub mount: PrefMount,
+    /// Each file, as one of `creds`' paths, and its keys that are preferences:
+    /// TOML dotted keys (`tui.theme`), a table declared whole by its name.
+    pub files: BTreeMap<String, Vec<String>>,
+    /// Bookkeeping the harness writes on its own — a notice dismissed —
+    /// kept without asking. Judged by the same rule.
+    #[serde(default)]
+    pub quiet: BTreeMap<String, Vec<String>>,
+}
+
+/// How a session's copy of a preferences file reaches the harness.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrefMount {
+    /// The account's file is a link to the same name under
+    /// [`crate::prefs::GUEST`], a directory each container mounts from its
+    /// session's own copy — for a harness that saves by writing beside the
+    /// file and renaming over it, which a single-file mount refuses with
+    /// `EBUSY`, and that resolves the link before it saves.
+    Link,
+}
+
+/// A key inside a preferences file, one segment per table.
+pub type KeyPath = Vec<String>;
+
+/// One declared preferences file, parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declared {
+    /// As the adapter names it, one of `creds`' paths.
+    pub path: String,
+    /// Its file name: the name it has under [`crate::prefs::GUEST`] and in
+    /// the account's kept preferences.
+    pub name: String,
+    pub keys: Vec<KeyPath>,
+    pub quiet: Vec<KeyPath>,
+}
+
+impl Declared {
+    /// Every key kept, asked about or not.
+    pub fn all(&self) -> impl Iterator<Item = &KeyPath> {
+        self.keys.iter().chain(&self.quiet)
+    }
+}
+
+impl Preferences {
+    /// Each file and its keys, parsed — `check_preferences` has held every
+    /// one to [`key_path`] already, so none is dropped here.
+    pub fn declared(&self) -> Vec<Declared> {
+        let parse = |keys: Option<&Vec<String>>| -> Vec<KeyPath> {
+            keys.into_iter()
+                .flatten()
+                .filter_map(|k| key_path(k).ok())
+                .collect()
+        };
+        self.files
+            .iter()
+            .map(|(path, keys)| Declared {
+                path: path.clone(),
+                name: path.rsplit('/').next().unwrap_or_default().to_string(),
+                keys: parse(Some(keys)),
+                quiet: parse(self.quiet.get(path)),
+            })
+            .collect()
+    }
+}
+
+/// A TOML dotted key as TOML spells one: bare segments of letters, digits,
+/// `_` and `-`, or quoted ones (`notice."hide_gpt-5.1-codex-max_migration_prompt"`),
+/// with no escapes — or why it is not one.
+pub fn key_path(s: &str) -> Result<KeyPath, String> {
+    let refuse = || format!("`{s}` is not a key");
+    let mut out = Vec::new();
+    let mut rest = s.trim();
+    loop {
+        let (segment, after) = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => {
+                let inner = &rest[1..];
+                let end = inner.find(q).ok_or_else(refuse)?;
+                (&inner[..end], &inner[end + 1..])
+            }
+            _ => {
+                let end = rest.find('.').unwrap_or(rest.len());
+                let bare = rest[..end].trim();
+                if !bare
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    return Err(refuse());
+                }
+                (bare, &rest[end..])
+            }
+        };
+        if segment.is_empty() || segment.contains('\\') {
+            return Err(refuse());
+        }
+        out.push(segment.to_string());
+        let after = after.trim_start();
+        if after.is_empty() {
+            return Ok(out);
+        }
+        rest = after.strip_prefix('.').ok_or_else(refuse)?.trim_start();
+        if rest.is_empty() {
+            return Err(refuse());
+        }
+    }
+}
+
+/// What is never a preference, per harness: each names a program or a
+/// capability, grants a consent, a trust or a permission, or carries text the
+/// harness puts in front of the model — or picks where traffic goes, which
+/// the account's provider file (`provider.rs`) holds instead. A key at, inside
+/// or around one is refused. Read in each harness's source at the version
+/// `adapters/` pins; a table is listed whole where any of it would qualify.
+pub const NEVER: &[(&str, &[&str])] = &[
+    (
+        "codex",
+        &[
+            "mcp_servers",
+            "notify",
+            "model_provider",
+            "model_providers",
+            "profile",
+            "profiles",
+            "features",
+            "developer_instructions",
+            "instructions",
+            "model_instructions_file",
+            "experimental_instructions_file",
+            "projects",
+            "hooks",
+            "approval_policy",
+            "sandbox_mode",
+            "sandbox_workspace_write",
+            "shell_environment_policy",
+            "tools",
+            "chatgpt_base_url",
+            "openai_base_url",
+            "notice.hide_full_access_warning",
+            "notice.hide_world_writable_warning",
+        ],
+    ),
+];
+
+/// [`NEVER`]'s keys for `harness`, parsed.
+pub fn never_for(harness: &str) -> Vec<KeyPath> {
+    NEVER
+        .iter()
+        .filter(|(h, _)| *h == harness)
+        .flat_map(|(_, keys)| keys.iter())
+        .filter_map(|k| key_path(k).ok())
+        .collect()
+}
+
+/// Whether one key is the other, or holds it.
+pub fn related(a: &KeyPath, b: &KeyPath) -> bool {
+    let n = a.len().min(b.len());
+    a[..n] == b[..n]
 }
 
 /// The capability classes a profile can carry. Ordered as declared, which is
@@ -608,6 +788,7 @@ impl Adapter {
         adapter.check_login(&path)?;
         adapter.check_hook_maps(&path)?;
         adapter.check_policy(&path)?;
+        adapter.check_preferences(&path)?;
         Ok(adapter)
     }
 
@@ -722,6 +903,87 @@ impl Adapter {
                 policy.format.name(),
                 policy.format.seeds().join(", ")
             );
+        }
+        Ok(())
+    }
+
+    /// A preferences file is one the account keeps, strictly inside one of
+    /// `creds`' directories, where its link is laid; TOML, the one format
+    /// `prefs` reads so far; with no `..` to walk, since it is joined into the
+    /// account directory on the host. Its keys are TOML keys, each declared
+    /// once, none inside another, and none at, inside or around a [`NEVER`]
+    /// key.
+    fn check_preferences(&self, path: &Path) -> Result<()> {
+        let Some(prefs) = &self.preferences else {
+            return Ok(());
+        };
+        let shown = path.display();
+        let dirs: Vec<&str> = self
+            .creds
+            .iter()
+            .filter(|c| c.ends_with('/'))
+            .map(String::as_str)
+            .collect();
+        let never = never_for(self.name.as_str());
+        for (file, keys) in &prefs.files {
+            anyhow::ensure!(
+                dirs.iter()
+                    .any(|d| file.strip_prefix(d).is_some_and(|rest| !rest.is_empty())),
+                "adapter {shown}: preferences file {file:?} must be strictly inside one of this \
+                 adapter's credential directories ({})",
+                dirs.join(", ")
+            );
+            anyhow::ensure!(
+                !Path::new(file)
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir),
+                "adapter {shown}: preferences file {file:?} has a `..` — it is joined into the \
+                 account directory on the host"
+            );
+            anyhow::ensure!(
+                file.ends_with(".toml"),
+                "adapter {shown}: preferences file {file:?} — only TOML preferences are read so far"
+            );
+            anyhow::ensure!(
+                !keys.is_empty(),
+                "adapter {shown}: preferences file {file:?} declares no keys"
+            );
+        }
+        for file in prefs.quiet.keys() {
+            anyhow::ensure!(
+                prefs.files.contains_key(file),
+                "adapter {shown}: quiet file {file:?} is not one of `[preferences.files]`"
+            );
+        }
+        for (file, keys) in &prefs.files {
+            let quiet = prefs.quiet.get(file).into_iter().flatten();
+            let mut seen: Vec<(&str, KeyPath)> = Vec::new();
+            for raw in keys.iter().chain(quiet) {
+                let key = key_path(raw).map_err(|e| anyhow::anyhow!("adapter {shown}: {e}"))?;
+                if let Some(n) = never.iter().find(|n| related(&key, n)) {
+                    anyhow::bail!(
+                        "adapter {shown}: `{raw}` is never a preference — `{}` names a program, \
+                         grants a consent or a trust, or carries text before the model",
+                        n.join(".")
+                    );
+                }
+                for (other, at) in &seen {
+                    anyhow::ensure!(
+                        at != &key,
+                        "adapter {shown}: `{raw}` is declared twice in {file:?}"
+                    );
+                    let (outer, inner) = match at.len() < key.len() {
+                        true => (*other, raw.as_str()),
+                        false => (raw.as_str(), *other),
+                    };
+                    anyhow::ensure!(
+                        !related(at, &key),
+                        "adapter {shown}: `{inner}` is inside `{outer}` — declare the table or \
+                         its keys, not both"
+                    );
+                }
+                seen.push((raw.as_str(), key));
+            }
         }
         Ok(())
     }
@@ -1551,6 +1813,93 @@ render = "concat"
             );
             let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
             assert!(err.contains(names), "{top} / {policy}: {err}");
+        }
+    }
+
+    /// Codex's preferences are the issue's list, explicit, each a key Codex
+    /// 0.162.1 reads (its source), none of them a program, a consent, a trust
+    /// or text before the model — and the two tables declared whole are named
+    /// here, so a pin bump's diff touches them and they are read again.
+    #[test]
+    fn codexs_preferences_are_its_own_list_and_never_a_never_key() {
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        let prefs = codex.preferences.as_ref().expect("codex declares preferences");
+        assert_eq!(prefs.mount, PrefMount::Link);
+        let declared = prefs.declared();
+        let [file] = declared.as_slice() else {
+            panic!("one file: {declared:?}");
+        };
+        assert_eq!(file.path, "$HOME/.codex/config.toml");
+        assert_eq!(file.name, "config.toml");
+        let dotted = |k: &KeyPath| k.join(".");
+        let keys: Vec<String> = file.keys.iter().map(dotted).collect();
+        assert!(keys.contains(&"model".to_string()), "{keys:?}");
+        let quiet: Vec<String> = file.quiet.iter().map(dotted).collect();
+        assert!(
+            quiet.contains(&"notice.hide_gpt-5.1-codex-max_migration_prompt".to_string()),
+            "{quiet:?}"
+        );
+        for key in file.keys.iter().chain(&file.quiet) {
+            for never in never_for("codex") {
+                assert!(!related(key, &never), "{} is near never-key {}", dotted(key), never.join("."));
+            }
+        }
+        const WHOLE_TABLES: &[&str] = &["tui.keymap", "notice.model_migrations"];
+        for table in WHOLE_TABLES {
+            assert!(
+                keys.iter().chain(&quiet).any(|k| k == table),
+                "{table} is no longer declared — drop it from this list"
+            );
+        }
+    }
+
+    /// What a preference never is, refused by name at load — and the shapes a
+    /// preferences table cannot take, each in words of its own.
+    #[test]
+    fn a_preference_that_is_not_one_is_refused_by_name() {
+        const CREDS: &str = "creds = [\"$HOME/.codex/\"]";
+        const FILE: &str = "\"$HOME/.codex/config.toml\"";
+        for (top, body, names) in [
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"developer_instructions\"]"), "`developer_instructions` is never a preference"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"mcp_servers.x\"]"), "`mcp_servers.x` is never a preference"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"notice\"]"), "`notice` is never a preference"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"model\"]\n[preferences.quiet]\n{FILE} = [\"notice.hide_full_access_warning\"]"), "`notice.hide_full_access_warning` is never a preference"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"a..b\"]"), "`a..b` is not a key"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"tui.\\\"x\"]"), "is not a key"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"tui\", \"tui.theme\"]"), "`tui.theme` is inside `tui`"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"model\"]\n[preferences.quiet]\n{FILE} = [\"model\"]"), "`model` is declared twice"),
+            (CREDS, format!("[preferences.files]\n{FILE} = [\"model\"]\n[preferences.quiet]\n\"$HOME/.codex/other.toml\" = [\"x\"]"), "quiet file \"$HOME/.codex/other.toml\" is not one of"),
+            (CREDS, "[preferences.files]\n\"$HOME/elsewhere.toml\" = [\"model\"]".to_string(), "strictly inside one of this adapter's credential directories"),
+            (CREDS, "[preferences.files]\n\"$HOME/.codex/x/../../y.toml\" = [\"model\"]".to_string(), "has a `..`"),
+            (CREDS, "[preferences.files]\n\"$HOME/.codex/config.json\" = [\"model\"]".to_string(), "only TOML"),
+            (CREDS, format!("[preferences.files]\n{FILE} = []"), "declares no keys"),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "codex.toml",
+                &format!(
+                    "name = \"codex\"\nbin = \"codex\"\ninstall = \"true\"\n{top}\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
+                     [preferences]\nmount = \"link\"\n\n{body}\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "codex").unwrap_err().to_string();
+            assert!(err.contains(names), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_key_path_reads_as_toml_spells_it() {
+        assert_eq!(key_path("model").unwrap(), vec!["model"]);
+        assert_eq!(key_path("tui.theme").unwrap(), vec!["tui", "theme"]);
+        assert_eq!(
+            key_path("notice.\"hide_gpt-5.1-codex-max_migration_prompt\"").unwrap(),
+            vec!["notice", "hide_gpt-5.1-codex-max_migration_prompt"]
+        );
+        assert_eq!(key_path("a.'b.c'").unwrap(), vec!["a", "b.c"]);
+        for bad in ["", ".", "a.", ".a", "a..b", "a b", "\"x", "a.\"\"", "a.\"b\\\"c\""] {
+            assert!(key_path(bad).is_err(), "{bad:?}");
         }
     }
 

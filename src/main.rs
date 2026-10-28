@@ -35,6 +35,7 @@ mod memory;
 mod notice;
 mod out;
 mod persist;
+mod prefs;
 mod profile;
 mod provider;
 mod render;
