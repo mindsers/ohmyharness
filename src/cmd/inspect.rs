@@ -339,9 +339,9 @@ pub(crate) fn doctor_cmd(
     // Everything past here can fail, and every one of those failures used to
     // take the host's answers with it. Run it, then decide what to say.
     let host_rows = host.0.clone();
-    // A host row found inside the run below, kept here too so a run that fails
-    // after finding it still reports it.
-    let mut found: Option<doctor::Outcome> = None;
+    // The host rows found inside the run below, kept here too so a run that
+    // fails after finding them still reports them.
+    let mut found: Vec<doctor::Outcome> = Vec::new();
     // Whether the run below got as far as saying its report. Past that point
     // a failure *is* the report — it carries the host's rows already — and
     // saying them again was a second report: two documents under `--json`,
@@ -369,6 +369,17 @@ pub(crate) fn doctor_cmd(
         let configured = auth::configured(&paths, &adapter)?;
         let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
             .map(|a| auth::dir(&paths, &adapter, &a));
+        // The account's provider file, before any image work: a file the
+        // harness would refuse fails every start, the probe's among them.
+        if let Some(row) = doctor::provider_check(&adapter, account.as_deref()) {
+            let broken = !row.ok;
+            found.push(row.clone());
+            host.0.push(row);
+            anyhow::ensure!(
+                !broken,
+                "the account's provider file would refuse every {name} start"
+            );
+        }
 
         // Resolved once and used for both the checks and the plan below, so the
         // probe cannot check a session different from the one it launches.
@@ -411,7 +422,7 @@ pub(crate) fn doctor_cmd(
                     ok: true,
                     detail: format!("could not check whether this network re-signs TLS: {why}"),
                 };
-                found = Some(row.clone());
+                found.push(row.clone());
                 host.0.push(row);
             }
             if verdict == doctor::Inspection::Private {

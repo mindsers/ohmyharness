@@ -16519,6 +16519,55 @@ fn a_provider_authored_for_an_account_reaches_its_launches() {
     assert!(system.contains("model_provider = \"azure\""), "{system}");
 }
 
+/// `omh doctor` has a row for the account's provider file: the provider it
+/// selects, by name — and a file that would refuse every codex start, by file
+/// and key, before any image is built for a probe that could not launch.
+#[test]
+fn doctor_names_the_accounts_provider_and_a_broken_one() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, false);
+    let log = sb.fake_docker_answering_doctor(&[], &[]);
+    let account = sb.home.join(".omh/creds/codex/default");
+    std::fs::create_dir_all(&account).unwrap();
+    let provider = account.join("provider.toml");
+    std::fs::write(
+        &provider,
+        "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+         base_url = \"https://example.invalid/openai\"\nexperimental_bearer_token = \"sk-secret\"\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["doctor", "--json", "--harness", "codex"]);
+    let row = json_documents(&out.stdout)
+        .iter()
+        .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+        .find(|c| c["name"] == "model provider")
+        .unwrap_or_else(|| panic!("no provider row: {}", printed(&out)));
+    assert_eq!(row["ok"], serde_json::json!(true), "{row}");
+    let detail = row["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("azure") && detail.contains("provider.toml"),
+        "{detail}"
+    );
+    assert!(!printed(&out).contains("sk-secret"), "{}", printed(&out));
+
+    std::fs::write(&provider, "notify = [\"x\"]\n").unwrap();
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["doctor", "--harness", "codex"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    let said = printed(&out);
+    let line = said
+        .lines()
+        .find(|l| l.contains("model provider"))
+        .unwrap_or_else(|| panic!("no provider row: {said}"));
+    assert!(
+        line.contains("provider.toml") && line.contains("notify"),
+        "{line}"
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!seen.contains("build"), "a probe that cannot launch was built for: {seen}");
+}
+
 /// What a `docker` argv mounted at `guest`, from the stand-in's log.
 fn mounted_at(log: &str, guest: &str) -> Option<String> {
     log.split_whitespace()

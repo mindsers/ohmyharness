@@ -1188,6 +1188,55 @@ pub fn sandbox_git_check() -> Check {
     }
 }
 
+/// The account's provider file, read on the host as a launch reads it: the
+/// provider it selects, by name — never a value, which can be a token — or,
+/// when it would refuse every start, the file and the key. `None` for a
+/// harness that takes none, with no account, or an account holding none.
+pub fn provider_check(adapter: &Adapter, account: Option<&std::path::Path>) -> Option<Outcome> {
+    let account = account.filter(|_| {
+        adapter
+            .policy
+            .as_ref()
+            .is_some_and(|p| p.format.reads_provider())
+    })?;
+    let path = account.join(crate::provider::FILE);
+    let (ok, detail) = match crate::provider::read(account) {
+        Ok(None) => return None,
+        Ok(Some(doc)) => {
+            let names: Vec<&str> = doc
+                .get("model_providers")
+                .and_then(|p| p.as_table())
+                .map(|p| p.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            let selected = doc.get("model_provider").and_then(|p| p.as_str());
+            (
+                true,
+                format!(
+                    "{} — {}, from {}",
+                    selected.map_or("none selected".into(), |s| format!("`{s}` selected")),
+                    match names.as_slice() {
+                        [] => "no provider defined".into(),
+                        names => format!("defines {}", names.join(", ")),
+                    },
+                    path.display()
+                ),
+            )
+        }
+        Err(e) => (
+            false,
+            format!(
+                "{e:#} — every {} start refuses until it is fixed: omh auth {} --provider <file>",
+                adapter.name, adapter.name
+            ),
+        ),
+    };
+    Some(Outcome {
+        name: "model provider".into(),
+        ok,
+        detail,
+    })
+}
+
 /// What must be true of the credential mounts, given an account.
 ///
 /// Nothing in process can answer this — it is a property of how the runtime
