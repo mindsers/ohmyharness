@@ -174,28 +174,36 @@ pub const CLAUDE: Driver = Driver {
     drops: &["graph-first"],
 };
 
-/// Codex takes a provider on the command line — the session layer, above
-/// `/etc/codex/config.toml`, so nothing here may name a key omh writes there.
-/// A known model slug, because an unknown one is not offered `apply_patch`,
-/// which is Codex's only edit. No `OPENAI_BASE_URL`: Codex does not read it.
+/// A Codex account holding only a provider file, which selects the fake model:
+/// omh renders it into `/etc/codex/config.toml`, so every turn of every codex
+/// scenario is a turn through the account's provider — none is named on the
+/// command line. No retries, so a turn that fails says so at once.
+fn codex_account() -> Vec<(&'static str, String)> {
+    let provider = format!(
+        "model_provider = \"fake\"\n\n[model_providers.fake]\nname = \"fake\"\n\
+         base_url = \"{}/v1\"\nwire_api = \"responses\"\n\
+         request_max_retries = 0\nstream_max_retries = 0\n",
+        crate::sandbox::fake_url()
+    );
+    vec![("provider.toml", provider)]
+}
+
+/// Codex takes its provider from the account (`codex_account`), and the rest
+/// on the command line — the session layer, above `/etc/codex/config.toml`, so
+/// nothing here may name a key omh writes there. A known model slug, because
+/// an unknown one is not offered `apply_patch`, which is Codex's only edit. No
+/// `OPENAI_BASE_URL`: Codex does not read it.
 pub const CODEX: Driver = Driver {
     name: "codex",
     env: &[],
     files: &[],
-    turn: |prompt, url| {
-        let provider = format!(
-            r#"model_providers.fake={{name="fake",base_url="{url}/v1",wire_api="responses",request_max_retries=0,stream_max_retries=0}}"#
-        );
+    turn: |prompt, _url| {
         [
             "codex",
             "exec",
             "--json",
             "-m",
             "gpt-5.5",
-            "-c",
-            "model_provider=fake",
-            "-c",
-            &provider,
             "-c",
             r#"approval_policy="never""#,
             "-c",
@@ -240,7 +248,7 @@ pub const CODEX: Driver = Driver {
     },
     elsewhere: &[GRAPH_UPDATE_CHECK],
     transcripts: true,
-    account: None,
+    account: Some(codex_account),
     drops: &["graph-first", "graph-read", "e2e-end-inject"],
 };
 

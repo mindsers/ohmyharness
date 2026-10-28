@@ -752,9 +752,13 @@ fn planted_server(s: &Session) {
 /// the copy's doing and not the lock's. None of it reaches this session, and
 /// nothing this session writes there reaches the account.
 ///
-/// Only for a driver that launches with an account.
+/// Only for a driver that launches with an account holding a `.claude.json`.
 fn own_copy(s: &Session) {
-    if s.harness.account.is_none() {
+    let planted = s
+        .harness
+        .account
+        .is_some_and(|a| a().iter().any(|(file, _)| *file == ".claude.json"));
+    if !planted {
         return;
     }
     let (command, args) = crate::driver::omh_memory_argv();
