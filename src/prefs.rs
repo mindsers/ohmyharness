@@ -1012,10 +1012,11 @@ base_url = "https://example.invalid"
         first.apply(&none_running).unwrap();
         let backup = account.join("preferences/config.toml.before-omh");
         std::fs::write(&backup, "the first launch's").unwrap();
-        second
-            .apply(&|| Ok(vec!["omh-repo-s01".into()]))
-            .unwrap();
-        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "the first launch's");
+        second.apply(&|| Ok(vec!["omh-repo-s01".into()])).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            "the first launch's"
+        );
     }
 
     /// A session from before the link still mounting the account would
