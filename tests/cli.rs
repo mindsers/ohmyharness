@@ -16546,6 +16546,16 @@ fn a_provider_authored_for_an_account_reaches_its_launches() {
         .unwrap_or_else(|| panic!("no System layer: {}", printed(&out)));
     let system = std::fs::read_to_string(&host).unwrap();
     assert!(system.contains("model_provider = \"azure\""), "{system}");
+
+    // One Codex would run as managed refuses the launch, by file and key.
+    std::fs::write(&kept, "notify = [\"x\"]\n").unwrap();
+    let out = sb.omh(&["new", "codex"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("provider.toml") && printed(&out).contains("`notify`"),
+        "{}",
+        printed(&out)
+    );
 }
 
 /// `omh doctor` has a row for the account's provider file: the provider it
