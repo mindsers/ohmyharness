@@ -286,7 +286,7 @@ fn host(url: &str) -> &str {
 /// become `<redacted>`, and a fragment goes. Erring wide, since parsers
 /// disagree on where an authority ends: everything before the last `@` is
 /// redacted, and a value with no scheme is redacted whole.
-fn redacted_url(url: &str) -> String {
+pub(crate) fn redacted_url(url: &str) -> String {
     let url = url.split('#').next().unwrap_or_default();
     let (url, query) = match url.split_once('?') {
         Some((url, _)) => (url, "?<redacted>"),
