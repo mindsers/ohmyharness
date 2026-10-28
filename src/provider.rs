@@ -116,7 +116,7 @@ pub fn read(account_dir: &Path) -> Result<Option<toml::Table>> {
 
 /// `raw` as a TOML table, or where it stops being one — by line and column
 /// only: the parser's own message quotes the line, and the line can be a token.
-fn parse(raw: &str) -> Result<toml::Table> {
+pub(crate) fn parse(raw: &str) -> Result<toml::Table> {
     toml::from_str(raw).map_err(|e: toml::de::Error| {
         let at = e.span().map_or(0, |s| s.start).min(raw.len());
         let before = &raw.as_bytes()[..at];
