@@ -44,6 +44,26 @@ pub(crate) fn eject(
 
     let (own, repo) = crate::cmd::session::resolved(&paths)?;
 
+    // The model provider a launch on this checkout's account would render —
+    // redacted, since an eject is handed to the user to read and keep.
+    let provider = match adapter
+        .policy
+        .as_ref()
+        .filter(|p| p.format.reads_provider())
+    {
+        Some(_) => {
+            let configured = crate::auth::configured(&paths, &adapter)?;
+            match crate::auth::resolve_for_launch(&paths, &adapter, configured.as_deref())? {
+                Some(account) => {
+                    crate::provider::read(&crate::auth::dir(&paths, &adapter, &account))?
+                        .map(|p| crate::provider::redacted(&p))
+                }
+                None => None,
+            }
+        }
+        None => None,
+    };
+
     // Composed exactly as a launch composes it, which is the point: the
     // project's own rules file is read and labelled with where it came from,
     // and the result is one document rather than a pile of layers the reader
@@ -132,7 +152,7 @@ pub(crate) fn eject(
                             // must carry none of omh's own plumbing — see
                             // `hook::render`'s doc on this parameter.
                             log: None,
-                            provider: None,
+                            provider: provider.as_ref(),
                         },
                     )?;
                     write_file(&out_path, &doc.body, dry_run)?;

@@ -14168,6 +14168,30 @@ fn a_system_path_ejects_under_system() {
         "{policy}"
     );
 
+    // The account's model provider is part of what a launch writes there —
+    // and leaves eject with every secret redacted.
+    let account = sb.home.join(".omh/creds/codex/default");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(
+        account.join("provider.toml"),
+        "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
+         base_url = \"https://example.invalid/openai\"\nexperimental_bearer_token = \"sk-secret\"\n",
+    )
+    .unwrap();
+    let out = sb.home.join("ejected-provider");
+    let ran = sb.omh(&["eject", "codex", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let system = std::fs::read_to_string(out.join("system/etc/codex/config.toml")).unwrap();
+    assert!(system.contains("model_provider = \"azure\""), "{system}");
+    assert!(
+        !system.contains("sk-secret"),
+        "a token was ejected: {system}"
+    );
+
     // Claude's is a system path too.
     let out = sb.home.join("ejected-claude");
     let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
