@@ -72,6 +72,12 @@ gated on the
 [backend spike](/concepts/architecture/#declared-capabilities-and-honest-unknowns).
 Several accounts widens this gap rather than narrowing it.
 
+A Codex [provider file](/guides/accounts/#a-model-provider-of-your-own) is one
+more token the agent can read: its key is in `/etc/codex/config.toml`, which
+the session cannot write but Codex — and so the agent — must read. An
+`env_key` that used to stay in your shell is, once `omh auth codex` resolves
+it, a value in a `0600` file on disk.
+
 ### 1b. The account directory is writable, and every repo shares it
 
 **Reading the token is not the only thing a writable account mount allows.**

@@ -89,6 +89,70 @@ when there is a login there to copy.
 
 </details>
 
+## A model provider of your own
+
+Codex talks to OpenAI unless its config names another provider — Azure, a
+gateway, a local server. omh keeps that choice with the account, in a file of
+its own:
+
+```console
+$ omh auth codex --name work --provider ~/.codex/config.toml
+`work` captured for codex
+  model provider azure kept in /Users/you/.omh/creds/codex/work/provider.toml
+```
+
+`--provider` takes a Codex `config.toml` or a file holding only the provider,
+and logs nothing in. `--import` brings the provider in `~/.codex/config.toml`
+along with the login. An account that holds only a provider counts as
+captured — a provider with an API key needs no login.
+
+**Only the provider is kept.** omh takes `model_provider` and the
+`[model_providers.*]` tables, in Codex's own words, and nothing else from the
+file — `model`, `[mcp_servers]`, hooks stay out. Each launch writes them into
+`/etc/codex/config.toml`, Codex's System layer, which the session cannot write.
+The file sits at the account's root, `~/.omh/creds/codex/<account>/`, which is
+never mounted, so no session can change which provider later sessions use.
+
+**What the host supplies is settled once, at `omh auth`.** A sandbox has none
+of the host's environment, commands or loopback, so:
+
+| In your config | What omh does |
+|---|---|
+| `env_key = "AZURE_KEY"` | reads `AZURE_KEY` from the shell running `omh auth` and keeps its value as `experimental_bearer_token`; refused by name if it is unset |
+| `env_http_headers` | the same, into `http_headers` |
+| `env_key_instructions` | dropped |
+| `auth` (a command), `gateway_oauth`, `aws` | refused: a sandbox cannot run your command or read your AWS profile. Put the token the command produces in a provider file and name that |
+| a `base_url` on `127.0.0.1` or `localhost` | refused: in a sandbox that is the sandbox itself. Name an address it can reach — on Docker Desktop, `host.docker.internal` |
+
+A refusal keeps nothing. A file you write by hand is held to the same
+allowlist at every launch: a key Codex does not read as a provider field, or
+anything outside the provider tables — `notify`, `[hooks]`,
+`developer_instructions`, which in the System layer would run as managed — is
+refused and named, and the launch stops. So does a file that is not TOML,
+named by line and column.
+
+**The values are secrets, and treated as such.** `provider.toml` is `0600`,
+written so from its first byte, and so is the System layer omh stages with it.
+omh prints provider names, never values. `omh eject` writes the provider with
+its token, headers and query parameters as `<redacted>`, and a URL's userinfo
+and query too.
+
+**Your own `~/.codex/config.toml` still wins where it says otherwise.** Codex
+ranks its System layer below the user's config (read in Codex's source,
+0.162.1), so a `model_provider` in the account's `~/.codex/config.toml` beats
+the account's provider file. Until sessions get their own copy of that file,
+leave the provider out of it.
+
+`omh doctor` has a row for it:
+
+```
+  ✓ model provider   `azure` selected — defines azure, from /Users/you/.omh/creds/codex/work/provider.toml
+```
+
+A `✗` there is a file Codex would refuse to start with, and doctor stops
+before building anything. An account with a provider and no login has no
+token to probe, so doctor leaves credentials unchecked and says so.
+
 ## Verifying
 
 `omh doctor` probes the token path by attempting the temp-file-plus-rename that

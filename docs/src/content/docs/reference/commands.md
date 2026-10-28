@@ -13,7 +13,7 @@ yours in the table, then follow it to its entry.
 | **Set up** | |
 | [`omh init`](#omh-init) | Set this repo up, once. Decides everything, asks nothing. |
 | [`omh upgrade`](#omh-upgrade) | Apply a newer omh: refresh the catalogue, check again which provides apply, rebuild the images whose recipe moved. |
-| [`omh auth <harness>`](#omh-auth-harness---name-account---import) | Log a harness in once; repeat with `--name` for several accounts. |
+| [`omh auth <harness>`](#omh-auth-harness---name-account---import---provider-file) | Log a harness in once; repeat with `--name` for several accounts. |
 | [`omh doctor`](#omh-doctor---harness-name--d) · `d` | Check, inside a real sandbox, that a harness sees your setup. |
 | **Sessions** | |
 | [`omh new <harness>`](#omh-new-harness----args) | Start a session and run an agent in it. |
@@ -335,19 +335,20 @@ that instead.
 **It runs in a repo already set up**; in one that is not, it refuses and points
 at `omh init`.
 
-## `omh auth <harness> [--name <account>] [--import]`
+## `omh auth <harness> [--name <account>] [--import] [--provider <file>]`
 
 Runs the harness's own login and captures the result.
 
 ```
-omh auth <harness> [-n <acct>] [--import]
+omh auth <harness> [-n <acct>] [--import] [--provider <file>]
 ```
 
 | | | Default |
 |---|---|---|
 | `<harness>` | `claude`, `codex`, `opencode` or `omp` | |
 | `--name <account>` `-n` | the account to capture it as, e.g. `personal` or `work` | `default` |
-| `--import` | copy the login this machine already has instead; needs no container runtime | |
+| `--import` | copy the login this machine already has instead; needs no container runtime. For codex, the model provider in `~/.codex/config.toml` comes along | |
+| `--provider <file>` | keep the account's model provider from this file — a Codex `config.toml` or a provider file — and log nothing in. Codex only, so far | |
 
 ```console
 $ omh auth claude --name personal
@@ -370,6 +371,21 @@ $ omh auth codex --name work --import
 `work` captured for codex
   copied from /Users/you/.codex/auth.json
 ```
+
+**`--provider` keeps a model provider, and only that.** omh reads the file's
+`model_provider` and `[model_providers.*]` tables, resolves for a sandbox what
+it reads from the host — an `env_key` becomes the token it names, read once
+from the shell running `omh auth` — and writes them to the account's
+`provider.toml`, `0600`. Anything a sandbox cannot satisfy is refused by name
+and nothing is kept. The output names providers, never values:
+
+```text title="omh auth codex --name work --provider ~/azure.toml"
+`work` captured for codex
+  model provider azure kept in /Users/you/.omh/creds/codex/work/provider.toml
+```
+
+An account holding only a provider counts as captured. See
+[Accounts](/guides/accounts/#a-model-provider-of-your-own).
 
 ## `omh doctor [--harness <name>]` · `d`
 
