@@ -86,7 +86,7 @@ place, and a captured account lives under `~/.omh/creds/<harness>/<name>` —
 one directory for every repo that uses it. For Claude Code that is all of
 `~/.claude/` and, until #197, `~/.claude.json` — each session now gets its own
 copy of that one, below; for omp, all of `~/.omp/agent/`; for Codex,
-`~/.codex/`.
+`~/.codex/`, where `config.toml` is each session's own since #197.
 
 **Those directories hold more than credentials.** By the adapters' own
 accounts of what each harness reads:
@@ -131,12 +131,20 @@ lock admits, and asserts none of it reaches the session and nothing the
 session writes reaches the account. `omh auth`'s login, which mounts the
 account's own file, cleans it the same way first and admits no server.
 
+**Closed across sessions on Codex** (#197): the requirements identity
+compares neither `env` nor `cwd` (read in Codex's source), so an entry with
+omh's command and arguments and an `env` of its own passes it. Each session
+now gets its own `config.toml`: the account's is a link to the session's copy,
+and the account keeps only the keys the adapter declares as preferences — see
+[`~/.codex/config.toml` is each session's own](/guides/accounts/#codexconfigtoml-is-each-sessions-own).
+A server, `developer_instructions`, a provider or a trust a session writes
+there lasts that session. `tests/e2e` launches with an account whose shared
+file holds `developer_instructions` beside a model, and asserts the turn runs
+on the model and the model never sees the instructions — red with the shared
+file mounted as before.
+
 **Still open:**
 
-- on Codex, the requirements identity compares neither `env` nor
-  `cwd` (read in Codex's source): an entry with omh's command and arguments
-  and an `env` of its own passes. A per-session `config.toml` closes it,
-  tracked in #197 §0;
 - an enterprise account's cloud bundle composes above omh's requirements: its
   allowlist is the union of both, and an organisation's
   `allow_managed_hooks_only = false` wins over omh's (read in Codex's source);

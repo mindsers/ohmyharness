@@ -176,8 +176,9 @@ container:
 The policy admits exactly the MCP servers the launch staged, by command and
 arguments compared exactly — and by name too, on Codex. Neither harness
 compares `env`: on Claude Code each session's own `~/.claude.json` (`copy`
-above) keeps such an entry from reaching another session; on Codex it is still
-open ([risk 1b](/concepts/risks/#1b-the-account-directory-is-writable-and-every-repo-shares-it)). It is written even when
+above), and on Codex each session's own `config.toml`
+([`[preferences]`](#preferences-what-a-session-keeps)), keep such an entry
+from reaching another session. It is written even when
 nothing is staged, because a harness with no allowlist admits anything. On
 Codex, what the policy stops in your checkout or account — a repo's own
 `.codex/config.toml` servers or hooks, an enterprise bundle cache — is named at
@@ -196,14 +197,50 @@ launch and by `omh doctor`. `omh eject` writes the policy itself under
   `model_provider` and the fields of `[model_providers.*]` — see
   [A model provider of your own](/guides/accounts/#a-model-provider-of-your-own).
   Codex uses it from there (`tests/e2e`: every codex turn's provider comes
-  from it), unless the account's own `~/.codex/config.toml` names another,
-  which ranks above it (Codex's source).
+  from it); a session's own `config.toml`, which ranks above the system layer
+  (Codex's source), holds no provider to override it.
 - **claude** — a `managed-settings.d` drop-in: `allowManagedMcpServersOnly`,
   `allowedMcpServers`, and `disableClaudeAiConnectors`. claude.ai connectors
   are switched off in a session (read in the 2.1.300 binary; not measured):
   one is matched by its URL, and allowlisting that URL would let a session put
   its own server there. An organisation's own managed list replaces omh's
   (Claude Code's docs; not measured).
+
+### `[preferences]`: what a session keeps
+
+```toml
+# adapters/codex.toml
+[preferences]
+mount = "link"
+
+[preferences.files]
+"$HOME/.codex/config.toml" = ["model", "model_reasoning_effort", "tui.theme", …]
+
+[preferences.quiet]
+"$HOME/.codex/config.toml" = ["notice.hide_rate_limit_model_nudge", …]
+```
+
+A harness's own config file sits in the account, and a session writes it. The
+keys named here are the user's preferences: the account keeps them, at its
+root where no mount reaches, and each session starts from a copy of them.
+Everything else a session writes there lasts that session — see
+[`~/.codex/config.toml` is each session's own](/guides/accounts/#codexconfigtoml-is-each-sessions-own).
+
+| Field | What it says | Default |
+|---|---|---|
+| `mount` | how a session's copy reaches the harness. `link`: the account's file is a link to the same name under `/omh/prefs`, which each container mounts from its session's own copy — for a harness that saves by renaming over the file, which a mounted file refuses, and resolves the link first | required |
+| `files` | each file, one of `creds`' paths strictly inside one of its directories, with no `..`; TOML; and its keys that are preferences, as TOML dotted keys (`tui.theme`, `notice."a.b"`), a table declared whole by its name | required |
+| `quiet` | keys of the same files the harness writes on its own — a notice dismissed — kept without asking | none |
+
+**The rule a key is judged by:** a preference never names a program or a
+capability, never grants a consent, a trust or a permission, never carries
+text the harness puts in front of the model, and never picks where traffic
+goes. omh holds a list of what that rules out per harness — for codex
+`mcp_servers`, `notify`, `model_provider`, `model_providers`, `profiles`,
+`features`, `developer_instructions`, `projects`, `hooks`, `approval_policy`,
+`sandbox_mode`, `notice.hide_full_access_warning` and their kin — and an
+adapter declaring a key at, inside or around one of them is refused when it
+loads. Every list is explicit: a key no list names is not kept.
 
 ### What omh refuses when it loads an adapter
 

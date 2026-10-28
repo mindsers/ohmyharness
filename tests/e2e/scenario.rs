@@ -98,6 +98,10 @@ const SCENARIOS: &[Scenario] = &[
         run: own_copy,
     },
     Scenario {
+        name: "the session's ~/.codex/config.toml is its own, migrated from the account's",
+        run: own_config,
+    },
+    Scenario {
         name: "omh doctor passes in the session's repo",
         run: doctor,
     },
@@ -741,6 +745,50 @@ fn planted_server(s: &Session) {
             }
         }
     }
+}
+
+/// The account's shared `config.toml` held the model beside a planted
+/// `developer_instructions` (`driver::codex_account`), and the launch
+/// migrated it: the turn runs on the model the account kept — the driver
+/// names none — read through the link from the session's own copy, and the
+/// planted text never reaches the model. Codex's own writer (`codex mcp
+/// add`) saves into that copy and leaves the link a link; the account keeps
+/// neither the planted text nor what was saved, which is not a preference.
+///
+/// Only for a driver whose account holds a `.codex/config.toml`.
+fn own_config(s: &Session) {
+    let planted = s
+        .harness
+        .account
+        .is_some_and(|a| a().iter().any(|(file, _)| *file == ".codex/config.toml"));
+    if !planted {
+        return;
+    }
+    let turn = s.turn("Say hello.", &[]);
+    ran(&turn);
+    let ask = turn.asks()[0];
+    assert_eq!(
+        ask["body"]["model"], "gpt-5.5",
+        "the turn did not run on the model the account kept"
+    );
+    assert!(
+        !Turn::seen(ask).contains("e2e-planted"),
+        "the planted developer_instructions reached the model"
+    );
+    let link = || ok(&s.sh("readlink ~/.codex/config.toml"), "readlink").trim().to_string();
+    assert_eq!(link(), "/omh/prefs/config.toml");
+    let add = "codex mcp add e2e-writer -- /bin/true";
+    ok(&s.sh(add), add);
+    assert_eq!(link(), "/omh/prefs/config.toml", "codex's save replaced the link");
+    let live = ok(&s.sh("cat /omh/prefs/config.toml"), "cat /omh/prefs/config.toml");
+    let _ = s.sh("codex mcp remove e2e-writer");
+    assert!(live.contains("e2e-writer"), "codex's save missed the session's copy: {live}");
+    let kept = std::fs::read_to_string(s.account().join("preferences/config.toml"))
+        .unwrap_or_default();
+    assert!(
+        kept.contains("gpt-5.5") && !kept.contains("e2e-planted") && !kept.contains("e2e-writer"),
+        "the account kept: {kept}"
+    );
 }
 
 /// The account this session launched with carries what earlier sessions could

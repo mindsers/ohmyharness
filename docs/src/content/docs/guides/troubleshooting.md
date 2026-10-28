@@ -98,6 +98,9 @@ see [Something else](#something-else).
 | A server is `disabled` with `requirements (/etc/codex/requirements.toml)`, or a repo's `.codex/config.toml` hooks do not run | [Put it in your catalogue](#a-server-is-disabled-by-requirements-etccodexrequirementstoml) |
 | Codex does not start offline on an enterprise account | [Expected](#codex-does-not-start-offline-on-an-enterprise-account) |
 | A launch stops on `provider.toml`, or `omh doctor`'s `model provider` row is `✗` | [Fix the account's provider file](#a-launch-stops-on-providertoml) |
+| A launch says `… selects model_provider = …, and sessions no longer read it from there` | [Keep it as the account's provider](#a-launch-says-sessions-no-longer-read-model_provider-from-there) |
+| A launch says `… is in use by omh-…, started before codex's config was per session` | [Stop that session, then launch](#a-launch-says-the-account-is-in-use-by-a-session-started-before) |
+| A Codex setting from one session is gone in the next | [Expected, unless it is a preference](#a-codex-setting-from-one-session-is-gone-in-the-next) |
 | **Claude Code** | |
 | `claude mcp add` says "not allowed by enterprise policy" | [Put it in your catalogue](#claude-mcp-add-says-not-allowed-by-enterprise-policy) |
 | claude.ai connectors are missing in a session | [Expected](#claudeai-connectors-are-missing-in-a-session) |
@@ -606,6 +609,54 @@ $ omh auth codex --name work --provider ~/.codex/config.toml
 A field that reads the environment (`env_key`), runs a command (`auth`) or
 reads an AWS profile has to be settled on the host, which `--provider` does —
 or, for a command, refuses: put the token it produces in the file by hand.
+
+#### A launch says sessions no longer read `model_provider` from there
+
+The account's shared `~/.codex/config.toml` selects a model provider, and the
+first launch after upgrading is about to make that file
+[each session's own](/guides/accounts/#codexconfigtoml-is-each-sessions-own),
+keeping only preferences. A provider is not one, and nothing else on the
+account holds it, so every later session would send its turns to OpenAI.
+Nothing has changed yet:
+
+```
+omh: /Users/you/.omh/creds/codex/work/.codex/config.toml selects `model_provider = "azure"`, at https://example.openai.azure.com/openai, and sessions no longer read it from there — this launch would go to OpenAI instead. Keep it as the account's provider:
+
+    omh auth codex --name work --provider /Users/you/.omh/creds/codex/work/.codex/config.toml
+
+or remove `model_provider` from that file to use OpenAI
+```
+
+Run the command it names: it reads the provider out of that same file into the
+account's [provider file](/guides/accounts/#a-model-provider-of-your-own), and
+the next launch migrates. Read the `base_url` first — a session could have
+written that file.
+
+#### A launch says the account is in use by a session started before
+
+A session an older omh started still mounts the account, and still reads the
+shared `config.toml` — the migration would leave it reading a link it cannot
+follow, and its next save would rename over the link:
+
+```
+omh: /Users/you/.omh/creds/codex/work is in use by omh-api-3f9a2c1b-s02, started before codex's config was per session — stop it first (`omh sNN down`), and launch again
+```
+
+Stop it — `omh s02 down` in the repo it belongs to, or `docker rm -f` the name
+— and launch again. Once an account has migrated this is never asked again.
+With a runtime that keeps no labels on its sandboxes (`sbx`) omh cannot tell
+which are running, and says so instead.
+
+#### A Codex setting from one session is gone in the next
+
+Expected, unless it is a preference. A session's `config.toml` is its own: a
+server added with `codex mcp add`, a feature toggled, `developer_instructions`,
+a profile last that session. Your
+[preferences](/guides/accounts/#codexconfigtoml-is-each-sessions-own) — the
+model, its reasoning effort, the `tui` settings — reach the account when Codex
+exits in your terminal and at `omh sNN down` and `rm`, and omh says which. A
+server you want in every session goes in your catalogue
+([`[use]`](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue)).
 
 ### Claude Code
 
