@@ -194,7 +194,8 @@ launch and by `omh doctor`. `omh eject` writes the policy itself under
   Codex's source, offline it does not start; no enterprise account has been
   run. The account's model provider, `provider.toml` at the account's root,
   is rendered into the system layer beside omh's hooks, held to
-  `model_provider` and the fields of `[model_providers.*]` — see
+  `model_provider` and the fields of `[model_providers.*]` — declared by
+  [`[provider]`](#provider-the-accounts-model-provider), not here; see
   [A model provider of your own](/guides/accounts/#a-model-provider-of-your-own).
   Codex uses it from there (`tests/e2e`: every codex turn's provider comes
   from it); a session's own `config.toml`, which ranks above the system layer
