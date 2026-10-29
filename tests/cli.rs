@@ -16705,6 +16705,34 @@ fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
     );
 }
 
+/// `omh auth omp --import` keeps the host's own providers even though omp's
+/// login is nothing omh can copy: the account holds its providers, and that is
+/// the capture — said as one, not as a login waiting to be confirmed.
+#[test]
+fn an_omp_import_keeps_the_hosts_providers_as_the_capture() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, true);
+    let host = sb.home.join(".omp/agent/models.yml");
+    std::fs::create_dir_all(host.parent().unwrap()).unwrap();
+    std::fs::write(
+        &host,
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: sk-corp\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["auth", "omp", "--import"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said = printed(&out);
+    assert!(
+        said.contains("`default` captured for omp") && !said.contains("login not confirmed"),
+        "{said}"
+    );
+    assert!(sb
+        .home
+        .join(".omh/creds/omp/default/provider.yml")
+        .is_file());
+}
+
 /// Providers in the account's own `models.yml` would vanish behind the
 /// render, and a session could have written them: the launch refuses — a
 /// preview too — naming the file, where it points and the command that keeps
@@ -16812,17 +16840,20 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
          apiKey: E2E_HOST_SECRET\n    api: openai-completions\n",
     )
     .unwrap();
-    std::fs::remove_file(&omp).unwrap();
-    std::os::unix::fs::symlink(&outside, &omp).unwrap();
+    // `models.yaml`, not `models.yml`: a launch lays its mountpoint at the
+    // latter and refuses a link there before this rule is ever asked.
+    let link = omp.with_extension("yaml");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_omh"))
-        .args(["auth", "omp", "--provider", omp.to_str().unwrap()])
+        .args(["auth", "omp", "--provider", link.to_str().unwrap()])
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
         .env("E2E_HOST_SECRET", "sk-host-secret")
         .output()
         .unwrap();
     assert!(
-        !out.status.success(),
+        !out.status.success()
+            && printed(&out).contains("so nothing in it is read from your environment"),
         "a link out of ~/.omh: {}",
         printed(&out)
     );

@@ -37,7 +37,7 @@ toml_edit = "0.25"
 # from a file the user names or the host's own `models.yml`, and written to the
 # account. Chosen for its bounds on what a file can make a parse do — nodes,
 # nesting, alias replay — and for refusing a duplicate key and a second
-# document. 1.1 is the last release that builds on `rust-version`.
+# document. 1.1 is the last release before one that asks for rust 1.89.
 serde-saphyr = { version = "1.1", default-features = false, features = ["deserialize", "serialize"] }
 # `Session::diff` stages the worktree into an index of its own so a review can
 # see files the agent created without touching the index the user's git shares.

@@ -177,8 +177,9 @@ $ omh auth omp --name work --provider ~/.omp/agent/models.yml
 ```
 
 `--provider` takes an omp `models.yml` and logs nothing in. `--import` reads
-the one in `~/.omp/agent/`, or the `models.yaml` beside it, along with the
-login. An account that holds only providers counts as captured.
+the one in `~/.omp/agent/`, or the `models.yaml` beside it; omp's own login is
+not a file omh can copy, so the account holds the providers alone. An account
+that holds only providers counts as captured.
 
 **Only the providers are kept, in omp's own words.** `provider.yml` is a
 `models.yml`: `providers:` and nothing else, each provider's fields from omp's

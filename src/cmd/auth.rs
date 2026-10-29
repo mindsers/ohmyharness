@@ -138,9 +138,9 @@ pub(crate) fn auth_cmd(
     // somewhere omh cannot stat it means only that nothing is obviously
     // missing, and saying "captured" there announced a login to users who had
     // opened the harness, run nothing and quit.
-    // With `--provider` nothing was logged in, and the provider kept is the
-    // capture: there is no login to confirm.
-    let decided = auth::decided_by_files(&adapter) || provider.is_some();
+    // A provider kept with no login — `--provider`, or an import that found
+    // only providers to bring — is the capture: there is no login to confirm.
+    let decided = auth::decided_by_files(&adapter) || (provided.is_some() && imported.is_none());
     let mut action = if decided {
         report::Action::new(
             "account-captured",
