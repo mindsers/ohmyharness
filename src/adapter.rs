@@ -2115,6 +2115,18 @@ render = "concat"
                 "`flag = \"settings\"` must be a long option",
             ),
             (
+                "path = \"/etc/p/s.json\"\nflag = \"--\"\neject = \"$HOME/.p/s.json\"",
+                "`flag = \"--\"` must be a long option",
+            ),
+            (
+                "path = \"/etc/p/s.json\"\nflag = \"--set*\"\neject = \"$HOME/.p/s.json\"",
+                "`flag = \"--set*\"` must be a long option",
+            ),
+            (
+                "path = \"/etc\"\nflag = \"--settings\"\neject = \"$HOME/.p/s.json\"",
+                "must name a file under /etc/ — it is handed by `--settings`",
+            ),
+            (
                 "path = \"$HOME/.p/s.json\"\nflag = \"--settings\"\neject = \"$HOME/.p/s.json\"",
                 "must name a file under /etc/ — it is handed by `--settings`",
             ),
