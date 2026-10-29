@@ -273,11 +273,11 @@ pub fn read(account_dir: &Path) -> Result<Option<Value>> {
 /// `raw` as YAML, or where it stops being YAML omh reads — by line and column
 /// only: the parser's own message quotes the line, and the line can be a token.
 ///
-/// Read the way omp's reader does where the two could differ — only `true` and
-/// `false` are booleans, as in YAML 1.2 — and refused where they could
-/// disagree on what the file says: a merge key (`<<`), a duplicate key, a
-/// second document. The parser's budget bounds nodes, nesting and alias
-/// replay, so a file cannot make a launch's parse unbounded.
+/// Read the way omp's reader does where readers differ — only `true` and
+/// `false` are booleans, as Bun's YAML has it — and refused where a file could
+/// say one thing two ways: a merge key (`<<`), a duplicate key, a second
+/// document. The parser's budget bounds nodes, nesting and alias replay, so a
+/// file cannot make a launch's parse unbounded.
 pub(crate) fn parse(raw: &str) -> Result<Value> {
     let options = serde_saphyr::options! {
         strict_booleans: true,
@@ -621,6 +621,20 @@ mod tests {
         assert!(
             parse("providers:\n  x: {}\n  x: {}\n").is_err(),
             "a duplicate key"
+        );
+        assert!(
+            parse("a: &a {x: 1}\nproviders:\n  <<: *a\n").is_err(),
+            "a merge key"
+        );
+    }
+
+    /// Only `true` and `false` are booleans, as omp's reader has it — Bun's
+    /// YAML reads `yes` and `on` as the strings they are (measured, 1.3.14).
+    #[test]
+    fn a_word_is_a_string_as_omps_reader_reads_it() {
+        assert_eq!(
+            parse("a: yes\nb: on\nc: true\n").unwrap(),
+            json!({"a": "yes", "b": "on", "c": true})
         );
     }
 

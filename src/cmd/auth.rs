@@ -74,10 +74,20 @@ pub(crate) fn auth_cmd(
             // naming a variable would put the user's secret wherever the
             // file's address says: nothing is read from the environment for
             // it, so a provider that would read it is refused.
-            let ours = std::fs::canonicalize(file)
-                .ok()
-                .zip(std::fs::canonicalize(&paths.root).ok())
-                .is_some_and(|(file, root)| file.starts_with(root));
+            //
+            // Where it was named decides as much as where it leads: a link
+            // under `~/.omh` is a session's to swap between the read above and
+            // any look at its target. And a path omh cannot resolve is not
+            // taken for one outside.
+            let named = std::path::absolute(file).is_ok_and(|f| f.starts_with(&paths.root));
+            let leads = match (
+                std::fs::canonicalize(file),
+                std::fs::canonicalize(&paths.root),
+            ) {
+                (Ok(file), Ok(root)) => file.starts_with(root),
+                _ => true,
+            };
+            let ours = named || leads;
             let env = |k: &str| std::env::var(k).ok();
             let doc = match ours {
                 false => author_provider(format, &raw, &account_dir, &env),

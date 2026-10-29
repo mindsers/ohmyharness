@@ -16801,6 +16801,37 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
             "{harness}: the secret was kept: {body}"
         );
     }
+
+    // Named under `~/.omh` and a link out of it: the link is the session's to
+    // swap between the read and any look at where it leads, so where it was
+    // named decides, whatever it resolves to.
+    let outside = sb.home.join("outside-models.yml");
+    std::fs::write(
+        &outside,
+        "providers:\n  corp:\n    baseUrl: https://collector.example.invalid/v1\n    \
+         apiKey: E2E_HOST_SECRET\n    api: openai-completions\n",
+    )
+    .unwrap();
+    std::fs::remove_file(&omp).unwrap();
+    std::os::unix::fs::symlink(&outside, &omp).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .args(["auth", "omp", "--provider", omp.to_str().unwrap()])
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("E2E_HOST_SECRET", "sk-host-secret")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a link out of ~/.omh: {}",
+        printed(&out)
+    );
+    let body = std::fs::read_to_string(sb.home.join(".omh/creds/omp/default/provider.yml"))
+        .unwrap_or_default();
+    assert!(
+        !body.contains("sk-host-secret"),
+        "the secret was kept: {body}"
+    );
 }
 
 /// `omh doctor` names omp's providers by name and file, and an account's own
@@ -17147,6 +17178,57 @@ fn a_codex_login_reads_its_preferences_as_a_session_does() {
         std::fs::read_to_string(PathBuf::from(&live).join("config.toml")).unwrap(),
         "model = \"gpt-5.5\"\n"
     );
+}
+
+/// The model cache a session left goes before every start of omp on the
+/// account, not only a session's: an `omh auth` login and `omh doctor`'s
+/// probe each run omp on it too — and each reads the providers the launch
+/// renders, read-only.
+#[test]
+fn omps_model_cache_goes_before_a_login_and_a_probe_too() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = sb.home.join(".omh/creds/omp/default");
+    let agent = account.join(".omp/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    std::fs::write(
+        account.join("provider.yml"),
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: sk-corp\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let plant = || {
+        for db in ["models.db", "models.db-wal", "models.db-shm"] {
+            std::fs::write(agent.join(db), "cached").unwrap();
+        }
+    };
+
+    let log = sb.fake_docker();
+    plant();
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["auth", "omp"]);
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let guest = "/home/agent/.omp/agent/models.yml";
+    let host = mounted_at(&seen, guest).unwrap_or_else(|| panic!("{}", printed(&out)));
+    assert!(seen.contains(&format!("{host}:{guest}:ro")), "{seen}");
+    for db in ["models.db", "models.db-wal", "models.db-shm"] {
+        assert!(
+            !agent.join(db).exists(),
+            "{db} survived a login: {}",
+            printed(&out)
+        );
+    }
+
+    sb.fake_docker_answering_doctor(&[], &[]);
+    plant();
+    let out = sb.omh(&["doctor", "--json", "--harness", "omp"]);
+    for db in ["models.db", "models.db-wal", "models.db-shm"] {
+        assert!(
+            !agent.join(db).exists(),
+            "{db} survived a probe: {}",
+            printed(&out)
+        );
+    }
 }
 
 /// `omh doctor` names what the next launch does to the account's file and
