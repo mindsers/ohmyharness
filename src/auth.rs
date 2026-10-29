@@ -101,10 +101,9 @@ pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     // token is the login for a harness pointed at it (#197 §6).
     let dir = dir(paths, adapter, account);
     let provider = adapter
-        .policy
+        .provider
         .as_ref()
-        .is_some_and(|p| p.format.reads_provider())
-        && dir.join(crate::provider::FILE).is_file();
+        .is_some_and(|p| dir.join(crate::provider::file(p.format)).is_file());
     provider || unfilled(adapter, &dir, GUEST_HOME).is_empty()
 }
 
@@ -208,17 +207,23 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     // Docker refuses to create a mountpoint inside a bind-mounted host
     // directory, so anything omh will mount *inside* a credential directory has
     // to exist on the host first or the launch fails outright.
-    // A masked path is a file mount like a rendered document's.
+    // A masked path is a file mount like a rendered document's, and so is the
+    // file a provider render hides.
     let masked = adapter
         .policy
         .iter()
         .flat_map(|p| p.mask.iter())
         .map(|path| (path, Point::Empty));
+    let provided = adapter
+        .provider
+        .iter()
+        .flat_map(|p| p.path.iter())
+        .map(|path| (path, Point::File));
     let bound = adapter.capabilities.values().map(|b| match b.render {
         crate::adapter::Render::Dir => (&b.path, Point::Dir),
         _ => (&b.path, Point::File),
     });
-    for (path, point) in bound.chain(masked) {
+    for (path, point) in bound.chain(masked).chain(provided) {
         let guest = crate::adapter::expand(path, guest_home);
         let Some(cred) = creds
             .iter()
@@ -248,6 +253,49 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         } else {
             std::fs::create_dir_all(&cred.host)?;
         }
+    }
+    Ok(())
+}
+
+/// Remove from the account each file `[provider] drop` names: a cache the
+/// harness rebuilds, which a session could have written to carry a
+/// provider's endpoint into the next one.
+///
+/// One name at a time through [`crate::held`], from the account down: a link
+/// on the way is not entered, a link at the name is the link removed, and a
+/// directory there is refused by name. What is not there is already gone.
+pub fn drop_carried(adapter: &Adapter, account_dir: &std::path::Path) -> Result<()> {
+    let Some(provider) = &adapter.provider else {
+        return Ok(());
+    };
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    'files: for drop in &provider.drop {
+        let rel = std::path::Path::new(drop.trim_start_matches("$HOME/"));
+        let names: Vec<&std::ffi::OsStr> = rel.iter().collect();
+        let Some((leaf, above)) = names.split_last() else {
+            continue;
+        };
+        let refuse = |e: std::io::Error| {
+            anyhow::anyhow!(
+                "{} could not be removed ({e}) — a cache omp rebuilds, which a session can \
+                 write to carry a provider's address into the next one. Remove it and launch \
+                 again",
+                account_dir.join(rel).display()
+            )
+        };
+        let mut dir = match crate::held::Dir::open(account_dir) {
+            Ok(d) => d,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(refuse(e)),
+        };
+        for name in above {
+            dir = match dir.sub(name) {
+                Ok(d) => d,
+                Err(e) if gone(&e) => continue 'files,
+                Err(e) => return Err(refuse(e)),
+            };
+        }
+        dir.remove(leaf).map_err(refuse)?;
     }
     Ok(())
 }
@@ -510,48 +558,11 @@ const SEEDED_FROM: &str = ".omh-seeded-from";
 /// 231 KB), and a bound on what a session could make a launch read.
 const COPY_CAP: u64 = 16 << 20;
 
-/// `rel` under `dir`, read as a file a session could have written: one name at
-/// a time through [`crate::held`], never through a link, never past
-/// [`COPY_CAP`], UTF-8 or refused. Absent is empty — `prepare` lays a
-/// placeholder anyway.
+/// `rel` under `dir`, read as a file a session could have written, through
+/// [`crate::held::read_under`] and never past [`COPY_CAP`]. Absent is empty —
+/// `prepare` lays a placeholder anyway.
 fn read_account_file(dir: &std::path::Path, rel: &str) -> Result<String> {
-    use std::io::Read;
-    let path = std::path::Path::new(rel);
-    let names: Vec<&std::ffi::OsStr> = path.iter().collect();
-    let Some((leaf, above)) = names.split_last() else {
-        anyhow::bail!("{rel} names no file");
-    };
-    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
-    let mut held = match crate::held::Dir::open(dir) {
-        Ok(d) => d,
-        Err(e) if gone(&e) => return Ok(String::new()),
-        Err(e) => return Err(e.into()),
-    };
-    for name in above {
-        held = match held.sub(name) {
-            Ok(d) => d,
-            Err(e) if gone(&e) => return Ok(String::new()),
-            Err(e) => return Err(e.into()),
-        };
-    }
-    let file = match held.file(leaf) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(e) => {
-            return Err(e).context(
-                "it is a link or not a regular file, which omh does not follow or read \
-                 where a session could have written",
-            )
-        }
-    };
-    let mut bytes = Vec::new();
-    file.take(COPY_CAP + 1).read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= COPY_CAP,
-        "it is larger than omh reads ({} MiB)",
-        COPY_CAP >> 20
-    );
-    String::from_utf8(bytes).context("it is not UTF-8")
+    crate::held::read_under(dir, rel, COPY_CAP)
 }
 
 /// The account a launch of this harness is configured with, if any — its own
@@ -1849,6 +1860,86 @@ mod tests {
             let point = d.path().join(mask.trim_start_matches("$HOME/"));
             assert_eq!(std::fs::read_to_string(point).unwrap(), "the harness's own");
         }
+    }
+
+    /// The file omp reads providers from, which the provider render hides,
+    /// needs its mountpoint in the account like a mask — and one already there
+    /// keeps its bytes, which a launch reads to see whether it defines
+    /// providers of its own. A link there is refused, never written through.
+    #[test]
+    fn omps_models_file_gets_a_mountpoint_and_keeps_its_bytes() {
+        let a = omp();
+        let rel = a.provider.as_ref().unwrap().path.as_deref().unwrap();
+        let rel = rel.trim_start_matches("$HOME/");
+
+        let d = tempfile::tempdir().unwrap();
+        prepare(&a, d.path(), "/home/agent").unwrap();
+        assert!(d.path().join(rel).is_file(), "{rel} has no mountpoint");
+
+        let d = tempfile::tempdir().unwrap();
+        let point = d.path().join(rel);
+        std::fs::create_dir_all(point.parent().unwrap()).unwrap();
+        std::fs::write(&point, "providers: {}\n").unwrap();
+        prepare(&a, d.path(), "/home/agent").unwrap();
+        assert_eq!(std::fs::read_to_string(&point).unwrap(), "providers: {}\n");
+
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("elsewhere");
+        std::fs::write(&target, "kept").unwrap();
+        let point = d.path().join("account").join(rel);
+        std::fs::create_dir_all(point.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &point).unwrap();
+        assert!(prepare(&a, &d.path().join("account"), "/home/agent").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+    }
+
+    /// omp's model cache can carry a provider's endpoint into the next
+    /// session, and omp rebuilds it: each file `[provider] drop` names goes
+    /// before a launch, and nothing else of the account's. A link there is the
+    /// link, never what it points at; a directory there is not a file omh
+    /// removes, and is named.
+    #[test]
+    fn a_dropped_file_goes_and_nothing_else_does() {
+        let a = omp();
+        let drops: Vec<&str> = a
+            .provider
+            .as_ref()
+            .unwrap()
+            .drop
+            .iter()
+            .map(|d| d.trim_start_matches("$HOME/"))
+            .collect();
+        assert!(!drops.is_empty());
+        let d = tempfile::tempdir().unwrap();
+        let agent = d.path().join(".omp/agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        for rel in &drops {
+            std::fs::write(d.path().join(rel), "cached").unwrap();
+        }
+        std::fs::write(agent.join("agent.db"), "logins").unwrap();
+        drop_carried(&a, d.path()).unwrap();
+        for rel in &drops {
+            assert!(!d.path().join(rel).exists(), "{rel} is still there");
+        }
+        assert_eq!(
+            std::fs::read_to_string(agent.join("agent.db")).unwrap(),
+            "logins"
+        );
+        // Again, with nothing left to drop.
+        drop_carried(&a, d.path()).unwrap();
+        // An account with no omp directory yet.
+        drop_carried(&a, &d.path().join("fresh")).unwrap();
+
+        let target = d.path().join("elsewhere");
+        std::fs::write(&target, "kept").unwrap();
+        std::os::unix::fs::symlink(&target, d.path().join(drops[0])).unwrap();
+        drop_carried(&a, d.path()).unwrap();
+        assert!(std::fs::symlink_metadata(d.path().join(drops[0])).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+
+        std::fs::create_dir(d.path().join(drops[0])).unwrap();
+        let e = format!("{:#}", drop_carried(&a, d.path()).unwrap_err());
+        assert!(e.contains(drops[0]), "{e}");
     }
 
     /// The account was writable in every session before the mask, so what

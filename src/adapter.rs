@@ -97,6 +97,51 @@ pub struct Adapter {
     /// else a session writes there reaches the next one.
     #[serde(default)]
     pub preferences: Option<Preferences>,
+    /// The account's model provider: a file at the account's root, in the
+    /// harness's own schema (`provider.rs`), rendered into a layer the
+    /// session cannot write. Absent where a harness takes none yet.
+    #[serde(default)]
+    pub provider: Option<Provider>,
+}
+
+/// Where an account's model provider comes from and where a session reads it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provider {
+    pub format: ProviderFormat,
+    /// Where the harness keeps its own provider on the host, for `omh auth
+    /// --import` to read. `$HOME` is the user's.
+    pub import: String,
+    /// The file the harness reads providers from, hidden behind the render,
+    /// read-only — strictly inside one of `creds`' directories. Only for a
+    /// format that is a file of its own: Codex's rides in its System layer.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Files in the account that can carry a provider's endpoint into the
+    /// next session and that the harness rebuilds: removed from the account
+    /// before each launch. Each strictly inside one of `creds`' directories.
+    #[serde(default)]
+    pub drop: Vec<String>,
+}
+
+/// What a provider file is written as, which is a claim about one harness.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderFormat {
+    /// `model_provider` and `[model_providers.*]` of Codex's `config.toml`.
+    CodexConfig,
+    /// omp's `models.yml`.
+    OmpModels,
+}
+
+impl ProviderFormat {
+    /// As an adapter spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CodexConfig => "codex-config",
+            Self::OmpModels => "omp-models",
+        }
+    }
 }
 
 /// A file the harness reads as policy — above anything a session can leave
@@ -143,21 +188,6 @@ impl PolicyFormat {
         match self {
             Self::CodexRequirements => "codex-requirements",
             Self::ClaudeManaged => "claude-managed",
-        }
-    }
-
-    /// Whether this harness takes an account's provider file (`provider.rs`),
-    /// rendered into a layer the session cannot write.
-    pub fn reads_provider(self) -> bool {
-        self.provider_source().is_some()
-    }
-
-    /// Where this harness keeps its own provider on the host, for `omh auth
-    /// --import` to read — `None` for one that takes no provider file.
-    pub fn provider_source(self) -> Option<&'static str> {
-        match self {
-            Self::CodexRequirements => Some("$HOME/.codex/config.toml"),
-            Self::ClaudeManaged => None,
         }
     }
 
@@ -787,7 +817,81 @@ impl Adapter {
         adapter.check_hook_maps(&path)?;
         adapter.check_policy(&path)?;
         adapter.check_preferences(&path)?;
+        adapter.check_provider(&path)?;
         Ok(adapter)
+    }
+
+    /// A provider render hides a file the account keeps, so it lands strictly
+    /// inside one of `creds`' directories, where `auth::prepare` lays its
+    /// mountpoint — and only for a format that is a file of its own. A dropped
+    /// file is removed from the account, so it is one the account holds too.
+    /// Neither walks with `..`: both are joined into the account directory on
+    /// the host. An import reads the user's own home.
+    fn check_provider(&self, path: &Path) -> Result<()> {
+        let Some(provider) = &self.provider else {
+            return Ok(());
+        };
+        let shown = path.display();
+        let format = provider.format.name();
+        let dirs: Vec<&str> = self
+            .creds
+            .iter()
+            .filter(|c| c.ends_with('/'))
+            .map(String::as_str)
+            .collect();
+        let inside = |p: &str| {
+            dirs.iter()
+                .any(|d| p.strip_prefix(d).is_some_and(|rest| !rest.is_empty()))
+        };
+        let walks = |p: &str| {
+            Path::new(p)
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        };
+        match (provider.format, &provider.path) {
+            (ProviderFormat::OmpModels, None) => anyhow::bail!(
+                "adapter {shown}: `[provider]` format {format} needs a `path` — the file omp \
+                 reads providers from, which the render hides"
+            ),
+            (ProviderFormat::CodexConfig, Some(_)) => anyhow::bail!(
+                "adapter {shown}: `[provider]` format {format} takes no `path` — it is \
+                 rendered into Codex's System layer"
+            ),
+            (_, Some(at)) => {
+                anyhow::ensure!(
+                    inside(at),
+                    "adapter {shown}: `[provider] path = {at:?}` must be strictly inside one of \
+                     this adapter's credential directories ({})",
+                    dirs.join(", ")
+                );
+                anyhow::ensure!(
+                    !walks(at),
+                    "adapter {shown}: `[provider] path = {at:?}` has a `..` — it is joined \
+                     into the account directory on the host"
+                );
+            }
+            (_, None) => {}
+        }
+        let import = &provider.import;
+        anyhow::ensure!(
+            import.starts_with("$HOME/") && !walks(import),
+            "adapter {shown}: `[provider] import = {import:?}` must be under $HOME/, with no \
+             `..` — it is the user's own file"
+        );
+        for drop in &provider.drop {
+            anyhow::ensure!(
+                inside(drop),
+                "adapter {shown}: `[provider]` drop entry {drop:?} must be strictly inside one \
+                 of this adapter's credential directories ({})",
+                dirs.join(", ")
+            );
+            anyhow::ensure!(
+                !walks(drop),
+                "adapter {shown}: `[provider]` drop entry {drop:?} has a `..` — it is joined \
+                 into the account directory on the host"
+            );
+        }
+        Ok(())
     }
 
     /// The policy is above everything a session leaves behind only if a
@@ -1811,6 +1915,99 @@ render = "concat"
             );
             let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
             assert!(err.contains(names), "{top} / {policy}: {err}");
+        }
+    }
+
+    /// A provider render hides a file the account keeps, so it lands strictly
+    /// inside a `creds` directory, where `auth::prepare` lays its mountpoint;
+    /// so does every file dropped before a launch. Neither walks with `..`, and
+    /// an import reads the user's own home.
+    #[test]
+    fn a_provider_omh_could_not_mount_or_drop_safely_is_refused() {
+        // Each rule refuses in words no other rule uses.
+        for (provider, names) in [
+            (
+                "format = \"omp-models\"\nimport = \"$HOME/.p/m.yml\"",
+                "omp-models needs a `path`",
+            ),
+            (
+                "format = \"codex-config\"\nimport = \"$HOME/.p/c.toml\"\npath = \"$HOME/.p/m.yml\"",
+                "codex-config takes no `path`",
+            ),
+            (
+                "format = \"omp-models\"\nimport = \"$HOME/.p/m.yml\"\npath = \"/etc/m.yml\"",
+                "`[provider] path = \"/etc/m.yml\"` must be strictly inside",
+            ),
+            (
+                "format = \"omp-models\"\nimport = \"$HOME/.p/m.yml\"\npath = \"$HOME/.p\"",
+                "`[provider] path = \"$HOME/.p\"` must be strictly inside",
+            ),
+            (
+                "format = \"omp-models\"\nimport = \"$HOME/.p/m.yml\"\npath = \"$HOME/.p/../x\"",
+                "`[provider] path = \"$HOME/.p/../x\"` has a `..`",
+            ),
+            (
+                "format = \"omp-models\"\nimport = \"/etc/m.yml\"\npath = \"$HOME/.p/m.yml\"",
+                "`[provider] import = \"/etc/m.yml\"` must be under $HOME/",
+            ),
+            (
+                "format = \"omp-models\"\nimport = \"$HOME/.p/m.yml\"\npath = \"$HOME/.p/m.yml\"\n\
+                 drop = [\"$HOME/elsewhere/c.db\"]",
+                "drop entry \"$HOME/elsewhere/c.db\" must be strictly inside",
+            ),
+            (
+                "format = \"omp-models\"\nimport = \"$HOME/.p/m.yml\"\npath = \"$HOME/.p/m.yml\"\n\
+                 drop = [\"$HOME/.p/../c.db\"]",
+                "drop entry \"$HOME/.p/../c.db\" has a `..`",
+            ),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "p.toml",
+                &format!(
+                    "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\ncreds = [\"$HOME/.p/\"]\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
+                     [provider]\n{provider}\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
+            assert!(err.contains(names), "{provider}: {err}");
+        }
+    }
+
+    /// Codex and omp each take a provider file, imported from where the
+    /// harness keeps its own on the host; omp's is rendered over the file it
+    /// reads providers from, and its model cache — which can carry a
+    /// provider's endpoint (`model-registry.ts`, v18.10.4) — is dropped. Claude
+    /// and opencode take none yet (#197 §6, "after").
+    #[test]
+    fn the_shipped_providers_are_where_each_harness_reads_its_own() {
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        let p = codex
+            .provider
+            .as_ref()
+            .expect("codex takes a provider file");
+        assert_eq!(p.format, ProviderFormat::CodexConfig);
+        assert_eq!(p.import, "$HOME/.codex/config.toml");
+        assert!(p.path.is_none() && p.drop.is_empty());
+
+        let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
+        let p = omp.provider.as_ref().expect("omp takes a provider file");
+        assert_eq!(p.format, ProviderFormat::OmpModels);
+        assert_eq!(p.path.as_deref(), Some("$HOME/.omp/agent/models.yml"));
+        assert_eq!(p.import, "$HOME/.omp/agent/models.yml");
+        for db in ["models.db", "models.db-wal", "models.db-shm"] {
+            assert!(
+                p.drop.contains(&format!("$HOME/.omp/agent/{db}")),
+                "{db}: {:?}",
+                p.drop
+            );
+        }
+
+        for name in ["claude", "opencode"] {
+            let a = Adapter::find(Path::new(REAL), name).unwrap();
+            assert!(a.provider.is_none(), "{name}");
         }
     }
 

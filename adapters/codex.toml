@@ -216,6 +216,14 @@ path   = "/etc/codex/requirements.toml"
 format = "codex-requirements"
 mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
 
+# The account's model provider — `model_provider` and `[model_providers.*]` —
+# kept in `provider.toml` at the account root, which no mount reaches, and
+# rendered into the System layer, `/etc/codex/config.toml`, beside omh's hooks
+# (#197 §6). `--import` takes it from the host's own config.
+[provider]
+format = "codex-config"
+import = "$HOME/.codex/config.toml"
+
 # The keys of `~/.codex/config.toml` that are yours — a model, a theme — kept
 # per account and copied into each session (omh's `prefs`). Everything else a
 # session writes there — a server, `developer_instructions`, a provider, a

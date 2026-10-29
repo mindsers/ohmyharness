@@ -377,7 +377,7 @@ pub(crate) fn doctor_cmd(
             host.0.push(row);
             anyhow::ensure!(
                 !broken,
-                "the account's provider file would refuse every {name} start"
+                "the account's model provider would refuse every {name} start"
             );
         }
         // The account's preferences: what the next launch does to its file,
@@ -502,9 +502,19 @@ pub(crate) fn doctor_cmd(
         // A login to probe, not merely an account: one can hold only its model
         // provider, and a probe of a token that is not there fails as a token
         // that will not persist.
-        let logged_in = account
-            .as_deref()
-            .is_some_and(|a| auth::unfilled(&adapter, a, auth::GUEST_HOME).is_empty());
+        // A harness only it can say is logged in (a probe) has nothing to say
+        // for an account whose model provider is its login: asked, omp
+        // answers "no account" for an account that works.
+        let provider_is_login = |a: &std::path::Path| {
+            adapter.token_probe.is_some()
+                && adapter
+                    .provider
+                    .as_ref()
+                    .is_some_and(|p| a.join(crate::provider::file(p.format)).is_file())
+        };
+        let logged_in = account.as_deref().is_some_and(|a| {
+            auth::unfilled(&adapter, a, auth::GUEST_HOME).is_empty() && !provider_is_login(a)
+        });
         if logged_in {
             checks.extend(doctor::credential_checks(&adapter));
         }
@@ -635,6 +645,9 @@ pub(crate) fn doctor_cmd(
                 &adapter,
                 &container::prefs_home(&paths, &session, adapter.name.as_str()),
             )?;
+        }
+        if let Some(account_dir) = account.as_ref().filter(|_| !dry_run) {
+            auth::drop_carried(&adapter, account_dir)?;
         }
         plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 

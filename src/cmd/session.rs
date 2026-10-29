@@ -240,6 +240,7 @@ pub(crate) fn session_up(
         Some(account) => crate::prefs::check(adapter, account)?.map(|p| (p, account.clone())),
         None => None,
     };
+    let account_dir = opts.account_dir.clone();
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate_for(backend)?;
 
@@ -282,6 +283,11 @@ pub(crate) fn session_up(
         for note in prefs.seed(adapter, &home)? {
             ctx.warn(&note);
         }
+    }
+    // What a session could have left a provider's address in, which the
+    // harness rebuilds: gone before this one starts.
+    if let Some(account) = &account_dir {
+        auth::drop_carried(adapter, account)?;
     }
     image::ensure_stack(
         backend,

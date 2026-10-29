@@ -1350,10 +1350,10 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // Getting started was one page until it became two, and all fifteen
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
-        ("docs/src/content/docs/guides/accounts.md", 12),
+        ("docs/src/content/docs/guides/accounts.md", 13),
         ("docs/src/content/docs/guides/code-graph.md", 1),
         ("docs/src/content/docs/guides/editors.md", 4),
-        ("docs/src/content/docs/guides/troubleshooting.md", 15),
+        ("docs/src/content/docs/guides/troubleshooting.md", 16),
         ("docs/src/content/docs/project/decisions.md", 1),
         ("docs/src/content/docs/reference/adapters.md", 2), // + `omh doctor --harness` in adding a harness
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
@@ -2049,6 +2049,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/profile.rs", 1),
         // `omh auth codex --provider <file>`, in a provider field's refusal.
         ("src/provider.rs", 1),
+        // `omh auth omp --name <account> --provider <file>`, when the
+        // account's own models file defines providers a launch would hide.
+        ("src/provider/omp.rs", 1),
         ("src/render.rs", 1),
         // `select`'s refusal when only the unmeasured backend is present
         // names `omh doctor` as the way to check it first.

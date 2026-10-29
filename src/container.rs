@@ -445,8 +445,8 @@ pub fn plan(
     // The account's provider, for the harness that takes one: checked here,
     // so a file that would stop every start of the harness refuses the
     // launch instead, naming itself.
-    let provider = match (&adapter.policy, &opts.account_dir) {
-        (Some(policy), Some(account)) if policy.format.reads_provider() => {
+    let provider = match (&adapter.provider, &opts.account_dir) {
+        (Some(p), Some(account)) if p.format == crate::adapter::ProviderFormat::CodexConfig => {
             crate::provider::read(account)?
         }
         _ => None,
@@ -844,6 +844,18 @@ pub fn plan(
         policy_notes = crate::notice::policy(policy, work, opts.account_dir.as_deref());
     }
 
+    // The account's model providers, for a harness that reads them from a
+    // file of its own: rendered from the account's provider file over that
+    // file, read-only. After the credentials, because it lands inside the
+    // account's directory.
+    if let (Some(provider), Some(account)) = (&adapter.provider, &opts.account_dir) {
+        if let (crate::adapter::ProviderFormat::OmpModels, Some(path)) =
+            (provider.format, &provider.path)
+        {
+            stage_omp_models(path, account, &stage, staging, &mut mounts)?;
+        }
+    }
+
     // The harness's transcripts, over a per-session directory omh owns, so a
     // review can read what the agent did without reaching into the container.
     // Writable — the harness writes here — and only for a real session (a
@@ -987,6 +999,53 @@ fn stage_policy(
             file: true,
         });
     }
+    Ok(())
+}
+
+/// Render the account's omp providers over `path`, the `models.yml` omp
+/// reads, read-only and for the user alone since a provider can carry a key —
+/// `{}` when the account's provider file has none.
+///
+/// Providers the account's own models file defines, with no provider file to
+/// carry them, refuse the launch instead: the render would hide them without
+/// a word, and a session could have written them, so they are never adopted
+/// unasked.
+fn stage_omp_models(
+    path: &str,
+    account: &Path,
+    stage: &Path,
+    staging: Staging,
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    use crate::provider::omp;
+    let doc = omp::read(account)?;
+    if doc.is_none() {
+        let own = omp::stranded(account, path.trim_start_matches("$HOME/")).context(
+            "omh cannot tell whether the account's own models file defines providers, which \
+             the provider render would hide",
+        )?;
+        if let Some(own) = own {
+            let name = account
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            anyhow::bail!("{}", own.refusal(&name));
+        }
+    }
+    let body = omp::render(doc.as_ref())?;
+    let file = stage.join("provider.rendered");
+    if staging == Staging::Apply {
+        std::fs::create_dir_all(stage)?;
+        crate::held::Dir::open(stage)?
+            .replace_private(std::ffi::OsStr::new("provider.rendered"), body.as_bytes())
+            .context("staging the account's model providers")?;
+    }
+    mounts.push(Mount {
+        host: file,
+        guest: expand(path, GUEST_HOME),
+        read_only: true,
+        file: true,
+    });
     Ok(())
 }
 
@@ -2096,7 +2155,7 @@ mod tests {
     #[test]
     fn with_an_account_every_writable_mount_is_one_of_these() {
         let fx = fixture();
-        for harness in ["claude", "codex"] {
+        for harness in ["claude", "codex", "omp"] {
             let account = fx.paths.root.join("creds").join(harness).join("work");
             let p = plan_account(&fx, harness, Some(account.clone()));
             let run = fx.paths.runs().join(&fx.session.id);
@@ -2119,10 +2178,30 @@ mod tests {
                     .iter()
                     .any(|m| m.host == account.join(".claude.json")
                         || m.host.starts_with(account.join("preferences"))
-                        || m.host == account.join(crate::provider::FILE)),
+                        || m.host == account.join(crate::provider::FILE)
+                        || m.host == account.join(crate::provider::omp::FILE)),
                 "{harness}: the account's own copied file, kept values or provider is mounted"
             );
         }
+    }
+
+    /// omp reads its providers from `models.yml` inside the account's
+    /// directory, which is mounted writable: the file itself is mounted over
+    /// it, read-only, and after the directory — a mount made before the one it
+    /// sits in is hidden by it.
+    #[test]
+    fn omps_models_file_is_never_one_a_session_can_write() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/omp/work");
+        let p = plan_account(&fx, "omp", Some(account));
+        let models = Path::new(GUEST_HOME).join(".omp/agent/models.yml");
+        let at = p
+            .mounts
+            .iter()
+            .rposition(|m| models.starts_with(&m.guest))
+            .expect("something mounts there");
+        let m = &p.mounts[at];
+        assert!(m.guest == models && m.read_only && m.file, "{m:?}");
     }
 
     /// A codex session reads its preferences from its own copy, mounted at
@@ -3596,6 +3675,103 @@ mod tests {
             err.contains("provider.toml") && err.contains("notify"),
             "{err}"
         );
+    }
+
+    /// An account's providers reach omp in the `models.yml` it reads, from
+    /// the account's provider file, read-only and for the user alone since it
+    /// can carry a key; `{}` when it holds none, so whatever the account's own
+    /// `models.yml` says never reaches a session. A broken provider file
+    /// refuses the launch, naming itself.
+    #[test]
+    fn the_accounts_providers_reach_omp_read_only_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/omp/default");
+        std::fs::create_dir_all(&account).unwrap();
+        let models = Path::new(GUEST_HOME).join(".omp/agent/models.yml");
+        let staged = |p: &Plan| {
+            let m = p
+                .mounts
+                .iter()
+                .find(|m| m.guest == models)
+                .expect("models.yml is mounted");
+            assert!(m.read_only && m.file, "{m:?}");
+            let mode = std::fs::metadata(&m.host).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "a staged key is the user's alone: {mode:o}"
+            );
+            crate::provider::omp::parse(&std::fs::read_to_string(&m.host).unwrap()).unwrap()
+        };
+
+        let p = plan_account(&fx, "omp", Some(account.clone()));
+        assert_eq!(staged(&p), serde_json::json!({}));
+
+        std::fs::write(
+            account.join(crate::provider::omp::FILE),
+            "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+             apiKey: sk-secret\n    api: openai-completions\n",
+        )
+        .unwrap();
+        let p = plan_account(&fx, "omp", Some(account.clone()));
+        assert_eq!(
+            staged(&p)["providers"]["corp"]["baseUrl"],
+            "https://llm.example.invalid/v1"
+        );
+
+        std::fs::write(
+            account.join(crate::provider::omp::FILE),
+            "providers:\n  corp:\n    apiKey: '!cat /x'\n",
+        )
+        .unwrap();
+        let err = format!(
+            "{:#}",
+            try_plan_account(&fx, "omp", Some(account)).expect_err("a broken provider file")
+        );
+        assert!(
+            err.contains("provider.yml") && err.contains("providers.corp.apiKey"),
+            "{err}"
+        );
+        assert!(!err.contains("/x"), "the value is shown: {err}");
+    }
+
+    /// Providers the account's own `models.yml` defines would be hidden by
+    /// the render without a word — and a session could have written them, so
+    /// they are never adopted unasked: the launch refuses, naming the file,
+    /// what it points at and the command that keeps it. Once the account has
+    /// a provider file, its own `models.yml` is not read.
+    #[test]
+    fn an_accounts_own_providers_refuse_the_launch_until_kept_or_removed() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/omp/default");
+        std::fs::create_dir_all(account.join(".omp/agent")).unwrap();
+        std::fs::write(
+            account.join(".omp/agent/models.yml"),
+            "providers:\n  corp:\n    baseUrl: https://user:pw-in-url@llm.example.invalid/v1\n    \
+             apiKey: sk-secret\n",
+        )
+        .unwrap();
+        let err = format!(
+            "{:#}",
+            try_plan_account(&fx, "omp", Some(account.clone())).expect_err("stranded")
+        );
+        let file = account.join(".omp/agent/models.yml");
+        for said in [
+            file.display().to_string(),
+            "corp".to_string(),
+            "llm.example.invalid".to_string(),
+            format!("omh auth omp --name default --provider {}", file.display()),
+        ] {
+            assert!(err.contains(&said), "{said}: {err}");
+        }
+        assert!(
+            !err.contains("sk-secret") && !err.contains("pw-in-url"),
+            "{err}"
+        );
+
+        std::fs::write(account.join(crate::provider::omp::FILE), "providers: {}\n").unwrap();
+        try_plan_account(&fx, "omp", Some(account)).unwrap();
     }
 
     /// A file a session could write and the harness trusts on its next start
@@ -5258,6 +5434,10 @@ mod tests {
     }
 
     fn plan_account(fx: &Fx, harness: &str, account_dir: Option<PathBuf>) -> Plan {
+        try_plan_account(fx, harness, account_dir).unwrap()
+    }
+
+    fn try_plan_account(fx: &Fx, harness: &str, account_dir: Option<PathBuf>) -> Result<Plan> {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
         let (own, repo) = decided_from(fx);
         plan(
@@ -5280,7 +5460,6 @@ mod tests {
                 resolves: BTreeMap::new(),
             },
         )
-        .unwrap()
     }
 
     fn stamped(labels: &[(String, String)], key: &str) -> String {

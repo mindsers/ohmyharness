@@ -208,3 +208,30 @@ template = 'return { content: [...(event.content ?? []), { type: "text", text: {
 # on Claude Code, rather than a throw the shell has to interpret.
 [capabilities.hooks.refuse]
 template = 'return { block: true, reason: {{text}} }'
+
+# The account's model providers, kept in `provider.yml` at the account root,
+# which no mount reaches, and rendered over `models.yml` read-only — `{}` when
+# there are none (#197 §0, §6). In the account, `models.yml` is a file every
+# session can rewrite, and omp trusts it at the next start: a provider's
+# `baseUrl` sends the credentials it carries wherever the file says, and an
+# `apiKey` or a header value starting with `!` runs through `/bin/sh`
+# (`config/resolve-config-value.ts`). With `models.yml` there, omp reads
+# neither `models.yaml` nor `models.json` (`config/config-file.ts`). It writes
+# `models.yml` only to migrate a `models.json` into it, when `models.yml` is
+# absent — which, mounted, it never is.
+#
+# `drop`: omp's model cache, `models.db` in SQLite with its `-wal` and `-shm`
+# (opened in WAL mode, `catalog/src/model-cache.ts`), is in the account too, and
+# a fresh cached model keeps its own `baseUrl` —
+# "a matching cache may contain provider-endpoint overrides"
+# (`config/model-registry.ts`). omp rebuilds it at its next start, so omh
+# removes it from the account before each launch.
+[provider]
+format = "omp-models"
+path   = "$HOME/.omp/agent/models.yml"
+import = "$HOME/.omp/agent/models.yml"
+drop   = [
+  "$HOME/.omp/agent/models.db",
+  "$HOME/.omp/agent/models.db-wal",
+  "$HOME/.omp/agent/models.db-shm",
+]
