@@ -690,13 +690,13 @@ mod tests {
         for url in [
             "http://127.0.0.1:11434/v1",
             "http://localhost:1234",
-            "http://user:pw@LOCALHOST./v1",
+            "http://user:pw-in-url@LOCALHOST./v1",
             "http://[::1]:8080",
         ] {
             for doc in at(url) {
                 let raw = serde_json::to_string(&doc).unwrap();
                 let e = from_models_config(&raw, &no_env).unwrap_err();
-                assert!(!format!("{e:#}").contains("pw"), "{e:#}");
+                assert!(!format!("{e:#}").contains("pw-in-url"), "{e:#}");
             }
         }
         for doc in at("https://localhost.example.com/v1") {

@@ -3748,7 +3748,7 @@ mod tests {
         std::fs::create_dir_all(account.join(".omp/agent")).unwrap();
         std::fs::write(
             account.join(".omp/agent/models.yml"),
-            "providers:\n  corp:\n    baseUrl: https://user:pw@llm.example.invalid/v1\n    \
+            "providers:\n  corp:\n    baseUrl: https://user:pw-in-url@llm.example.invalid/v1\n    \
              apiKey: sk-secret\n",
         )
         .unwrap();
@@ -3765,7 +3765,10 @@ mod tests {
         ] {
             assert!(err.contains(&said), "{said}: {err}");
         }
-        assert!(!err.contains("sk-secret") && !err.contains("pw"), "{err}");
+        assert!(
+            !err.contains("sk-secret") && !err.contains("pw-in-url"),
+            "{err}"
+        );
 
         std::fs::write(account.join(crate::provider::omp::FILE), "providers: {}\n").unwrap();
         try_plan_account(&fx, "omp", Some(account)).unwrap();
