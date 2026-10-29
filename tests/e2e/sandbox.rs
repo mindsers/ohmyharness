@@ -236,6 +236,17 @@ impl Session {
 
     /// One turn of the harness, against a fake model playing `script`.
     pub fn turn(&self, prompt: &str, script: &[serde_json::Value]) -> Turn {
+        self.turn_passing(prompt, script, &[])
+    }
+
+    /// [`Session::turn`], with `args` handed to the harness right after its
+    /// own name.
+    pub fn turn_passing(
+        &self,
+        prompt: &str,
+        script: &[serde_json::Value],
+        args: &[String],
+    ) -> Turn {
         // A directory per turn, so nothing the last fake logged can be taken
         // for this turn's. One port for all of them — omp's provider is a file
         // naming it, written whenever the container is new — and it is clear
@@ -273,7 +284,8 @@ impl Session {
         for (k, v) in self.harness.env {
             env.push((k.to_string(), v.replace("{url}", &url)));
         }
-        let argv = (self.harness.turn)(prompt, &url);
+        let mut argv = (self.harness.turn)(prompt, &url);
+        argv.splice(1..1, args.iter().cloned());
         let out = self.exec(&env, &argv);
 
         // Stopped, and gone, before the next turn wants the port.

@@ -518,6 +518,17 @@ pub struct Binding {
     /// degradation an unmapped moment or field gets.
     #[serde(default)]
     pub refuse: Option<Template>,
+    /// The option this harness is handed `path` by, on every command line —
+    /// a file it reads only when told to. The image puts a wrapper where
+    /// `bin` was that passes it ahead of any subcommand, and merges one the
+    /// caller passes into omh's (`image::wrapper`).
+    #[serde(default)]
+    pub flag: Option<String>,
+    /// Where `omh eject` writes a document handed by `flag`: the file the
+    /// harness reads on its own, since one started without omh has no
+    /// wrapper to hand it the other.
+    #[serde(default)]
+    pub eject: Option<String>,
 }
 
 impl Binding {
@@ -818,6 +829,7 @@ impl Adapter {
         adapter.check_policy(&path)?;
         adapter.check_preferences(&path)?;
         adapter.check_provider(&path)?;
+        adapter.check_flags(&path)?;
         Ok(adapter)
     }
 
@@ -977,6 +989,14 @@ impl Adapter {
                 !walks(mask),
                 "adapter {shown}: `[policy]` mask entry {mask:?} has a `..` — it is joined \
                  into the account directory on the host"
+            );
+            anyhow::ensure!(
+                !self
+                    .capabilities
+                    .values()
+                    .any(|b| &b.path == mask || b.also.contains(mask)),
+                "adapter {shown}: `[policy]` mask entry {mask:?} is a capability's path too — \
+                 two mounts at one path"
             );
         }
         // A copy replaces one credential file's mount, so it names one —
@@ -1173,6 +1193,66 @@ impl Adapter {
                 ),
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// A document handed by `flag` is one the harness reads only when told
+    /// to, so it lands where no session writes — a file under `/etc`, as a
+    /// policy does — and an eject needs to be told where the harness reads
+    /// its own: under `$HOME`, with no `..`, since it is joined under the
+    /// eject's `home/`. Only a `claude-settings` document is handed this way:
+    /// the wrapper merges a caller's own into it as JSON.
+    fn check_flags(&self, path: &Path) -> Result<()> {
+        let shown = path.display();
+        for (cap, b) in &self.capabilities {
+            let Some(flag) = &b.flag else {
+                anyhow::ensure!(
+                    b.eject.is_none(),
+                    "adapter {shown}: `{cap}` names an `eject` and no `flag` — an eject \
+                     writes a document where `path` says unless a flag hands it"
+                );
+                continue;
+            };
+            // Spelled into the wrapper's `case` patterns, so a letter, a digit
+            // or a dash: nothing the shell would read as a pattern.
+            anyhow::ensure!(
+                flag.strip_prefix("--").is_some_and(|name| {
+                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                }),
+                "adapter {shown}: `{cap}`'s `flag = {flag:?}` must be a long option, `--name`"
+            );
+            anyhow::ensure!(
+                b.render == Render::ClaudeSettings,
+                "adapter {shown}: `{cap}` renders `{:?}`, and only a claude-settings document \
+                 is handed by a flag — the wrapper merges a caller's own into it as JSON",
+                b.render
+            );
+            let at = Path::new(&b.path);
+            anyhow::ensure!(
+                at.starts_with("/etc")
+                    && at.components().count() > 2
+                    && !at
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir),
+                "adapter {shown}: `{cap}`'s `path = {:?}` must name a file under /etc/ — it is \
+                 handed by `{flag}`, from where no session writes",
+                b.path
+            );
+            let Some(eject) = &b.eject else {
+                anyhow::bail!(
+                    "adapter {shown}: `{cap}` is handed by `{flag}` and names no `eject` — the \
+                     file the harness reads on its own, where `omh eject` writes it"
+                );
+            };
+            anyhow::ensure!(
+                eject.starts_with("$HOME/")
+                    && !Path::new(eject)
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir),
+                "adapter {shown}: `{cap}`'s `eject = {eject:?}` must be under $HOME/, with no \
+                 `..` — it is the harness's own file, joined under the eject's home/"
+            );
         }
         Ok(())
     }
@@ -1870,6 +1950,12 @@ render = "concat"
                 "mask entry \"$HOME/.p/../../tmp/x\" has a `..`",
             ),
             (
+                CREDS,
+                "path = \"/etc/x.toml\"\nmask = [\"$HOME/.p/x.json\"]\n\n\
+                 [capabilities.mcp]\npath = \"$HOME/.p/x.json\"\nrender = \"mcp-json\"",
+                "mask entry \"$HOME/.p/x.json\" is a capability's path too",
+            ),
+            (
                 "creds = [\"$HOME/.p/\", \"$HOME/.p.json\"]",
                 "path = \"/etc/x.toml\"\ncopy = [\"$HOME/.p/\"]",
                 "copy entry \"$HOME/.p/\" must be one of this adapter's credential files",
@@ -2008,6 +2094,117 @@ render = "concat"
         for name in ["claude", "opencode"] {
             let a = Adapter::find(Path::new(REAL), name).unwrap();
             assert!(a.provider.is_none(), "{name}");
+        }
+    }
+
+    /// A document handed by `flag` lands where no session writes — a file
+    /// under `/etc`, as a policy does — and nowhere the harness would find it
+    /// on its own, so an eject needs to be told where the harness reads its
+    /// own: under `$HOME`, with no `..`, since it is joined under the eject's
+    /// `home/`. Only a `claude-settings` document is handed this way, because
+    /// the wrapper merges a caller's own into it as JSON.
+    #[test]
+    fn a_document_omh_could_not_hand_or_eject_is_refused() {
+        // Each rule refuses in words no other rule uses.
+        const HOOKS: &str =
+            "[tools]\nshell = \"Bash\"\n\n[capabilities.hooks]\nrender = \"claude-settings\"\n";
+        const EVENTS: &str = "\n[capabilities.hooks.events]\nturn-end = \"Stop\"\n";
+        for (binding, names) in [
+            (
+                "path = \"/etc/p/s.json\"\nflag = \"settings\"\neject = \"$HOME/.p/s.json\"",
+                "`flag = \"settings\"` must be a long option",
+            ),
+            (
+                "path = \"$HOME/.p/s.json\"\nflag = \"--settings\"\neject = \"$HOME/.p/s.json\"",
+                "must name a file under /etc/ — it is handed by `--settings`",
+            ),
+            (
+                "path = \"/work/s.json\"\nflag = \"--settings\"\neject = \"$HOME/.p/s.json\"",
+                "must name a file under /etc/ — it is handed by `--settings`",
+            ),
+            (
+                "path = \"/etc/../work/s.json\"\nflag = \"--settings\"\neject = \"$HOME/.p/s.json\"",
+                "must name a file under /etc/ — it is handed by `--settings`",
+            ),
+            (
+                "path = \"/etc/p/s.json\"\nflag = \"--settings\"",
+                "is handed by `--settings` and names no `eject`",
+            ),
+            (
+                "path = \"/etc/p/s.json\"\nflag = \"--settings\"\neject = \"/etc/p/s.json\"",
+                "`eject = \"/etc/p/s.json\"` must be under $HOME/, with no `..`",
+            ),
+            (
+                "path = \"/etc/p/s.json\"\nflag = \"--settings\"\neject = \"$HOME/../s.json\"",
+                "`eject = \"$HOME/../s.json\"` must be under $HOME/, with no `..`",
+            ),
+            (
+                "path = \"$HOME/.p/s.json\"\neject = \"$HOME/.p/s.json\"",
+                "names an `eject` and no `flag`",
+            ),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "p.toml",
+                &format!(
+                    "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\n\n{HOOKS}{binding}\n{EVENTS}"
+                ),
+            );
+            let err = format!("{:#}", Adapter::find(d.path(), "p").unwrap_err());
+            assert!(err.contains(names), "{binding}: {err}");
+        }
+
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "p.toml",
+            "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\n\n[capabilities.mcp]\n\
+             path = \"/etc/p/mcp.json\"\nrender = \"mcp-json\"\nflag = \"--mcp-config\"\n\
+             eject = \"$HOME/.p/mcp.json\"\n",
+        );
+        let err = format!("{:#}", Adapter::find(d.path(), "p").unwrap_err());
+        assert!(
+            err.contains("only a claude-settings document is handed by a flag"),
+            "{err}"
+        );
+    }
+
+    /// Claude reads omh's settings document from `--settings` alone, and its
+    /// own `~/.claude/settings.json` — in the account every session on it
+    /// shares — is masked. `attribution: false` in that document needs Claude
+    /// 2.1.281 or later; an older one skips the whole file, hooks included
+    /// [bin, #197] — so the pin holds at or above it.
+    #[test]
+    fn claudes_settings_reach_it_by_flag_from_a_pin_that_reads_them() {
+        let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
+        let hooks = claude.supports(Capability::Hooks).unwrap();
+        assert_eq!(hooks.flag.as_deref(), Some("--settings"));
+        assert_eq!(hooks.eject.as_deref(), Some("$HOME/.claude/settings.json"));
+        assert!(
+            claude
+                .policy
+                .as_ref()
+                .unwrap()
+                .mask
+                .contains(&"$HOME/.claude/settings.json".to_string()),
+            "{:?}",
+            claude.policy
+        );
+        let pin: Vec<u32> = claude
+            .version
+            .as_deref()
+            .unwrap()
+            .split('.')
+            .map(|n| n.parse().unwrap())
+            .collect();
+        assert!(pin >= vec![2, 1, 281], "{pin:?}");
+
+        for name in ["codex", "omp", "opencode"] {
+            let a = Adapter::find(Path::new(REAL), name).unwrap();
+            for (cap, b) in &a.capabilities {
+                assert!(b.flag.is_none() && b.eject.is_none(), "{name} {cap}");
+            }
         }
     }
 

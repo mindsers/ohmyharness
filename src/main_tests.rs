@@ -1928,6 +1928,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // route — which was `omh settings rm mcp <server>` until omh's own
         // servers could no longer be removed.
         ("base/2026.08.toml", 27),
+        // `omh eject`, where a document handed by a flag names no `eject`.
+        ("src/adapter.rs", 1),
         ("src/auth.rs", 8),
         ("src/base.rs", 3),
         ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences

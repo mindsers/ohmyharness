@@ -619,8 +619,121 @@ pub fn harness_dockerfile(adapter: &Adapter, ca: Option<&str>) -> String {
             dirs.join(" ")
         ));
     }
+    // A document the harness reads only when told to, handed to every run of
+    // it by the program that stands where it was.
+    for b in adapter.capabilities.values() {
+        if let Some(flag) = &b.flag {
+            df.push_str(&wrap(&adapter.bin, flag, &b.path));
+        }
+    }
     df.push_str("USER agent\nWORKDIR /work\n");
     df
+}
+
+/// Where the image keeps a harness that a wrapper stands in for, beside
+/// nothing of the harness's own.
+const WRAPPED: &str = "/usr/local/libexec/omh";
+
+/// The layer that puts [`wrapper`] where `bin` is on `PATH`, for a harness
+/// handed `document` by `flag`.
+///
+/// Where `bin` is, not ahead of it on `PATH`: an editor's ssh login gets the
+/// profile's `PATH`, which leaves out `/usr/local/sbin`, and `sudo` its own.
+/// npm installs `bin` as a link into the package, so the real binary stays
+/// where npm put it, reached through a link of omh's; a file there instead is
+/// an install omh has not seen, and the build stops on it rather than move
+/// it.
+fn wrap(bin: &str, flag: &str, document: &str) -> String {
+    let real = format!("{WRAPPED}/{bin}");
+    let mut run = format!(
+        "RUN at=\"$(command -v {bin})\" \\\n \
+         && {{ [ -L \"$at\" ] || {{ echo \"omh wraps the link the install leaves at $at, and \
+         found a file\" >&2; exit 1; }}; }} \\\n \
+         && mkdir -p {WRAPPED} \\\n \
+         && ln -s \"$(readlink -f \"$at\")\" {real} \\\n \
+         && rm \"$at\" \\\n \
+         && printf '%s\\n' \\\n"
+    );
+    for line in wrapper(&real, flag, document).lines() {
+        run.push_str(&format!("  {} \\\n", quoted(line)));
+    }
+    run.push_str("  > \"$at\" \\\n && chmod 0755 \"$at\"\n");
+    run
+}
+
+/// The program that stands where the harness was: it runs `real` with
+/// `flag` and `document` ahead of everything else it was handed, so ahead of
+/// any subcommand.
+///
+/// One `flag` of the caller's own is not passed on beside it — of two, Claude
+/// keeps the last whole [measured, 2.1.300], so omh's or the caller's would
+/// be lost. It is merged into `document` instead, key by key and deeply,
+/// `document`'s keys winning (jq's `*`), and the result handed inline: a
+/// value Claude reads as inline JSON — trimmed, it starts with `{` and ends
+/// with `}` [bin] — read the same way, anything else as a file. One that
+/// will not merge stops here, naming itself, before the harness runs.
+/// Everything after `--` is passed on as it is.
+///
+/// With no `document`, the harness runs handed exactly what it was: the image
+/// run by something other than omh, or on `sbx`, where omh's entrypoint never
+/// runs to put it there (#199) — as the harness ran there before. Every plan
+/// omh makes on Docker mounts it, read-only.
+///
+/// POSIX `sh` and `jq`, both in the base image.
+pub(crate) fn wrapper(real: &str, flag: &str, document: &str) -> String {
+    let real = quoted(real);
+    let document = quoted(document);
+    format!(
+        r#"#!/bin/sh
+# omh: hands {flag} {document} to every run, ahead of any subcommand, and
+# merges one {flag} of yours into it: omh's keys win, the rest of yours stays.
+# Without the document — a container omh did not start, or sbx, where it is
+# never put there — this runs as if omh were not here.
+if [ ! -e {document} ]; then
+  exec {real} "$@"
+fi
+given=
+yours=
+n=$#
+while [ "$n" -gt 0 ]; do
+  a=$1
+  shift
+  n=$((n - 1))
+  case $a in
+    --)
+      set -- "$@" "$a"
+      while [ "$n" -gt 0 ]; do set -- "$@" "$1"; shift; n=$((n - 1)); done
+      ;;
+    {flag})
+      if [ "$n" -gt 0 ]; then given=1; yours=$1; shift; n=$((n - 1)); else set -- "$@" "$a"; fi
+      ;;
+    {flag}=*)
+      given=1
+      yours=${{a#{flag}=}}
+      ;;
+    *)
+      set -- "$@" "$a"
+      ;;
+  esac
+done
+if [ -z "$given" ]; then
+  exec {real} {flag} {document} "$@"
+fi
+case $(printf '%s' "$yours" | tr -d ' \t\n\r') in
+  '{{'*'}}') merged=$(printf '%s' "$yours" | jq -c --slurpfile ours {document} '. * $ours[0]') ;;
+  *) merged=$(jq -c --slurpfile ours {document} '. * $ours[0]' < "$yours") ;;
+esac || {{
+  printf 'omh could not merge your {flag} %s into its own\n' "$yours" >&2
+  exit 1
+}}
+exec {real} {flag} "$merged" "$@"
+"#
+    )
+}
+
+/// `line` as one single-quoted shell word.
+fn quoted(line: &str) -> String {
+    format!("'{}'", line.replace('\'', r"'\''"))
 }
 
 /// A third layer: what this repo's stacks put in the image.
@@ -4624,6 +4737,177 @@ mod tests {
         for dir in ["/work", "/omh/sock", "/omh/cache"] {
             assert!(df.contains(dir), "missing {dir}: {df}");
         }
+    }
+
+    /// The wrapper stands where `claude` is on `PATH`, the link npm installs,
+    /// so every caller finds it whatever its `PATH`: `docker exec`, `sudo`,
+    /// an editor's ssh login, whose profile leaves out `/usr/local/sbin`.
+    /// The real binary stays where npm put it, reached through a link of
+    /// omh's — and the wrapper written is the one `wrapper` makes, line for
+    /// line, after the install and before the image drops root.
+    #[test]
+    fn claudes_image_puts_the_wrapper_where_claude_was() {
+        let df = harness_dockerfile(&claude(), None);
+        let install = df
+            .find("@anthropic-ai/claude-code")
+            .expect("installs claude");
+        let at = df
+            .find("at=\"$(command -v claude)\"")
+            .unwrap_or_else(|| panic!("no wrapper: {df}"));
+        let user = df.find("USER agent").unwrap();
+        assert!(install < at && at < user, "{df}");
+        for step in [
+            "[ -L \"$at\" ]",
+            "ln -s \"$(readlink -f \"$at\")\" /usr/local/libexec/omh/claude",
+            "rm \"$at\"",
+            "> \"$at\"",
+            "chmod 0755 \"$at\"",
+        ] {
+            assert!(df.contains(step), "{step}: {df}");
+        }
+        let script = wrapper(
+            "/usr/local/libexec/omh/claude",
+            "--settings",
+            "/etc/omh/claude/settings.json",
+        );
+        for line in script.lines() {
+            assert!(
+                df.contains(&format!("  {} \\\n", quoted(line))),
+                "{line}: {df}"
+            );
+        }
+
+        for name in ["codex", "omp", "opencode"] {
+            let a = Adapter::find(adapters(), name).unwrap();
+            let df = harness_dockerfile(&a, None);
+            assert!(!df.contains("libexec/omh"), "{name} is wrapped: {df}");
+        }
+    }
+
+    /// Every `claude` in the sandbox starts with omh's settings: the wrapper
+    /// hands them by `--settings` ahead of any subcommand — `claude mcp list
+    /// --settings <f>` is an unknown option [measured, 2.1.300]. Of two
+    /// `--settings`, Claude keeps the last whole [measured], so a caller's own
+    /// is merged into omh's: omh's keys win, the rest of the caller's is
+    /// kept. A file, `--settings=<f>` and inline JSON — Claude's own test, a
+    /// trimmed value in braces [bin] — the same way.
+    ///
+    /// Run here against a stand-in for Claude that prints what it was handed,
+    /// under the host's `sh` and `jq`; the image has both.
+    #[test]
+    fn the_wrapper_hands_omhs_settings_to_every_claude_and_merges_yours() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::write(
+            &real,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\"; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let omh = dir.path().join("omh.json");
+        std::fs::write(
+            &omh,
+            r#"{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"omh"}]}]},"disableAllHooks":false,"attribution":false,"permissions":{"allow":["mcp__omh-memory"]}}"#,
+        )
+        .unwrap();
+        let yours = r#"{"env":{"E2E":"kept"},"disableAllHooks":true,"attribution":{"commit":"x"},"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"yours"}]}]},"permissions":{"deny":["Bash(rm:*)"]}}"#;
+        std::fs::write(dir.path().join("yours.json"), yours).unwrap();
+        let script = dir.path().join("claude");
+        std::fs::write(
+            &script,
+            wrapper(real.to_str().unwrap(), "--settings", omh.to_str().unwrap()),
+        )
+        .unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("sh")
+                .arg(&script)
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            let handed: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_terminator('\0')
+                .map(String::from)
+                .collect();
+            (
+                out.status.success(),
+                handed,
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        };
+        let omh_path = omh.to_str().unwrap();
+
+        for (args, rest) in [
+            (vec![], vec![]),
+            (vec!["mcp", "list"], vec!["mcp", "list"]),
+            (
+                vec!["-p", "say \"it's\"\nthere", "--model", "a b"],
+                vec!["-p", "say \"it's\"\nthere", "--model", "a b"],
+            ),
+            (
+                vec!["-p", "--", "--settings", "x"],
+                vec!["-p", "--", "--settings", "x"],
+            ),
+        ] {
+            let (ok, handed, err) = run(&args);
+            let mut want = vec!["--settings", omh_path];
+            want.extend(rest);
+            assert!(ok, "{args:?}: {err}");
+            assert_eq!(handed, want, "{args:?}");
+        }
+
+        let merged = serde_json::json!({
+            "env": {"E2E": "kept"},
+            "disableAllHooks": false,
+            "attribution": false,
+            "hooks": {
+                "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "omh"}]}],
+                "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "yours"}]}],
+            },
+            "permissions": {"allow": ["mcp__omh-memory"], "deny": ["Bash(rm:*)"]},
+        });
+        let inline = format!(" {yours}\n");
+        for args in [
+            vec!["--settings", "yours.json", "-p", "hi"],
+            vec!["-p", "--settings=yours.json", "hi"],
+            vec!["-p", "hi", "--settings", inline.as_str()],
+        ] {
+            let (ok, handed, err) = run(&args);
+            assert!(ok, "{args:?}: {err}");
+            assert_eq!(handed.len(), 4, "{args:?}: {handed:?}");
+            assert_eq!(handed[0], "--settings", "{args:?}: {handed:?}");
+            let doc: serde_json::Value = serde_json::from_str(&handed[1])
+                .unwrap_or_else(|e| panic!("{args:?}: {e}: {}", handed[1]));
+            assert_eq!(doc, merged, "{args:?}");
+            assert_eq!(handed[2..], ["-p", "hi"], "{args:?}");
+        }
+
+        for (args, named) in [
+            (
+                vec!["--settings", "missing.json", "-p", "hi"],
+                "missing.json",
+            ),
+            (vec!["--settings", "{not json}"], "{not json}"),
+        ] {
+            let (ok, handed, err) = run(&args);
+            assert!(!ok && handed.is_empty(), "{args:?} ran claude: {handed:?}");
+            assert!(
+                err.contains(&format!(
+                    "omh could not merge your --settings {named} into its own"
+                )),
+                "{args:?}: {err}"
+            );
+        }
+
+        // No document: a container omh did not start, or `sbx`, where the
+        // entrypoint that would put it there never runs (#199). Claude runs
+        // as it would without omh, handed exactly what it was.
+        std::fs::remove_file(&omh).unwrap();
+        let args = ["--settings", "yours.json", "mcp", "list"];
+        let (ok, handed, err) = run(&args);
+        assert!(ok, "{err}");
+        assert_eq!(handed, args, "{err}");
     }
 
     #[test]
