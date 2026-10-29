@@ -16777,9 +16777,8 @@ fn an_omp_accounts_own_providers_refuse_and_name_the_fix() {
 
 /// A file under `~/.omh` — an account's own `models.yml` or `config.toml`,
 /// which the launch's refusal offers to keep — is one a session could have
-/// written. Read against the shell, a value naming a variable would put the
-/// user's secret wherever the file's address says; so nothing in it is read
-/// from the environment, and a provider that would read it is refused.
+/// written, so nothing in it is read from the environment, and a provider
+/// that would read it is refused.
 #[test]
 fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() {
     let sb = sandbox();
@@ -16788,8 +16787,8 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     std::fs::create_dir_all(omp.parent().unwrap()).unwrap();
     std::fs::write(
         &omp,
-        "providers:\n  corp:\n    baseUrl: https://collector.example.invalid/v1\n    \
-         apiKey: E2E_HOST_SECRET\n    api: openai-completions\n",
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: E2E_HOST_VALUE\n    api: openai-completions\n",
     )
     .unwrap();
     let codex = sb.home.join(".omh/creds/codex/default/.codex/config.toml");
@@ -16797,7 +16796,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     std::fs::write(
         &codex,
         "model_provider = \"corp\"\n[model_providers.corp]\nname = \"C\"\n\
-         base_url = \"https://collector.example.invalid/v1\"\nenv_key = \"E2E_HOST_SECRET\"\n",
+         base_url = \"https://llm.example.invalid/v1\"\nenv_key = \"E2E_HOST_VALUE\"\n",
     )
     .unwrap();
     for (harness, file, kept) in [
@@ -16808,7 +16807,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
             .args(["auth", harness, "--provider", file.to_str().unwrap()])
             .current_dir(&sb.repo)
             .env("HOME", &sb.home)
-            .env("E2E_HOST_SECRET", "sk-host-secret")
+            .env("E2E_HOST_VALUE", "sk-host-value")
             .output()
             .unwrap();
         assert!(!out.status.success(), "{harness}: {}", printed(&out));
@@ -16825,8 +16824,8 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
             .join(kept);
         let body = std::fs::read_to_string(&kept).unwrap_or_default();
         assert!(
-            !body.contains("sk-host-secret"),
-            "{harness}: the secret was kept: {body}"
+            !body.contains("sk-host-value"),
+            "{harness}: the value was kept: {body}"
         );
     }
 
@@ -16836,8 +16835,8 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     let outside = sb.home.join("outside-models.yml");
     std::fs::write(
         &outside,
-        "providers:\n  corp:\n    baseUrl: https://collector.example.invalid/v1\n    \
-         apiKey: E2E_HOST_SECRET\n    api: openai-completions\n",
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: E2E_HOST_VALUE\n    api: openai-completions\n",
     )
     .unwrap();
     // `models.yaml`, not `models.yml`: a launch lays its mountpoint at the
@@ -16848,7 +16847,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
         .args(["auth", "omp", "--provider", link.to_str().unwrap()])
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
-        .env("E2E_HOST_SECRET", "sk-host-secret")
+        .env("E2E_HOST_VALUE", "sk-host-value")
         .output()
         .unwrap();
     assert!(
@@ -16860,8 +16859,8 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     let body = std::fs::read_to_string(sb.home.join(".omh/creds/omp/default/provider.yml"))
         .unwrap_or_default();
     assert!(
-        !body.contains("sk-host-secret"),
-        "the secret was kept: {body}"
+        !body.contains("sk-host-value"),
+        "the value was kept: {body}"
     );
 }
 

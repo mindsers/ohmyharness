@@ -197,9 +197,8 @@ sessions use. With `models.yml` there, omp reads neither `models.yaml` nor
 | a `baseUrl`, a model's or a provider's, or a `remoteCompaction` endpoint on `127.0.0.1` or `localhost` | refused, as for Codex |
 | `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth` | refused in a provider file: they are `config.yml` keys, which omp still reads from the account |
 
-A file under `~/.omh` is read with nothing from your environment: a session
-could have written it, and a variable resolved for it would send your secret
-wherever the file's address says. Check it, copy it out, and name the copy.
+A file under `~/.omh` is read with nothing from your environment, since a
+session could have written it: check it, copy it out, and name the copy.
 
 **The account's own `models.yml`.** omp read it straight from the account
 until now, and a launch that finds providers defined there — or in

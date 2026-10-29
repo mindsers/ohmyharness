@@ -70,10 +70,9 @@ pub(crate) fn auth_cmd(
                 .with_context(|| format!("reading {}", file.display()))?;
             // A file under `~/.omh` — an account's own models file, which a
             // launch's refusal offers to keep, or anything in a session's
-            // reach — could be a session's. Read against this shell, a value
-            // naming a variable would put the user's secret wherever the
-            // file's address says: nothing is read from the environment for
-            // it, so a provider that would read it is refused.
+            // reach — could be a session's, so nothing is read from the
+            // environment for it, and a provider that would read it is
+            // refused.
             //
             // Where it was named decides as much as where it leads: a link
             // under `~/.omh` is a session's to swap between the read above and
