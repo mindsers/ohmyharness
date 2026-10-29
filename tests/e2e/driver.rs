@@ -262,18 +262,30 @@ pub const CODEX: Driver = Driver {
     drops: &["graph-first", "graph-read", "e2e-end-inject"],
 };
 
-/// omp's provider is a file, speaking `openai-completions`, which was measured
-/// completing a turn as is. The providers it would otherwise ask for model
-/// lists are switched off. Not `--no-extensions`: omh's hooks are an
-/// extension.
+/// An omp account holding only its provider file: the fake provider,
+/// speaking `openai-completions`, which was measured completing a turn as is.
+/// omh renders it over the `models.yml` omp reads, read-only — so every omp
+/// turn of every scenario is a turn through the account's provider file.
+fn omp_account() -> Vec<(&'static str, String)> {
+    vec![(
+        "provider.yml",
+        format!(
+            "providers:\n  fake:\n    baseUrl: {}/v1\n    auth: none\n    \
+             api: openai-completions\n    models:\n      - id: fake-model\n        \
+             reasoning: false\n        contextWindow: 1000000\n",
+            crate::sandbox::fake_url()
+        ),
+    )]
+}
+
+/// omp's provider comes from its account (`omp_account`). The providers it
+/// would otherwise ask for model lists are switched off, in the account's
+/// `config.yml`, which a session still shares. Not `--no-extensions`: omh's
+/// hooks are an extension.
 pub const OMP: Driver = Driver {
     name: "omp",
     env: &[("PI_AUTO_QA", "0")],
     files: &[
-        (
-            "~/.omp/agent/models.yml",
-            "providers:\n  fake:\n    baseUrl: {url}/v1\n    auth: none\n    api: openai-completions\n    models:\n      - id: fake-model\n        reasoning: false\n        contextWindow: 1000000\n",
-        ),
         (
             "~/.omp/agent/config.yml",
             "disabledProviders: [alibaba-coding-plan, charm-hyper, commandcode, kilo, venice, zenmux, ollama, llama.cpp, lm-studio]\n",
@@ -306,7 +318,7 @@ pub const OMP: Driver = Driver {
     // in others.
     elsewhere: &[GRAPH_UPDATE_CHECK, "catalog.stencil.so:443"],
     transcripts: false,
-    account: None,
+    account: Some(omp_account),
     drops: &["e2e-before-inject", "e2e-end-inject", "e2e-start-inject", "git-note", "graph-first", "graph-orient", "graph-read"],
 };
 

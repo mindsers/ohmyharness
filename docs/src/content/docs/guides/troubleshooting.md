@@ -105,6 +105,11 @@ see [Something else](#something-else).
 | `claude mcp add` says "not allowed by enterprise policy" | [Put it in your catalogue](#claude-mcp-add-says-not-allowed-by-enterprise-policy) |
 | claude.ai connectors are missing in a session | [Expected](#claudeai-connectors-are-missing-in-a-session) |
 | A `/mcp` switch from one session is gone in the next, and a `/login` keeps only its tokens | [Expected](#a-mcp-switch-from-one-session-is-gone-in-the-next-and-a-login-keeps-only-its-tokens) |
+| **omp** | |
+| A launch says `… models.yml defines … omh now hides it behind the account's provider file` | [Keep them, or remove the file](#a-launch-says-the-accounts-own-models-file-defines-providers) |
+| A launch stops on `provider.yml`, or `omh doctor`'s `model provider` row is `✗` | [Fix the account's provider file](#a-launch-stops-on-provideryml) |
+| `omh auth --provider` says a file `is under … .omh, which a session can write` | [Check it, copy it out, name the copy](#a-launch-says-the-accounts-own-models-file-defines-providers) |
+| A session cannot write `~/.omp/agent/models.yml` (`Read-only file system`) | [Expected](#a-launch-says-the-accounts-own-models-file-defines-providers) |
 | **Your setup in the session** | |
 | The agent does not see your rules or skills | [Run `omh doctor`, then read the launch line](#the-harness-starts-but-does-not-see-my-rules-or-skills) |
 | One skill is missing, and the launch says `1 catalogue entry is not selected here` | [Select it with `omh use`](#a-skill-i-have-is-not-reaching-the-agent) |
@@ -630,7 +635,9 @@ or remove `model_provider` from that file to use OpenAI
 Run the command it names: it reads the provider out of that same file into the
 account's [provider file](/guides/accounts/#a-model-provider-of-your-own), and
 the next launch migrates. Read the `base_url` first — a session could have
-written that file.
+written that file. For the same reason nothing in it is read from your
+environment: an `env_key` there is refused. Check the file, copy it out of
+`~/.omh`, and name the copy.
 
 #### A launch says the account is in use by a session started before
 
@@ -694,6 +701,53 @@ launch with another account, `omh set account claude:<name>`. If your account
 carried `env` or `apiKeyHelper` in `.claude.json` (which 2.1.300 reads as a
 legacy fallback: read in the binary, not measured), a session no longer gets
 them.
+
+### omp
+
+#### A launch says the account's own models file defines providers
+
+omp used to read its providers straight from the account's `models.yml`,
+which every session on the account can rewrite. omh now
+[keeps them in a file of the account's own](/guides/accounts/#omps-providers)
+and mounts what it renders from that file over `models.yml`, read-only. The
+account defines providers that file does not hold, so the launch stops rather
+than hide them, and nothing has changed yet:
+
+```
+omh: /Users/you/.omh/creds/omp/work/.omp/agent/models.yml defines corp (https://llm.example.com/v1) — omp read it from the account, which any session can write, and omh now hides it behind the account's provider file, which holds none. If they are yours, keep them: `omh auth omp --name work --provider /Users/you/.omh/creds/omp/work/.omp/agent/models.yml`; if not, remove the file
+```
+
+Read the addresses first — a session could have written that file. If they
+are yours, run the command it names. A key there that names an environment
+variable, or one that runs a command, is refused, since nothing in a file
+under `~/.omh` is read from your environment:
+
+```
+omh: /Users/you/.omh/creds/omp/work/.omp/agent/models.yml
+  because it is under /Users/you/.omh, which a session can write, so nothing in it is read from your environment — check it, copy it out, and name the copy
+  because `providers.corp.apiKey` reads `CORP_KEY` from the environment, and it is not set here — set it and import again, or write the value into a provider file and name it
+```
+
+A session cannot write `models.yml` — `Read-only file system` — so a provider
+added there lasts nowhere. Add it to a `models.yml` of your own and run
+`omh auth omp --provider` with it.
+
+#### A launch stops on `provider.yml`
+
+The account's provider file holds something omp's `models.yml` does not, a
+command, or is not YAML omh reads:
+
+```
+omh: /Users/you/.omh/creds/omp/work/provider.yml
+  because `providers.corp.apiKey` is a command (`!…`), which omp would run at every request — a provider file holds the value it prints instead
+```
+
+Every launch on the account stops until it is fixed, `omh doctor` among them.
+Write it again from a `models.yml` that holds the providers:
+
+```console
+$ omh auth omp --name work --provider ~/.omp/agent/models.yml
+```
 
 ### Your setup in the session
 

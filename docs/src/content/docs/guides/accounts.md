@@ -91,9 +91,16 @@ when there is a login there to copy.
 
 ## A model provider of your own
 
-Codex talks to OpenAI unless its config names another provider — Azure, a
-gateway, a local server. omh keeps that choice with the account, in a file of
-its own:
+A harness talks to its vendor's models unless its config names another
+provider — Azure, a gateway, a local server. Where the harness keeps that
+choice is a file in the account, which every session on it can rewrite. omh
+keeps it with the account instead, in a file at the account's root that no
+session reaches, in the harness's own schema. Codex and omp take one so far.
+
+### Codex's provider
+
+Codex talks to OpenAI unless its config names another provider. omh keeps
+that choice in a file of the account's own:
 
 ```console
 $ omh auth codex --name work --provider ~/.codex/config.toml
@@ -152,6 +159,71 @@ session's `config.toml` is its own copy and holds only your preferences —
 A `✗` there is a file Codex would refuse to start with, and doctor stops
 before building anything. An account with a provider and no login has no
 token to probe, so doctor leaves credentials unchecked and says so.
+
+### omp's providers
+
+omp reads custom providers — a gateway, a local server, a built-in
+provider's address overridden — from `~/.omp/agent/models.yml`, and trusts
+what it finds there at its next start: a provider's `baseUrl` sends the turn,
+and the key it carries, wherever the file says, and an `apiKey` or a header
+value starting with `!` runs through `/bin/sh` (read in omp's source,
+18.10.4). In the account that file is every session's to rewrite. So omh keeps
+your providers in a file of the account's own:
+
+```console
+$ omh auth omp --name work --provider ~/.omp/agent/models.yml
+`work` captured for omp
+  model provider corp kept in /Users/you/.omh/creds/omp/work/provider.yml
+```
+
+`--provider` takes an omp `models.yml` and logs nothing in. `--import` reads
+the one in `~/.omp/agent/`, or the `models.yaml` beside it, along with the
+login. An account that holds only providers counts as captured.
+
+**Only the providers are kept, in omp's own words.** `provider.yml` is a
+`models.yml`: `providers:` and nothing else, each provider's fields from omp's
+own list. Each launch renders it over the `models.yml` omp reads, read-only —
+`{}` when the account has none — so no session can change the providers later
+sessions use. With `models.yml` there, omp reads neither `models.yaml` nor
+`models.json`.
+
+**What the host supplies is settled once, at `omh auth`:**
+
+| In your `models.yml` | What omh does |
+|---|---|
+| `apiKey: CORP_KEY`, or a header value naming a variable | reads it from the shell running `omh auth` and keeps its value, as omp would; a name in capitals that is unset is refused — omp would send it as the key |
+| an `apiKey` or a header value starting with `!` | refused: a sandbox cannot run your command. Put the value it prints in the file |
+| a `baseUrl`, a model's or a provider's, or a `remoteCompaction` endpoint on `127.0.0.1` or `localhost` | refused, as for Codex |
+| `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth` | refused in a provider file: they are `config.yml` keys, which omp still reads from the account |
+
+A file under `~/.omh` is read with nothing from your environment: a session
+could have written it, and a variable resolved for it would send your secret
+wherever the file's address says. Check it, copy it out, and name the copy.
+
+**The account's own `models.yml`.** omp read it straight from the account
+until now, and a launch that finds providers defined there — or in
+`models.yaml` or `models.json` — with no provider file stops and names them,
+with the command that keeps them. A session could have written them, so they
+are never adopted unasked:
+[A launch says the account's own models file defines providers](/guides/troubleshooting/#a-launch-says-the-accounts-own-models-file-defines-providers).
+
+**The model cache goes before each launch.** omp keeps the model lists it
+fetches in `models.db`, in the account, and a fresh cached model keeps its own
+address (omp's source; not measured). omh removes `models.db` and its `-wal`
+and `-shm` from the account before each launch, and omp rebuilds it at its
+next start. Two sessions running at once on one account still share it.
+
+The values are secrets, as for Codex: `provider.yml` and the `models.yml` omh
+stages from it are `0600`, output names providers and never values, and
+`omh eject` writes `models.yml` with every key and header value as
+`<redacted>`. `omh doctor` has a row:
+
+```
+  ✓ model provider   defines corp, from /Users/you/.omh/creds/omp/work/provider.yml
+```
+
+An account whose providers are its login has no omp login to probe, so doctor
+leaves credentials unchecked.
 
 ## Verifying
 

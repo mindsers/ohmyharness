@@ -68,14 +68,35 @@ pub(crate) fn auth_cmd(
         (Some(file), _, Some(_), Some(format)) => {
             let raw = std::fs::read_to_string(file)
                 .with_context(|| format!("reading {}", file.display()))?;
-            let doc = author_provider(format, &raw, &account_dir)
-                .with_context(|| format!("{}", file.display()))?;
+            // A file under `~/.omh` — an account's own models file, which a
+            // launch's refusal offers to keep, or anything in a session's
+            // reach — could be a session's. Read against this shell, a value
+            // naming a variable would put the user's secret wherever the
+            // file's address says: nothing is read from the environment for
+            // it, so a provider that would read it is refused.
+            let ours = std::fs::canonicalize(file)
+                .ok()
+                .zip(std::fs::canonicalize(&paths.root).ok())
+                .is_some_and(|(file, root)| file.starts_with(root));
+            let env = |k: &str| std::env::var(k).ok();
+            let doc = match ours {
+                false => author_provider(format, &raw, &account_dir, &env),
+                true => author_provider(format, &raw, &account_dir, &|_| None).with_context(|| {
+                    format!(
+                        "it is under {}, which a session can write, so nothing in it is read \
+                         from your environment — check it, copy it out, and name the copy",
+                        paths.root.display()
+                    )
+                }),
+            }
+            .with_context(|| format!("{}", file.display()))?;
             Some(doc.with_context(|| format!("{} defines no model provider", file.display()))?)
         }
         (None, true, Some(source), Some(format)) => {
             let host = crate::adapter::expand_host(source, &home, &paths.repo);
+            let env = |k: &str| std::env::var(k).ok();
             match read_host_provider(format, &host)? {
-                Some((host, raw)) => author_provider(format, &raw, &account_dir)
+                Some((host, raw)) => author_provider(format, &raw, &account_dir, &env)
                     .with_context(|| format!("{}", host.display()))?,
                 None => None,
             }
@@ -107,7 +128,9 @@ pub(crate) fn auth_cmd(
     // somewhere omh cannot stat it means only that nothing is obviously
     // missing, and saying "captured" there announced a login to users who had
     // opened the harness, run nothing and quit.
-    let decided = auth::decided_by_files(&adapter);
+    // With `--provider` nothing was logged in, and the provider kept is the
+    // capture: there is no login to confirm.
+    let decided = auth::decided_by_files(&adapter) || provider.is_some();
     let mut action = if decided {
         report::Action::new(
             "account-captured",
@@ -166,17 +189,17 @@ pub(crate) fn auth_cmd(
 /// The provider a harness config `raw` defines — Codex's tables, omp's
 /// `models.yml` — resolved for a sandbox and written as the account's
 /// provider file: the names of the providers it holds, or `None` when `raw`
-/// defines none. Environment variables it reads are read here, once, from the
-/// shell `omh auth` runs in.
+/// defines none. Environment variables it reads are read here, once, from
+/// `env`.
 fn author_provider(
     format: ProviderFormat,
     raw: &str,
     account_dir: &std::path::Path,
+    env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Option<Vec<String>>> {
-    let env = |k: &str| std::env::var(k).ok();
     match format {
         ProviderFormat::CodexConfig => {
-            let Some(doc) = crate::provider::from_codex_config(raw, &env)? else {
+            let Some(doc) = crate::provider::from_codex_config(raw, env)? else {
                 return Ok(None);
             };
             crate::provider::write(account_dir, &doc)?;
@@ -188,7 +211,7 @@ fn author_provider(
             Ok(Some(names))
         }
         ProviderFormat::OmpModels => {
-            let Some(doc) = crate::provider::omp::from_models_config(raw, &env)? else {
+            let Some(doc) = crate::provider::omp::from_models_config(raw, env)? else {
                 return Ok(None);
             };
             crate::provider::omp::write(account_dir, &doc)?;

@@ -242,6 +242,34 @@ goes. omh holds a list of what that rules out per harness — for codex
 adapter declaring a key at, inside or around one of them is refused when it
 loads. Every list is explicit: a key no list names is not kept.
 
+### `[provider]`: the account's model provider
+
+```toml
+# adapters/omp.toml
+[provider]
+format = "omp-models"
+path   = "$HOME/.omp/agent/models.yml"
+import = "$HOME/.omp/agent/models.yml"
+drop   = [
+  "$HOME/.omp/agent/models.db",
+  "$HOME/.omp/agent/models.db-wal",
+  "$HOME/.omp/agent/models.db-shm",
+]
+```
+
+A custom model provider is the user's, and the file a harness keeps it in is
+one every session on the account can rewrite. The account keeps it instead,
+in a provider file at its root in the harness's own schema, and each launch
+renders it where the session cannot write — see
+[A model provider of your own](/guides/accounts/#a-model-provider-of-your-own).
+
+| Field | What it says | Default |
+|---|---|---|
+| `format` | the provider file's schema, and where it is rendered. `codex-config`: `model_provider` and `[model_providers.*]`, kept in `provider.toml` and rendered into Codex's system layer beside omh's hooks. `omp-models`: omp's `models.yml`, kept in `provider.yml` and rendered over `path` | required |
+| `import` | the host file, under `$HOME`, that `omh auth --import` reads the harness's own provider from | required |
+| `path` | for `omp-models`, the file the harness reads providers from, strictly inside one of `creds`' directories, with no `..`: the render is mounted over it read-only, `{}` when the account has none. `codex-config` takes none | — |
+| `drop` | files in the account, each strictly inside one of `creds`' directories, that can carry a provider's address into the next session and that the harness rebuilds: removed before each launch | none |
+
 ### What omh refuses when it loads an adapter
 
 omh enforces each of these, with an error naming the adapter:
@@ -253,6 +281,7 @@ omh enforces each of these, with an error naming the adapter:
 - `token` and `token-probe` together
 - no capabilities at all — it would launch a harness that can see none of your profile
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
+- a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
 
 One rule is yours to keep: **declare `verify` and `ready` together.** `doctor`
 runs the check only when both are set, and skips half a pair without a word.

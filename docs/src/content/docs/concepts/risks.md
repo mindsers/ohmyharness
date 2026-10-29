@@ -36,7 +36,7 @@ them, because a risk that vanishes teaches nobody what it cost.
 | Risk | Where it stands |
 |---|---|
 | [1. The credential model is weaker than `sbx`'s](#1-the-credential-model-is-weaker-than-sbxs) | open — gated on the `sbx` backend |
-| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | narrowed — MCP servers, and Codex's hooks, are held to the launch's |
+| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | narrowed — MCP servers, and Codex's hooks, are held to the launch's; omp's providers are the account's own |
 | [2. A sandbox protects the host, not the repo](#2-a-sandbox-protects-the-host-not-the-repo) | inherent |
 | [2b. The sandbox's repository is agent-writable](#2b-the-sandboxs-repository-is-agent-writable-its-push-wall-is-a-signpost) | narrowed |
 | [2c. ~~`omh sNN rm` destroys the agent's own commits~~](#2c-omh-snn-rm-destroys-the-agents-own-commits) | closed in #58 |
@@ -143,6 +143,22 @@ file holds `developer_instructions` beside a model, and asserts the turn runs
 on the model and the model never sees the instructions — red with the shared
 file mounted as before.
 
+**Closed across sessions for omp's providers** (#197): omp reads custom
+providers from `~/.omp/agent/models.yml` and trusts it at its next start — a
+provider's `baseUrl` sends the turn, and the key it carries, where the file
+says, and an `apiKey` or a header value starting with `!` runs through
+`/bin/sh` (read in omp's source, 18.10.4). The account's providers now live in
+`provider.yml` at its root, which no mount reaches, and each launch mounts
+what omh renders from it over `models.yml`, read-only — see
+[omp's providers](/guides/accounts/#omps-providers). omp reads neither
+`models.yaml` nor `models.json` while `models.yml` is there. Its model cache,
+`models.db`, is in the account too, and a cached model keeps its own address
+(omp's source; not measured), so omh removes it before each launch.
+`tests/e2e` has a session write a provider doing both into all three files and
+leave a cache, and asserts that at the next start the cache is gone, the
+command never ran and the turn reached the account's provider — red with the
+render unmounted, and with the cache left.
+
 **Still open:**
 
 - an enterprise account's cloud bundle composes above omh's requirements: its
@@ -150,7 +166,18 @@ file mounted as before.
   `allow_managed_hooks_only = false` wins over omh's (read in Codex's source);
 - the instruction files and omp's hook directory above. The mitigation for
   those is read-only overlays inside the account directory, the way omh
-  already mounts its own files there.
+  already mounts its own files there;
+- omp's logins, `agent.db` in the account: an API key stored there that
+  starts with `!` runs through `/bin/sh` the way one in `models.yml` did (read
+  in omp's source, `ai/src/auth/cascade.ts`; not measured). It reaches what the
+  hook directory does — code one session leaves runs in the next — and closes
+  with it;
+- omp's `config.yml`, shared until its per-session copy (#197, step 3):
+  `enabledProviders`, `disabledProviders` and `modelProviderOrder` choose among
+  providers, and `auth.broker.*` names a broker omp fetches credentials
+  through;
+- omp's model cache between two sessions running at once on one account:
+  omh removes it only when a session starts.
 
 Until then, an account used for untrusted repos is best kept separate from one
 used for work — `omh auth <harness> -n <name>` captures as many as you like.

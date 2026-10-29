@@ -347,8 +347,8 @@ omh auth <harness> [-n <acct>] [--import] [--provider <file>]
 |---|---|---|
 | `<harness>` | `claude`, `codex`, `opencode` or `omp` | |
 | `--name <account>` `-n` | the account to capture it as, e.g. `personal` or `work` | `default` |
-| `--import` | copy the login this machine already has instead; needs no container runtime. For codex, the model provider in `~/.codex/config.toml` comes along | |
-| `--provider <file>` | keep the account's model provider from this file — a Codex `config.toml` or a provider file — and log nothing in. Codex only, so far | |
+| `--import` | copy the login this machine already has instead; needs no container runtime. For codex, the model provider in `~/.codex/config.toml` comes along; for omp, the providers in `~/.omp/agent/models.yml` | |
+| `--provider <file>` | keep the account's model provider from this file — a Codex `config.toml` or an omp `models.yml`, or a provider file — and log nothing in. Codex and omp only, so far | |
 
 ```console
 $ omh auth claude --name personal
@@ -361,7 +361,8 @@ $ omh auth claude --name work
 **`--import` copies the adapter's `token` files**, so it works only where the
 harness keeps its login in that file on this machine too — Codex by default
 does; Claude Code on macOS keeps it in the Keychain, so there it finds nothing
-to copy. A harness with no `token` file (omp) is refused. One that has it:
+to copy. A harness with no `token` file (omp) is refused, unless the import
+brings its providers, which the account then holds alone. One that has it:
 
 ```console
 $ omh auth codex --name work --import
@@ -383,6 +384,11 @@ and nothing is kept. The output names providers, never values:
 `work` captured for codex
   model provider azure kept in /Users/you/.omh/creds/codex/work/provider.toml
 ```
+
+For omp, the file is a `models.yml`: its `providers:`, with an `apiKey` or a
+header value that names a variable read the same way, kept in
+`provider.yml`. A file under `~/.omh` — an account's own, which a session can
+write — is read with nothing from your environment.
 
 An account holding only a provider counts as captured. See
 [Accounts](/guides/accounts/#a-model-provider-of-your-own).

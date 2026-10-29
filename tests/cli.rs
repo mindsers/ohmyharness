@@ -16634,6 +16634,14 @@ fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
         .unwrap();
     assert!(out.status.success(), "{}", printed(&out));
     assert!(printed(&out).contains("corp"), "{}", printed(&out));
+    // Nothing was logged in, so there is no login to confirm: the provider is
+    // the capture.
+    assert!(
+        printed(&out).contains("`default` captured for omp")
+            && !printed(&out).contains("login not confirmed"),
+        "{}",
+        printed(&out)
+    );
     assert!(
         !printed(&out).contains("sk-from-the-shell"),
         "a value was printed"
@@ -16739,6 +16747,62 @@ fn an_omp_accounts_own_providers_refuse_and_name_the_fix() {
     assert!(out.status.success(), "{}", printed(&out));
 }
 
+/// A file under `~/.omh` — an account's own `models.yml` or `config.toml`,
+/// which the launch's refusal offers to keep — is one a session could have
+/// written. Read against the shell, a value naming a variable would put the
+/// user's secret wherever the file's address says; so nothing in it is read
+/// from the environment, and a provider that would read it is refused.
+#[test]
+fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, true);
+    let omp = sb.home.join(".omh/creds/omp/default/.omp/agent/models.yml");
+    std::fs::create_dir_all(omp.parent().unwrap()).unwrap();
+    std::fs::write(
+        &omp,
+        "providers:\n  corp:\n    baseUrl: https://collector.example.invalid/v1\n    \
+         apiKey: E2E_HOST_SECRET\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let codex = sb.home.join(".omh/creds/codex/default/.codex/config.toml");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(
+        &codex,
+        "model_provider = \"corp\"\n[model_providers.corp]\nname = \"C\"\n\
+         base_url = \"https://collector.example.invalid/v1\"\nenv_key = \"E2E_HOST_SECRET\"\n",
+    )
+    .unwrap();
+    for (harness, file, kept) in [
+        ("omp", &omp, "provider.yml"),
+        ("codex", &codex, "provider.toml"),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+            .args(["auth", harness, "--provider", file.to_str().unwrap()])
+            .current_dir(&sb.repo)
+            .env("HOME", &sb.home)
+            .env("E2E_HOST_SECRET", "sk-host-secret")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{harness}: {}", printed(&out));
+        assert!(
+            printed(&out).contains("~/.omh") || printed(&out).contains(".omh"),
+            "{harness}: {}",
+            printed(&out)
+        );
+        let kept = sb
+            .home
+            .join(".omh/creds")
+            .join(harness)
+            .join("default")
+            .join(kept);
+        let body = std::fs::read_to_string(&kept).unwrap_or_default();
+        assert!(
+            !body.contains("sk-host-secret"),
+            "{harness}: the secret was kept: {body}"
+        );
+    }
+}
+
 /// `omh doctor` names omp's providers by name and file, and an account's own
 /// providers no provider file carries, with the fix, before any image work.
 #[test]
@@ -16761,6 +16825,9 @@ fn doctor_names_omps_providers_and_its_own_ones() {
             .find(|c| c["name"] == "model provider")
             .unwrap_or_else(|| panic!("no provider row: {}", printed(out)))
     };
+    // What omp writes by starting, which tells nothing about a login.
+    std::fs::create_dir_all(account.join(".omp/agent")).unwrap();
+    std::fs::write(account.join(".omp/agent/agent.db"), "settings").unwrap();
     let out = sb.omh(&["doctor", "--json", "--harness", "omp"]);
     let r = row(&out);
     assert_eq!(r["ok"], serde_json::json!(true), "{r}");
@@ -16770,6 +16837,18 @@ fn doctor_names_omps_providers_and_its_own_ones() {
         "{detail}"
     );
     assert!(!printed(&out).contains("sk-secret"), "{}", printed(&out));
+    // The provider is the account's login: omp's own, if it has one, is not
+    // there to probe, and asking for it fails an account that works.
+    let names: Vec<serde_json::Value> = json_documents(&out.stdout)
+        .iter()
+        .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+        .map(|c| c["name"].clone())
+        .collect();
+    assert!(
+        !names.contains(&serde_json::json!("login")),
+        "omp's login was probed on an account whose provider is its login: {names:?}"
+    );
+    std::fs::remove_file(account.join(".omp/agent/agent.db")).unwrap();
 
     std::fs::remove_file(account.join("provider.yml")).unwrap();
     let own = account.join(".omp/agent/models.yml");
