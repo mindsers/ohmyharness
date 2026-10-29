@@ -14241,6 +14241,19 @@ fn a_system_path_ejects_under_system() {
             .contains(&serde_json::json!({"serverCommand": ["demo-server"]})),
         "{policy}"
     );
+    // Its settings document is handed to every `claude` in a sandbox on its
+    // command line; a harness run on the host without omh reads its own
+    // file, so that is where the document lands.
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("home/.claude/settings.json"))
+            .expect("claude's settings document, where claude reads its own"),
+    )
+    .unwrap();
+    assert_eq!(settings["enableAllProjectMcpServers"], true, "{settings}");
+    assert!(
+        !out.join("system/etc/omh").exists(),
+        "and not at the path only the sandbox's wrapper hands it from"
+    );
 }
 
 /// The exit. Write out the raw per-harness config and step aside.

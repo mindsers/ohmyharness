@@ -2512,10 +2512,11 @@ $ omh eject claude --to /tmp/ejtest
 ```text title="omh eject claude --to /tmp/ejtest"
 eject claude /tmp/ejtest
 
-  rules  /tmp/ejtest/CLAUDE.md
-  rules  /tmp/ejtest/AGENTS.md
-  mcp    /tmp/ejtest/.mcp.json
-  hooks  /tmp/ejtest/home/.claude/settings.json
+  rules   /tmp/ejtest/CLAUDE.md
+  rules   /tmp/ejtest/AGENTS.md
+  mcp     /tmp/ejtest/.mcp.json
+  hooks   /tmp/ejtest/home/.claude/settings.json
+  policy  /tmp/ejtest/system/etc/claude-code/managed-settings.d/omh.json
 
 omh: these still name paths only omh's sandbox has — `/omh`, `/work`, `$OMH_*` — so they need editing before a harness reads them outside one:
     /tmp/ejtest/CLAUDE.md
@@ -2528,11 +2529,13 @@ omh: these still name paths only omh's sandbox has — `/omh`, `/work`, `$OMH_*`
 
 Two things in that output are the whole design.
 
-**`/work` lands at the root, everything else under `home/`.** An adapter
-declares where the *container* expects a file, and neither `/work/CLAUDE.md`
-nor `$HOME/.claude/settings.json` is a host path. Keeping them apart is what
-lets you tell "this belongs in my repo" from "this belongs in my dotfiles"
-without knowing omh's mount layout.
+**`/work` lands at the root, the harness's home under `home/`, the rest
+under `system/`.** An adapter declares where the *container* expects a file,
+and neither `/work/CLAUDE.md` nor `/etc/claude-code/managed-settings.d/omh.json`
+is a host path. Keeping them apart is what lets you tell "this belongs in my
+repo" from "this belongs in my dotfiles" from "this belongs to the machine"
+without knowing omh's mount layout. Claude's settings, which a sandbox hands it
+by `--settings`, land where Claude reads its own.
 
 **The warning is not a caveat, it is the honest half.** omh renders these for
 a sandbox: the memory server is invoked with `--notes /omh/memory`, hooks

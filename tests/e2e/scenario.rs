@@ -98,6 +98,10 @@ const SCENARIOS: &[Scenario] = &[
         run: own_copy,
     },
     Scenario {
+        name: "omh's settings reach every claude above what a session writes, merged with the caller's own",
+        run: claude_settings,
+    },
+    Scenario {
         name: "the session's ~/.codex/config.toml is its own, migrated from the account's",
         run: own_config,
     },
@@ -866,6 +870,96 @@ fn own_copy(s: &Session) {
     );
 }
 
+/// omh's settings document reaches every `claude` in the sandbox by
+/// `--settings` — every turn here is a `claude` started by hand, through the
+/// image's wrapper — and `--settings` sits above every settings file a
+/// session writes:
+/// - `disableAllHooks: true` and `attribution` text in
+///   `/work/.claude/settings.local.json` switched omh's hooks off and put the
+///   text before the model, for the session that wrote them; the document's
+///   own `false`s outrank both;
+/// - `~/.claude/settings.json`, in the account, is masked: a hook written
+///   there is refused;
+/// - a caller's own `--settings` — a file, `--settings=`, inline JSON — is
+///   merged into omh's rather than replacing it, as a second `--settings`
+///   would: omh's servers stay connected though the caller's says otherwise,
+///   and the caller's own hook runs beside omh's.
+///
+/// Only for claude.
+fn claude_settings(s: &Session) {
+    if s.harness.name != "claude" {
+        return;
+    }
+    // Removed before anything is asserted: it is in the worktree, which the
+    // scenarios after this one diff and commit.
+    let fresh = !s.sh("test -e /work/.claude").status.success();
+    let plant = r#"mkdir -p /work/.claude && printf '%s' '{"disableAllHooks":true,"attribution":{"commit":"E2E-ATTRIBUTION","pr":"E2E-ATTRIBUTION"}}' > /work/.claude/settings.local.json"#;
+    ok(&s.sh(plant), plant);
+    let before = lines(s, "/tmp/e2e-start-run");
+    let turn = s.turn("Say hello.", &[]);
+    let fired = lines(s, "/tmp/e2e-start-run") > before;
+    ok(
+        &s.sh(match fresh {
+            true => "rm -rf /work/.claude",
+            false => "rm /work/.claude/settings.local.json",
+        }),
+        "removing the planted settings",
+    );
+    ran(&turn);
+    assert!(
+        fired,
+        "the session's own settings switched omh's hooks off: {}",
+        turn.printed()
+    );
+    let said = turn
+        .requests
+        .iter()
+        .any(|r| Turn::seen(r).contains("E2E-ATTRIBUTION"));
+    assert!(!said, "the session's attribution reached the model");
+
+    let write = r#"printf '%s' '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"touch /tmp/e2e-planted-hook"}]}]}}' > ~/.claude/settings.json"#;
+    let wrote = s.sh(write);
+    assert!(
+        !wrote.status.success() && crate::sandbox::text(&wrote).contains("Read-only file system"),
+        "a session wrote the account's settings.json: {}",
+        crate::sandbox::text(&wrote)
+    );
+
+    let yours = r#"{"enableAllProjectMcpServers":false,"env":{"E2E_YOURS":"1"}}"#;
+    ok(
+        &s.sh(&format!("printf '%s' '{yours}' > /tmp/e2e-yours.json")),
+        "writing the caller's settings",
+    );
+    for form in [
+        "--settings /tmp/e2e-yours.json".to_string(),
+        "--settings=/tmp/e2e-yours.json".to_string(),
+        format!("--settings '{yours}'"),
+    ] {
+        let list = format!("claude {form} mcp list");
+        let listed = ok(&s.sh(&list), &list);
+        let memory = listed
+            .lines()
+            .find(|l| l.starts_with("omh-memory"))
+            .unwrap_or_else(|| panic!("{list}: omh-memory is not listed: {listed}"));
+        assert!(memory.contains("Connected"), "{list}: {memory}");
+    }
+
+    let hook = r#"{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"touch /tmp/e2e-yours-ran"}]}]}}"#;
+    let before = lines(s, "/tmp/e2e-start-run");
+    let turn = s.turn_passing("Say hello.", &[], &["--settings".into(), hook.into()]);
+    ran(&turn);
+    assert!(
+        s.sh("test -e /tmp/e2e-yours-ran").status.success(),
+        "the caller's own hook did not run: {}",
+        turn.printed()
+    );
+    assert!(
+        lines(s, "/tmp/e2e-start-run") > before,
+        "omh's hooks did not run beside the caller's: {}",
+        turn.printed()
+    );
+}
+
 /// omp reads its providers from `~/.omp/agent/models.yml`, in the account
 /// every session on it shares, and trusts what it finds there at its next
 /// start: a provider's `baseUrl` sends the turn, and the key it carries, where
@@ -1076,8 +1170,17 @@ fn lifecycle_down_resume(s: &Session) {
     ok(&s.omh(&["s01", "down"]), "omh s01 down");
     assert!(!s.running(), "the session is still running after down");
     s.resume();
+    // A new container: what the session-start hook appended before is gone.
+    let before = lines(s, "/tmp/e2e-start-run");
     let turn = s.turn("Read it.", &[(s.harness.read)("lifecycle.txt")]);
     ran(&turn);
+    if !s.harness.drops.contains(&"e2e-start-run") {
+        assert!(
+            lines(s, "/tmp/e2e-start-run") > before,
+            "omh's hooks did not run in the resumed session: {}",
+            turn.printed()
+        );
+    }
 }
 
 fn lifecycle_rm(s: &Session) {

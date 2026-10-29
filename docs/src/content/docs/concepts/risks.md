@@ -36,7 +36,7 @@ them, because a risk that vanishes teaches nobody what it cost.
 | Risk | Where it stands |
 |---|---|
 | [1. The credential model is weaker than `sbx`'s](#1-the-credential-model-is-weaker-than-sbxs) | open — gated on the `sbx` backend |
-| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | narrowed — MCP servers, and Codex's hooks, are held to the launch's; omp's providers are the account's own |
+| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | narrowed — MCP servers, and Codex's hooks, are held to the launch's; Claude's settings are above what a session writes; omp's providers are the account's own |
 | [2. A sandbox protects the host, not the repo](#2-a-sandbox-protects-the-host-not-the-repo) | inherent |
 | [2b. The sandbox's repository is agent-writable](#2b-the-sandboxs-repository-is-agent-writable-its-push-wall-is-a-signpost) | narrowed |
 | [2c. ~~`omh sNN rm` destroys the agent's own commits~~](#2c-omh-snn-rm-destroys-the-agents-own-commits) | closed in #58 |
@@ -130,6 +130,18 @@ omh-memory switched off and a permission granted, checks the entry is one the
 lock admits, and asserts none of it reaches the session and nothing the
 session writes reaches the account. `omh auth`'s login, which mounts the
 account's own file, cleans it the same way first and admits no server.
+
+**omh's hooks are above every settings file a session writes, on Claude
+Code** (#197). omh's settings reach Claude by `--settings`, from a read-only
+file every `claude` in the sandbox is handed — see
+[Claude's settings document](/reference/adapters/#claudes-settings-document)
+— which ranks above user, project and local settings. A `disableAllHooks:
+true` written into the worktree's `.claude/settings.local.json` switched omh's
+hooks off for the session that wrote it, and `attribution` text there reached
+the model; neither does now (`tests/e2e`, red before). `~/.claude/settings.json`
+in the account is masked, so a hook written there is refused. A `claude` run
+by the real binary's absolute path is not handed the document: that session's
+own business, like any other file it can write.
 
 **Closed across sessions on Codex** (#197): the requirements identity
 compares neither `env` nor `cwd` (read in Codex's source), so an entry with

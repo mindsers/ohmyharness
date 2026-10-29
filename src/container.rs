@@ -2046,16 +2046,65 @@ mod tests {
         )
         .unwrap();
 
-        let mount = p
-            .mounts
-            .iter()
-            .find(|m| m.guest.ends_with(".claude/settings.json"))
-            .expect("no hooks is not the same as no settings document");
+        let mount = claude_settings(&p);
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&mount.host).unwrap()).unwrap();
         assert_eq!(
             doc["enableAllProjectMcpServers"], true,
             "the mcp document would be listed and never loaded: {doc}"
+        );
+    }
+
+    /// The mount of Claude's settings document: where its hooks binding puts
+    /// it, wherever that is.
+    fn claude_settings(p: &Plan) -> &Mount {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let guest = expand(
+            &adapter.supports(Capability::Hooks).unwrap().path,
+            GUEST_HOME,
+        );
+        p.mounts
+            .iter()
+            .find(|m| m.guest == guest)
+            .expect("claude is always handed its settings document")
+    }
+
+    /// omh's settings document reaches Claude on its command line — the
+    /// image's wrapper hands it to every `claude` — from a file outside the
+    /// home and the worktree, read-only. Never at `~/.claude/settings.json`,
+    /// inside the account every session on it shares: that file is masked,
+    /// empty and without a write bit, which Claude 2.1.300 reads as no
+    /// settings [measured], so what a session writes there reaches no
+    /// session.
+    #[test]
+    fn claudes_settings_document_is_handed_on_its_own_and_its_users_file_is_masked() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let stage = fx.paths.staging(&fx.session.id, "claude");
+
+        let doc = p
+            .mounts
+            .iter()
+            .find(|m| m.host == stage.join("hooks.rendered"))
+            .expect("the settings document is staged");
+        assert!(doc.read_only && doc.file, "{doc:?}");
+        assert!(
+            !doc.guest.starts_with(GUEST_HOME) && !doc.guest.starts_with("/work"),
+            "the document lands where a harness or a session reads it on its own: {doc:?}"
+        );
+
+        let own = expand("$HOME/.claude/settings.json", GUEST_HOME);
+        let masks: Vec<&Mount> = p.mounts.iter().filter(|m| m.guest == own).collect();
+        assert_eq!(masks.len(), 1, "{masks:?}");
+        let mask = masks[0];
+        assert!(mask.read_only && mask.file, "{mask:?}");
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&mask.host).unwrap();
+        assert_eq!(meta.len(), 0, "{} is not empty", mask.host.display());
+        assert_eq!(
+            meta.permissions().mode() & 0o222,
+            0,
+            "{mask:?} can be written"
         );
     }
 
@@ -4189,12 +4238,7 @@ mod tests {
     /// with quotes in them, and a substring check against JSON compares
     /// escaped text with unescaped and fails on hooks that are present.
     fn staged_hooks(p: &Plan) -> Vec<String> {
-        let mount = p
-            .mounts
-            .iter()
-            .find(|m| m.guest.ends_with(".claude/settings.json"))
-            .expect("claude stages hooks into ~/.claude/settings.json");
-        let body = std::fs::read_to_string(&mount.host).unwrap();
+        let body = std::fs::read_to_string(&claude_settings(p).host).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
         doc["hooks"]
             .as_object()

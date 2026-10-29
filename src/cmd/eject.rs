@@ -298,13 +298,16 @@ fn refuse_the_checkout(cwd: &Path, paths: &Paths, to: &Path) -> Result<()> {
 /// - the harness's own home lands under `home/`.
 /// - anything else is a system path — Codex's hooks, in
 ///   `/etc/codex/config.toml` — and lands under `system/`, at its full path.
+/// - except a document handed by a flag, Claude's settings: it sits where only
+///   the sandbox's wrapper looks, and lands at its `eject`, the file a harness
+///   started without omh reads instead.
 ///
 /// Kept apart deliberately: a reader has to be able to tell "this belongs in my
 /// repo" from "this belongs in my dotfiles" from "this belongs to the machine"
 /// without knowing omh's mount layout, and flattening them together loses
 /// exactly that.
 fn destinations(binding: &Binding, to: &Path) -> Result<Vec<PathBuf>> {
-    std::iter::once(&binding.path)
+    std::iter::once(binding.eject.as_ref().unwrap_or(&binding.path))
         .chain(binding.also.iter())
         .map(|target| {
             let expanded = crate::adapter::expand(target, crate::image::GUEST_HOME);

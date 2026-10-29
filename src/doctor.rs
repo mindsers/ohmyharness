@@ -3747,6 +3747,40 @@ mod tests {
         );
     }
 
+    /// A masked path is an empty file in every launch, so a check looking for
+    /// content there fails every doctor run. Claude's hooks were checked at
+    /// `~/.claude/settings.json`, which is masked now that they reach Claude
+    /// by `--settings`: each check looks where the launch puts what it checks.
+    #[test]
+    fn no_check_looks_for_content_where_a_launch_masks() {
+        let fx = fixture();
+        for name in ["claude", "codex", "omp", "opencode"] {
+            let a = adapter(name);
+            let masked: Vec<PathBuf> = a
+                .policy
+                .iter()
+                .flat_map(|p| p.mask.iter())
+                .map(|m| expand(m, GUEST_HOME))
+                .collect();
+            let checks = checks(
+                &fx.profile,
+                &a,
+                &decided().0,
+                &decided().1,
+                &Default::default(),
+            )
+            .unwrap();
+            for c in &checks {
+                assert!(
+                    !masked.contains(&c.guest),
+                    "{name}: `{}` looks in {}, which every launch masks",
+                    c.name,
+                    c.guest.display()
+                );
+            }
+        }
+    }
+
     /// **The one thing about `ca_cert` a green suite cannot say.**
     ///
     /// Every other guard for this feature asserts what is in the recipe. None
@@ -4194,7 +4228,9 @@ mod tests {
     }
 
     /// The entire point: doctor must inspect where the *harness* looks, not
-    /// where omh staged. Checking the host would be circular.
+    /// where omh staged. Checking the host would be circular. A sandbox path
+    /// is the worktree, the agent's home, or `/etc`, where omh mounts what
+    /// Claude reads only when handed it — its settings document.
     #[test]
     fn checks_target_guest_paths_only() {
         let fx = fixture();
@@ -4209,8 +4245,12 @@ mod tests {
         {
             let p = check.guest.to_string_lossy().to_string();
             assert!(
-                p.starts_with("/work") || p.starts_with(GUEST_HOME),
+                p.starts_with("/work") || p.starts_with(GUEST_HOME) || p.starts_with("/etc/"),
                 "{p} is not a sandbox path"
+            );
+            assert!(
+                !check.guest.starts_with(fx._dir.path()),
+                "{p} is where omh staged it"
             );
         }
     }

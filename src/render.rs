@@ -1703,10 +1703,20 @@ fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>, ours: &[&str]) -> R
     // query of every session waits on a dialog. Yours are not listed: omh
     // ships and runs its own and cannot vouch for a server it did not.
     let allow: Vec<String> = ours.iter().map(|name| format!("mcp__{name}")).collect();
+    // Handed by `--settings`, which sits above every settings file a session
+    // writes [docs]. A `disableAllHooks: true` in the worktree's
+    // `.claude/settings.local.json` switched omh's hooks off for the session
+    // that wrote it [measured]; this `false` outranks it. `attribution` is
+    // text Claude puts before the model at every start, and `false` hides it
+    // whole, `sessionUrl` included [bin] — omh's choice, which no file a
+    // session writes can change. That form needs 2.1.281 or later; an older
+    // Claude skips the whole file, hooks included [bin].
     pretty(serde_json::json!({
         "hooks": by_event,
         "enableAllProjectMcpServers": true,
         "permissions": { "allow": allow },
+        "disableAllHooks": false,
+        "attribution": false,
     }))
 }
 
@@ -3251,6 +3261,44 @@ mod tests {
             allow,
             vec!["mcp__omh-codegraph"],
             "omh's own, and not the server whose feature is off here: {}",
+            out.body
+        );
+    }
+
+    /// The document sits above every settings file a session can write, and
+    /// two of its keys are there for that alone. `disableAllHooks: true` in
+    /// `/work/.claude/settings.local.json` switched omh's hooks off for the
+    /// session that wrote it; `false` here outranks it. `attribution` carries
+    /// free text Claude puts before the model at every start: `false` hides
+    /// it whole, `sessionUrl` included, and no file a session writes sets it.
+    #[test]
+    fn the_settings_document_keeps_hooks_on_and_attribution_off() {
+        let adapter = claude_hooks();
+        let out = document(
+            Capability::Hooks,
+            hooks_binding(&adapter),
+            &[],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+                provider: None,
+            },
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(
+            v.get("disableAllHooks"),
+            Some(&serde_json::json!(false)),
+            "{}",
+            out.body
+        );
+        assert_eq!(
+            v.get("attribution"),
+            Some(&serde_json::json!(false)),
+            "{}",
             out.body
         );
     }
