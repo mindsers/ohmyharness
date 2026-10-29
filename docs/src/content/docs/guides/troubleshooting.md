@@ -105,6 +105,9 @@ see [Something else](#something-else).
 | `claude mcp add` says "not allowed by enterprise policy" | [Put it in your catalogue](#claude-mcp-add-says-not-allowed-by-enterprise-policy) |
 | claude.ai connectors are missing in a session | [Expected](#claudeai-connectors-are-missing-in-a-session) |
 | A `/mcp` switch from one session is gone in the next, and a `/login` keeps only its tokens | [Expected](#a-mcp-switch-from-one-session-is-gone-in-the-next-and-a-login-keeps-only-its-tokens) |
+| `claude` says `omh could not merge your --settings … into its own` | [Fix the settings you passed](#claude-says-omh-could-not-merge-your---settings--into-its-own) |
+| `/model` or `/config` does not last, and `~/.claude/settings.json` cannot be written | [Expected, for now](#model-or-config-does-not-last-and-claudesettingsjson-cannot-be-written) |
+| Claude's commits and pull requests in a session carry no attribution | [Expected](#claudes-commits-and-pull-requests-in-a-session-carry-no-attribution) |
 | **omp** | |
 | A launch says `… models.yml defines … omh now hides it behind the account's provider file` | [Keep them, or remove the file](#a-launch-says-the-accounts-own-models-file-defines-providers) |
 | A launch stops on `provider.yml`, or `omh doctor`'s `model provider` row is `✗` | [Fix the account's provider file](#a-launch-stops-on-provideryml) |
@@ -701,6 +704,29 @@ launch with another account, `omh set account claude:<name>`. If your account
 carried `env` or `apiKeyHelper` in `.claude.json` (which 2.1.300 reads as a
 legacy fallback: read in the binary, not measured), a session no longer gets
 them.
+
+#### `claude` says `omh could not merge your --settings … into its own`
+
+Every `claude` in a sandbox is handed omh's settings by `--settings`, and one
+you pass is merged into them — Claude keeps only the last of two. The value
+you passed did not merge: a file that is not there or not JSON, or a value in
+braces that does not parse. Fix it and run again; nothing ran. See
+[Claude's settings document](/reference/adapters/#claudes-settings-document).
+
+#### `/model` or `/config` does not last, and `~/.claude/settings.json` cannot be written
+
+Expected, for now. That file is user settings, in the account every session on
+it shares, so a session's write would reach every later session: it is masked
+behind an empty read-only file. Keeping your preferences from one session to
+the next, and nothing else, is #197's next step.
+
+#### Claude's commits and pull requests in a session carry no attribution
+
+Expected: omh's settings set `attribution` to `false`, above every settings
+file in the worktree or the account. Its text is put before the model at every
+start, so a settings file a session can write would otherwise choose what the
+model is told. To credit Claude, say so in your commit message, or add a
+trailer in your own commit hook.
 
 ### omp
 

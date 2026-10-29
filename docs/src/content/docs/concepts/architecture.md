@@ -145,7 +145,7 @@ tools:  claude=ok dtach=ok git=ok rg=ok node=ok
   skills     graphify, review-diff       (your catalogue)
   mcp        codegraph, filesystem, github, linear, omh-memory, sentry
   subagents  explorer.md
-  hooks      rust-test, graph-refresh …  (translated into settings.json)
+  hooks      rust-test, graph-refresh …  (translated into Claude's settings)
   version    2.1.222 (Claude Code)
 ```
 

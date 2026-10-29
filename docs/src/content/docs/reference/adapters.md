@@ -146,7 +146,47 @@ temporary file and renaming it over.
 | `import` | the host-side path `omh import` and `omh settings mcp import` read from: where *you* keep it, not where the container reads | none — `omh import` then needs `--from` |
 | `verify` | the harness's own command for listing what it loaded, run by `omh doctor` inside the sandbox | not asked |
 | `ready` | the word `verify`'s output uses for a server the harness took up | not asked |
+| `flag` | the option the harness is handed `path` by, for a document it reads only when told to; `path` is then a file under `/etc/`. Only `claude-settings` — see [Claude's settings document](#claudes-settings-document) | none: the harness finds `path` itself |
+| `eject` | with `flag`, the file under `$HOME` the harness reads on its own, where `omh eject` writes the document | required with `flag`, refused without |
 | `events`, `fields`, `fields-by-tool`, `inject`, `refuse` | `hooks` only — see [Hooks](#hooks-three-maps-and-a-template) | none |
+
+### Claude's settings document
+
+Claude Code reads omh's settings — its hooks, the approval of omh's MCP
+document and of omh's own servers' tools, `disableAllHooks: false` and
+`attribution: false` — from `--settings`, never from `~/.claude/settings.json`,
+which is in the account every session on it shares and is masked:
+
+```toml
+# adapters/claude.toml
+[capabilities.hooks]
+path   = "/etc/omh/claude/settings.json"
+render = "claude-settings"
+flag   = "--settings"
+eject  = "$HOME/.claude/settings.json"
+```
+
+The image puts a wrapper where `claude` was on `PATH`, so every `claude` in the
+sandbox is handed the document — omh's launches, `omh doctor`'s `claude mcp
+list`, one run by hand in an editor's terminal, a nested `claude -p` — ahead of
+any subcommand, since `claude mcp list --settings <f>` is an unknown option.
+`--settings` sits above user, project and local settings, so a session's
+`disableAllHooks: true` or `attribution` text in the worktree's
+`.claude/settings.local.json` changes nothing (`tests/e2e`). Of two
+`--settings`, Claude keeps the last whole, so one you pass — a file,
+`--settings=<f>` or inline JSON — is merged into omh's instead, with jq's `*`:
+omh's keys win, the rest of yours is kept (`tests/e2e`). One that does not
+parse stops the run: `omh could not merge your --settings <value> into its
+own`. Calling the real binary by its absolute path skips the wrapper. Where
+the document is not there — the image run by something other than omh, or on
+`sbx`, where omh's entrypoint never runs (#199) — the wrapper runs Claude
+handed exactly what it was, as it ran there before.
+
+`attribution: false` hides the attribution Claude adds to the commits and pull
+requests it writes — text it puts before the model at every start, which a
+file a session writes could otherwise set. It needs Claude Code 2.1.281 or
+later; an older one skips the whole file, hooks included, and a test holds the
+pin above it.
 
 ### `[policy]`: what a session may load
 
@@ -170,7 +210,7 @@ container:
 |---|---|---|
 | `path` | the guest path the harness reads its policy from: a file under `/etc/`, absolute, with no `..`, not under a `creds` or `transcripts` path and not a capability's own path — a literal, never expanded | required |
 | `format` | `codex-requirements` or `claude-managed` | required |
-| `mask` | guest paths strictly inside one of `creds`' directories, with no `..`, that a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
+| `mask` | guest paths strictly inside one of `creds`' directories, with no `..`, never a capability's own path, that a session could write and the harness would trust on its next start; each is hidden behind an empty read-only file | none |
 | `copy` | `creds` file entries each session gets its own copy of, seeded from the account's without what names, switches or grants a server, and never written back — see [`~/.claude.json` is each session's own](/guides/accounts/#claudejson-is-each-sessions-own). Only a file its format knows how to seed: `$HOME/.claude.json`, for `claude-managed` | none |
 
 The policy admits exactly the MCP servers the launch staged, by command and
@@ -205,7 +245,13 @@ launch and by `omh doctor`. `omh eject` writes the policy itself under
   are switched off in a session (read in the 2.1.300 binary; not measured):
   one is matched by its URL, and allowlisting that URL would let a session put
   its own server there. An organisation's own managed list replaces omh's
-  (Claude Code's docs; not measured).
+  (Claude Code's docs; not measured). Two files in the account's shared
+  `~/.claude/` are masked: `.config.json`, which Claude reads *instead of*
+  `~/.claude.json` when it is not empty, and `settings.json`, user settings —
+  a hook written there would load in every later session, and in running ones
+  live. An empty file there is read as no settings (measured; a malformed one
+  stops Claude at a Settings Error). omh's own settings reach Claude another
+  way: [Claude's settings document](#claudes-settings-document).
 
 ### `[preferences]`: what a session keeps
 
@@ -283,6 +329,8 @@ omh enforces each of these, with an error naming the adapter:
 - no capabilities at all — it would launch a harness that can see none of your profile
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
 - a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
+- a `[policy]` `mask` entry that is a capability's own path — two mounts at one path
+- a `flag` that is not a long option (`--` and letters, digits, dashes), on anything but a `claude-settings` render, with a `path` not under `/etc/`, or with no `eject`; an `eject` outside `$HOME`, with a `..`, or without a `flag`
 
 One rule is yours to keep: **declare `verify` and `ready` together.** `doctor`
 runs the check only when both are set, and skips half a pair without a word.
@@ -458,8 +506,10 @@ read   = "Read"
 shell  = "Bash"
 
 [capabilities.hooks]
-path   = "$HOME/.claude/settings.json"
+path   = "/etc/omh/claude/settings.json"
 render = "claude-settings"
+flag   = "--settings"
+eject  = "$HOME/.claude/settings.json"
 
 [capabilities.hooks.events]        # omh's moments → this harness's names
 session-start = "SessionStart"
