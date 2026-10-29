@@ -406,9 +406,9 @@ fn refuse_a_lost_provider(
         return Ok(());
     };
     let reads = adapter
-        .policy
+        .provider
         .as_ref()
-        .is_some_and(|p| p.format.reads_provider());
+        .is_some_and(|p| p.format == crate::adapter::ProviderFormat::CodexConfig);
     if selected == "openai" || !reads || crate::provider::read(account)?.is_some() {
         return Ok(());
     }

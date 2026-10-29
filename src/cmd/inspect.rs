@@ -377,7 +377,7 @@ pub(crate) fn doctor_cmd(
             host.0.push(row);
             anyhow::ensure!(
                 !broken,
-                "the account's provider file would refuse every {name} start"
+                "the account's model provider would refuse every {name} start"
             );
         }
         // The account's preferences: what the next launch does to its file,
@@ -635,6 +635,9 @@ pub(crate) fn doctor_cmd(
                 &adapter,
                 &container::prefs_home(&paths, &session, adapter.name.as_str()),
             )?;
+        }
+        if let Some(account_dir) = account.as_ref().filter(|_| !dry_run) {
+            auth::drop_carried(&adapter, account_dir)?;
         }
         plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 

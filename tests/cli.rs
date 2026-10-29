@@ -14196,6 +14196,31 @@ fn a_system_path_ejects_under_system() {
         "a token was ejected: {system}"
     );
 
+    // omp's providers too: the `models.yml` a launch renders over the
+    // account's own, a home path, with every secret redacted.
+    let account = sb.home.join(".omh/creds/omp/default");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(
+        account.join("provider.yml"),
+        "providers:\n  corp:\n    baseUrl: https://u:pw-secret@llm.example.invalid/v1\n    \
+         apiKey: sk-secret\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let out = sb.home.join("ejected-omp");
+    let ran = sb.omh(&["eject", "omp", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let models = std::fs::read_to_string(out.join("home/.omp/agent/models.yml"))
+        .expect("the models.yml a launch renders, under home/");
+    assert!(
+        models.contains("corp") && models.contains("llm.example.invalid"),
+        "{models}"
+    );
+    assert!(!models.contains("secret"), "a key was ejected: {models}");
+
     // Claude's is a system path too.
     let out = sb.home.join("ejected-claude");
     let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
@@ -16476,7 +16501,11 @@ fn a_provider_for_a_harness_that_takes_none_touches_nothing() {
 
     let out = sb.omh(&["auth", "claude", "--provider", file.to_str().unwrap()]);
     assert!(!out.status.success(), "{}", printed(&out));
-    assert!(printed(&out).contains("codex only"), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("codex and omp only"),
+        "{}",
+        printed(&out)
+    );
     assert_eq!(
         std::fs::read_to_string(account.join(".claude.json")).unwrap(),
         planted,
@@ -16559,6 +16588,210 @@ fn a_provider_authored_for_an_account_reaches_its_launches() {
         printed(&out).contains("provider.toml") && printed(&out).contains("`notify`"),
         "{}",
         printed(&out)
+    );
+}
+
+/// `omh auth omp --provider` keeps the providers an omp `models.yml` defines
+/// in a file of the account's own, resolved for a sandbox and readable by the
+/// user alone; a launch renders them over the `models.yml` omp reads,
+/// read-only, and removes the model cache from the account first — on a real
+/// launch, never a preview. A command is refused, and nothing is kept.
+#[test]
+fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let models = sb.home.join("their-models.yml");
+    std::fs::write(
+        &models,
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: E2E_OMP_KEY\n    api: openai-completions\n",
+    )
+    .unwrap();
+
+    let refused = sb.home.join("runs-a-command.yml");
+    std::fs::write(
+        &refused,
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: \"!op read op://vault/key\"\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["auth", "omp", "--provider", refused.to_str().unwrap()]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("apiKey"), "{}", printed(&out));
+    assert!(!printed(&out).contains("op://"), "{}", printed(&out));
+    let account = sb.home.join(".omh/creds/omp/default");
+    let kept = account.join("provider.yml");
+    assert!(!kept.exists(), "a refused provider was kept");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .args(["auth", "omp", "--provider", models.to_str().unwrap()])
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("E2E_OMP_KEY", "sk-from-the-shell")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("corp"), "{}", printed(&out));
+    assert!(
+        !printed(&out).contains("sk-from-the-shell"),
+        "a value was printed"
+    );
+    let body = std::fs::read_to_string(&kept).unwrap();
+    assert!(
+        body.contains("sk-from-the-shell") && !body.contains("E2E_OMP_KEY"),
+        "{body}"
+    );
+    let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let info = sb.omh(&["info", "--json"]);
+    assert!(printed(&info).contains("default"), "{}", printed(&info));
+
+    // A model cache a session left in the account.
+    let agent = account.join(".omp/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    for db in ["models.db", "models.db-wal", "models.db-shm"] {
+        std::fs::write(agent.join(db), "cached").unwrap();
+    }
+    std::fs::write(agent.join("agent.db"), "logins").unwrap();
+
+    let out = sb.omh(&["new", "omp", "--dry-run"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        agent.join("models.db").exists(),
+        "a preview removed the cache"
+    );
+
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["new", "omp"]);
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let guest = "/home/agent/.omp/agent/models.yml";
+    let host =
+        mounted_at(&seen, guest).unwrap_or_else(|| panic!("no models.yml: {}", printed(&out)));
+    assert!(
+        seen.contains(&format!("{host}:{guest}:ro")),
+        "models.yml is writable: {seen}"
+    );
+    let rendered = std::fs::read_to_string(&host).unwrap();
+    assert!(
+        rendered.contains("llm.example.invalid") && rendered.contains("sk-from-the-shell"),
+        "{rendered}"
+    );
+    for db in ["models.db", "models.db-wal", "models.db-shm"] {
+        assert!(!agent.join(db).exists(), "{db} survived a launch");
+    }
+    assert_eq!(
+        std::fs::read_to_string(agent.join("agent.db")).unwrap(),
+        "logins"
+    );
+
+    // One that would run a command refuses the launch, by file and field.
+    std::fs::write(&kept, "providers:\n  corp:\n    apiKey: '!x'\n").unwrap();
+    let out = sb.omh(&["new", "omp"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("provider.yml") && printed(&out).contains("providers.corp.apiKey"),
+        "{}",
+        printed(&out)
+    );
+}
+
+/// Providers in the account's own `models.yml` would vanish behind the
+/// render, and a session could have written them: the launch refuses — a
+/// preview too — naming the file, where it points and the command that keeps
+/// them; that command lets the next launch through.
+#[test]
+fn an_omp_accounts_own_providers_refuse_and_name_the_fix() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = sb.home.join(".omh/creds/omp/default");
+    let own = account.join(".omp/agent/models.yml");
+    std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+    std::fs::write(
+        &own,
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: sk-secret\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let fix = format!("omh auth omp --name default --provider {}", own.display());
+    for argv in [&["new", "omp", "--dry-run"][..], &["new", "omp"][..]] {
+        let out = sb.omh(argv);
+        assert!(!out.status.success(), "{argv:?}: {}", printed(&out));
+        let said = printed(&out);
+        assert!(
+            said.contains(&fix) && said.contains("llm.example.invalid"),
+            "{argv:?}: {said}"
+        );
+        assert!(!said.contains("sk-secret"), "{said}");
+    }
+    let out = sb.omh(&[
+        "auth",
+        "omp",
+        "--name",
+        "default",
+        "--provider",
+        own.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let out = sb.omh(&["new", "omp", "--dry-run"]);
+    assert!(out.status.success(), "{}", printed(&out));
+}
+
+/// `omh doctor` names omp's providers by name and file, and an account's own
+/// providers no provider file carries, with the fix, before any image work.
+#[test]
+fn doctor_names_omps_providers_and_its_own_ones() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, false);
+    let log = sb.fake_docker_answering_doctor(&[], &[]);
+    let account = sb.home.join(".omh/creds/omp/default");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(
+        account.join("provider.yml"),
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: sk-secret\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let row = |out: &std::process::Output| {
+        json_documents(&out.stdout)
+            .iter()
+            .flat_map(|d| d["checks"].as_array().cloned().unwrap_or_default())
+            .find(|c| c["name"] == "model provider")
+            .unwrap_or_else(|| panic!("no provider row: {}", printed(out)))
+    };
+    let out = sb.omh(&["doctor", "--json", "--harness", "omp"]);
+    let r = row(&out);
+    assert_eq!(r["ok"], serde_json::json!(true), "{r}");
+    let detail = r["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("corp") && detail.contains("provider.yml"),
+        "{detail}"
+    );
+    assert!(!printed(&out).contains("sk-secret"), "{}", printed(&out));
+
+    std::fs::remove_file(account.join("provider.yml")).unwrap();
+    let own = account.join(".omp/agent/models.yml");
+    std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+    std::fs::write(
+        &own,
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n",
+    )
+    .unwrap();
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["doctor", "--json", "--harness", "omp"]);
+    let r = row(&out);
+    assert_eq!(r["ok"], serde_json::json!(false), "{r}");
+    let detail = r["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("omh auth omp --name default --provider"),
+        "{detail}"
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !seen.contains("build"),
+        "a probe that cannot launch was built for: {seen}"
     );
 }
 
@@ -18045,6 +18278,14 @@ const EXERCISES: &[Exercise] = &[
         argv: &["auth", "codex", "--provider", "no-such-provider.toml"],
         needs: Needs::Repo,
         expect: Expect::Refuses(&["no-such-provider.toml"]),
+        runtime: true,
+    },
+    // omp's, the same way; kept and launched with in
+    // `an_omp_provider_authored_for_an_account_reaches_its_launches`.
+    Exercise {
+        argv: &["auth", "omp", "--provider", "no-such-models.yml"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["no-such-models.yml"]),
         runtime: true,
     },
     Exercise {

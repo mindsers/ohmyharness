@@ -4,7 +4,7 @@
 //! setting, because that is how it actually varies. `crate::auth` owns the
 //! capture; this drives it and reports.
 
-use crate::adapter::Adapter;
+use crate::adapter::{Adapter, ProviderFormat};
 use crate::out;
 use crate::profile::{Paths, Profile};
 use crate::session::Session;
@@ -44,12 +44,11 @@ pub(crate) fn auth_cmd(
 
     auth::validate_name(account)?;
     // Before anything is touched: a refusal leaves the account as it was.
-    let source = adapter
-        .policy
-        .as_ref()
-        .and_then(|p| p.format.provider_source());
+    let source = adapter.provider.as_ref().map(|p| p.import.as_str());
     if provider.is_some() && source.is_none() {
-        anyhow::bail!("{harness} takes no provider file — omh keeps one for codex only, so far");
+        anyhow::bail!(
+            "{harness} takes no provider file — omh keeps one for codex and omp only, so far"
+        );
     }
     let account_dir = auth::dir(&paths, &adapter, account);
     let already = auth::is_captured(&paths, &adapter, account);
@@ -64,21 +63,21 @@ pub(crate) fn auth_cmd(
     // from the file named, or with `--import` from the host's own config.
     // Authored before any login, and independent of one.
     let home = dirs::home_dir().context("no home directory")?;
-    let provided = match (provider, import, source) {
-        (Some(file), _, Some(_)) => {
+    let format = adapter.provider.as_ref().map(|p| p.format);
+    let provided = match (provider, import, source, format) {
+        (Some(file), _, Some(_), Some(format)) => {
             let raw = std::fs::read_to_string(file)
                 .with_context(|| format!("reading {}", file.display()))?;
-            let doc = author_provider(&raw, &account_dir)
+            let doc = author_provider(format, &raw, &account_dir)
                 .with_context(|| format!("{}", file.display()))?;
             Some(doc.with_context(|| format!("{} defines no model provider", file.display()))?)
         }
-        (None, true, Some(source)) => {
+        (None, true, Some(source), Some(format)) => {
             let host = crate::adapter::expand_host(source, &home, &paths.repo);
-            match std::fs::read_to_string(&host) {
-                Ok(raw) => author_provider(&raw, &account_dir)
+            match read_host_provider(format, &host)? {
+                Some((host, raw)) => author_provider(format, &raw, &account_dir)
                     .with_context(|| format!("{}", host.display()))?,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(e).with_context(|| format!("reading {}", host.display())),
+                None => None,
             }
         }
         _ => None,
@@ -137,7 +136,11 @@ pub(crate) fn auth_cmd(
         action = action.note(format!(
             "model provider {} kept in {}",
             providers.join(", "),
-            account_dir.join(crate::provider::FILE).display()
+            account_dir
+                .join(crate::provider::file(format.context(
+                    "a provider was kept for a harness that takes none"
+                )?))
+                .display()
         ));
     }
     action = action.data(serde_json::json!({
@@ -160,21 +163,59 @@ pub(crate) fn auth_cmd(
     Ok(())
 }
 
-/// The provider tables of a Codex config `raw`, resolved for a sandbox and
-/// written as the account's provider file — the names of the providers it
-/// holds, or `None` when `raw` defines none. Environment variables it reads
-/// are read here, once, from the shell `omh auth` runs in.
-fn author_provider(raw: &str, account_dir: &std::path::Path) -> Result<Option<Vec<String>>> {
-    let Some(doc) = crate::provider::from_codex_config(raw, &|k| std::env::var(k).ok())? else {
-        return Ok(None);
-    };
-    crate::provider::write(account_dir, &doc)?;
-    let names = doc
-        .get("model_providers")
-        .and_then(|p| p.as_table())
-        .map(|p| p.keys().cloned().collect())
-        .unwrap_or_default();
-    Ok(Some(names))
+/// The provider a harness config `raw` defines — Codex's tables, omp's
+/// `models.yml` — resolved for a sandbox and written as the account's
+/// provider file: the names of the providers it holds, or `None` when `raw`
+/// defines none. Environment variables it reads are read here, once, from the
+/// shell `omh auth` runs in.
+fn author_provider(
+    format: ProviderFormat,
+    raw: &str,
+    account_dir: &std::path::Path,
+) -> Result<Option<Vec<String>>> {
+    let env = |k: &str| std::env::var(k).ok();
+    match format {
+        ProviderFormat::CodexConfig => {
+            let Some(doc) = crate::provider::from_codex_config(raw, &env)? else {
+                return Ok(None);
+            };
+            crate::provider::write(account_dir, &doc)?;
+            let names = doc
+                .get("model_providers")
+                .and_then(|p| p.as_table())
+                .map(|p| p.keys().cloned().collect())
+                .unwrap_or_default();
+            Ok(Some(names))
+        }
+        ProviderFormat::OmpModels => {
+            let Some(doc) = crate::provider::omp::from_models_config(raw, &env)? else {
+                return Ok(None);
+            };
+            crate::provider::omp::write(account_dir, &doc)?;
+            Ok(Some(crate::provider::omp::names(&doc)))
+        }
+    }
+}
+
+/// The host's own provider config, where the harness reads it — for omp, the
+/// `models.yaml` it reads when `models.yml` is absent. `None` when there is
+/// none.
+fn read_host_provider(
+    format: ProviderFormat,
+    host: &std::path::Path,
+) -> Result<Option<(std::path::PathBuf, String)>> {
+    let mut candidates = vec![host.to_path_buf()];
+    if format == ProviderFormat::OmpModels {
+        candidates.push(host.with_extension("yaml"));
+    }
+    for at in candidates {
+        match std::fs::read_to_string(&at) {
+            Ok(raw) => return Ok(Some((at, raw))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", at.display())),
+        }
+    }
+    Ok(None)
 }
 
 /// The harness's own login, run in a throwaway sandbox with the account's
@@ -262,6 +303,7 @@ fn login_in_sandbox(
             ctx.warn(&note);
         }
     }
+    auth::drop_carried(adapter, account_dir)?;
     image::ensure_network(&backend, &plan.network)?;
     let _network_cleanup = NetworkCleanup {
         backend: &backend,

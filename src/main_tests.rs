@@ -2049,6 +2049,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/profile.rs", 1),
         // `omh auth codex --provider <file>`, in a provider field's refusal.
         ("src/provider.rs", 1),
+        // `omh auth omp --name <account> --provider <file>`, when the
+        // account's own models file defines providers a launch would hide.
+        ("src/provider/omp.rs", 1),
         ("src/render.rs", 1),
         // `select`'s refusal when only the unmeasured backend is present
         // names `omh doctor` as the way to check it first.

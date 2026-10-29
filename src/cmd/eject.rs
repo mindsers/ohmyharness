@@ -46,22 +46,19 @@ pub(crate) fn eject(
 
     // The model provider a launch on this checkout's account would render —
     // redacted, since an eject is handed to the user to read and keep.
-    let provider = match adapter
-        .policy
-        .as_ref()
-        .filter(|p| p.format.reads_provider())
-    {
+    let account = match &adapter.provider {
         Some(_) => {
             let configured = crate::auth::configured(&paths, &adapter)?;
-            match crate::auth::resolve_for_launch(&paths, &adapter, configured.as_deref())? {
-                Some(account) => {
-                    crate::provider::read(&crate::auth::dir(&paths, &adapter, &account))?
-                        .map(|p| crate::provider::redacted(&p))
-                }
-                None => None,
-            }
+            crate::auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
+                .map(|account| crate::auth::dir(&paths, &adapter, &account))
         }
         None => None,
+    };
+    let provider = match (&adapter.provider, &account) {
+        (Some(p), Some(account)) if p.format == crate::adapter::ProviderFormat::CodexConfig => {
+            crate::provider::read(account)?.map(|p| crate::provider::redacted(&p))
+        }
+        _ => None,
     };
 
     // Composed exactly as a launch composes it, which is the point: the
@@ -183,6 +180,28 @@ pub(crate) fn eject(
         write_file(&at, &render::policy(policy.format, &servers)?, dry_run)?;
         wrote.push(report::EjectedFile {
             capability: "policy".into(),
+            at: at.display().to_string(),
+            wrote: report::Wrote::Document,
+        });
+    }
+
+    // omp's providers, in the `models.yml` a launch renders over the
+    // account's own: a home path, so it lands under `home/`.
+    if let Some(path) = adapter
+        .provider
+        .as_ref()
+        .filter(|p| p.format == crate::adapter::ProviderFormat::OmpModels)
+        .and_then(|p| p.path.as_deref())
+    {
+        use crate::provider::omp;
+        let doc = match &account {
+            Some(account) => omp::read(account)?.map(|d| omp::redacted(&d)),
+            None => None,
+        };
+        let at = to.join("home").join(path.trim_start_matches("$HOME/"));
+        write_file(&at, &omp::render(doc.as_ref())?, dry_run)?;
+        wrote.push(report::EjectedFile {
+            capability: "provider".into(),
             at: at.display().to_string(),
             wrote: report::Wrote::Document,
         });

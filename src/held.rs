@@ -94,6 +94,48 @@ fn open_under_mode(
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// `rel` under `dir`, read as a file a session could have written: one name
+/// at a time, never through a link, never past `cap` bytes, UTF-8 or refused.
+/// Absent — the file, or a directory on the way to it — is empty.
+pub(crate) fn read_under(dir: &Path, rel: &str, cap: u64) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::io::Read;
+    let names: Vec<&OsStr> = Path::new(rel).iter().collect();
+    let Some((leaf, above)) = names.split_last() else {
+        anyhow::bail!("{rel} names no file");
+    };
+    let gone = |e: &io::Error| e.kind() == io::ErrorKind::NotFound;
+    let mut held = match Dir::open(dir) {
+        Ok(d) => d,
+        Err(e) if gone(&e) => return Ok(String::new()),
+        Err(e) => return Err(e.into()),
+    };
+    for name in above {
+        held = match held.sub(name) {
+            Ok(d) => d,
+            Err(e) if gone(&e) => return Ok(String::new()),
+            Err(e) => return Err(e.into()),
+        };
+    }
+    let file = match held.file(leaf) {
+        Ok(f) => f,
+        Err(e) if gone(&e) => return Ok(String::new()),
+        Err(e) => {
+            return Err(e).context(
+                "it is a link or not a regular file, which omh does not follow or read \
+                 where a session could have written",
+            )
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= cap,
+        "it is larger than omh reads ({cap} bytes)"
+    );
+    String::from_utf8(bytes).context("it is not UTF-8")
+}
+
 impl Dir {
     /// Hold `path`, which has to be a directory and not a link to one.
     ///
@@ -252,6 +294,23 @@ impl Dir {
                 unsafe { libc::unlinkat(dir, part.as_ptr(), 0) };
                 Err(why)
             }
+        }
+    }
+
+    /// Remove `name` here when it is a file or a link — a link is removed,
+    /// never what it points at. Absent is already done; anything else, a
+    /// directory among them, is refused and left as it is.
+    pub(crate) fn remove(&self, name: &OsStr) -> io::Result<()> {
+        let name = step(name)?;
+        // SAFETY: as `open_under` — an open descriptor and a C string, both
+        // outliving the call.
+        if unsafe { libc::unlinkat(self.fd.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+            return Ok(());
+        }
+        let why = io::Error::last_os_error();
+        match why.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(why),
         }
     }
 

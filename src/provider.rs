@@ -25,8 +25,18 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
+pub mod omp;
+
 /// At the account root, beside its harness directories and in none of them.
 pub const FILE: &str = "provider.toml";
+
+/// The provider file a harness of `format` keeps at the account root.
+pub fn file(format: crate::adapter::ProviderFormat) -> &'static str {
+    match format {
+        crate::adapter::ProviderFormat::CodexConfig => FILE,
+        crate::adapter::ProviderFormat::OmpModels => omp::FILE,
+    }
+}
 
 /// `model_providers.<id>` fields that are data: kept as written.
 const DATA: &[&str] = &[
@@ -197,18 +207,13 @@ pub fn from_codex_config(
             );
         }
         if let Some(url) = p.get("base_url").and_then(|u| u.as_str()) {
-            let host = host(url);
-            let lower = host.to_ascii_lowercase();
-            let local = lower == "localhost"
-                || lower.ends_with(".localhost")
-                || lower.starts_with("127.")
-                || ["[::1]", "[::]", "0.0.0.0"].contains(&lower.as_str());
             anyhow::ensure!(
-                !local,
-                "`model_providers.{id}.base_url = \"{}\"` is `{host}`, which in a sandbox is \
+                !loopback(url),
+                "`model_providers.{id}.base_url = \"{}\"` is `{}`, which in a sandbox is \
                  the sandbox itself — nothing was imported. Name an address the sandbox can \
                  reach (on Docker Desktop, `host.docker.internal`)",
-                redacted_url(url)
+                redacted_url(url),
+                host(url)
             );
         }
         out.insert(id.clone(), p.into());
@@ -263,10 +268,19 @@ pub fn redacted(doc: &toml::Table) -> toml::Table {
     doc
 }
 
+/// Whether `url` names this machine — which, in a sandbox, is the sandbox.
+pub(crate) fn loopback(url: &str) -> bool {
+    let lower = host(url).to_ascii_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.starts_with("127.")
+        || ["[::1]", "[::]", "0.0.0.0"].contains(&lower.as_str())
+}
+
 /// The host `url` names: after its scheme and userinfo, before its port. For
 /// the loopback refusal, which saves a provider that could not answer, not a
 /// boundary: a form it misses imports a provider that fails at its first turn.
-fn host(url: &str) -> &str {
+pub(crate) fn host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
     let host = authority
