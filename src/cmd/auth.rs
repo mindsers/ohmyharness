@@ -332,7 +332,7 @@ fn login_in_sandbox(
             ctx.warn(&note);
         }
         // A login mounts the account's own files, so nothing is a copy.
-        for note in prefs.seed(adapter, &home, &BTreeMap::new())? {
+        for note in prefs.seed(adapter, &home, &BTreeMap::new(), false)? {
             ctx.warn(&note);
         }
     }

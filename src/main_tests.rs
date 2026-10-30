@@ -1968,7 +1968,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh <id> resume <harness>` the way the `Resume` arm does.
         // + the `omh s` pointer when rm names no session, and the `omh <id> rm`
         // in the reason `leftovers` gives for naming nothing.
-        ("src/cmd/session.rs", 15),
+        // + `omh {id} down` and `omh {id} rm --yes` in the line naming a
+        // session's preferences to review, the same two and `omh {id} rm` in
+        // `rm`'s refusal once its container is down, and `omh {id} rm --yes`
+        // in its refusal when omh could not tell.
+        ("src/cmd/session.rs", 20),
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         // + `omh settings edit mcp`, in the refusal of a name for a server.
@@ -2044,8 +2048,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/notice.rs", 2),
         // `omh auth <harness> --name <account> --provider <file>`, when a
         // migration would lose a provider, and `omh sNN down`, when a session
-        // still mounts the account.
-        ("src/prefs.rs", 2),
+        // still mounts the account; `omh <id> down` and `omh <id> rm --yes`
+        // in the refusal of a launch on another account with preferences
+        // still to review, and the same two in the refusal of a new session
+        // over an earlier one's under the same id.
+        ("src/prefs.rs", 6),
         // `omh s down`, in the refusal when a live sandbox blocks the move
         // off the pre-2026.08 repo key.
         ("src/profile.rs", 1),

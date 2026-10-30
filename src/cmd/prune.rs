@@ -463,11 +463,14 @@ fn list(
 /// that somebody's uncommitted afternoon was not important. What this produces
 /// is not only a gate — it is the text of the question the dangerous flag
 /// asks, so it has to say what is actually there.
-pub fn holds_work(item: &Item) -> Option<String> {
+pub fn holds_work(item: &Item, adapters: &std::path::Path) -> Option<String> {
     if item.class != Class::State {
         return None;
     }
     let path = std::path::Path::new(&item.name);
+    if path.parent().is_some_and(|p| p.ends_with("run")) {
+        return preferences_to_review(path, adapters);
+    }
     let bearing = STATE_DIRS
         .iter()
         .any(|(dir, work)| *work && path.parent().is_some_and(|p| p.ends_with(dir)));
@@ -491,6 +494,65 @@ pub fn holds_work(item: &Item) -> Option<String> {
             })
         }
     }
+}
+
+/// A run directory is derived on every launch — but for the preferences its
+/// sessions changed that no review has answered, which go with it, and which
+/// no review can reach once its checkout is gone. Named by session, harness
+/// and key; and what omh cannot read is a reason to keep it too, never none.
+fn preferences_to_review(run: &std::path::Path, adapters: &std::path::Path) -> Option<String> {
+    let could_not = |what: String| Some(format!("omh could not tell {what}"));
+    let sessions = match std::fs::read_dir(run) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            return could_not(format!(
+                "whether its sessions' preferences are still to review ({e})"
+            ))
+        }
+    };
+    let mut found = Vec::new();
+    for entry in sessions {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                return could_not(format!(
+                    "whether its sessions' preferences are still to review ({e})"
+                ))
+            }
+        };
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let session = entry.file_name().to_string_lossy().into_owned();
+        let homes = match crate::prefs::review::homes_of(&entry.path()) {
+            Ok(homes) => homes,
+            Err(e) => {
+                return could_not(format!(
+                    "whether {session}'s preferences are still to review ({e:#})"
+                ))
+            }
+        };
+        for (harness, home) in homes {
+            match crate::adapter::Adapter::find(adapters, &harness)
+                .and_then(|a| crate::prefs::review::unreviewed(&a, &home))
+            {
+                Ok(keys) if keys.is_empty() => {}
+                Ok(keys) => found.push(format!("{session} {harness}: {}", keys.join(", "))),
+                Err(e) => {
+                    return could_not(format!(
+                        "whether {session}'s {harness} preferences are still to review ({e:#})"
+                    ))
+                }
+            }
+        }
+    }
+    (!found.is_empty()).then(|| {
+        crate::out::untrusted(&format!(
+            "holds preferences no review has answered — {}",
+            found.join("; ")
+        ))
+    })
 }
 
 /// What the run did, or would do — every bucket, every time.
@@ -803,7 +865,7 @@ pub fn prune_cmd(
         items,
         blind,
         &|id| crate::profile::attribution_of(&paths.root, id, backfill),
-        &holds_work,
+        &|item| holds_work(item, &paths.adapters()),
         false,
     );
 
@@ -1155,7 +1217,7 @@ mod tests {
             items,
             blind,
             &|_| Attribution::Live("/work/tmp.1s9QTT4H5v".into()),
-            &holds_work,
+            &|item| holds_work(item, &root.join("adapters")),
             true,
         );
         assert!(
@@ -1218,5 +1280,55 @@ mod tests {
         let with = plan(items, Vec::new(), &attribute, &holds, true);
         assert_eq!(with.remove.len(), 2, "and both go only when asked for");
         assert!(with.kept_unknown.is_empty() && with.kept_unsafe.is_empty());
+    }
+
+    /// A run directory goes with its checkout — unless a session in it
+    /// changed preferences no review answered, which no review can reach once
+    /// the checkout is gone: kept, and named by session, harness and key. One
+    /// omh cannot read is kept too, saying so; one with nothing to review is
+    /// derived state like any other.
+    #[test]
+    fn a_run_directory_with_preferences_to_review_is_kept_and_named() {
+        let d = tempfile::tempdir().unwrap();
+        let adapters = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+        let codex = crate::adapter::Adapter::find(&adapters, "codex").unwrap();
+        let account = d.path().join("creds/codex/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(account.join("preferences/config.toml"), "model = \"a\"\n").unwrap();
+        let run = d.path().join("run/gone-1a2b3c4d");
+        let home = crate::home::Home::Kept(run.join("s01/.preferences/codex"));
+        let checked = crate::prefs::check(&codex, &account).unwrap().unwrap();
+        checked.apply(&|| Ok(Vec::new())).unwrap();
+        checked
+            .seed(&codex, &home, &Default::default(), false)
+            .unwrap();
+        std::fs::write(run.join("stamp.json"), "{}").unwrap();
+        let item = item(Class::State, &run.display().to_string(), "gone-1a2b3c4d");
+        assert_eq!(holds_work(&item, &adapters), None);
+
+        let live = crate::prefs::live(&home).join("config.toml");
+        std::fs::write(&live, "model = \"b\"\n").unwrap();
+        assert_eq!(
+            holds_work(&item, &adapters).as_deref(),
+            Some("holds preferences no review has answered — s01 codex: model")
+        );
+        let p = plan(
+            vec![item.clone()],
+            Vec::new(),
+            &|_| Attribution::Gone("/gone".into()),
+            &|i| holds_work(i, &adapters),
+            false,
+        );
+        assert!(p.remove.is_empty() && p.kept_unsafe.len() == 1, "{p:?}");
+
+        std::fs::remove_file(&live).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", &live).unwrap();
+        let why = holds_work(&item, &adapters).unwrap();
+        assert!(
+            why.starts_with(
+                "omh could not tell whether s01's codex preferences are still to review"
+            ),
+            "{why}"
+        );
     }
 }

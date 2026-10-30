@@ -28,6 +28,8 @@
 /// account's file is a link to the same name here.
 pub const GUEST: &str = "/omh/prefs";
 
+pub mod review;
+
 use crate::adapter::{Adapter, Declared, KeyPath, PrefMount};
 use crate::home::Home;
 use anyhow::{Context, Result};
@@ -752,21 +754,27 @@ impl Account {
 
     /// Fill a session's copy: on a kept home, once — a relaunch continues
     /// from the session's own `live`, unless the session's account has
-    /// changed, which keeps what it changed into its old account first and
-    /// then seeds from this one; a scratch home every time. Written after the
-    /// reuse decision and before the container starts: never into a directory
-    /// a running container has mounted, and never missing when one mounts it.
+    /// changed: refused while the session has changes to review, which
+    /// belong to its old account, then seeded afresh from this one; a scratch
+    /// home every time. Written after the reuse decision and before the
+    /// container starts: never into a directory a running container has
+    /// mounted, and never missing when one mounts it.
     ///
     /// `rests` holds, by [`Account::copies`]' paths, what a copy holds beside
     /// its preferences — `auth::seeds`' scrubbed `~/.claude.json`. The copy is
     /// that, with the declared keys set from the account's kept values; on a
     /// relaunch whose rest has changed — the account captured again — from
     /// the session's own, which its review has not seen yet.
+    ///
+    /// `created`: this launch made the session, so whatever is already in
+    /// its home is an earlier session's under the same id — seeded afresh,
+    /// or refused while that one's changes are still to review.
     pub fn seed(
         &self,
         adapter: &Adapter,
         home: &Home,
         rests: &BTreeMap<String, String>,
+        created: bool,
     ) -> Result<Vec<String>> {
         let root = home.path();
         std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
@@ -789,11 +797,31 @@ impl Account {
             };
             rest_of.insert(f.declared.name.clone(), (rest, digest));
         }
-        if let Home::Kept(_) = home {
+        if let (Home::Kept(_), true, Some(_)) = (home, created, recorded.as_deref()) {
+            let left = review::unreviewed(adapter, home)?;
+            anyhow::ensure!(
+                left.is_empty(),
+                "an earlier session under this id left {} preferences still to review — {} — in \
+                 {}: review them (`omh <id> down` at a terminal) or drop them (`omh <id> rm \
+                 --yes`) before a new session takes the id",
+                self.harness,
+                left.join(", "),
+                root.display()
+            );
+        }
+        if let (Home::Kept(_), false) = (home, created) {
             match recorded.as_deref() {
                 Some(r) if r == this => return self.continue_from_live(home, &rest_of),
-                Some(_) => {
-                    notes.extend(keep(adapter, home)?);
+                Some(r) => {
+                    let left = review::unreviewed(adapter, home)?;
+                    anyhow::ensure!(
+                        left.is_empty(),
+                        "this session's {} preferences, from {r}, are still to review — {} — and \
+                         would be lost to a launch on {this}: review them first (`omh <id> \
+                         down` at a terminal), or drop them (`omh <id> rm --yes`)",
+                        self.harness,
+                        left.join(", ")
+                    );
                     notes.push(format!(
                         "this session's {} preferences were seeded again, from {}",
                         self.harness,
@@ -1367,8 +1395,9 @@ base_url = "https://example.invalid"
     }
 
     /// A session is seeded once from the account, and a relaunch continues
-    /// from its own copy; another account keeps what the session changed into
-    /// the old one first, then seeds from the new.
+    /// from its own copy; another account is refused while the session has a
+    /// change to review — it belongs to the old one — and seeds from the new
+    /// once it is reviewed.
     #[test]
     fn a_session_is_seeded_once_and_again_only_for_another_account() {
         let (root, work, _) = account();
@@ -1386,7 +1415,9 @@ base_url = "https://example.invalid"
         let seed = |acct: &Path| {
             let checked = check(&codex(), acct).unwrap().unwrap();
             checked.apply(&none_running).unwrap();
-            checked.seed(&codex(), &home, &BTreeMap::new()).unwrap()
+            checked
+                .seed(&codex(), &home, &BTreeMap::new(), false)
+                .unwrap()
         };
         seed(&work);
         assert_eq!(
@@ -1400,14 +1431,31 @@ base_url = "https://example.invalid"
             "model = \"mine\"\n"
         );
 
-        let notes = seed(&personal).join("\n");
+        let checked = check(&codex(), &personal).unwrap().unwrap();
+        let err = format!(
+            "{:#}",
+            checked
+                .seed(&codex(), &home, &BTreeMap::new(), false)
+                .unwrap_err()
+        );
         assert!(
-            notes.contains("kept 1 codex preference on account `work`: model"),
-            "{notes}"
+            err.contains("are still to review — model") && err.contains("omh <id> rm --yes"),
+            "{err}"
         );
         assert_eq!(
-            std::fs::read_to_string(work.join("preferences/config.toml")).unwrap(),
+            std::fs::read_to_string(&at_live).unwrap(),
             "model = \"mine\"\n"
+        );
+        let sitting = review::Sitting {
+            id: "s01".into(),
+            home: Home::Kept(home.path().to_path_buf()),
+        };
+        review::review(&codex(), &[sitting], review::Answers::DropAll).unwrap();
+        let notes = seed(&personal).join("\n");
+        assert!(notes.contains("seeded again"), "{notes}");
+        assert_eq!(
+            std::fs::read_to_string(work.join("preferences/config.toml")).unwrap(),
+            "model = \"w\"\n"
         );
         assert_eq!(
             std::fs::read_to_string(&at_live).unwrap(),
@@ -1428,7 +1476,9 @@ base_url = "https://example.invalid"
         std::fs::write(work.join("preferences/config.toml"), "model = \"a\"\n").unwrap();
         let checked = check(&codex(), &work).unwrap().unwrap();
         checked.apply(&none_running).unwrap();
-        checked.seed(&codex(), &home, &BTreeMap::new()).unwrap();
+        checked
+            .seed(&codex(), &home, &BTreeMap::new(), false)
+            .unwrap();
         std::fs::write(
             live(&home).join("config.toml"),
             "model = \"b\"\ndeveloper_instructions = \"planted\"\n[tui]\ntheme = \"t\"\n",
@@ -1619,7 +1669,7 @@ base_url = "https://example.invalid"
             checked.copies(),
             vec![".claude.json", ".claude/settings.json"]
         );
-        checked.seed(&claude(), &home, &rests).unwrap();
+        checked.seed(&claude(), &home, &rests, false).unwrap();
 
         let copy = live(&home).join(".claude.json");
         assert_eq!(
@@ -1672,7 +1722,7 @@ base_url = "https://example.invalid"
             check(&claude(), &account)
                 .unwrap()
                 .unwrap()
-                .seed(&claude(), &home, rests)
+                .seed(&claude(), &home, rests, false)
                 .unwrap()
         };
         seed(&rest("a"));
@@ -1712,6 +1762,48 @@ base_url = "https://example.invalid"
         assert_eq!(
             read_json(&copy),
             json(r#"{"oauthAccount":{"emailAddress":"b"},"copyOnSelect":false}"#)
+        );
+    }
+
+    /// A launch that makes the session finds an earlier session's preferences
+    /// under the same id: refused while a change there is still to review,
+    /// naming it; seeded afresh once there is none — never continued.
+    #[test]
+    fn a_new_session_over_an_earlier_ones_preferences_starts_afresh_or_is_refused() {
+        let (root, work, _) = account();
+        std::fs::create_dir_all(work.join("preferences")).unwrap();
+        std::fs::write(work.join("preferences/config.toml"), "model = \"w\"\n").unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let at_live = live(&home).join("config.toml");
+        let seed = |created: bool| {
+            let checked = check(&codex(), &work).unwrap().unwrap();
+            checked.apply(&none_running).unwrap();
+            checked.seed(&codex(), &home, &BTreeMap::new(), created)
+        };
+        seed(false).unwrap();
+        std::fs::write(&at_live, "model = \"mine\"\n").unwrap();
+
+        let err = format!("{:#}", seed(true).unwrap_err());
+        assert!(
+            err.contains(
+                "an earlier session under this id left codex preferences still to review — model"
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"mine\"\n"
+        );
+
+        let sitting = review::Sitting {
+            id: "s01".into(),
+            home: Home::Kept(home.path().to_path_buf()),
+        };
+        review::review(&codex(), &[sitting], review::Answers::DropAll).unwrap();
+        seed(true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"w\"\n"
         );
     }
 }

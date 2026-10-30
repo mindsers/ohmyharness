@@ -776,7 +776,40 @@ fn session(id: &str, work: Work) -> Session {
         running: Some(crate::image::Running::No),
         work: Some(work),
         behind: Some(0),
+        unreviewed: Some(Unreviewed::Keys(vec![])),
     }
+}
+
+/// A session with preferences to review says how many in its row, and
+/// which in JSON; one omh could not read is a question, with the reason in
+/// JSON — never the empty cell of a session with nothing to review.
+#[test]
+fn a_session_with_preferences_to_review_says_so() {
+    let mut two = session("s01", Work::Clean);
+    two.unreviewed = Some(Unreviewed::Keys(vec!["model".into(), "theme".into()]));
+    let mut unknown = session("s02", Work::Clean);
+    unknown.unreviewed = Some(Unreviewed::CouldNotTell("a link".into()));
+    let none = session("s03", Work::Clean);
+    let report = sessions(vec![two, unknown, none]);
+    let human = report.human(&Palette::plain());
+    let row = |id: &str| {
+        human
+            .lines()
+            .find(|l| l.trim_start().starts_with(id))
+            .unwrap_or_else(|| panic!("no row {id}: {human}"))
+            .to_string()
+    };
+    assert!(row("s01").contains("2 preferences to review"), "{human}");
+    assert!(row("s02").contains("preferences to review?"), "{human}");
+    assert!(!row("s03").contains("review"), "{human}");
+    let json = report.json();
+    assert_eq!(
+        json["sessions"][0]["unreviewed"],
+        serde_json::json!(["model", "theme"])
+    );
+    assert_eq!(json["sessions"][1]["unreviewed"], serde_json::Value::Null);
+    assert_eq!(json["sessions"][1]["unreviewed_unknown"], "a link");
+    assert_eq!(json["sessions"][2]["unreviewed"], serde_json::json!([]));
 }
 
 fn sessions(rows: Vec<Session>) -> Sessions {

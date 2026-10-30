@@ -649,6 +649,7 @@ pub(crate) fn doctor_cmd(
                 &adapter,
                 &container::prefs_home(&paths, &session, adapter.name.as_str()),
                 &rests,
+                false,
             )?;
         }
         if let Some(account_dir) = account.as_ref().filter(|_| !dry_run) {
@@ -949,6 +950,8 @@ pub(crate) fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                             None
                         }
                     },
+                    // Not read here: `omh s` is the listing that says it.
+                    unreviewed: None,
                     id,
                 }
             })
