@@ -219,8 +219,13 @@ impl PolicyFormat {
 pub struct Preferences {
     /// How a session's copy reaches the harness.
     pub mount: PrefMount,
-    /// Each file, as one of `creds`' paths, and its keys that are preferences:
-    /// TOML dotted keys (`tui.theme`), a table declared whole by its name.
+    /// For `dir`, and only there: the directory mounted from the session's
+    /// copy, under `$HOME`; `files` names files in it.
+    #[serde(default)]
+    pub root: Option<String>,
+    /// Each file, as one of `creds`' paths — for `dir`, a name in `root` —
+    /// and its keys that are preferences: TOML dotted keys (`tui.theme`), a
+    /// table declared whole by its name.
     pub files: BTreeMap<String, Vec<String>>,
     /// Bookkeeping the harness writes on its own — a notice dismissed —
     /// kept without asking. Judged by the same rule.
@@ -248,6 +253,13 @@ pub enum PrefMount {
     /// reads it — for a harness that, its rename refused, writes the file in
     /// place, which lands in the mounted file.
     File,
+    /// The session's copy of a whole directory, mounted at `root` — for a
+    /// harness whose preferences are files in a directory of its own state
+    /// that no account holds: opencode's `~/.local/state/opencode`, where it
+    /// writes `kv.json` and `model.json` by renaming over them, beside its
+    /// prompt history. The account keeps the declared keys; everything else
+    /// in the directory is the session's.
+    Dir,
 }
 
 /// A key inside a preferences file, one segment per table.
@@ -441,6 +453,14 @@ pub const NEVER: &[(&str, &[&str])] = &[
             "env",
             "oauthAccount",
             "primaryApiKey",
+        ],
+    ),
+    (
+        "opencode",
+        &[
+            // Which TUI plugins load, and a consent to share a session.
+            "plugin_enabled",
+            "share_consent",
         ],
     ),
     (
@@ -1218,6 +1238,9 @@ impl Adapter {
     /// each declared once, none inside another, and none at, inside or around
     /// a [`NEVER`] key. A fallback is for a `link` file, beside it, in a
     /// format `prefs` reads, and neither the file itself nor another one.
+    /// `dir` names a `root` under the home, with no `..`, and clear of every
+    /// credential path, since the session's copy is mounted whole there; its
+    /// files are names in it; and `root` is for `dir` alone.
     fn check_preferences(&self, path: &Path) -> Result<()> {
         let Some(prefs) = &self.preferences else {
             return Ok(());
@@ -1249,6 +1272,11 @@ impl Adapter {
                      credential files, or inside one of its directories ({})",
                     self.creds.join(", ")
                 ),
+                PrefMount::Dir => anyhow::ensure!(
+                    !file.is_empty() && !file.contains('/'),
+                    "adapter {shown}: preferences file {file:?} is a file name in `root` for \
+                     `mount = \"dir\"`"
+                ),
             }
             anyhow::ensure!(
                 !masked.contains(file),
@@ -1278,6 +1306,37 @@ impl Adapter {
                 !keys.is_empty(),
                 "adapter {shown}: preferences file {file:?} declares no keys"
             );
+        }
+        match (prefs.mount, prefs.root.as_deref()) {
+            (PrefMount::Dir, None) => anyhow::bail!(
+                "adapter {shown}: `mount = \"dir\"` needs a `root`, the directory the session's \
+                 copy is mounted at"
+            ),
+            (PrefMount::Dir, Some(root)) => {
+                anyhow::ensure!(
+                    root.strip_prefix("$HOME/").is_some_and(|r| !r.is_empty()),
+                    "adapter {shown}: preferences root {root:?} must be under $HOME"
+                );
+                anyhow::ensure!(
+                    !Path::new(root)
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir),
+                    "adapter {shown}: preferences root {root:?} has a `..`"
+                );
+                let at = Path::new(root);
+                if let Some(cred) = self.creds.iter().find(|c| {
+                    let c = Path::new(c.trim_end_matches('/'));
+                    at.starts_with(c) || c.starts_with(at)
+                }) {
+                    anyhow::bail!(
+                        "adapter {shown}: preferences root {root:?} is inside or around one of \
+                         this adapter's credential paths ({cred}) — the session's copy is \
+                         mounted whole there"
+                    );
+                }
+            }
+            (_, Some(_)) => anyhow::bail!("adapter {shown}: `root` is for `mount = \"dir\"` alone"),
+            (_, None) => {}
         }
         for file in prefs.quiet.keys() {
             anyhow::ensure!(
@@ -2719,6 +2778,136 @@ render = "concat"
             );
             let err = Adapter::find(d.path(), "omp").unwrap_err().to_string();
             assert!(err.contains(names), "{mount} {body}: {err}");
+        }
+    }
+
+    /// opencode's preferences are the issue's lists, explicit, in the two
+    /// files of its state directory opencode 1.19.0 keeps them in (its
+    /// source) — the directory mounted whole from the session's own copy,
+    /// since it is no account file. The quiet keys are the dismissals and
+    /// marks opencode writes on its own; `plugin_enabled` and
+    /// `share_consent` are never preferences.
+    #[test]
+    fn opencodes_preferences_are_its_own_lists_and_never_a_never_key() {
+        let opencode = Adapter::find(Path::new(REAL), "opencode").unwrap();
+        let prefs = opencode
+            .preferences
+            .as_ref()
+            .expect("opencode declares preferences");
+        assert_eq!(prefs.mount, PrefMount::Dir);
+        assert_eq!(prefs.root.as_deref(), Some("$HOME/.local/state/opencode"));
+        let declared = prefs.declared();
+        let dotted = |k: &KeyPath| k.join(".");
+        let got: Vec<(&str, Vec<String>, Vec<String>)> = declared
+            .iter()
+            .map(|d| {
+                assert_eq!(d.path, d.name);
+                assert_eq!(d.format(), PrefFormat::Json);
+                (
+                    d.name.as_str(),
+                    d.keys.iter().map(dotted).collect(),
+                    d.quiet.iter().map(dotted).collect(),
+                )
+            })
+            .collect();
+        let owned = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "kv.json",
+                    owned(&[
+                        "theme",
+                        "theme_mode",
+                        "theme_mode_lock",
+                        "thinking_mode",
+                        "tool_details_visibility",
+                        "assistant_metadata_visibility",
+                        "scrollbar_visible",
+                        "generic_tool_output_visibility",
+                        "animations_enabled",
+                        "file_context_enabled",
+                        "diff_wrap_mode",
+                        "paste_summary_enabled",
+                        "terminal_title_enabled",
+                        "session_directory_filter_enabled",
+                        "which_key_layout",
+                        "which_key_pending_preview",
+                        "diff_viewer_view",
+                        "diff_viewer_show_file_tree",
+                        "diff_viewer_single_patch",
+                        "attention_sound_pack",
+                    ]),
+                    owned(&[
+                        "skipped_version",
+                        "update_dismissed_until",
+                        "tips_hidden",
+                        "dismissed_getting_started",
+                        "go_upsell_last_seen_at",
+                        "go_upsell_dont_show",
+                        "go_upsell_account_rate_limit_last_seen_at",
+                        "go_upsell_account_rate_limit_dont_show",
+                    ])
+                ),
+                (
+                    "model.json",
+                    owned(&["recent", "favorite", "variant"]),
+                    Vec::new()
+                ),
+            ]
+        );
+        let never = never_for("opencode");
+        assert_eq!(
+            never.iter().map(dotted).collect::<Vec<_>>(),
+            ["plugin_enabled", "share_consent"]
+        );
+        for d in &declared {
+            for key in d.keys.iter().chain(&d.quiet) {
+                for n in &never {
+                    assert!(
+                        !related(key, n),
+                        "{} is near never-key {}",
+                        dotted(key),
+                        dotted(n)
+                    );
+                }
+            }
+        }
+    }
+
+    /// A `dir` preferences file is a name in `root`, the directory mounted
+    /// whole from the session's own copy where the harness reads it — under
+    /// the home, with no `..`, and clear of every credential path, since
+    /// none of the account's files may be under it or it under one; and
+    /// `root` is for `dir` alone.
+    #[test]
+    fn a_dir_preference_that_is_not_one_is_refused_by_name() {
+        const CREDS: &str = "creds = [\"$HOME/.local/share/opencode/\"]";
+        const ROOT: &str = "root = \"$HOME/.local/state/opencode\"";
+        let files = "[preferences.files]\n\"kv.json\" = [\"theme\"]";
+        for (mount, root, body, names) in [
+            ("dir", "", files.to_string(), "`mount = \"dir\"` needs a `root`"),
+            ("link", ROOT, "[preferences.files]\n\"$HOME/.local/share/opencode/kv.json\" = [\"theme\"]".to_string(), "`root` is for `mount = \"dir\"` alone"),
+            ("dir", "root = \"/var/opencode\"", files.to_string(), "must be under $HOME"),
+            ("dir", "root = \"$HOME/.local/state/../share/opencode\"", files.to_string(), "has a `..`"),
+            ("dir", "root = \"$HOME/.local/share/opencode/state\"", files.to_string(), "is inside or around one of this adapter's credential paths"),
+            ("dir", "root = \"$HOME/.local\"", files.to_string(), "is inside or around one of this adapter's credential paths"),
+            ("dir", ROOT, "[preferences.files]\n\"sub/kv.json\" = [\"theme\"]".to_string(), "is a file name in `root`"),
+            ("dir", ROOT, "[preferences.files]\n\"kv.json\" = [\"plugin_enabled\"]".to_string(), "`plugin_enabled` is never a preference"),
+            ("dir", ROOT, "[preferences.files]\n\"kv.json\" = [\"theme\"]\n[preferences.quiet]\n\"kv.json\" = [\"share_consent\"]".to_string(), "`share_consent` is never a preference"),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "opencode.toml",
+                &format!(
+                    "name = \"opencode\"\nbin = \"opencode\"\ninstall = \"true\"\n{CREDS}\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
+                     [preferences]\nmount = \"{mount}\"\n{root}\n\n{body}\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "opencode").unwrap_err().to_string();
+            assert!(err.contains(names), "{mount} {root} {body}: {err}");
         }
     }
 

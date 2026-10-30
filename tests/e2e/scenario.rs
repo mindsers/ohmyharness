@@ -114,6 +114,10 @@ const SCENARIOS: &[Scenario] = &[
         run: omp_config,
     },
     Scenario {
+        name: "opencode's state directory is the session's own, seeded from what the account keeps",
+        run: opencode_state,
+    },
+    Scenario {
         name: "a provider or a command a session writes for omp's next start never reaches it",
         run: omp_models,
     },
@@ -878,6 +882,49 @@ fn omp_config(s: &Session) {
     );
 }
 
+/// opencode's state directory is the session's own copy, seeded from what
+/// the account keeps (`driver::opencode_account`): the turn runs on the model
+/// the account last picked — the driver names none, and without it opencode
+/// runs on `fake-model` — read from the `model.json` mounted where opencode
+/// keeps its state. What the session writes in that directory lands in its
+/// copy, and the account keeps what it kept and nothing the session wrote.
+///
+/// Only for a driver whose account keeps a `model.json`.
+fn opencode_state(s: &Session) {
+    let kept = s.harness.account.is_some_and(|a| {
+        a().iter()
+            .any(|(file, _)| *file == "preferences/model.json")
+    });
+    if !kept {
+        return;
+    }
+    let turn = s.turn("Say hello.", &[]);
+    ran(&turn);
+    assert_eq!(
+        turn.asks()[0]["body"]["model"],
+        "fake-kept",
+        "the turn did not run on the model the account kept"
+    );
+    let mark = "echo e2e > ~/.local/state/opencode/e2e-mark";
+    ok(&s.sh(mark), mark);
+    assert!(
+        s.preferences("e2e-mark").is_file(),
+        "~/.local/state/opencode is not the session's copy"
+    );
+    let store = std::fs::read_dir(s.account().join("preferences"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !store.iter().any(|f| f == "e2e-mark"),
+        "the account kept it: {store:?}"
+    );
+    let model = std::fs::read_to_string(s.account().join("preferences/model.json")).unwrap();
+    assert!(model.contains("fake-kept"), "{model}");
+}
+
 /// The account this session launched with carries what earlier sessions could
 /// leave in a shared `~/.claude.json` (see `driver::claude_account`): a server
 /// with omh-memory's command and arguments and a `PATH` of its own, the same
@@ -1130,6 +1177,11 @@ fn a_preference(s: &Session) -> Option<(&'static str, &'static str, &'static str
             "omp config set defaultThinkingLevel low",
             "omp config get defaultThinkingLevel",
         )),
+        "opencode" => Some((
+            "theme",
+            r#"jq '.theme = "e2e-theme"' ~/.local/state/opencode/kv.json > /tmp/e2e-p && cat /tmp/e2e-p > ~/.local/state/opencode/kv.json"#,
+            "jq -r .theme ~/.local/state/opencode/kv.json",
+        )),
         _ => None,
     }
 }
@@ -1364,7 +1416,7 @@ fn lifecycle_down_resume(s: &Session) {
         );
         let value = ok(&s.sh(read), read);
         assert!(
-            ["vim", "high", "low"].contains(&value.trim()),
+            ["vim", "high", "low", "e2e-theme"].contains(&value.trim()),
             "the resumed session lost its own {key}: {value}"
         );
     }

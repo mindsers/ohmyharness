@@ -93,6 +93,7 @@ see [Something else](#something-else).
 | A preference from one session — `/model`, a theme — is not in the next | [Review it](#a-preference-from-one-session-is-not-in-the-next) |
 | `omh sNN rm` says `… preferences to review — … nothing was removed` | [Review them, or drop them](#omh-snn-rm-refuses-over-preferences-to-review) |
 | A launch says `… preferences … are still to review` or `an earlier session under this id left … preferences still to review` | [Review them, or drop them](#a-launch-is-refused-over-preferences-still-to-review) |
+| opencode runs on another model than the one you last picked | [A configured model wins](#opencode-runs-on-another-model-than-the-one-you-last-picked) |
 | **Logging in** | |
 | You logged in, and the next session is logged out | [Find where the token was written](#i-logged-in-but-the-next-session-is-logged-out) |
 | Codex says "Login using `codex login` and then run this command again" | [Upgrade, then log in with a device code](#codex-says-login-using-codex-login-and-then-run-this-command-again) |
@@ -545,6 +546,15 @@ The same holds for a new session started under an id whose earlier session
 left changes to review (`an earlier session under this id left … preferences
 still to review`): they are that session's. `omh <id> down` at a terminal
 reviews them, `omh <id> rm --yes` drops them.
+
+#### opencode runs on another model than the one you last picked
+
+The model you last picked is a preference, kept in
+`~/.local/state/opencode/model.json` once you keep it in the review. opencode
+reads it only where nothing configures one: a `model` in the repo's
+`opencode.json`, in `OPENCODE_CONFIG_CONTENT`, or `-m` wins at every start.
+omh's own render of `~/.config/opencode/opencode.json` never sets one. Remove
+the one that does to run on the last one picked.
 
 ### Logging in
 

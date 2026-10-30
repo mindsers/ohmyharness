@@ -14,7 +14,9 @@
 //!   base/     the account's kept values when this session last synced
 //!   reviewed/ the live values at the last decision
 //!   live/     what the harness reads and writes: mounted at GUEST (`link`),
-//!             or file by file where the harness reads each (`file`)
+//!             file by file where the harness reads each (`file`), or whole
+//!             at the adapter's `root` (`dir`), beside what else the harness
+//!             keeps there
 //!   rest/     for a file that is the session's copy of an account file
 //!             (`[policy] copy`), a digest of what the copy holds beside its
 //!             preferences
@@ -428,6 +430,7 @@ pub fn check(adapter: &Adapter, account: &Path) -> Result<Option<Account>> {
         let (state, kept) = match prefs.mount {
             PrefMount::Link => check_link(adapter, account, &declared, marked)?,
             PrefMount::File => check_file(account, &declared)?,
+            PrefMount::Dir => (State::Ready, self::kept(account, &declared)?),
         };
         // The declared keys alone, whatever the file holds beside them.
         let kept = pick(&kept, declared.all());
@@ -629,11 +632,12 @@ fn refuse_a_lost_provider(
 
 /// Bytes a preferences file is written with: readable by the user alone for
 /// a `file` adapter, whose copy of `~/.claude.json` holds the account's
-/// identity, and as they always were for `link`.
+/// identity, and as they always were for `link` and `dir`.
 fn place(dir: &crate::held::Dir, name: &OsStr, body: &[u8], mount: PrefMount) -> Result<()> {
     match mount {
         PrefMount::File => dir.replace_private(name, body)?,
         PrefMount::Link => dir.replace(name, body)?,
+        PrefMount::Dir => dir.replace(name, body)?,
     }
     Ok(())
 }
@@ -661,7 +665,7 @@ impl Account {
                 .iter()
                 .map(|f| account_rel(&f.declared).to_string())
                 .collect(),
-            PrefMount::Link => Vec::new(),
+            PrefMount::Link | PrefMount::Dir => Vec::new(),
         }
     }
 
@@ -1836,6 +1840,87 @@ base_url = "https://example.invalid"
             "kept from it"
         );
         assert!(yaml.exists(), "a session's file is not omh's to remove");
+    }
+
+    // ── `dir` ──
+
+    fn opencode() -> Adapter {
+        Adapter::find(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters"),
+            "opencode",
+        )
+        .unwrap()
+    }
+
+    /// A `dir` account has no file of its own to migrate or import — the
+    /// harness's state directory was never in it — so a launch changes
+    /// nothing in the account and asks about no running session. What the
+    /// account keeps, declared keys alone, is what `omh doctor` names and
+    /// what a launch seeds the session's directory with — an empty document
+    /// for a file it keeps nothing of. What the harness
+    /// writes beside them in its directory is the session's, and a relaunch
+    /// keeps it.
+    #[test]
+    fn a_dir_account_seeds_the_sessions_directory_and_changes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/opencode/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/model.json"),
+            r#"{"recent":[{"providerID":"fake","modelID":"kept"}],"planted":true}"#,
+        )
+        .unwrap();
+        let before: Vec<_> = walk(&account);
+        let checked = check(&opencode(), &account).unwrap().unwrap();
+        assert!(!checked.needs_quiet());
+        assert!(checked.pending().is_empty(), "{:?}", checked.pending());
+        let summary = checked.summary();
+        assert!(
+            summary.contains("model.json — the account keeps recent")
+                && summary.contains("kv.json — the account keeps nothing")
+                && !summary.contains("planted"),
+            "{summary}"
+        );
+        assert!(checked
+            .apply(&|| panic!("a dir account asks about running sessions"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(walk(&account), before, "the account changed");
+
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/opencode"));
+        checked
+            .seed(&opencode(), &home, &BTreeMap::new(), true)
+            .unwrap();
+        let read = |part: &str, name: &str| -> Doc {
+            Format::Json
+                .parse(&std::fs::read(home.path().join(part).join(name)).unwrap())
+                .unwrap()
+        };
+        let kept = Format::Json
+            .parse(br#"{"recent":[{"providerID":"fake","modelID":"kept"}]}"#)
+            .unwrap();
+        for part in ["base", "reviewed", "live"] {
+            assert_eq!(read(part, "model.json"), kept, "{part}");
+            assert!(read(part, "kv.json").is_empty(), "{part}");
+        }
+        std::fs::write(live(&home).join("prompt-history.jsonl"), "{}\n").unwrap();
+        checked
+            .seed(&opencode(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        assert!(live(&home).join("prompt-history.jsonl").is_file());
+    }
+
+    /// Every path under `dir`, sorted — what a launch must leave as it was.
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            out.push(entry.path());
+            if entry.file_type().unwrap().is_dir() {
+                out.extend(walk(&entry.path()));
+            }
+        }
+        out.sort();
+        out
     }
 
     // ── `file` ──
