@@ -116,6 +116,8 @@ see [Something else](#something-else).
 | A launch stops on `provider.yml`, or `omh doctor`'s `model provider` row is `✗` | [Fix the account's provider file](#a-launch-stops-on-provideryml) |
 | `omh auth --provider` says a file `is under … .omh, which a session can write` | [Check it, copy it out, name the copy](#a-launch-says-the-accounts-own-models-file-defines-providers) |
 | A session cannot write `~/.omp/agent/models.yml` (`Read-only file system`) | [Expected](#a-launch-says-the-accounts-own-models-file-defines-providers) |
+| A launch says `… is in use by omh-…, started before omp's config was per session` | [Stop that session, then launch](#a-launch-says-the-account-is-in-use-by-a-session-started-before) |
+| An omp setting from one session is gone in the next | [Expected, unless it is a preference](#an-omp-setting-from-one-session-is-gone-in-the-next) |
 | **Your setup in the session** | |
 | The agent does not see your rules or skills | [Run `omh doctor`, then read the launch line](#the-harness-starts-but-does-not-see-my-rules-or-skills) |
 | One skill is missing, and the launch says `1 catalogue entry is not selected here` | [Select it with `omh use`](#a-skill-i-have-is-not-reaching-the-agent) |
@@ -699,8 +701,8 @@ environment: an `env_key` there is refused. Check the file, copy it out of
 #### A launch says the account is in use by a session started before
 
 A session an older omh started still mounts the account, and still reads the
-shared `config.toml` — the migration would leave it reading a link it cannot
-follow, and its next save would rename over the link:
+shared `config.toml` — or omp's `config.yml` — the migration would leave it
+reading a link it cannot follow, and its next save would rename over the link:
 
 ```
 omh: /Users/you/.omh/creds/codex/work is in use by omh-api-3f9a2c1b-s02, started before codex's config was per session — stop it first (`omh sNN down`), and launch again
@@ -709,7 +711,7 @@ omh: /Users/you/.omh/creds/codex/work is in use by omh-api-3f9a2c1b-s02, started
 Stop it — `omh s02 down` in the repo it belongs to, or `docker rm -f` the name
 — and launch again. Once an account has migrated this is never asked again.
 With a runtime that keeps no labels on its sandboxes (`sbx`) omh cannot tell
-which are running, and says so instead: codex on `sbx` waits for #199.
+which are running, and says so instead: codex and omp on `sbx` wait for #199.
 
 #### A Codex setting from one session is gone in the next
 
@@ -804,6 +806,17 @@ omh: /Users/you/.omh/creds/omp/work/.omp/agent/models.yml
 A session cannot write `models.yml` — `Read-only file system` — so a provider
 added there lasts nowhere. Add it to a `models.yml` of your own and run
 `omh auth omp --provider` with it.
+
+#### An omp setting from one session is gone in the next
+
+Expected, unless it is a preference. A session's `config.yml` is its own: an
+extension, a tool or MCP setting, `disabledProviders`, `auth` last that
+session. Your
+[preferences](/guides/accounts/#ompagentconfigyml-is-each-sessions-own) — the
+model each role uses, the thinking level, the themes, your presets — reach the
+account once you keep them in
+[the review](#a-preference-from-one-session-is-not-in-the-next). Providers go
+in the account's [provider file](/guides/accounts/#omps-providers).
 
 #### A launch stops on `provider.yml`
 

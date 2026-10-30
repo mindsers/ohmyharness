@@ -195,7 +195,7 @@ sessions use. With `models.yml` there, omp reads neither `models.yaml` nor
 | `apiKey: CORP_KEY`, or a header value naming a variable | reads it from the shell running `omh auth` and keeps its value, as omp would; a name in capitals that is unset is refused — omp would send it as the key |
 | an `apiKey` or a header value starting with `!` | refused: a sandbox cannot run your command. Put the value it prints in the file |
 | a `baseUrl`, a model's or a provider's, or a `remoteCompaction` endpoint on `127.0.0.1` or `localhost` | refused, as for Codex |
-| `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth` | refused in a provider file: they are `config.yml` keys, which omp still reads from the account |
+| `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth` | refused in a provider file: they are `config.yml` keys — and not [preferences](#ompagentconfigyml-is-each-sessions-own), so one a session sets lasts that session |
 
 A file under `~/.omh` is read with nothing from your environment, since a
 session could have written it: check it, copy it out, and name the copy.
@@ -326,9 +326,9 @@ a copy of them. What the session changes there is its own until you review it:
 | Claude Code | `~/.claude/settings.json` | `model`, `advisorModel`, `modelSettings`, `effortLevel`, `editorMode`, `tui`, `theme`, `verbose` |
 | | `~/.claude.json` | `copyFullResponse`, `copyOnSelect`, `defaultToAgentsView`, `leftArrowOpensAgents`, `prStatusFooterEnabled`, `respectGitignore` |
 | Codex | `~/.codex/config.toml` | `model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`, `service_tier`, the `tui` settings, and the notices Codex records once you dismiss one |
+| omp | `~/.omp/agent/config.yml` | `modelRoles`, `defaultThinkingLevel`, `theme.dark`, `theme.light`, `enabledModels`, `cycleOrder`, `modelPresets`, and the mark omp records once its setup wizard has run |
 
-omp and opencode are not covered yet (#197): their preferences behave as they
-did. The lists are each adapter's
+opencode is not covered yet (#197): its preferences behave as they did. The lists are each adapter's
 [`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps).
 
 ### The review
@@ -574,6 +574,67 @@ session: it is linked again, said, and nothing in it is kept.
 codex account, new or not — asks which sandboxes still mount the account,
 and `sbx` keeps no labels to answer from, so that launch refuses. `sbx` does
 not run omh's links yet either.
+
+### `~/.omp/agent/config.yml` is each session's own
+
+omp keeps its settings in the account, at `~/.omp/agent/config.yml`, and saves
+into it as it runs. A session that wrote an extension, a credential broker or
+the providers to use there would hand it to every later session on the
+account. So the account keeps only your preferences, and each session gets a
+copy of its own:
+
+- **kept:** the keys the omp adapter declares under
+  [`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps) —
+  the model each role uses (`modelRoles`) and the order `/model` cycles them in
+  (`cycleOrder`), the models it offers (`enabledModels`), the presets
+  `/modelpreset` saves (`modelPresets`), the default thinking level, the dark
+  and light themes, and `setupVersion`, which omp records once its setup
+  wizard has run — without it, every session would start with the wizard;
+- **not kept:** everything else — extensions, tool and MCP settings,
+  `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth`. They
+  last the session that wrote them. Your providers are the account's
+  [provider file](#omps-providers);
+- **how:** the account's `config.yml` is a link to `/omh/prefs/config.yml`, and
+  each session mounts its own copy there. omp resolves the link before it
+  saves, and saves into the session's copy (`tests/e2e`: `omp config set`
+  writes there and leaves the link).
+
+What a session changes among its preferences reaches the account through
+[the review](#the-review). The account's kept values are at
+`~/.omh/creds/omp/<account>/preferences/config.yml`; a session's copy at
+`~/.omh/run/<repo>/<session>/.preferences/omp/live/config.yml`, and it goes
+with the session at `omh sNN rm`.
+
+<details>
+<summary>The first launch after upgrading: the migration</summary>
+
+An account omp has run on holds a real, shared `config.yml`, and its first
+launch migrates it as
+[Codex's is migrated](#codexconfigtoml-is-each-sessions-own): backed up `0600`
+to `~/.omh/creds/omp/<account>/preferences/config.yml.before-omh`, its
+preferences kept, the link laid and recorded. It says what it kept and what it
+dropped, by key, never by value:
+
+```
+omh: omp's config.yml is per session from now on — kept defaultThinkingLevel, modelRoles.default, theme.dark, dropped disabledProviders, extensions; the file as it was is at /Users/you/.omh/creds/omp/default/preferences/config.yml.before-omh
+```
+
+omp reads `config.yaml` where `config.yml` is absent, so an account whose
+settings are there is migrated from that one — backed up as
+`config.yaml.before-omh` — and `config.yaml` leaves the account: once the
+link is there, omp never reads it again. A `config.yaml` beside a real
+`config.yml` is one omp never read, and is left as it is.
+
+It refuses, and changes nothing, while a session started by an older omh still
+mounts the account; `omh auth omp` asks the same, once per account. After the
+migration, a real file where the link goes was put there by a session: it is
+linked again, said, and nothing in it is kept — and a `config.yaml` a session
+writes is never read while the link is there, and never kept.
+
+</details>
+
+**omp on `sbx` waits for #199**, as Codex does: laying the link asks which
+sandboxes still mount the account, and `sbx` keeps no labels to answer from.
 
 ### `token` is what proves a login
 

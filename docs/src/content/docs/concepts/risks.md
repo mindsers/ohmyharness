@@ -36,7 +36,7 @@ them, because a risk that vanishes teaches nobody what it cost.
 | Risk | Where it stands |
 |---|---|
 | [1. The credential model is weaker than `sbx`'s](#1-the-credential-model-is-weaker-than-sbxs) | open — gated on the `sbx` backend |
-| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | narrowed — MCP servers, and Codex's hooks, are held to the launch's; Claude's settings are above what a session writes; omp's providers are the account's own |
+| [1b. The account directory is writable, and every repo shares it](#1b-the-account-directory-is-writable-and-every-repo-shares-it) | narrowed — MCP servers, and Codex's hooks, are held to the launch's; Claude's settings are above what a session writes; omp's providers are the account's own, and its settings each session's |
 | [2. A sandbox protects the host, not the repo](#2-a-sandbox-protects-the-host-not-the-repo) | inherent |
 | [2b. The sandbox's repository is agent-writable](#2b-the-sandboxs-repository-is-agent-writable-its-push-wall-is-a-signpost) | narrowed |
 | [2c. ~~`omh sNN rm` destroys the agent's own commits~~](#2c-omh-snn-rm-destroys-the-agents-own-commits) | closed in #58 |
@@ -85,8 +85,9 @@ omh mounts each `creds` path read-write, because OAuth tokens refresh in
 place, and a captured account lives under `~/.omh/creds/<harness>/<name>` —
 one directory for every repo that uses it. For Claude Code that is all of
 `~/.claude/` and, until #197, `~/.claude.json` — each session now gets its own
-copy of that one, below; for omp, all of `~/.omp/agent/`; for Codex,
-`~/.codex/`, where `config.toml` is each session's own since #197.
+copy of that one, below; for omp, all of `~/.omp/agent/`, where `config.yml`
+is each session's own since #197; for Codex, `~/.codex/`, where `config.toml`
+is too.
 
 **Those directories hold more than credentials.** By the adapters' own
 accounts of what each harness reads:
@@ -181,6 +182,19 @@ leave a cache, and asserts that at the next start the cache is gone, the
 command never ran and the turn reached the account's provider — red with the
 render unmounted, and with the cache left.
 
+**Closed across sessions for omp's settings** (#197): omp keeps its settings
+in `~/.omp/agent/config.yml`, in the account, and what one session wrote
+there every later one read: `enabledProviders`, `disabledProviders` and
+`modelProviderOrder` choose among providers, `auth.broker.*` names a broker
+omp fetches credentials through, and `extensions` lists extensions it loads
+(read in omp's source, 18.10.4). Each session now gets its own `config.yml`:
+the account's is a link to the session's copy, and the account keeps only the
+keys the adapter declares as preferences — see
+[`~/.omp/agent/config.yml` is each session's own](/guides/accounts/#ompagentconfigyml-is-each-sessions-own).
+`tests/e2e` launches with an account whose shared file holds a setting that is
+not a preference beside the model, and asserts the turn runs on the model and
+omp reads the other setting as never set — red with the shared file as before.
+
 **Still open:**
 
 - an enterprise account's cloud bundle composes above omh's requirements: its
@@ -194,10 +208,6 @@ render unmounted, and with the cache left.
   in omp's source, `ai/src/auth/cascade.ts`; not measured). It reaches what the
   hook directory does — code one session leaves runs in the next — and closes
   with it;
-- omp's `config.yml`, shared until its per-session copy (#197, step 3):
-  `enabledProviders`, `disabledProviders` and `modelProviderOrder` choose among
-  providers, and `auth.broker.*` names a broker omp fetches credentials
-  through;
 - omp's model cache between two sessions running at once on one account:
   omh removes it only when a session starts.
 
