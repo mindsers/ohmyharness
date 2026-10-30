@@ -19,7 +19,7 @@ end to end.
 - **The backend sits behind a narrow seam**: a pure `Plan` in, an argv out, and
   one place where an argv becomes a process. → [Runtime backends](#runtime-backends)
 - **Backends declare what they can do**, and a plan that needs more fails loudly
-  instead of starting an agent that cannot see its own profile.
+  instead of starting an agent that cannot see its own catalogue.
   → [Declared capabilities](#declared-capabilities-and-honest-unknowns)
 - **`sbx` is measured, built and opt-in.** It is the fix for the agent holding
   its own token, but its full launch has not been accepted, so `auto` never
@@ -49,7 +49,7 @@ so Docker is the only runtime anyone has confirmed works.
   worktrees/<repo>/<session>/ the agent's working directory
   shadow/<repo>/<session>.git the repository the sandbox gets, and `.seed` beside it
   keys/<repo>/                per-repo ed25519 keypair
-  run/<repo>/<session>/<harness>/  staged profile, regenerated per launch
+  run/<repo>/<session>/<harness>/  staged catalogue, regenerated per launch
   run/<repo>/<session>/port   the loopback port that session's sshd is published on
   memory/<repo>/              the local note store, mounted into every session of the repo
 
@@ -223,7 +223,7 @@ From the sbx FAQ:
 
 **Docker drew its boundary exactly where omh's product begins.** They isolate;
 they deliberately do not carry your setup in. The two **compose**: `sbx`
-provides the microVM, omh gets your profile inside it.
+provides the microVM, omh gets your catalogue inside it.
 
 ### The seam in the code
 
@@ -298,7 +298,7 @@ be written into the workspace and symlinked from inside, not mounted onto chosen
 guest paths.
 
 Better to know that from a failing validation than from an agent that starts
-fine and cannot see its own profile.
+fine and cannot see its own catalogue.
 
 Resolving it was planned as a one-afternoon spike — build an opencode kit, try a
 single-file mount, try attaching an IDE. **The spike below answered it**: `sbx`
@@ -414,7 +414,7 @@ raises are marked as still needing one.
    documented as such.
 3. Egress is a `sbx policy` / `--deny-network` set seeded from the harness's
    known hosts plus a `sandbox_egress` setting.
-4. The profile — skills, MCP, rules — is staged into the worktree and symlinked
+4. The catalogue — skills, MCP, rules — is staged into the worktree and symlinked
    from inside at startup, because the guest path cannot be chosen.
 
 </details>
@@ -478,7 +478,7 @@ image loaded into sbx:
    `runs/<id>` and compares there.
 3. **The workspace is at its host path, and `/work` must be a symlink.** `-e
    OMH_WORKTREE=<host path>` carries the path in (env carrying is confirmed),
-   and the image entrypoint does `ln -s "$OMH_WORKTREE" /work`. The profile's
+   and the image entrypoint does `ln -s "$OMH_WORKTREE" /work`. The catalogue's
    single-file and chosen-guest-path mounts (rules, `.mcp.json`, skills) cannot
    be mounts at all — they stage into the worktree (or a second `:ro`
    workspace) and are symlinked from the entrypoint, which is the

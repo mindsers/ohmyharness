@@ -21,7 +21,7 @@ transcripts = "$HOME/.codex/sessions"
 # What proves a login: `auth.json` holds the API key or the OAuth tokens Codex
 # writes after `codex login` — with Codex's default credential store, `file`.
 # Set to `keyring` (or `auto`, where a keyring exists) it writes no file, so
-# `omh auth codex --import` finds nothing on that host and says so; inside the
+# `omh account login codex --import` finds nothing on that host and says so; inside the
 # sandbox there is no keyring, and the default holds. A config directory fills with other files on the
 # first start, so nothing else there distinguishes a login from boot noise.
 token = ["$HOME/.codex/auth.json"]
@@ -29,8 +29,8 @@ token = ["$HOME/.codex/auth.json"]
 # Device code, not the default browser sign-in: that one waits for a redirect
 # on `127.0.0.1:1455` inside the sandbox, where the host's browser never
 # arrives. Codex's own sign-in screen offers both. A login that already exists
-# on this machine can be copied instead, with `omh auth codex --import`.
-login = "choose `Sign in with Device Code` in Codex, then exit — or run `omh auth codex --import` to copy this machine's login"
+# on this machine can be copied instead, with `omh account login codex --import`.
+login = "choose `Sign in with Device Code` in Codex, then exit — or run `omh account login codex --import` to copy this machine's login"
 
 # How this harness names the things an agent does, as its hooks see them —
 # measured in the 0.154.0 image with a stub model making real calls. The shell

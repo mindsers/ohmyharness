@@ -6,8 +6,8 @@
 //! what happened.
 
 use crate::adapter::{self, Adapter};
+use crate::catalogue::{Catalogue, Paths};
 use crate::out;
-use crate::profile::{Paths, Profile};
 use crate::session::{self, Session};
 use crate::{
     ask, auth, base, carry, config, container, detect, editor, idle, image, memory, notice,
@@ -165,13 +165,13 @@ pub(crate) fn start(
 /// container*, not a launch — that is what lets an editor attach to the same
 /// place the agent is working.
 // One more than clippy's seven, for the backend. Bundling it with `paths` and
-// `profile` into a launch context is the shape Phase 3c's `Resolved` takes;
+// `catalogue` into a launch context is the shape Phase 3c's `Resolved` takes;
 // until then the parameter list is the honest one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn session_up(
     backend: &runtime::Backend,
     paths: &Paths,
-    profile: &Profile,
+    catalogue: &Catalogue,
     adapter: &Adapter,
     session: &Session,
     // This launch made the session: whatever its run directory already holds
@@ -229,7 +229,7 @@ pub(crate) fn session_up(
     // The account must reach *this* plan: this is the container that actually
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
-    say_selection(paths, profile, &opts.repo, ctx);
+    say_selection(paths, catalogue, &opts.repo, ctx);
     // The session's copies of account files, read and checked now — before
     // a running container is replaced — and written below, after the reuse
     // decision, never into a file bind-mounted into a running container.
@@ -249,7 +249,7 @@ pub(crate) fn session_up(
         _ => std::collections::BTreeMap::new(),
     };
     let account_dir = opts.account_dir.clone();
-    let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
+    let plan = container::plan(paths, catalogue, adapter, session, &[], opts)?;
     plan.validate_for(backend)?;
 
     // The plan is built before this rather than after, because the plan *is*
@@ -425,7 +425,7 @@ pub(crate) fn attach(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let profile = Profile::resolve(&paths);
+    let catalogue = Catalogue::resolve(&paths);
     let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
         .into_iter()
         .map(|a| a.name.to_string())
@@ -455,7 +455,7 @@ pub(crate) fn attach(
         &paths,
         &backend,
         &adapter,
-        &profile.sources(adapter::Capability::Hooks)?,
+        &catalogue.sources(adapter::Capability::Hooks)?,
         &own,
         &repo,
         ctx,
@@ -497,7 +497,7 @@ pub(crate) fn attach(
     //
     // Through `render::held_back`, so the wording and the set are `init`'s.
     for d in render::held_back(
-        &profile.sources(adapter::Capability::Hooks)?,
+        &catalogue.sources(adapter::Capability::Hooks)?,
         &own,
         &repo,
         &sandbox.resolves,
@@ -508,7 +508,7 @@ pub(crate) fn attach(
     session_up(
         &backend,
         &paths,
-        &profile,
+        &catalogue,
         &adapter,
         &session,
         false,
@@ -1212,7 +1212,7 @@ fn read_hooks(
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Not every session with hooks has one: a scratch session
-            // (`omh auth`, `omh doctor`) never mounts the shadow gitdir at
+            // (`omh account login`, `omh doctor`) never mounts the shadow gitdir at
             // all, and a session launched by an omh built before this
             // feature shipped never wrote one either. Neither is a damaged
             // record.
@@ -1827,7 +1827,7 @@ pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
 /// `git worktree remove` strands from here on.
 ///
 /// A run directory counts only when it carries the marker `idle::touch` writes.
-/// `omh doctor` and `omh auth` stage into the same tree under their own names,
+/// `omh doctor` and `omh account login` stage into the same tree under their own names,
 /// and neither is a session anybody could resume or would want reported.
 pub(crate) fn leftovers(
     paths: &Paths,
@@ -1908,7 +1908,7 @@ pub(crate) fn leftovers(
     };
 
     // A run directory counts only when it carries the marker `idle::touch`
-    // writes: `omh doctor` and `omh auth` stage into this same tree under their
+    // writes: `omh doctor` and `omh account login` stage into this same tree under their
     // own names, and neither is a session anybody could resume.
     found.extend(
         match opened(
@@ -2188,7 +2188,7 @@ pub(crate) fn say_hooks(paths: &Paths, ctx: &out::Ctx) -> Option<notice::Record>
     // Same withdrawal for the same reason: what each hook file claims comes
     // from reading the hook directories, and a drift report built on half of
     // that is a wrong report rather than a shorter one.
-    let dirs = match Profile::resolve(paths).sources(adapter::Capability::Hooks) {
+    let dirs = match Catalogue::resolve(paths).sources(adapter::Capability::Hooks) {
         Ok(dirs) => dirs,
         Err(e) => {
             ctx.warn(&format!("could not read your hooks — {e:#}"));
@@ -2224,7 +2224,7 @@ pub(crate) fn say_hooks(paths: &Paths, ctx: &out::Ctx) -> Option<notice::Record>
 ///
 /// Called from **every path that builds a plan**, which is the rule `say_rules`
 /// states and this broke on arrival: it was wired into `run` alone, so `attach`
-/// and `doctor` composed the same profile and said nothing. `attach` is the path
+/// and `doctor` composed the same catalogue and said nothing. `attach` is the path
 /// where it matters most — it is how you rejoin a session that staged the
 /// selection you have since changed.
 ///
@@ -2234,7 +2234,7 @@ pub(crate) fn say_hooks(paths: &Paths, ctx: &out::Ctx) -> Option<notice::Record>
 /// to cover a silence rather than to guard anything.
 pub(crate) fn say_selection(
     paths: &Paths,
-    profile: &Profile,
+    catalogue: &Catalogue,
     repo: &settings::RepoPolicy,
     ctx: &out::Ctx,
 ) {
@@ -2248,7 +2248,7 @@ pub(crate) fn say_selection(
             return;
         }
     };
-    match notice::selection(profile, &repo.selection, &applicable) {
+    match notice::selection(catalogue, &repo.selection, &applicable) {
         Ok(notices) => {
             for notice in notices {
                 ctx.warn(&notice.to_string());
@@ -2365,7 +2365,7 @@ pub(crate) fn run(
 
     let adapter =
         Adapter::find(&paths.adapters(), name).map_err(|e| crate::unknown_tool(&paths, name, e))?;
-    let profile = Profile::resolve(&paths);
+    let catalogue = Catalogue::resolve(&paths);
 
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
@@ -2427,7 +2427,7 @@ pub(crate) fn run(
             &paths,
             &backend,
             &adapter,
-            &profile.sources(adapter::Capability::Hooks)?,
+            &catalogue.sources(adapter::Capability::Hooks)?,
             &own,
             &repo,
             ctx,
@@ -2490,7 +2490,7 @@ pub(crate) fn run(
 
     let plan = container::plan(
         &paths,
-        &profile,
+        &catalogue,
         &adapter,
         &session,
         &argv[1..],
@@ -2500,7 +2500,7 @@ pub(crate) fn run(
     plan.validate_for(&backend)?;
 
     say_rules(&plan, ctx);
-    say_selection(&paths, &profile, &opts.repo, ctx);
+    say_selection(&paths, &catalogue, &opts.repo, ctx);
     let hooks_seen = say_hooks(&paths, ctx);
 
     // Without the `omh: ` prefix, which `Ctx` now owns: the launch line is a
@@ -2587,7 +2587,7 @@ pub(crate) fn run(
     let name = session_up(
         &backend,
         &paths,
-        &profile,
+        &catalogue,
         &adapter,
         &session,
         created,

@@ -16,7 +16,7 @@
 //! and composed into what the harness is given.
 
 use crate::adapter::{Adapter, Binding, Capability};
-use crate::profile::Paths;
+use crate::catalogue::Paths;
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
@@ -373,7 +373,7 @@ const MARKER: &str = "<!-- omh:";
 /// A body that contains the marker syntax has it neutralised first. Provenance
 /// only means something if omh is the only writer of it: a project's own
 /// `AGENTS.md` could otherwise open with `<!-- omh: personal -->` and attribute
-/// whatever followed to the user's own profile. Cheap to do, and the whole
+/// whatever followed to the user's own catalogue. Cheap to do, and the whole
 /// point of the marker rests on it.
 fn render(sections: &[Section]) -> String {
     sections
@@ -430,7 +430,7 @@ fn catalogue(
         let Some(body) = read(&path)?.filter(|b| !b.trim().is_empty()) else {
             continue;
         };
-        let name = crate::profile::entry_name(path.file_name().unwrap_or_default());
+        let name = crate::catalogue::entry_name(path.file_name().unwrap_or_default());
         // A manifest name is omh's, on or off — an error naming both rather
         // than a file that composes. The same rule `render::merge_hooks`
         // applies to a hook file, and it became this module's business when

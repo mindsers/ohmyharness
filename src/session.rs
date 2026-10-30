@@ -55,7 +55,7 @@ pub enum Removed {
     BranchUnconfirmed { held: Dropped, why: String },
     /// There was no branch to speak of.
     ///
-    /// A scratch session (`omh auth`, `omh doctor`) never had one, and neither
+    /// A scratch session (`omh account login`, `omh doctor`) never had one, and neither
     /// did a session id nothing ever created, which `omh s rm` reaches because
     /// it builds a session rather than looking one up. Reporting *kept* or
     /// *dropped* there is a claim about work that never existed.
@@ -209,7 +209,7 @@ impl<'a> Carried<'a> {
 
 pub struct Session {
     pub id: String,
-    /// `None` for a scratch session. `omh auth` and `omh doctor` need a
+    /// `None` for a scratch session. `omh account login` and `omh doctor` need a
     /// container and a writable `/work`, not somewhere to keep work — giving
     /// them a branch litters the user's namespace with names like `omh/auth`
     /// that outlive the command that made them.
@@ -574,7 +574,7 @@ impl Session {
     /// trees it already walks past are what proves a squash landed.
     pub fn survey(&self, repo: &Path, base: &str) -> Result<Survey> {
         let Some(branch) = &self.branch else {
-            // A scratch session (`omh auth`, `omh doctor`) has no branch, and
+            // A scratch session (`omh account login`, `omh doctor`) has no branch, and
             // asking git about one would error rather than report nothing.
             return Ok(Survey {
                 standing: Standing {
@@ -2564,7 +2564,7 @@ fn hooks_for(cwd: &Path, tree: &Path) -> Result<Hooks> {
     let at = Path::new(&value);
     let inside = !at.is_absolute() || {
         let at = lexically(at);
-        at.starts_with(lexically(tree)) || at.starts_with(crate::profile::settled(tree))
+        at.starts_with(lexically(tree)) || at.starts_with(crate::catalogue::settled(tree))
     };
     Ok(match inside {
         true => Hooks::SetAside(value),
@@ -3561,7 +3561,7 @@ mod tests {
         assert_eq!(whole.trunk.len(), 3);
     }
 
-    /// A scratch session (`omh auth`, `omh doctor`) has no branch at all, and
+    /// A scratch session (`omh account login`, `omh doctor`) has no branch at all, and
     /// asking git about one would error rather than report nothing to keep.
     #[test]
     fn removing_a_scratch_session_reports_no_branch() {
@@ -4687,7 +4687,7 @@ mod tests {
         );
     }
 
-    /// `omh auth` and `omh doctor` get a writable directory, not somewhere to
+    /// `omh account login` and `omh doctor` get a writable directory, not somewhere to
     /// keep work. `diff` already refuses them; so must this.
     ///
     /// Asserting the reason: a scratch directory is not a git repository, so
@@ -5304,7 +5304,7 @@ mod tests {
         }
         std::fs::write(shadows.join("s03.landed"), "abc\n").unwrap();
         std::fs::create_dir_all(runs.join("s05")).unwrap();
-        // Not ids: what `omh doctor` and `omh auth` stage under the same tree.
+        // Not ids: what `omh doctor` and `omh account login` stage under the same tree.
         std::fs::create_dir_all(runs.join("doctor")).unwrap();
         let at = Claimed {
             worktrees: &wt,
@@ -5517,7 +5517,7 @@ mod tests {
 
     // ── scratch sessions ────────────────────────────────────────────────────
 
-    /// Regression: `omh auth` and `omh doctor` each left an `omh/auth` and
+    /// Regression: `omh account login` and `omh doctor` each left an `omh/auth` and
     /// `omh/doctor` branch behind, because `rm` keeps branches by design —
     /// a rule that is right for your work and wrong for a login.
     #[test]
@@ -6162,7 +6162,7 @@ mod tests {
         std::fs::write(s.worktree.join("tracked.txt"), "the agent's edit\n").unwrap();
 
         let changed = s.changed().unwrap();
-        let paths = crate::profile::Paths {
+        let paths = crate::catalogue::Paths {
             root: d.path().join("omh"),
             repo: root.clone(),
         };
@@ -6271,7 +6271,7 @@ mod tests {
         for inside in [
             s.worktree.join(".husky/_"),
             s.worktree.join("src/../.husky/_"),
-            crate::profile::settled(&s.worktree).join(".husky/_"),
+            crate::catalogue::settled(&s.worktree).join(".husky/_"),
         ] {
             set(&inside);
             assert_eq!(

@@ -38,7 +38,7 @@ one verified harness, one verified runtime.
 ## v0 — the base set, one harness
 
 ✅ `omh init` that decides · ✅ images · ✅ sandbox + worktree · ✅ persistence ·
-✅ `omh auth` · ✅ `omh sNN attach` · ✅ `omh doctor` · ✅ `carry_in` ·
+✅ `omh account login` · ✅ `omh sNN attach` · ✅ `omh doctor` · ✅ `carry_in` ·
 ✅ code graph · ✅ `omh graph` · ✅ stack hooks ·
 🔶 [memory](/reference/memory/) — the store, retrieval and staleness
 ship; hub pages do not

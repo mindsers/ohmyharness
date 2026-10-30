@@ -35,7 +35,7 @@ which proves their paths and nothing about their behaviour.
 **Step 2 is not optional, and it is not a formality.** Adapter facts are
 unverified claims about external software that ships weekly, and they break
 *silently* — a wrong path means the harness starts fine and simply never sees
-your profile. A green unit suite proves omh mounted a path faithfully. It cannot
+your catalogue. A green unit suite proves omh mounted a path faithfully. It cannot
 prove anything read it. See [Troubleshooting](/guides/troubleshooting/#why-it-exists).
 
 ### The bar for shipping one
@@ -48,7 +48,7 @@ hooks included on every one. Any fifth adapter inherits the same bar.
   distinction is deliberate, is repeated wherever the claim appears, and applies
   to `opencode`, `omp` and `codex` in the same words.
 - **The check count is not an adapter fact.** It varies with the capabilities
-  your profile declares and with whether a login has been captured for that
+  your catalogue declares and with whether a login has been captured for that
   harness.
 
 <details>
@@ -118,12 +118,12 @@ ready  = "Connected"           # what that answer calls a server it loaded
 
 | Field | What it says | Default |
 |---|---|---|
-| `name` | the harness's name, as `omh new`, `omh auth` and `omh doctor --harness` take it. Letters, digits, `-` and `_` only — it is joined into paths | required |
+| `name` | the harness's name, as `omh new`, `omh account login` and `omh doctor --harness` take it. Letters, digits, `-` and `_` only — it is joined into paths | required |
 | `bin` | the executable to run inside the sandbox | required |
 | `install` | the command that installs `bin` into the image; it may interpolate the pin as `{{version}}` | required |
 | `version` | the harness version this adapter pins. `install` must interpolate it | no pin |
 | `checksums` | SHA-256 sums keyed by `uname -m` (`x86_64`, `aarch64`), for a harness delivered as a release binary rather than an npm package | none |
-| `creds` | the paths holding credentials, captured by `omh auth` and remounted on every launch. **A trailing `/` declares a directory** | none |
+| `creds` | the paths holding credentials, captured by `omh account login` and remounted on every launch. **A trailing `/` declares a directory** | none |
 | `token` | the file(s) whose contents prove a login — see [below](#token-or-token-probe-never-both) | none |
 | `[token-probe]` | `run` and `ready`: ask the harness whether it is logged in, where no file can say | none |
 | `login` | what you have to do once the harness opens, to log in | none |
@@ -356,7 +356,7 @@ renders it where the session cannot write — see
 | Field | What it says | Default |
 |---|---|---|
 | `format` | the provider file's schema, and where it is rendered. `codex-config`: `model_provider` and `[model_providers.*]`, kept in `provider.toml` and rendered into Codex's system layer beside omh's hooks. `omp-models`: omp's `models.yml`, kept in `provider.yml` and rendered over `path` | required |
-| `import` | the host file, under `$HOME`, that `omh auth --import` reads the harness's own provider from | required |
+| `import` | the host file, under `$HOME`, that `omh account login --import` reads the harness's own provider from | required |
 | `path` | for `omp-models`, the file the harness reads providers from, strictly inside one of `creds`' directories, with no `..`: the render is mounted over it read-only, `{}` when the account has none. `codex-config` takes none | — |
 | `drop` | files in the account, each strictly inside one of `creds`' directories, that can carry a provider's address into the next session and that the harness rebuilds: removed before each launch | none |
 
@@ -369,7 +369,7 @@ omh enforces each of these, with an error naming the adapter:
 - a `version` that `install` never interpolates, or a `{{version}}` with no `version` to fill it
 - an `install` that runs `sha256sum -c` while declaring no `checksums`
 - `token` and `token-probe` together
-- no capabilities at all — it would launch a harness that can see none of your profile
+- no capabilities at all — it would launch a harness that can see none of your catalogue
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
 - a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
 - a `[policy]` `mask` entry that is a capability's own path — two mounts at one path
@@ -401,7 +401,7 @@ of a host `docker build`.
 
 ## Capabilities are optional keys
 
-The profile carries the **superset** of what any harness might express. An
+The catalogue carries the **superset** of what any harness might express. An
 adapter declares which parts its harness can actually express, and where. The
 capability classes are `rules`, `skills`, `mcp`, `commands`, `subagents` and
 `hooks`.
@@ -440,7 +440,7 @@ run   = "omp usage --json"   # asked inside the sandbox, where the credentials a
 ready = "accountId"          # what that answer says when the login is real
 ```
 
-**`omh doctor` settles a probe, not `omh auth`.** `omh auth` tears the container
+**`omh doctor` settles a probe, not `omh account login`.** `omh account login` tears the container
 down before it can ask, so on such a harness it records the account and says the
 login is **unconfirmed**.
 

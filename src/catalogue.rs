@@ -437,12 +437,12 @@ impl Paths {
     }
 
     /// Per-launch staging. Keyed by repo as well as session and harness: two
-    /// checkouts both on `s01` must not share a rendered profile.
+    /// checkouts both on `s01` must not share a rendered catalogue.
     pub fn staging(&self, session: &str, harness: &str) -> PathBuf {
         self.runs().join(session).join(harness)
     }
 
-    /// Per-repo run state: staged profiles, and the marker recording when each
+    /// Per-repo run state: staged catalogues, and the marker recording when each
     /// session was last used.
     pub fn runs(&self) -> PathBuf {
         self.root.join("run").join(self.repo_id())
@@ -523,7 +523,7 @@ impl Paths {
 
     /// The network a scratch verb shares: the per-repo `omh-<repo_id>`.
     ///
-    /// `omh auth` and `omh doctor` run a one-shot `--rm` container and need a
+    /// `omh account login` and `omh doctor` run a one-shot `--rm` container and need a
     /// network, but not isolation from each other — they hold no services. A
     /// per-session network for each would be a leftover nothing removes (they
     /// are not in the session list) and one `id_in_network` would misattribute
@@ -1031,14 +1031,14 @@ fn stable_digest(s: &str) -> u32 {
     hash
 }
 
-pub struct Profile {
+pub struct Catalogue {
     /// The catalogue — yours, every project.
     root: PathBuf,
     /// This checkout, which declares hooks and nothing else.
     repo: PathBuf,
 }
 
-impl Profile {
+impl Catalogue {
     pub fn resolve(paths: &Paths) -> Self {
         Self {
             root: paths.root.clone(),
@@ -1504,7 +1504,7 @@ mod tests {
         // `exists()` exactly the same way.
         std::fs::set_permissions(&f.paths.root, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let result = Profile::resolve(&f.paths).sources(Capability::Skills);
+        let result = Catalogue::resolve(&f.paths).sources(Capability::Skills);
         std::fs::set_permissions(&f.paths.root, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let err = result.expect_err("unreadable must not read as undeclared");
@@ -1520,9 +1520,9 @@ mod tests {
     #[test]
     fn absent_capabilities_are_skipped_not_faked() {
         let f = fixture(&[("catalogue", "rules/tdd.md", "only")]);
-        let profile = Profile::resolve(&f.paths);
-        assert_eq!(profile.sources(Capability::Rules).unwrap().len(), 1);
-        assert!(profile.sources(Capability::Skills).unwrap().is_empty());
+        let catalogue = Catalogue::resolve(&f.paths);
+        assert_eq!(catalogue.sources(Capability::Rules).unwrap().len(), 1);
+        assert!(catalogue.sources(Capability::Skills).unwrap().is_empty());
     }
 
     /// A name omh mints has to be a name `[use]` can hold.
@@ -1544,7 +1544,7 @@ mod tests {
             ("catalogue", "skills/.DS_Store", "junk"),
         ]);
         assert_eq!(
-            Profile::resolve(&f.paths)
+            Catalogue::resolve(&f.paths)
                 .entries(Capability::Skills)
                 .unwrap(),
             vec!["review-diff"],
@@ -1562,7 +1562,7 @@ mod tests {
     fn a_capability_resolves_to_one_catalogue_path() {
         let f = fixture(&[("catalogue", "skills/mine/SKILL.md", "yours")]);
         assert_eq!(
-            Profile::resolve(&f.paths)
+            Catalogue::resolve(&f.paths)
                 .sources(Capability::Skills)
                 .unwrap(),
             vec![f.paths.root.join("skills")]
@@ -1582,9 +1582,9 @@ mod tests {
             ("local", "skills/secret/SKILL.md", "yours, here"),
             ("shared", "mcp.json", "{}"),
         ]);
-        let profile = Profile::resolve(&f.paths);
-        assert!(profile.sources(Capability::Skills).unwrap().is_empty());
-        assert!(profile.sources(Capability::Mcp).unwrap().is_empty());
+        let catalogue = Catalogue::resolve(&f.paths);
+        assert!(catalogue.sources(Capability::Skills).unwrap().is_empty());
+        assert!(catalogue.sources(Capability::Mcp).unwrap().is_empty());
     }
 
     /// Hooks are the one capability with a repo tier, because they are the one
@@ -1600,7 +1600,7 @@ mod tests {
             ("project", "hooks/format.json", "this repo's"),
         ]);
         assert_eq!(
-            Profile::resolve(&f.paths)
+            Catalogue::resolve(&f.paths)
                 .sources(Capability::Hooks)
                 .unwrap(),
             vec![f.paths.root.join("hooks"), f.paths.repo.join(".omh/hooks")],
@@ -2505,7 +2505,7 @@ mod tests {
     }
 
     /// Regression: staging was keyed by session and harness only, so two repos
-    /// both using session `s01` shared one rendered profile — repo A's MCP
+    /// both using session `s01` shared one rendered catalogue — repo A's MCP
     /// config could be mounted into repo B's sandbox.
     #[test]
     fn staging_is_keyed_by_repo() {

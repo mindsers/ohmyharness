@@ -7,8 +7,8 @@
 //! because both work on the same lists in `<repo>/.omh/settings.toml`.
 
 use crate::adapter::{self, Adapter};
+use crate::catalogue::{Catalogue, Paths};
 use crate::out;
-use crate::profile::{Paths, Profile};
 use crate::{base, config, hook, render, report, selection, settings, stack};
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,7 +73,7 @@ pub(crate) fn use_cmd(
         // The second half cost more than the wrong sentence: it offered
         // `omh settings edit hooks go-test`, which creates a second
         // `go-test.json` beside the one already there.
-        let held = Profile::resolve(&paths).entries(cap)?;
+        let held = Catalogue::resolve(&paths).entries(cap)?;
         if held.iter().any(|n| n == name) {
             anyhow::bail!(
                 "{cap}/{name} is in your catalogue, but names an ecosystem this repo is \
@@ -951,9 +951,9 @@ pub(crate) fn catalogue_lists(
 /// **later** directory's copy of `name` overwrites an earlier one, matching
 /// `merge_hooks` and `declared_stacks`'s own later-wins rule.
 fn guard_hooks(paths: &Paths) -> Result<BTreeSet<String>> {
-    let profile = Profile::resolve(paths);
+    let catalogue = Catalogue::resolve(paths);
     let mut refuses = std::collections::BTreeMap::new();
-    for dir in profile.sources(adapter::Capability::Hooks)? {
+    for dir in catalogue.sources(adapter::Capability::Hooks)? {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1082,8 +1082,8 @@ pub(crate) fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result
         .into_iter()
         .map(|d| d.name.clone())
         .collect();
-    let profile = Profile::resolve(paths);
-    let declared = render::declared_stacks(&profile.sources(cap)?)?;
+    let catalogue = Catalogue::resolve(paths);
+    let declared = render::declared_stacks(&catalogue.sources(cap)?)?;
     Ok(applicable_hooks(names, &declared, &detected))
 }
 
@@ -1102,8 +1102,8 @@ pub(crate) fn catalogue_names_unfiltered(
     // Reserved, not merely owned: a name omh's server used to have is never
     // yours to list, and a list naming one is a list `[use]` refuses.
     let reserved = manifest.reserved();
-    let profile = Profile::resolve(paths);
-    Ok(profile
+    let catalogue = Catalogue::resolve(paths);
+    Ok(catalogue
         .entries(cap)?
         .into_iter()
         .filter(|n| !reserved.get(&cap).is_some_and(|o| o.contains_key(n)))
@@ -1179,7 +1179,7 @@ pub(crate) fn new_repo_takes(
 /// every page of the screen one.
 fn defaults_catalogue(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String>> {
     let owned = crate::cmd::settings::shipped_owned(cap)?;
-    Ok(Profile::resolve(paths)
+    Ok(Catalogue::resolve(paths)
         .entries(cap)?
         .into_iter()
         .filter(|n| !owned.contains_key(n))
@@ -1259,7 +1259,7 @@ pub(crate) fn defaults_use(
     // `space` on one said "new repos take skills/gone" and wrote it.
     if cap != adapter::Capability::Mcp {
         let source = paths.root.join(cap.source());
-        let found = crate::profile::listed(&source, cap)?
+        let found = crate::catalogue::listed(&source, cap)?
             .into_iter()
             .find(|(n, _)| n == name);
         if let Some((_, at)) = found.filter(|(_, at)| at.is_symlink() && !at.exists()) {

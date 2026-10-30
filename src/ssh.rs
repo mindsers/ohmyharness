@@ -17,11 +17,11 @@ pub const INCLUDE_LINE: &str = "Include ~/.ssh/config.d/omh";
 
 /// SSH host alias for a session: the session's container name.
 ///
-/// Respelled by [`crate::profile::runtime_id`], because a space in a `Host`
+/// Respelled by [`crate::catalogue::runtime_id`], because a space in a `Host`
 /// line is two patterns and in `HostKeyAlias` a parse error — and the block is
 /// included from `~/.ssh/config`, so the error stops every ssh on the machine.
 pub fn host_alias(repo: &str, session: &str) -> String {
-    format!("omh-{}-{session}", crate::profile::runtime_id(repo))
+    format!("omh-{}-{session}", crate::catalogue::runtime_id(repo))
 }
 
 /// Loopback port for a session's sshd.

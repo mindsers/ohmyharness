@@ -186,7 +186,7 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # (`render::scrub`): identity — `oauthAccount`, `userID`, onboarding — still
 # comes from the account, tokens stay in the shared `.credentials.json`, and
 # nothing a session writes there reaches the account or any other session
-# [e2e] — but the preferences declared below, through the review. `omh auth`
+# [e2e] — but the preferences declared below, through the review. `omh account login`
 # mounts the account's own file — a login is where its identity is written —
 # after `auth::scrub_account` cleans it the same way.
 [policy]

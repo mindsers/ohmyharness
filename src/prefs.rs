@@ -621,7 +621,7 @@ fn refuse_a_lost_provider(
     anyhow::bail!(
         "{} selects `model_provider = {}`{url}, and sessions no longer read it from there — \
          this launch would go to OpenAI instead. Keep it as the account's provider:\n\n    \
-         omh auth {} --name {name} --provider {}\n\nor remove `model_provider` from that file \
+         omh account login {} --name {name} --provider {}\n\nor remove `model_provider` from that file \
          to use OpenAI",
         shown.display(),
         crate::out::untrusted(&format!("{selected:?}")),
@@ -1135,6 +1135,114 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
     Ok(notes)
 }
 
+/// What an account keeps for one preferences file.
+#[derive(Debug)]
+pub struct Kept {
+    pub file: String,
+    pub doc: Doc,
+    /// `doc` by key, dotted, in the adapter's order.
+    pub keys: Vec<(String, Value)>,
+}
+
+/// What the account at `account` keeps of `adapter`'s preferences, file by
+/// file — the declared keys alone, as a launch seeds them. A file it keeps
+/// nothing of is an empty document; one omh cannot read is an error naming
+/// it, never nothing kept.
+pub fn kept_by_file(adapter: &Adapter, account: &Path) -> Result<Vec<Kept>> {
+    let Some(prefs) = adapter.preferences.as_ref() else {
+        return Ok(Vec::new());
+    };
+    prefs
+        .declared()
+        .iter()
+        .map(|d| {
+            let doc = pick(&kept(account, d)?, d.all());
+            let keys = d
+                .all()
+                .filter_map(|k| get(&doc, k).map(|v| (dotted(k), v.clone())))
+                .collect();
+            Ok(Kept {
+                file: d.name.clone(),
+                doc,
+                keys,
+            })
+        })
+        .collect()
+}
+
+/// What [`forget`] took from an account, or would.
+#[derive(Debug)]
+pub struct Forgot {
+    /// The key, dotted.
+    pub key: String,
+    /// The file it was kept for.
+    pub file: String,
+    pub was: Value,
+}
+
+/// Take `key` from what the account at `account` keeps of `adapter`'s
+/// preferences, and nothing else — under the lock a review and a seed hold,
+/// so neither reads the file half written. `dry_run` reads and refuses as the
+/// real run does, and writes nothing.
+///
+/// The account only. A session already started keeps its own copy, and its
+/// review finds the account no longer keeping what it started from.
+pub fn forget(
+    adapter: &Adapter,
+    account: &Path,
+    shown: &str,
+    key: &str,
+    dry_run: bool,
+) -> Result<Forgot> {
+    let harness = adapter.name.as_str();
+    let Some(prefs) = adapter.preferences.as_ref() else {
+        anyhow::bail!("{harness} keeps no preferences on its accounts");
+    };
+    let path = crate::adapter::key_path(key).map_err(anyhow::Error::msg)?;
+    let not_one = || {
+        format!(
+            "`{key}` is not one of {harness}'s preferences — `omh account` lists what each \
+             account keeps"
+        )
+    };
+    let declared = prefs.declared();
+    let d = declared
+        .iter()
+        .find(|d| d.all().any(|k| *k == path))
+        .with_context(not_one)?;
+    let keeps_none = || format!("account `{shown}` keeps no {harness} {}", dotted(&path));
+    let name = OsStr::new(&d.name);
+    let at = || format!("{}", account.join(KEPT).join(&d.name).display());
+    let rel = format!("{KEPT}/{}", d.name);
+    let Some((dir, _)) = hold_parent(account, &rel, false).with_context(at)? else {
+        anyhow::bail!(keeps_none());
+    };
+    let _lock = match dry_run {
+        true => None,
+        false => Some(
+            dir.lock(OsStr::new(LOCK))
+                .with_context(|| format!("locking {}", account.join(KEPT).display()))?,
+        ),
+    };
+    let Some(now) = read_doc(&dir, name, d.format()).with_context(at)? else {
+        anyhow::bail!(keeps_none());
+    };
+    let mut doc = pick(&now, d.all());
+    let Some(was) = get(&doc, &path).cloned() else {
+        anyhow::bail!(keeps_none());
+    };
+    set(&mut doc, &path, None);
+    if !dry_run {
+        dir.replace_private(name, &d.format().render(&doc)?)
+            .with_context(at)?;
+    }
+    Ok(Forgot {
+        key: dotted(&path),
+        file: d.name.clone(),
+        was,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,7 +1487,7 @@ base_url = "https://example.invalid"
         let err = format!("{:#}", check(&codex(), &account).unwrap_err());
         assert!(
             err.contains("azure")
-                && err.contains("omh auth codex --name work --provider")
+                && err.contains("omh account login codex --name work --provider")
                 && err.contains(&file.display().to_string()),
             "{err}"
         );

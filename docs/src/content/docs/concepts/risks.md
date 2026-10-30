@@ -75,7 +75,7 @@ Several accounts widens this gap rather than narrowing it.
 A Codex [provider file](/guides/accounts/#a-model-provider-of-your-own) is one
 more token the agent can read: its key is in `/etc/codex/config.toml`, which
 the session cannot write but Codex — and so the agent — must read. An
-`env_key` that used to stay in your shell is, once `omh auth codex` resolves
+`env_key` that used to stay in your shell is, once `omh account login codex` resolves
 it, a value in a `0600` file on disk.
 
 ### 1b. The account directory is writable, and every repo shares it
@@ -130,8 +130,9 @@ relaunch still reads what it wrote into its copy. `tests/e2e` launches with an a
 holding such an entry — at the top, under `/work`, and in `.config.json` — with
 omh-memory switched off and a permission granted, checks the entry is one the
 lock admits, and asserts none of it reaches the session and nothing the
-session writes reaches the account. `omh auth`'s login, which mounts the
-account's own file, cleans it the same way first and admits no server.
+session writes reaches the account. The login, `omh account login`, which
+mounts the account's own file, cleans it the same way first and admits no
+server.
 
 **omh's hooks are above every settings file a session writes, on Claude
 Code** (#197). omh's settings reach Claude by `--settings`, from a read-only
@@ -212,7 +213,7 @@ omp reads the other setting as never set — red with the shared file as before.
   omh removes it only when a session starts.
 
 Until then, an account used for untrusted repos is best kept separate from one
-used for work — `omh auth <harness> -n <name>` captures as many as you like.
+used for work — `omh account login <harness> -n <name>` captures as many as you like.
 
 ### 2. A sandbox protects the host, not the repo
 
@@ -558,7 +559,7 @@ sandbox on git 2.39.5 turned out to lack.
 
 ### 7. Auth is verified but was hard-won
 
-**A real `omh auth claude --name <account>` login completes and persists.** Five
+**A real login, `omh account login claude --name <account>`, completes and persists.** Five
 bugs preceded that, every one at the boundary with a real harness.
 
 ### 8. Concurrent edits
@@ -716,7 +717,7 @@ likely to kill the project, and it is not a technical one.
   holds copies of them. Nothing reads those, `omh why` names them as not read,
   and `omh upgrade` takes them out — keeping the file as it was in
   `mcp.json.yours` when a copy was not what omh ships now.
-- **`omh why` answers about one repo's profile.** It reads the layers resolved
+- **`omh why` answers about one repo.** It reads the layers resolved
   for the current repo, so the same entry can legitimately answer differently in
   two checkouts. That is correct and occasionally surprising.
 

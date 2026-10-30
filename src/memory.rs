@@ -5,7 +5,7 @@
 //! Everything here is pure given a temp filesystem, which is deliberate: the
 //! places where a mistake is invisible are the places that test cheaply.
 
-use crate::profile::Paths;
+use crate::catalogue::Paths;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ pub enum Moved {
     ///
     /// Which of two notes filed under one key is the current one is a guess,
     /// made silently, about something a person wrote — the same guess
-    /// `profile::Migration::Stranded` refuses about two directories of
+    /// `catalogue::Migration::Stranded` refuses about two directories of
     /// sessions. Both paths are named and neither is touched.
     Both { from: PathBuf, to: PathBuf },
 }

@@ -183,7 +183,7 @@ listen on it, and the previous `StrictHostKeyChecking no` trusted whatever did.
 ## Verified
 
 `ssh omh-ohmyharness-3f9a2c1b-s01` lands as `agent` (uid 1000) inside the sandbox, with
-the worktree at `/work` and the profile in place.
+the worktree at `/work` and the catalogue in place.
 
 ## Next
 

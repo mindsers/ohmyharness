@@ -19,7 +19,7 @@
 //! the staging directory omh just wrote, which is circular.
 
 use crate::adapter::{expand, Adapter, Capability, Render};
-use crate::profile::Profile;
+use crate::catalogue::Catalogue;
 use anyhow::Context;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -173,14 +173,14 @@ pub struct Attributed {
 /// state directories on the same call. The prober is the closure.
 pub fn attributed(
     names: &[String],
-    attribute: &dyn Fn(&str) -> crate::profile::Attribution,
+    attribute: &dyn Fn(&str) -> crate::catalogue::Attribution,
 ) -> Attributed {
     let mut out = Attributed::default();
     for name in names {
         match attribute(name) {
-            crate::profile::Attribution::Gone(path) => out.gone.push((name.clone(), path)),
-            crate::profile::Attribution::Live(_) => out.live += 1,
-            crate::profile::Attribution::Unknown(why) => out.unknown.push((name.clone(), why)),
+            crate::catalogue::Attribution::Gone(path) => out.gone.push((name.clone(), path)),
+            crate::catalogue::Attribution::Live(_) => out.live += 1,
+            crate::catalogue::Attribution::Unknown(why) => out.unknown.push((name.clone(), why)),
         }
     }
     out
@@ -451,7 +451,7 @@ fn gigabytes(bytes: u64) -> String {
 /// **A repo with no commit has no branch to fork.**
 ///
 /// `repo_root` already refuses a directory that is not a git repository at all
-/// (`profile::repo_root`), naming the cause and `git init` — so *that* is
+/// (`catalogue::repo_root`), naming the cause and `git init` — so *that* is
 /// deliberately not a row here; it could never fail, because doctor cannot
 /// reach its own body without it. This is the narrower gap it leaves: `git
 /// init` with nothing committed yet is inside a repository, passes that gate,
@@ -605,7 +605,7 @@ pub struct HostRows(pub Vec<Outcome>);
 /// cannot see, because it never looks at the catalogue or the filesystem —
 /// a `[use]` name a rename left behind, a `carry_in` path that moved, a
 /// hand-edited repo hook that does not parse.
-pub fn audit(paths: &crate::profile::Paths) -> Vec<Outcome> {
+pub fn audit(paths: &crate::catalogue::Paths) -> Vec<Outcome> {
     let (_, repo) = match crate::cmd::session::resolved(paths) {
         Ok(pair) => pair,
         // Every check below reads the resolved policy, so a repo whose
@@ -638,7 +638,7 @@ pub fn audit(paths: &crate::profile::Paths) -> Vec<Outcome> {
 /// answers `None` for a capability following the whole catalogue — nothing
 /// was declared, so nothing can have drifted — and only a `Some` list is
 /// worth checking against what `catalogue_names` says exists today.
-fn use_row(paths: &crate::profile::Paths, repo: &crate::settings::RepoPolicy) -> Outcome {
+fn use_row(paths: &crate::catalogue::Paths, repo: &crate::settings::RepoPolicy) -> Outcome {
     let mut missing = Vec::new();
     let mut inapplicable = Vec::new();
     let mut unreadable = Vec::new();
@@ -729,7 +729,7 @@ fn use_row(paths: &crate::profile::Paths, repo: &crate::settings::RepoPolicy) ->
 /// copies are covered by `everything_in_the_repo_is_embedded_byte_for_byte`;
 /// this is the one place nothing else checks, because it is the one place a
 /// person, not `omh init`, wrote the file.
-fn hooks_row(paths: &crate::profile::Paths) -> Outcome {
+fn hooks_row(paths: &crate::catalogue::Paths) -> Outcome {
     let dir = paths.repo.join(".omh").join("hooks");
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -812,7 +812,7 @@ fn hooks_row(paths: &crate::profile::Paths) -> Outcome {
 /// is reported and never copied, launch proceeds — this row exists so that
 /// shows up before a session starts rather than after one silently carried
 /// nothing.
-fn carry_in_row(paths: &crate::profile::Paths) -> Outcome {
+fn carry_in_row(paths: &crate::catalogue::Paths) -> Outcome {
     // The checked read: a `carry_in` that is declared but is not a list
     // resolves to nothing, and "nothing declared" is exactly the wrong thing
     // to tell someone who declared something.
@@ -939,7 +939,7 @@ pub fn host_checks(
     // **The count is derived here, not supplied.** It was a separate `usize`
     // parameter, and `host_checks(rt, markers.len(), &markers)` compiled —
     // which collapses the "nothing to detect with" answer into "none matched"
-    // and tells a fully-seeded profile to run `omh init`. That is the bug this
+    // and tells a fully-seeded catalogue to run `omh init`. That is the bug this
     // function's own doc says was caught by hand against the binary; passing
     // the definitions themselves makes it unspellable.
     let (installed, detected) = match stacks {
@@ -960,7 +960,7 @@ pub fn host_checks(
 
     // **"None detected" and "nothing to detect with" are different answers.**
     // Detection filters the *installed* definitions by their marker file, so a
-    // profile that has none reports "none" for a repo full of markers — which
+    // catalogue that has none reports "none" for a repo full of markers — which
     // reads as a fact about the repo and is a fact about the machine.
     out.push(if installed_defs == 0 {
         Outcome {
@@ -1202,7 +1202,7 @@ pub fn provider_check(adapter: &Adapter, account: Option<&std::path::Path>) -> O
         (
             false,
             format!(
-                "{e:#} — every {} start refuses until it is fixed: omh auth {} --provider <file>",
+                "{e:#} — every {} start refuses until it is fixed: omh account login {} --provider <file>",
                 adapter.name, adapter.name
             ),
         )
@@ -1702,7 +1702,7 @@ pub fn ca_check(ca: Option<&str>) -> Option<Check> {
     })
 }
 
-/// What must be true inside the sandbox, given this profile and adapter.
+/// What must be true inside the sandbox, given this catalogue and adapter.
 /// Whether the harness starts at all — `<bin> --version`, from its home.
 ///
 /// Every other sandbox check asks about a path omh mounted. opencode 1.18
@@ -1721,7 +1721,7 @@ pub fn start_check(adapter: &Adapter) -> Check {
 }
 
 pub fn checks(
-    profile: &Profile,
+    catalogue: &Catalogue,
     adapter: &Adapter,
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
@@ -1729,17 +1729,17 @@ pub fn checks(
 ) -> Result<Vec<Check>> {
     let mut out = Vec::new();
     for capability in Capability::ALL {
-        let sources = profile.sources(capability)?;
+        let sources = catalogue.sources(capability)?;
         // Three capabilities are mounted whether or not a layer sources them,
         // because omh generates part of them from the base manifest. Asking
-        // the profile is the same mistake `container::plan` made about rules:
+        // the catalogue is the same mistake `container::plan` made about rules:
         // it answers about the layers, and the question is about the mount.
         //
         // Rules has one case this cannot see — a repo whose only rules are its
         // own tracked file, with every omh feature off. That composes and
         // mounts, and goes unchecked. Erring toward no check rather than a
         // check that fails forever, which is the trade `omh doctor` has to
-        // make while it reads a profile rather than a plan.
+        // make while it reads a catalogue rather than a plan.
         // Rules keys on what omh generates. Hooks does *not*, and the
         // difference is not a nicety: until 2026.08 `git-unavailable` was the
         // one shipped hook outside `codegraph`, so `own.hooks` was never empty
@@ -1757,7 +1757,7 @@ pub fn checks(
             Capability::Rules => !own.sections.is_empty(),
             Capability::Hooks => true,
             // omh's servers are generated, and `omh init` writes no `mcp.json`:
-            // asking the profile alone skipped both MCP checks on every fresh
+            // asking the catalogue alone skipped both MCP checks on every fresh
             // install, while the launch staged the servers all the same.
             Capability::Mcp => !own.servers.is_empty(),
             _ => false,
@@ -1859,7 +1859,7 @@ pub fn checks(
 /// `.flatten()` over the entries, so a source that could not be opened and an
 /// entry that failed part-way through both vanished — and what they left
 /// behind was a check demanding nothing, which prints `ok` without looking at
-/// the directory at all. The rule `profile::entries` states for every listing
+/// the directory at all. The rule `catalogue::entries` states for every listing
 /// in this codebase.
 fn entry_names(
     sources: &[PathBuf],
@@ -1878,7 +1878,7 @@ fn entry_names(
             let name = entry.file_name();
             if repo
                 .selection
-                .allows(cap, &crate::profile::entry_name(&name))
+                .allows(cap, &crate::catalogue::entry_name(&name))
             {
                 names.push(name.to_string_lossy().into_owned());
             }
@@ -1942,7 +1942,7 @@ fn hook_names(
 /// ended in `.unwrap_or_default()`, which spelled "every server is switched
 /// off here" and "nobody could read the catalogue" the same way — and the
 /// second one then built a check that demands nothing and prints `ok`.
-/// `parse_layers` propagates, like `profile::entries` and `doctor_cmd`; this
+/// `parse_layers` propagates, like `catalogue::entries` and `doctor_cmd`; this
 /// was the one caller that did not.
 fn server_names(
     sources: &[PathBuf],
@@ -2124,7 +2124,7 @@ pub fn probe_script(checks: &[Check]) -> String {
             // has to come from the answer, not from a warning printed beside
             // it; both are still quoted back on failure, because "no account"
             // and "no such subcommand" are indistinguishable from an exit code
-            // and decide whether the user runs `omh auth` or fixes the adapter.
+            // and decide whether the user runs `omh account login` or fixes the adapter.
             //
             // `grep -F`: `ready` is a marker an adapter author wrote, not a
             // pattern. Read as a basic regex, `usage: omp [options]` matches
@@ -2716,24 +2716,24 @@ mod tests {
         // green. Pin the sentence that only this branch says.
         assert!(
             stacks.detail.contains("none of the 4"),
-            "a seeded profile that matched nothing must say so, with the count: {}",
+            "a seeded catalogue that matched nothing must say so, with the count: {}",
             stacks.detail
         );
         assert!(
             !stacks.detail.contains("no stack definitions are installed"),
-            "and must not tell a seeded profile to seed itself: {}",
+            "and must not tell a seeded catalogue to seed itself: {}",
             stacks.detail
         );
 
         // **And the answer that is about the machine, not the repo.**
-        // Detection filters the *installed* definitions, so a profile with
+        // Detection filters the *installed* definitions, so a catalogue with
         // none reports "none" for a repo full of markers — driven on a real
         // `omh doctor` before `omh init`, which said "none" while
         // `pyproject.toml` sat in the directory. That reads as a fact about
         // the repo and is a fact about the machine.
         let bare = host_checks(Ok(("docker", Ok(()))), Ok((&[], vec![])), &BTreeMap::new());
         let stacks = &bare[1];
-        assert!(stacks.ok, "an uninitialised profile is not a broken one");
+        assert!(stacks.ok, "an uninitialised catalogue is not a broken one");
         assert!(
             stacks.detail.contains("no stack definitions are installed"),
             "it must say nothing could have matched, not that nothing did: {}",
@@ -2746,7 +2746,7 @@ mod tests {
         );
         assert!(
             !stacks.detail.contains("none of the"),
-            "an empty profile did not fail to match — it had nothing to match \
+            "an empty catalogue did not fail to match — it had nothing to match \
              against, and saying otherwise is a fact about the repo: {}",
             stacks.detail
         );
@@ -3213,7 +3213,7 @@ mod tests {
     /// let "omh could not tell" quietly join either of the other two.
     #[test]
     fn the_row_separates_gone_from_live_from_could_not_tell() {
-        use crate::profile::Attribution;
+        use crate::catalogue::Attribution;
         let names: Vec<String> = ["omh-cache-a", "omh-cache-b", "omh-cache-c", "omh-cache-d"]
             .iter()
             .map(|s| s.to_string())
@@ -3577,7 +3577,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::profile::Paths;
+    use crate::catalogue::Paths;
     use std::collections::BTreeMap;
     use std::path::Path;
 
@@ -3658,7 +3658,7 @@ mod tests {
 
     struct Fx {
         _dir: tempfile::TempDir,
-        profile: Profile,
+        catalogue: Catalogue,
     }
 
     fn fixture() -> Fx {
@@ -3680,7 +3680,7 @@ mod tests {
         // while every fresh install had them skipped.
         Fx {
             _dir: dir,
-            profile: Profile::resolve(&paths),
+            catalogue: Catalogue::resolve(&paths),
         }
     }
 
@@ -3719,10 +3719,10 @@ mod tests {
     }
 
     /// omh's own hooks and rules sections come from the base manifest, not
-    /// from a layer — so a profile that sources neither still has both mounted,
+    /// from a layer — so a catalogue that sources neither still has both mounted,
     /// and both have to be checked.
     ///
-    /// Asking the profile whether a capability is worth checking is the same
+    /// Asking the catalogue whether a capability is worth checking is the same
     /// mistake `container::plan` made about rules: it answers about the layers
     /// and the question is about the mount. A check that quietly disappears is
     /// worse than one that fails, because `omh doctor` reporting 4/4 is the
@@ -3731,7 +3731,7 @@ mod tests {
     fn a_capability_the_profile_does_not_source_is_still_checked() {
         let fx = fixture();
         let names: Vec<String> = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &decided().0,
             &decided().1,
@@ -3763,7 +3763,7 @@ mod tests {
                 .map(|m| expand(m, GUEST_HOME))
                 .collect();
             let checks = checks(
-                &fx.profile,
+                &fx.catalogue,
                 &a,
                 &decided().0,
                 &decided().1,
@@ -3836,7 +3836,7 @@ mod tests {
         let (own, off) = decided_with(["codegraph".to_string()].into());
 
         let mcp = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &own,
             &off,
@@ -3884,13 +3884,13 @@ mod tests {
             std::fs::write(p, body).unwrap();
         };
         write(paths.root.join("skills/graphify/SKILL.md"), "s");
-        // Readable, and not a document. `profile::sources` only asks whether
+        // Readable, and not a document. `catalogue::sources` only asks whether
         // the path exists, so this reaches the reader intact.
         write(paths.root.join("mcp.json"), "{ this is not json");
 
         let (own, repo) = decided();
         let err = checks(
-            &Profile::resolve(&paths),
+            &Catalogue::resolve(&paths),
             &adapter("claude"),
             &own,
             &repo,
@@ -3911,7 +3911,7 @@ mod tests {
     ///
     /// `entry_names` fed `Expect::Entries`. Restoring its `read_dir(..).ok()`
     /// left the whole suite green, so the `?` shipped unguarded — and unlike
-    /// the `mcp.json` half nothing catches this earlier: `profile::sources`
+    /// the `mcp.json` half nothing catches this earlier: `catalogue::sources`
     /// only asks `try_exists`, `init::sandbox` reads no capability directory,
     /// and `top_up` takes `sources(Hooks)`, which is existence-only. `checks`
     /// at `cmd/inspect.rs:445` is the first thing to open the directory, so a
@@ -3944,7 +3944,7 @@ mod tests {
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o000)).unwrap();
         let (own, repo) = decided();
         let got = checks(
-            &Profile::resolve(&paths),
+            &Catalogue::resolve(&paths),
             &adapter("claude"),
             &own,
             &repo,
@@ -3993,7 +3993,7 @@ mod tests {
 
         let (own, repo) = decided();
         let err = checks(
-            &Profile::resolve(&paths),
+            &Catalogue::resolve(&paths),
             &adapter("opencode"),
             &own,
             &repo,
@@ -4031,7 +4031,7 @@ mod tests {
             .unwrap();
 
         let skills = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &own,
             &repo,
@@ -4044,7 +4044,7 @@ mod tests {
         assert_eq!(
             skills.expect,
             Expect::Entries(vec![]),
-            "the only skill in this profile is graphify, and this repo did not name it"
+            "the only skill in this catalogue is graphify, and this repo did not name it"
         );
     }
 
@@ -4075,7 +4075,7 @@ mod tests {
             .unwrap();
 
         let got = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &own,
             &repo,
@@ -4109,7 +4109,7 @@ mod tests {
     fn every_declared_capability_is_checked() {
         let fx = fixture();
         let got: Vec<_> = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &decided().0,
             &decided().1,
@@ -4157,7 +4157,7 @@ mod tests {
         let terse = Adapter::find(dir.path(), "terse").unwrap();
 
         let caps: Vec<String> = checks(
-            &fx.profile,
+            &fx.catalogue,
             &terse,
             &decided().0,
             &decided().1,
@@ -4179,7 +4179,7 @@ mod tests {
 
         // opencode itself now has every capability checked, hooks included.
         let all: Vec<String> = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("opencode"),
             &decided().0,
             &decided().1,
@@ -4211,7 +4211,7 @@ mod tests {
             ..decided().0
         };
         let caps: Vec<String> = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("opencode"),
             &none,
             &decided().1,
@@ -4235,7 +4235,7 @@ mod tests {
     fn checks_target_guest_paths_only() {
         let fx = fixture();
         for check in checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &decided().0,
             &decided().1,
@@ -4269,7 +4269,7 @@ mod tests {
         let fx = fixture();
         for harness in ["opencode", "omp"] {
             let cs = checks(
-                &fx.profile,
+                &fx.catalogue,
                 &adapter(harness),
                 &decided().0,
                 &decided().1,
@@ -4292,7 +4292,7 @@ mod tests {
     fn content_checks_name_what_must_be_present() {
         let fx = fixture();
         let cs = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &decided().0,
             &decided().1,
@@ -4334,7 +4334,7 @@ mod tests {
     fn the_probe_reports_one_line_per_check() {
         let fx = fixture();
         let cs = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &decided().0,
             &decided().1,
@@ -4967,7 +4967,7 @@ mod tests {
     fn the_check_asks_where_the_document_is() {
         let fx = fixture();
         let cs = checks(
-            &fx.profile,
+            &fx.catalogue,
             &adapter("claude"),
             &decided().0,
             &decided().1,

@@ -1,6 +1,6 @@
 //! An adapter is data, not code.
 //!
-//! The profile carries the *superset* of what any harness can do. An adapter
+//! The catalogue carries the *superset* of what any harness can do. An adapter
 //! declares which of those capabilities its harness can express, and where each
 //! one lives. An absent key means "this harness cannot do this" — so graceful
 //! degradation is a missing map entry rather than special-case logic.
@@ -45,7 +45,7 @@ pub struct Adapter {
     /// empty session.
     #[serde(default)]
     pub transcripts: Option<String>,
-    /// Paths holding credentials, captured by `omh auth` and remounted on
+    /// Paths holding credentials, captured by `omh account login` and remounted on
     /// launch. **A trailing slash declares a directory** — load-bearing, because
     /// a bind-mounted *file* cannot be replaced by rename and every tool saves
     /// its token by writing a temp file and renaming over it.
@@ -109,7 +109,7 @@ pub struct Adapter {
 #[serde(deny_unknown_fields)]
 pub struct Provider {
     pub format: ProviderFormat,
-    /// Where the harness keeps its own provider on the host, for `omh auth
+    /// Where the harness keeps its own provider on the host, for `omh account login
     /// --import` to read. `$HOME` is the user's.
     pub import: String,
     /// The file the harness reads providers from, hidden behind the render,
@@ -573,7 +573,7 @@ pub fn related(a: &KeyPath, b: &KeyPath) -> bool {
     a[..n] == b[..n]
 }
 
-/// The capability classes a profile can carry. Ordered as declared, which is
+/// The capability classes a catalogue can carry. Ordered as declared, which is
 /// also the order they are staged and reported in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -847,7 +847,7 @@ pub enum Render {
 ///
 /// `Adapter::find` and `Editor::find` resolve a word by joining it into
 /// `<dir>/<word>.toml`, and the word arrives from every command that names a
-/// harness — `omh new`, `omh auth`, `omh doctor`, `omh eject`, `omh import` —
+/// harness — `omh new`, `omh account login`, `omh doctor`, `omh eject`, `omh import` —
 /// and from a `.harness` marker on disk, which
 /// `session::harness_of` already distrusts on the grounds that "omh wrote this,
 /// but a file on disk is not omh's word". Unchecked, `..` in that word named a
@@ -1018,7 +1018,7 @@ impl Adapter {
         if adapter.capabilities.is_empty() {
             anyhow::bail!(
                 "adapter {} declares no capabilities — it would launch a harness \
-                 that can see none of your profile",
+                 that can see none of your catalogue",
                 path.display()
             );
         }
@@ -1411,6 +1411,21 @@ impl Adapter {
                     );
                 }
                 seen.push((raw.as_str(), key));
+            }
+        }
+        // A key names one preference: `omh account` lists it, and `forget`
+        // takes it, by the key alone.
+        let mut files_of: BTreeMap<KeyPath, &str> = BTreeMap::new();
+        for (file, keys) in &prefs.files {
+            let quiet = prefs.quiet.get(file).into_iter().flatten();
+            for raw in keys.iter().chain(quiet) {
+                let key = key_path(raw).map_err(|e| anyhow::anyhow!("adapter {shown}: {e}"))?;
+                if let Some(other) = files_of.insert(key, file) {
+                    anyhow::bail!(
+                        "adapter {shown}: `{raw}` is declared in two files, {other:?} and \
+                         {file:?} — a preference is named by its key alone"
+                    );
+                }
             }
         }
         Ok(())
@@ -1952,7 +1967,7 @@ mod tests {
     /// The paths a harness reads, pinned to what its documentation says.
     ///
     /// These are the claims CONTRIBUTING puts at the top: a wrong one does not
-    /// crash anything — the harness starts and simply never sees your profile,
+    /// crash anything — the harness starts and simply never sees your catalogue,
     /// and `omh doctor` cannot tell, because its `dir` check verifies that the
     /// directory *omh mounted* holds what omh put there. It passes identically
     /// whether the path is right or wrong.
@@ -2936,6 +2951,7 @@ render = "concat"
             ("file", CREDS, "[preferences.files]\n\"$HOME/.claude/x.ini\" = [\"model\"]".to_string(), "only TOML, JSON and YAML"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/elsewhere.json\" = [\"model\"]".to_string(), "must be one of this adapter's credential files, or inside one of its directories"),
             ("file", CREDS, format!("{}\n\"$HOME/.claude/x/settings.json\" = [\"theme\"]", file("\"model\"")), "two preferences files are named `settings.json`"),
+            ("file", CREDS, format!("{}\n\"$HOME/.claude.json\" = [\"model\"]", file("\"model\"")), "`model` is declared in two files"),
             ("link", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"theme\"]".to_string(), "strictly inside one of this adapter's credential directories"),
             ("file", &format!("{CREDS}\n\n[policy]\npath = \"/etc/claude-code/managed-settings.d/omh.json\"\nformat = \"claude-managed\"\nmask = [\"$HOME/.claude/settings.json\"]"), file("\"model\""), "is masked by `[policy]`"),
         ] {
@@ -3025,7 +3041,12 @@ bin="e"
 install="x""#,
         );
         let err = Adapter::find(d.path(), "empty").unwrap_err();
-        assert!(err.to_string().contains("no capabilities"), "got: {err}");
+        assert!(
+            err.to_string().contains(
+                "no capabilities — it would launch a harness that can see none of your catalogue"
+            ),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3038,7 +3059,7 @@ install="x""#,
         );
     }
 
-    /// `omh auth` drops you into the harness and it is not obvious what to do
+    /// `omh account login` drops you into the harness and it is not obvious what to do
     /// next — Claude Code just shows "Not logged in" in the status bar. An
     /// adapter that declares credentials has to say how to fill them.
     #[test]

@@ -96,7 +96,7 @@ shipped to fire on nothing, and opencode logs in with `/connect`.
 
 **Codex you can log in to, and see into.** The pinned Codex's only sign-in
 waited for a browser redirect inside the sandbox, where no browser arrives.
-[`omh auth codex`](https://docs.ohmyharness.sh/guides/accounts/#a-login-that-cannot-finish-in-a-sandbox)
+[Codex's login](https://docs.ohmyharness.sh/guides/accounts/#a-login-that-cannot-finish-in-a-sandbox)
 now takes a device code, or `--import` copies the login this machine already
 has — read in full before anything is written, and offered only where there is
 one to copy. Codex runs omh's hooks, rendered into the system layer it trusts
@@ -253,8 +253,8 @@ stack, git log names what you work on, the README names the project.
 Then log in once and go:
 
 ```console
-$ omh auth claude --name personal   # runs the harness's own login, captures it
-$ omh new claude                    # sandboxed, logged in, configured
+$ omh account login claude --name personal   # runs the harness's own login, captures it
+$ omh new claude                             # sandboxed, logged in, configured
 ```
 
 `omh new` hands you the harness. Close the terminal whenever you like — it runs
@@ -321,7 +321,8 @@ not have to stay that way.
 omh init                          set this repo up (once)
 omh upgrade                       apply a newer omh: refresh and rebuild
 omh new <harness> [-- args…]      start a session, run an agent in it
-omh auth <harness> [-n <name>]    log in once; repeat for several accounts
+omh account login <harness>       log in once; repeat with -n <name>
+omh account                       your accounts, and what each keeps
 
 omh set <key> <value>             a setting, or a feature on|off — this repo
 omh unset <key>                   drop it, or hand the feature back to omh
@@ -332,7 +333,7 @@ omh settings [set|unset|edit|rm|mcp] …
 
 omh info [--repo]                 this machine · --repo, this checkout
 omh why <thing>                   who put this here, and on what grounds
-omh doctor [--harness <name>]     prove a harness really sees your profile
+omh doctor [--harness <name>]     prove a harness really sees your catalogue
 omh graph [--stop]                browse the code graph in a browser
 
 omh memory [remember|stale|lint|rm] …
@@ -395,7 +396,7 @@ harnesses take turns inhabiting.
  │ SESSION  omh-<repo>-s01          detached, long-lived │
  │  sshd 127.0.0.1 ──── your editor attaches here        │
  │  /work  ← worktree, the code you get back             │
- │  staged profile, read-only                            │
+ │  staged catalogue, read-only                          │
  │  graph cache ← volume keyed by REPO, not harness      │
  └───────────────────────────────────────────────────────┘
 ```
@@ -567,8 +568,8 @@ every session's graph for this repo, in one place
 ### Credentials
 
 ```console
-$ omh auth claude --name personal
-$ omh auth claude --name work
+$ omh account login claude --name personal
+$ omh account login claude --name work
 $ omh set account work        # which one this project uses
 $ omh new claude
 ```

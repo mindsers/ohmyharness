@@ -23,9 +23,9 @@
 //! so.
 
 use crate::adapter::{Adapter, Capability};
+use crate::catalogue::Paths;
 use crate::cmd::harvest::plural;
 use crate::cmd::settings::{self, Edited};
-use crate::profile::Paths;
 use crate::tui::{Act, App, Edit, Import, Model, Next, Page, Row, Section};
 use crate::{config, hook, key};
 use anyhow::{Context, Result};
@@ -641,7 +641,7 @@ fn redraw(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
 /// Everything the screen shows, read fresh.
 ///
 /// **Your catalogue alone** — `~/.omh` — and never this checkout's own hooks,
-/// which `Profile::entries` adds for a launch. The screen removes what it
+/// which `Catalogue::entries` adds for a launch. The screen removes what it
 /// lists, and a list that mixed the two would offer the repo's files under
 /// your catalogue's name.
 pub(crate) fn model(paths: &Paths) -> Model {
@@ -818,7 +818,7 @@ fn names_nothing(paths: &Paths, table: &str) -> Option<String> {
         };
         // The catalogue as the kind's page reads it: what is on disk, whether
         // or not `~/.omh/base` can be read.
-        let catalogue = match crate::profile::Profile::resolve(paths).entries(cap) {
+        let catalogue = match crate::catalogue::Catalogue::resolve(paths).entries(cap) {
             Ok(names) => names,
             Err(e) => {
                 wrong.push(format!("could not check [{table}] {cap}: {e:#}"));
@@ -1001,7 +1001,8 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             // name be typed, which was for `codex:work`, and that is here.
             ("account", _) => {
                 let typed = Edit::Text {
-                    hint: "a login's name, as `omh auth <harness> -n <name>` captured it".into(),
+                    hint: "a login's name, as `omh account login <harness> -n <name>` captured it"
+                        .into(),
                 };
                 match logins(paths, adapters) {
                     Ok(held) => {
@@ -1257,7 +1258,7 @@ fn unset_account(held: &[(String, Vec<String>)]) -> (String, Option<String>) {
         .collect();
     match (held, several.is_empty()) {
         ([], _) => (
-            "no login captured — `omh auth <harness>` captures one".into(),
+            "no login captured — `omh account login <harness>` captures one".into(),
             None,
         ),
         (_, false) => (
@@ -1372,7 +1373,7 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
             return out;
         }
     }
-    let listed = match crate::profile::listed(&dir, cap) {
+    let listed = match crate::catalogue::listed(&dir, cap) {
         Ok(listed) => listed,
         Err(e) => {
             out.problem = Some(format!("{e:#}"));
@@ -2671,7 +2672,7 @@ mod tests {
         }
     }
 
-    /// `account` offers the logins captured, by name — what `omh auth`
+    /// `account` offers the logins captured, by name — what `omh account login`
     /// leaves behind, the file claude's adapter names as proof.
     #[test]
     fn account_offers_the_logins_captured() {
@@ -2720,7 +2721,7 @@ mod tests {
         };
         let (fallback, warning) = account(&paths);
         assert!(
-            fallback.contains("no login captured") && fallback.contains("omh auth"),
+            fallback.contains("no login captured") && fallback.contains("omh account login"),
             "{fallback}"
         );
         assert_eq!(warning, None, "none yet is where everybody starts");
@@ -2741,7 +2742,7 @@ mod tests {
         assert!(fallback.contains("none chosen"), "{fallback}");
     }
 
-    /// A login captured for a harness, the way `omh auth` leaves it.
+    /// A login captured for a harness, the way `omh account login` leaves it.
     fn login(paths: &Paths, harness: &str, name: &str) {
         let token = paths
             .creds(harness)

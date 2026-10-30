@@ -1,14 +1,14 @@
-//! Launch plan: stage the resolved profile per capability, then bind-mount it
+//! Launch plan: stage the resolved catalogue per capability, then bind-mount it
 //! onto whatever paths the chosen harness happens to read.
 //!
 //! Docker cannot merge host directories onto one mount point, so layered
-//! profiles are materialized into a per-launch staging directory first. Staging
+//! catalogues are materialized into a per-launch staging directory first. Staging
 //! writes to `~/.omh/run/`, never into the harness's real config location — the
 //! harness only ever sees a read-only mount, so there is still nothing to drift
 //! and nothing to clean up.
 
 use crate::adapter::{expand, Adapter, Capability, Render};
-use crate::profile::{Paths, Profile};
+use crate::catalogue::{Catalogue, Paths};
 use crate::session::Session;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
@@ -26,7 +26,7 @@ pub struct Plan {
     /// the stamp: a limit changed in the settings is drift, and the sandbox
     /// restarts under the new one rather than running on under the old.
     pub limits: Limits,
-    /// Capabilities the profile carries that this harness cannot express.
+    /// Capabilities the catalogue carries that this harness cannot express.
     pub dropped: Vec<(Capability, usize)>,
     /// Hooks this harness *nearly* expressed — it has the capability but not
     /// the moment, tool or payload field they asked for. Separate from
@@ -247,7 +247,7 @@ pub struct Mount {
 /// Home directory *inside* the container. Adapters template `$HOME` against it.
 use crate::image::GUEST_HOME;
 
-/// Where profile layer `i`'s copy of `cap` is mounted inside the container.
+/// Where catalogue layer `i`'s copy of `cap` is mounted inside the container.
 fn guest_layer(i: usize, cap: Capability) -> PathBuf {
     PathBuf::from(format!("/omh/layers/{i}/{}", cap.source()))
 }
@@ -278,8 +278,9 @@ pub enum Launch {
     /// from the account by `auth::seeds` under [`session_home`], and admits
     /// the servers the launch staged.
     Session,
-    /// `omh auth`'s login: it mounts the account's own files, since that is
-    /// where a login writes the identity every later session is seeded with.
+    /// The login, `omh account login`: it mounts the account's own files, since
+    /// that is where a login writes the identity every later session is seeded
+    /// with.
     /// `auth::scrub_account` has cleaned them first; and a login needs no MCP
     /// server, so its policy admits none.
     Login,
@@ -301,8 +302,8 @@ pub fn session_home(paths: &Paths, session: &Session, harness: &str) -> crate::a
 
 /// Where a session's preferences live (`prefs`): in its run directory for a
 /// real session, kept between its launches; under `scratch/` for `omh
-/// doctor`'s probe and `omh auth`'s login, seeded afresh each time. Dotted
-/// like `.home`.
+/// doctor`'s probe and the login, `omh account login`, seeded afresh each
+/// time. Dotted like `.home`.
 pub fn prefs_home(paths: &Paths, session: &Session, harness: &str) -> crate::home::Home {
     match session.branch {
         Some(_) => crate::home::Home::Kept(
@@ -316,7 +317,7 @@ pub fn prefs_home(paths: &Paths, session: &Session, harness: &str) -> crate::hom
     }
 }
 
-/// Launch options that are not part of the profile.
+/// Launch options that are not part of the catalogue.
 #[derive(Debug, Clone)]
 pub struct Options {
     pub staging: Staging,
@@ -384,7 +385,7 @@ pub struct Options {
 
 pub fn plan(
     paths: &Paths,
-    profile: &Profile,
+    catalogue: &Catalogue,
     adapter: &Adapter,
     session: &Session,
     harness_args: &[String],
@@ -421,8 +422,8 @@ pub fn plan(
 
     // The sandbox's ssh host key, for the entrypoint to install as root. Read
     // only, and the directory rather than the file, so the `.pub` rides along.
-    // `session_up` generates it before the launch, and so do `doctor` and
-    // `auth` — whoever is about to start a container, because a mount the
+    // `session_up` generates it before the launch, and so do `doctor` and the
+    // login — whoever is about to start a container, because a mount the
     // daemon creates instead is root's. A plan that is only printed names the
     // path either way.
     mounts.push(Mount {
@@ -433,7 +434,7 @@ pub fn plan(
     });
 
     // `Some` exactly when the shadow gitdir is mounted below — a scratch
-    // session (`omh auth`, `omh doctor`) has no branch and no shadow, and a
+    // session (`omh account login`, `omh doctor`) has no branch and no shadow, and a
     // hook's log statement would be writing into a mount that is not there.
     let log = session
         .branch
@@ -465,7 +466,7 @@ pub fn plan(
     };
 
     for cap in Capability::ALL {
-        let sources = profile.sources(cap)?;
+        let sources = catalogue.sources(cap)?;
         if !carries(cap, &sources, &rules_doc, &opts.omh, adapter) {
             continue;
         }
@@ -513,7 +514,7 @@ pub fn plan(
     // normalised form, so a pattern written `./.env` or `certs/` reaches git as
     // something it can match.
     // `branch.is_some()` as well as `Apply`, and the first is the one that
-    // matters. `omh doctor` and `omh auth` borrow a writable `/work` for one
+    // matters. `omh doctor` and `omh account login` borrow a writable `/work` for one
     // command through `Session::scratch`, and neither calls `carry_in` — that
     // runs in `run` and `attach` only. Keyed on `Apply` alone this staged a
     // plaintext copy of the user's `.env` and mounted it read-write into the
@@ -581,7 +582,7 @@ pub fn plan(
     // does not track. Deriving it from `mounts` means a capability added later
     // is covered without anyone remembering to come back here.
     //
-    // Only for a session that has a branch: a scratch session is `omh auth` or
+    // Only for a session that has a branch: a scratch session is `omh account login` or
     // `omh doctor` borrowing a writable `/work` for one command, with no work
     // to check point and nothing that could ever be harvested from it.
     if session.branch.is_some() {
@@ -641,7 +642,7 @@ pub fn plan(
         });
 
         // Staged rather than written into the worktree: `/work` is the user's
-        // branch, and a `.git` file omh authored there would be a file the
+        // branch, and a `.git` file omh wrote there would be a file the
         // worktree's own git has to explain. Here it exists only as something
         // to mount, and the mount is what the container sees.
         let pointer = stage.join("shadow-gitdir");
@@ -847,7 +848,7 @@ pub fn plan(
     if let Some(policy) = &adapter.policy {
         stage_policy(
             policy,
-            profile,
+            catalogue,
             opts,
             &stage,
             staging,
@@ -863,7 +864,7 @@ pub fn plan(
         //   at all (`omh doctor`'s scratch): the checkout's copy if `carry_in`
         //   brings it in, which is what lands in `/work`, else `opts.base`,
         //   which a new session's worktree is made from.
-        // - no base (`omh auth`, which prints no notes): the scratch itself,
+        // - no base (`omh account login`, which prints no notes): the scratch itself,
         //   which holds nothing.
         let worktree =
             session.branch.is_some() && !matches!(session.worktree.try_exists(), Ok(false));
@@ -990,7 +991,7 @@ pub fn plan(
 #[allow(clippy::too_many_arguments)]
 fn stage_policy(
     policy: &crate::adapter::Policy,
-    profile: &Profile,
+    catalogue: &Catalogue,
     opts: &Options,
     stage: &Path,
     staging: Staging,
@@ -998,7 +999,7 @@ fn stage_policy(
     adapter: &Adapter,
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
-    let sources = profile.sources(Capability::Mcp)?;
+    let sources = catalogue.sources(Capability::Mcp)?;
     // A login mounts the account's own files, with whatever an earlier
     // session left in them, and needs no server: it admits none.
     let servers = match opts.launch {
@@ -1101,7 +1102,7 @@ pub(crate) fn admitted(
     adapter: &Adapter,
 ) -> Result<BTreeMap<String, crate::render::Server>> {
     // Both gates the document goes through: a harness with no MCP binding is
-    // handed nothing, whatever the profile carries.
+    // handed nothing, whatever the catalogue carries.
     if adapter.supports(Capability::Mcp).is_some()
         && carries(Capability::Mcp, sources, rules_doc, own, adapter)
     {
@@ -1200,7 +1201,7 @@ impl Stager<'_> {
                     if staging == Staging::Skip {
                         continue;
                     }
-                    // Not a skipped `Err`. `profile.sources` only returns
+                    // Not a skipped `Err`. `catalogue.sources` only returns
                     // paths that exist, so failing here means the layer is
                     // there and unreadable — and staging it as empty starts
                     // the session with the agent's skills silently absent.
@@ -1226,7 +1227,7 @@ impl Stager<'_> {
                         // catalogue, for a threat omh does not claim to stop.
                         if !repo
                             .selection
-                            .allows(cap, &crate::profile::entry_name(&entry.file_name()))
+                            .allows(cap, &crate::catalogue::entry_name(&entry.file_name()))
                         {
                             continue;
                         }
@@ -1252,7 +1253,7 @@ impl Stager<'_> {
             // into the user's PR on top of the project's own conventions. A mount
             // leaves the file on disk as the branch has it, so git has nothing to
             // report. Read-only for the reason every other staged capability is: a
-            // file the agent can rewrite is not a profile, it is a suggestion.
+            // file the agent can rewrite is not a rule, it is a suggestion.
             Render::Concat => {
                 // `rules::compose` owns the join, because the document is more than
                 // the layers: the project's own file is read from the worktree
@@ -1386,7 +1387,7 @@ fn prune(dst: &Path, cap: Capability, repo: &crate::settings::RepoPolicy) -> Res
         }
         if repo
             .selection
-            .allows(cap, &crate::profile::entry_name(&entry.file_name()))
+            .allows(cap, &crate::catalogue::entry_name(&entry.file_name()))
         {
             continue;
         }
@@ -1492,7 +1493,7 @@ fn symlink(src: &Path, dst: &Path) -> Result<()> {
 
 impl Plan {
     /// Refuse a plan the chosen backend cannot honour. Starting a sandbox where
-    /// the profile silently is not there is the worst available outcome.
+    /// the catalogue silently is not there is the worst available outcome.
     /// Validate this plan for a backend, honouring that a staging backend (sbx)
     /// handles through workspaces and symlinks the mounts it cannot do natively,
     /// so the native-mount refusal does not apply to it. Docker and podman mount
@@ -1646,16 +1647,16 @@ pub(crate) fn sample_plan() -> Plan {
 /// `omh eject` both follow, since an eject is the launch's documents written
 /// somewhere a harness can read without a container.
 ///
-/// Every other capability is exactly what the profile carries. Rules are not:
+/// Every other capability is exactly what the catalogue carries. Rules are not:
 /// the project's own `AGENTS.md` is composed in, and it is often the only thing
 /// there — a fresh install has no rules layer of its own. So asking the
-/// profile whether to stage threw the repo's conventions away in the
+/// catalogue whether to stage threw the repo's conventions away in the
 /// configuration a clone lands in, which is the bug this module was written to
 /// fix.
 ///
 /// Hooks and servers are the same story: omh's are generated from the
 /// manifest and belong to no layer at all, so a catalogue with no `hooks/` or
-/// no `mcp.json` of yours still has them to hand over. Eject asked the profile
+/// no `mcp.json` of yours still has them to hand over. Eject asked the catalogue
 /// alone, and wrote Claude's approval for a server it never defined.
 pub(crate) fn carries(
     cap: Capability,
@@ -1741,7 +1742,7 @@ mod tests {
     struct Fx {
         _dir: tempfile::TempDir,
         paths: Paths,
-        profile: Profile,
+        catalogue: Catalogue,
         session: Session,
     }
 
@@ -1802,11 +1803,11 @@ mod tests {
         )
         .unwrap();
 
-        let profile = Profile::resolve(&paths);
+        let catalogue = Catalogue::resolve(&paths);
         Fx {
             _dir: dir,
             paths,
-            profile,
+            catalogue,
             session,
         }
     }
@@ -1820,7 +1821,7 @@ mod tests {
         let (own, repo) = decided;
         plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             adapter,
             &fx.session,
             &[],
@@ -1858,7 +1859,7 @@ mod tests {
         let with = |resolves: BTreeMap<String, bool>| {
             plan(
                 &fx.paths,
-                &fx.profile,
+                &fx.catalogue,
                 &adapter,
                 &fx.session,
                 &[],
@@ -1918,7 +1919,7 @@ mod tests {
         let (own, repo) = decided();
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -2024,7 +2025,7 @@ mod tests {
         let (own, repo) = decided_from(fx);
         plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -2058,16 +2059,16 @@ mod tests {
         let fx = fixture();
         // No hook layer *and* none of omh's own, which is the only arrangement
         // that used to skip this document. The fixture ships one, so it has to
-        // go before the profile is resolved or this test passes without the
+        // go before the catalogue is resolved or this test passes without the
         // change it exists for.
         std::fs::remove_dir_all(fx.paths.root.join("hooks")).unwrap();
-        let profile = Profile::resolve(&fx.paths);
+        let catalogue = Catalogue::resolve(&fx.paths);
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let (_, repo) = decided_from(&fx);
         let p = plan(
             &fx.paths,
-            &profile,
+            &catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -2178,13 +2179,13 @@ mod tests {
     fn codex_trusts_the_worktree_even_when_a_repo_runs_no_hooks() {
         let fx = fixture();
         std::fs::remove_dir_all(fx.paths.root.join("hooks")).unwrap();
-        let profile = Profile::resolve(&fx.paths);
+        let catalogue = Catalogue::resolve(&fx.paths);
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
         let (_, repo) = decided_from(&fx);
         let p = plan(
             &fx.paths,
-            &profile,
+            &catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -2391,7 +2392,7 @@ mod tests {
         let (own, repo) = decided_from(&fx);
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &scratch,
             &[],
@@ -2487,13 +2488,13 @@ mod tests {
         );
     }
 
-    /// `omh doctor` and `omh auth` must not be handed the user's secrets.
+    /// `omh doctor` and `omh account login` must not be handed the user's secrets.
     ///
     /// Both borrow a writable `/work` for one command through
     /// `Session::scratch`, and neither calls `carry_in` — that runs only in
     /// `run` and `attach`. So staging keyed on `Staging::Apply` alone put a
     /// plaintext copy of the user's `.env` into the doctor probe container and
-    /// into the OAuth container `auth` gives network access to, with nothing
+    /// into the OAuth container the login gives network access to, with nothing
     /// printed: `carry_in`'s entire reporting surface is in the launcher it
     /// never reached. `omh doctor --dry-run` wrote the copy to disk too.
     ///
@@ -2517,7 +2518,7 @@ mod tests {
         let (own, repo) = decided_from(&fx);
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &scratch,
             &[],
@@ -2917,7 +2918,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -2943,7 +2944,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             session,
             &[],
@@ -3007,7 +3008,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -3215,10 +3216,10 @@ mod tests {
         std::fs::read_to_string(&mount.host).unwrap()
     }
 
-    /// Regression: the capability loop asked the *profile* whether there were
+    /// Regression: the capability loop asked the *catalogue* whether there were
     /// rules, and skipped everything when the answer was no.
     ///
-    /// `Profile::sources` only ever looks at the three layer directories, so a
+    /// `Catalogue::sources` only ever looks at the three layer directories, so a
     /// user with no `AGENTS.md` of their own — a fresh install, which is most
     /// of them — took the `sources.is_empty()` branch and never staged or
     /// mounted anything. The composed document existed and was thrown away, so
@@ -3235,9 +3236,9 @@ mod tests {
             let _ = std::fs::remove_file(fx.paths.repo.join(layer).join("AGENTS.md"));
         }
         std::fs::write(fx.session.worktree.join("AGENTS.md"), "ONLY THE PROJECT").unwrap();
-        // `Profile` caches which layers exist, so re-resolve after removing.
+        // `Catalogue` caches which layers exist, so re-resolve after removing.
         let fx = Fx {
-            profile: Profile::resolve(&fx.paths),
+            catalogue: Catalogue::resolve(&fx.paths),
             ..fx
         };
 
@@ -3245,7 +3246,7 @@ mod tests {
 
         assert!(
             composed_rules(&p).contains("ONLY THE PROJECT"),
-            "a repo's own rules must reach the agent even when the profile has none"
+            "a repo's own rules must reach the agent even when the catalogue has none"
         );
     }
 
@@ -3622,7 +3623,7 @@ mod tests {
         let (own, repo) = decided_from(&fx);
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -3659,7 +3660,7 @@ mod tests {
             let (own, repo) = decided_from(&fx);
             let p = plan(
                 &fx.paths,
-                &fx.profile,
+                &fx.catalogue,
                 &adapter,
                 &fx.session,
                 &[],
@@ -3791,7 +3792,7 @@ mod tests {
         let (own, repo) = decided_from(&fx);
         let err = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -3901,7 +3902,10 @@ mod tests {
             file.display().to_string(),
             "corp".to_string(),
             "llm.example.invalid".to_string(),
-            format!("omh auth omp --name default --provider {}", file.display()),
+            format!(
+                "omh account login omp --name default --provider {}",
+                file.display()
+            ),
         ] {
             assert!(err.contains(&said), "{said}: {err}");
         }
@@ -4092,7 +4096,7 @@ mod tests {
     }
 
     /// A layer that exists and cannot be read is a failed launch, not a
-    /// quietly empty one. `profile.sources` only returns paths that exist,
+    /// quietly empty one. `catalogue.sources` only returns paths that exist,
     /// so a `read_dir` failing here means the layer is there and unreadable
     /// — a file where a directory belongs, or permissions — and skipping it
     /// started the session with the agent's skills silently absent and
@@ -4114,7 +4118,7 @@ mod tests {
         let (own, repo) = decided_from(&fx);
         let result = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -4149,7 +4153,7 @@ mod tests {
         let (own, repo) = decided_from(&fx);
         plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -4175,7 +4179,7 @@ mod tests {
         );
     }
 
-    /// A scratch session (`omh auth`, `omh doctor`'s probe) has no branch and
+    /// A scratch session (`omh account login`, `omh doctor`'s probe) has no branch and
     /// mounts no shadow gitdir at all — `log` is `None` for it
     /// (`session.branch.is_some()`, tested once for `log` and again for the
     /// mount, the two some distance apart in `plan`), so there is no events
@@ -4371,13 +4375,13 @@ mod tests {
             .collect()
     }
 
-    /// omh's own hooks are generated from the base manifest, so a profile with
+    /// omh's own hooks are generated from the base manifest, so a catalogue with
     /// no `hooks/` directory anywhere still gets them.
     ///
     /// This is the configuration a fresh clone lands in, and the same shape as
-    /// the bug that hid a repo's rules: asking the profile whether to stage
+    /// the bug that hid a repo's rules: asking the catalogue whether to stage
     /// answers "nothing here" and skips the whole capability, when what omh
-    /// contributes does not come from the profile at all.
+    /// contributes does not come from the catalogue at all.
     #[test]
     fn omhs_hooks_reach_a_profile_with_no_hooks_layer() {
         let fx = fixture();
@@ -4427,7 +4431,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -4496,7 +4500,7 @@ mod tests {
             let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
             let p = plan(
                 &fx.paths,
-                &fx.profile,
+                &fx.catalogue,
                 &adapter,
                 &fx.session,
                 &[],
@@ -4649,7 +4653,7 @@ mod tests {
             ] {
                 let fx = fixture();
                 // No catalogue servers at all — where most installs are once
-                // omh's left `mcp.json`, and the case that asked the profile
+                // omh's left `mcp.json`, and the case that asked the catalogue
                 // whether to stage an MCP document at all.
                 std::fs::remove_file(fx.paths.root.join("mcp.json")).unwrap();
                 let bin = fake_server_binary(&fx);
@@ -4705,7 +4709,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -4768,7 +4772,7 @@ mod tests {
     ///
     /// Found by running `omh doctor` with `[omh] codegraph = false`, not by
     /// the suite: generation dropped the four graph hooks and the seeded files
-    /// of the same name were still sitting in the profile, so the graph hooks
+    /// of the same name were still sitting in the catalogue, so the graph hooks
     /// went on firing against a server that had been removed from the
     /// document. Disabling that leaves the disabled thing running is worse
     /// than not offering it.
@@ -4798,7 +4802,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let err = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -4905,7 +4909,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let err = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -4934,7 +4938,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -4992,7 +4996,7 @@ mod tests {
         );
 
         // Every source a link can point into must actually be mounted.
-        for i in 0..fx.profile.sources(Capability::Skills).unwrap().len() {
+        for i in 0..fx.catalogue.sources(Capability::Skills).unwrap().len() {
             assert!(
                 p.mounts
                     .iter()
@@ -5116,7 +5120,7 @@ mod tests {
         assert!(msg.contains("hooks"), "got: {msg}");
 
         // What is given up includes omh's own, which come from the manifest
-        // rather than from a layer. Counting only the profile's files would
+        // rather than from a layer. Counting only the catalogue's files would
         // report a harness dropping one hook while it drops six.
         let hooks = p
             .dropped
@@ -5157,7 +5161,7 @@ mod tests {
         let adapter = Adapter::find(dir.path(), "partial").unwrap();
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -5299,7 +5303,7 @@ mod tests {
         .unwrap();
         let err = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &bad,
             &fx.session,
             &[],
@@ -5351,7 +5355,7 @@ mod tests {
         let args = ["--resume".to_string(), "abc".to_string()];
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &args,
@@ -5391,7 +5395,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -5443,7 +5447,7 @@ mod tests {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let dry = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -5464,7 +5468,7 @@ mod tests {
         .unwrap();
         let wet = plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],
@@ -5513,7 +5517,7 @@ mod tests {
             image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
         };
-        let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
+        let p = plan(&fx.paths, &fx.catalogue, &adapter, &fx.session, &[], opts).unwrap();
 
         assert_eq!(p.argv[0], "dtach");
         assert_eq!(p.argv.last().unwrap(), "claude");
@@ -5536,7 +5540,7 @@ mod tests {
             image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
         };
-        let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
+        let p = plan(&fx.paths, &fx.catalogue, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
     }
 
@@ -5547,7 +5551,7 @@ mod tests {
         let (own, repo) = decided_from(fx);
         plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             argv,
@@ -5577,7 +5581,7 @@ mod tests {
         let (own, repo) = decided_from(fx);
         plan(
             &fx.paths,
-            &fx.profile,
+            &fx.catalogue,
             &adapter,
             &fx.session,
             &[],

@@ -4,8 +4,8 @@
 //! where the store's own rules are — these read arguments, call it, and
 //! decide what to print.
 
+use crate::catalogue::Paths;
 use crate::out;
-use crate::profile::Paths;
 use crate::{mcp, memory, report};
 use anyhow::Result;
 

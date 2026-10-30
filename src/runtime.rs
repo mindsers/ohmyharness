@@ -7,7 +7,7 @@
 //! Backends differ in ways that would otherwise break a plan mysteriously, so
 //! each **declares** its capabilities and a plan is validated against them
 //! before launch. An `sbx` sandbox that cannot mount a single file must say so,
-//! not silently drop the profile.
+//! not silently drop the catalogue.
 
 use crate::container::Plan;
 use anyhow::Result;
@@ -645,7 +645,7 @@ impl Runtime for Sbx {
         // workspace mounts at its exact host path — `sbx create shell <dir>`
         // puts the files at `<dir>` inside, so the guest path cannot be chosen
         // — and a workspace must be a directory: a single-file path is refused
-        // with "workspace path exists but is not a directory". So the profile's
+        // with "workspace path exists but is not a directory". So the catalogue's
         // single-file mounts and `/work` convention both need the staging model
         // `Plan::validate` will express, not a per-file mount.
         Caps {
@@ -1125,7 +1125,7 @@ mod tests {
     /// Measured against sbx 0.39.0 (2026-09-06): a workspace mounts at its
     /// host path (no chosen guest path) and must be a directory (a single-file
     /// path is refused). A wrong `true` here would start a sandbox with the
-    /// profile silently missing.
+    /// catalogue silently missing.
     #[test]
     fn sbx_capabilities_are_the_measured_ones() {
         let c = Sbx.caps();
@@ -1225,7 +1225,7 @@ mod tests {
 
     /// `Plan::validate` is the *native*-mount check: a backend whose caps say
     /// it cannot mount a file gets the plan refused, named to the offending
-    /// mount, rather than a sandbox where the profile silently isn't there.
+    /// mount, rather than a sandbox where the catalogue silently isn't there.
     /// sbx's raw caps are native-false, so it fails this check — and that is
     /// correct here, because this tests the pure function. What the launch does
     /// with sbx is skip it and stage instead
@@ -1263,7 +1263,7 @@ mod tests {
         assert!(format!("{err:#}").contains("/work"), "got: {err:#}");
     }
 
-    /// sbx's raw caps refuse a real profile — a file mount and `/work` at a
+    /// sbx's raw caps refuse a real catalogue — a file mount and `/work` at a
     /// guest path it cannot honour natively — but the launch never applies that
     /// refusal to a staging backend, because omh stages those into workspaces
     /// and symlinks. `stages_unmountable` is the seam `session_up` reads to skip
@@ -1845,7 +1845,7 @@ mod tests {
     }
 
     /// The session carries the same mounts as a one-shot launch, or the harness
-    /// execed into it later sees no profile.
+    /// execed into it later sees no catalogue.
     /// The session's PID 1 was `sleep infinity`, which reaps nothing. Every
     /// `dtach` that exits therefore left a zombie for the life of the session
     /// — observed directly: after the wrapped program ended, the socket was

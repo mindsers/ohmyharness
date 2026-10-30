@@ -4,7 +4,7 @@
 //!
 //! Same rules, same skills, same MCP servers, same memory. The container is not
 //! a fourth feature bolted on: it is what makes the other three free, because
-//! the profile is *mounted* rather than copied, so there is no drift to fight.
+//! the catalogue is *mounted* rather than copied, so there is no drift to fight.
 
 mod adapter;
 mod ask;
@@ -12,6 +12,7 @@ mod auth;
 mod base;
 mod bundled;
 mod carry;
+mod catalogue;
 mod cli;
 mod cmd;
 mod config;
@@ -37,7 +38,6 @@ mod notice;
 mod out;
 mod persist;
 mod prefs;
-mod profile;
 mod provider;
 mod render;
 mod report;
@@ -58,9 +58,9 @@ mod why;
 use adapter::Adapter;
 use anyhow::Context;
 use anyhow::Result;
+use catalogue::Paths;
 use clap::Parser;
-use cli::{Cli, Cmd, MemoryCmd, SessionsCmd, SettingsCmd};
-use profile::Paths;
+use cli::{AccountCmd, Cli, Cmd, MemoryCmd, SessionsCmd, SettingsCmd};
 
 fn main() -> std::process::ExitCode {
     // A closed pipe (`omh info | head`) is not a crash. Without this, Rust's
@@ -225,9 +225,9 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
         })
     };
 
-    match profile::migrate(&paths, &running) {
-        Ok(profile::Migration::NothingToDo) => {}
-        Ok(profile::Migration::Moved {
+    match catalogue::migrate(&paths, &running) {
+        Ok(catalogue::Migration::NothingToDo) => {}
+        Ok(catalogue::Migration::Moved {
             from,
             kinds,
             stranded,
@@ -246,10 +246,10 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
                 ctx.warn(&say_what_was_stranded(&paths, &from, &stranded));
             }
         }
-        Ok(profile::Migration::Stranded { from, kinds }) => {
+        Ok(catalogue::Migration::Stranded { from, kinds }) => {
             ctx.warn(&say_what_was_stranded(&paths, &from, &kinds))
         }
-        Ok(profile::Migration::Refused(why)) => ctx.warn(&why),
+        Ok(catalogue::Migration::Refused(why)) => ctx.warn(&why),
         Err(e) => ctx.warn(&format!(
             "omh could not move this checkout's state off its old location, so \
              anything under it is invisible to omh until this is resolved: {e}"
@@ -340,12 +340,24 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
 
     match &cli.cmd {
         Cmd::Init => cmd::init::init(&cwd, ctx),
-        Cmd::Auth {
-            harness,
-            account,
-            import,
-            provider,
-        } => cmd::auth::auth_cmd(&cwd, harness, account, *import, provider.as_deref(), ctx),
+        Cmd::Account { cmd: None } => cmd::account::list(&cwd, ctx),
+        Cmd::Account {
+            cmd:
+                Some(AccountCmd::Login {
+                    harness,
+                    account,
+                    import,
+                    provider,
+                }),
+        } => cmd::account::login(&cwd, harness, account, *import, provider.as_deref(), ctx),
+        Cmd::Account {
+            cmd:
+                Some(AccountCmd::Forget {
+                    harness,
+                    key,
+                    account,
+                }),
+        } => cmd::account::forget(&cwd, harness, key, account.as_deref(), cli.dry_run, ctx),
         Cmd::Info { repo } => {
             if *repo {
                 cmd::settings::show_repo(&cwd, ctx)

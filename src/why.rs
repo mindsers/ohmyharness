@@ -20,7 +20,7 @@ use crate::base::{Entry, Manifest, Rejected};
 use crate::config::{Layer, Setting};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// What omh knows, assembled from the manifest and the resolved profile.
+/// What omh knows, assembled from the manifest and the resolved catalogue.
 pub struct Catalog<'a> {
     pub manifest: &'a Manifest,
     /// What is actually installed, with the layer it won in — your catalogue's

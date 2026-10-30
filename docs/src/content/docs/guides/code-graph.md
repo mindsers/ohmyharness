@@ -43,7 +43,7 @@ per-session server showed every other session's graph anyway — N identical
 websites on N ports. A repo-scoped service removes the duplication, survives
 sessions coming and going, and needs no session to exist at all.
 
-It also mounts **only the index** — no worktree, no credentials, no profile. The
+It also mounts **only the index** — no worktree, no credentials, no catalogue. The
 per-session version ran inside a container holding a writable worktree and live
 credentials, which was exposure for no purpose.
 
@@ -234,7 +234,7 @@ languages.
 **A noncommercial licence cannot be a default.** Every omh user writing code at
 work would be in violation of a dependency they never chose — a distribution
 doing that is doing something *to* its users rather than for them. gitnexus is a
-legitimate opt-in profile and never a base-set entry.
+legitimate opt-in catalogue entry and never a base-set entry.
 
 </details>
 

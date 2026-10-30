@@ -42,7 +42,7 @@ is what turns proposing an entry into something anybody can do.
 
 **Adapters assert facts about external software**, and those facts break
 silently. A wrong path does not crash anything — the harness starts, and simply
-never sees your profile.
+never sees your catalogue.
 
 Almost every bug this project has shipped lived at that boundary, and **not one
 was catchable by the test suite.** If you change an adapter, an image, or a

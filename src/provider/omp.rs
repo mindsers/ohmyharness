@@ -15,7 +15,7 @@
 //! provider's own, a model's, a `modelOverrides` entry's — at each request: a
 //! value starting with `!` is a command, and any other is first looked up as an
 //! environment variable. A sandbox has neither the host's commands nor its
-//! environment, so `omh auth omp --provider` resolves a variable once into the
+//! environment, so `omh account login omp --provider` resolves a variable once into the
 //! file and refuses a command by name, and the file never holds one.
 //!
 //! The fields are `ProviderConfigSchema`'s at the pinned tag
@@ -436,7 +436,7 @@ impl Stranded {
         format!(
             "{} defines {} — omp read it from the account, which any session can write, and \
              omh now hides it behind the account's provider file, which holds none. If they \
-             are yours, keep them: `omh auth omp --name {account} --provider {}`; if not, \
+             are yours, keep them: `omh account login omp --name {account} --provider {}`; if not, \
              remove the file",
             self.path.display(),
             providers.join(", "),

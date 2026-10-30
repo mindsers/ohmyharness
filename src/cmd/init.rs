@@ -6,8 +6,8 @@
 //! only run when nothing on disk can answer.
 
 use crate::adapter::{self, Adapter};
+use crate::catalogue::{Catalogue, Paths};
 use crate::out;
-use crate::profile::{Paths, Profile};
 use crate::{
     ask, base, bundled, config, derive, detect, doctor, facts, hook, image, key, memory, render,
     report, runtime, settings, stack,
@@ -856,7 +856,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // shipping rustup with no `cc` looked like. The same
                 // measurements hold back a hook whose program is missing, which
                 // is a different question about the same fact.
-                let hook_dirs = Profile::resolve(&paths).sources(adapter::Capability::Hooks)?;
+                let hook_dirs = Catalogue::resolve(&paths).sources(adapter::Capability::Hooks)?;
                 let mut sandbox = sandbox;
                 sandbox.top_up(&paths, &backend, &adapter, &hook_dirs, &own, &repo, ctx)?;
                 for name in &sandbox.owed {
@@ -1239,7 +1239,7 @@ pub(crate) fn ask_all(
 /// Bundled files are **managed**: `init` writes them on a first run and
 /// `omh upgrade` refreshes them after — because a fix omh ships has to reach
 /// people who already ran it once. The one that mattered was a wrong credential
-/// path, which made `omh auth` capture nothing while reporting success.
+/// path, which made `omh account login` capture nothing while reporting success.
 /// Definitions you add yourself are left alone.
 ///
 /// The contents come from [`bundled`], embedded at compile time. Reading them

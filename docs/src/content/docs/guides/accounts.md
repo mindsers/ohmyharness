@@ -1,6 +1,6 @@
 ---
 title: Accounts
-description: Log in to a harness with omh auth, keep several logins side by side, and choose which one each project uses.
+description: Log in to a harness with omh account login, keep several logins side by side, and choose which one each project uses.
 ---
 
 Log in to a harness once, keep a work and a personal login side by side, and
@@ -16,11 +16,11 @@ and a git repository.
 1. Log in once for each account.
 
    ```console
-   $ omh auth claude --name personal
-   $ omh auth claude --name work
+   $ omh account login claude --name personal
+   $ omh account login claude --name work
    ```
 
-   `omh auth` runs the harness's real login flow and keeps whatever it wrote.
+   `omh account login` runs the harness's real login flow and keeps whatever it wrote.
    An **account is a captured snapshot of a harness's own credential files**,
    one directory per harness and name — see
    [Keyed by harness](#keyed-by-harness-not-by-provider).
@@ -32,7 +32,8 @@ and a git repository.
    ```
 
    The account is a project setting, so another repository can stay on
-   `personal`.
+   `personal`. `omh account` lists your accounts and marks the one this
+   repository uses.
 
 3. Start a session.
 
@@ -52,13 +53,13 @@ Codex's default sign-in opens a browser and waits for the redirect on
 `127.0.0.1:1455` — inside the container, where the host's browser never
 arrives. Two ways round it:
 
-- **Device code.** In `omh auth codex`, choose *Sign in with Device Code*:
+- **Device code.** In `omh account login codex`, choose *Sign in with Device Code*:
   Codex prints a URL and a one-time code to enter in any browser, so no
   redirect has to reach the sandbox.
 - **Import.** If you are already logged in on this machine, copy that login:
 
   ```console
-  $ omh auth codex --name work --import
+  $ omh account login codex --name work --import
   `work` captured for codex
     copied from /Users/you/.codex/auth.json
   ```
@@ -103,7 +104,7 @@ Codex talks to OpenAI unless its config names another provider. omh keeps
 that choice in a file of the account's own:
 
 ```console
-$ omh auth codex --name work --provider ~/.codex/config.toml
+$ omh account login codex --name work --provider ~/.codex/config.toml
 `work` captured for codex
   model provider azure kept in /Users/you/.omh/creds/codex/work/provider.toml
 ```
@@ -120,12 +121,12 @@ file — `model`, `[mcp_servers]`, hooks stay out. Each launch writes them into
 The file sits at the account's root, `~/.omh/creds/codex/<account>/`, which is
 never mounted, so no session can change which provider later sessions use.
 
-**What the host supplies is settled once, at `omh auth`.** A sandbox has none
+**What the host supplies is settled once, at `omh account login`.** A sandbox has none
 of the host's environment, commands or loopback, so:
 
 | In your config | What omh does |
 |---|---|
-| `env_key = "AZURE_KEY"` | reads `AZURE_KEY` from the shell running `omh auth` and keeps its value as `experimental_bearer_token`; refused by name if it is unset |
+| `env_key = "AZURE_KEY"` | reads `AZURE_KEY` from the shell running `omh account login` and keeps its value as `experimental_bearer_token`; refused by name if it is unset |
 | `env_http_headers` | the same, into `http_headers` |
 | `env_key_instructions` | dropped |
 | `auth` (a command), `gateway_oauth`, `aws` | refused: a sandbox cannot run your command or read your AWS profile. Put the token the command produces in a provider file and name that |
@@ -171,7 +172,7 @@ value starting with `!` runs through `/bin/sh` (read in omp's source,
 your providers in a file of the account's own:
 
 ```console
-$ omh auth omp --name work --provider ~/.omp/agent/models.yml
+$ omh account login omp --name work --provider ~/.omp/agent/models.yml
 `work` captured for omp
   model provider corp kept in /Users/you/.omh/creds/omp/work/provider.yml
 ```
@@ -188,11 +189,11 @@ own list. Each launch renders it over the `models.yml` omp reads, read-only —
 sessions use. With `models.yml` there, omp reads neither `models.yaml` nor
 `models.json`.
 
-**What the host supplies is settled once, at `omh auth`:**
+**What the host supplies is settled once, at `omh account login`:**
 
 | In your `models.yml` | What omh does |
 |---|---|
-| `apiKey: CORP_KEY`, or a header value naming a variable | reads it from the shell running `omh auth` and keeps its value, as omp would; a name in capitals that is unset is refused — omp would send it as the key |
+| `apiKey: CORP_KEY`, or a header value naming a variable | reads it from the shell running `omh account login` and keeps its value, as omp would; a name in capitals that is unset is refused — omp would send it as the key |
 | an `apiKey` or a header value starting with `!` | refused: a sandbox cannot run your command. Put the value it prints in the file |
 | a `baseUrl`, a model's or a provider's, or a `remoteCompaction` endpoint on `127.0.0.1` or `localhost` | refused, as for Codex |
 | `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth` | refused in a provider file: they are `config.yml` keys — and not [preferences](#ompagentconfigyml-is-each-sessions-own), so one a session sets lasts that session |
@@ -291,19 +292,19 @@ codex's entry, and the table goes back to one string once no harness differs.
 ## What stops a launch
 
 - **Not being logged in is fine.** The harness prompts, which is what you want
-  before your first `omh auth`. omh says so first, because the harness's prompt
+  before your first `omh account login`. omh says so first, because the harness's prompt
   names the harness's own login, and that login may be one that cannot finish
   in a sandbox:
 
   ```
-  omh: no codex account — starting logged out. `omh auth codex` to log in, or `omh auth codex --import` to copy this machine's login
+  omh: no codex account — starting logged out. `omh account login codex` to log in, or `omh account login codex --import` to copy this machine's login
   ```
 - **An account you named and do not have** stops it. Running with no credentials
   produces a session that is logged out for reasons nothing explains.
 - **Two identities and no stated preference** stops it too. Guessing would send
   work traffic through a personal account and never mention it.
 - **Account names are validated as single path components.** Credentials mount
-  writable, so `omh auth claude --name ../../..` would otherwise resolve to
+  writable, so `omh account login claude --name ../../..` would otherwise resolve to
   `~` and hand the agent your real credential store.
 - **The runtime's exit status is checked before the filesystem.** A container
   that failed to start leaves the previous credentials in place, which would
@@ -327,10 +328,13 @@ a copy of them. What the session changes there is its own until you review it:
 | | `~/.claude.json` | `copyFullResponse`, `copyOnSelect`, `defaultToAgentsView`, `leftArrowOpensAgents`, `prStatusFooterEnabled`, `respectGitignore` |
 | Codex | `~/.codex/config.toml` | `model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`, `service_tier`, the `tui` settings, and the notices Codex records once you dismiss one |
 | omp | `~/.omp/agent/config.yml` | `modelRoles`, `defaultThinkingLevel`, `theme.dark`, `theme.light`, `enabledModels`, `cycleOrder`, `modelPresets`, `colorBlindMode`, `symbolPreset`, `composer.shape`, and the mark omp records once its setup wizard has run |
-
 | opencode | `~/.local/state/opencode/model.json` | `recent`, `favorite`, `variant` |
-| | `~/.local/state/opencode/kv.json` | the theme and its mode, the thinking mode, and what the TUI shows — tool details, metadata, scrollbar, animations, diffs and the diff viewer, paste summaries, the terminal title, the which-key layout, the sound pack — and the notices it records once dismissed | The lists are each adapter's
+| | `~/.local/state/opencode/kv.json` | the theme and its mode, the thinking mode, and what the TUI shows — tool details, metadata, scrollbar, animations, diffs and the diff viewer, paste summaries, the terminal title, the which-key layout, the sound pack — and the notices it records once dismissed |
+
+The lists are each adapter's
 [`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps).
+`omh account` shows what each account keeps of them —
+[see it, and forget one](#what-an-account-keeps-and-forgetting-one).
 
 ### The review
 
@@ -394,6 +398,44 @@ A session relaunched on another account, and a new session started under an id
 an earlier session's changes are still under, are refused until those are
 reviewed or dropped — they belong to that account, and to that session.
 
+### What an account keeps, and forgetting one
+
+`omh account` lists each harness's accounts, marks the one a launch here uses,
+and shows what each keeps — a value as JSON, so one a session wrote is printed
+escaped rather than drawn:
+
+```text title="omh account"
+claude:
+  personal
+    keeps nothing
+  work  (selected here)
+    copyOnSelect  true
+    model         "claude-opus-5-5"
+    effortLevel   "high"
+    tui           "fullscreen"
+codex:
+  work  (selected here)
+    model      "gpt-5.5"
+    tui.theme  "dark"
+```
+
+A harness update can refuse a value an account kept: Claude Code stops at a
+Settings Error, Codex at a value its options no longer list, and every new
+session starts from that value. `omh account forget` takes that one key from
+the account, and nothing else it keeps changes:
+
+```console
+$ omh account forget codex tui.theme
+forgot codex's tui.theme on account `work`
+  a session already started keeps its own copy
+```
+
+It takes the key from the account a launch here uses; `--name` names another,
+and `--dry-run` says what it would take. A session already started keeps its own
+copy, and a value its review keeps reaches the account again. A Claude Code,
+Codex or omp account last launched before omh kept preferences keeps nothing
+until its next launch, which takes them from the harness's own file.
+
 ## How accounts work
 
 ### Mount the directory, never the token file
@@ -423,7 +465,7 @@ enclosing **directory** makes that rename an ordinary operation inside it.
 
 That collides with capability mounts living in the same directory, because
 Docker refuses to create a mountpoint inside a bind-mounted host directory
-("is outside of rootfs"). `omh auth` therefore prepares those mountpoints on the
+("is outside of rootfs"). `omh account login` therefore prepares those mountpoints on the
 host first: `.claude/skills`, `.claude/commands`, `.claude/agents`,
 `.claude/settings.json`.
 
@@ -466,13 +508,13 @@ each session gets a copy, seeded from the account's when it first launches:
 A `/login` inside a session replaces the account's shared tokens for every
 session on it, but the identity it writes stays in that session's copy — later
 sessions carry the account's old `oauthAccount` beside the new tokens.
-`omh auth claude --name <account>` is how an account's identity changes: it
+`omh account login claude --name <account>` is how an account's identity changes: it
 writes the account's own file, after cleaning it the same way, and setting it
 aside if no session could be seeded from it.
 
 The copy lives at `~/.omh/run/<repo>/<session>/.preferences/claude/live/.claude.json`
 and goes with the session at `omh sNN rm`. When the account's own file changes
-— `omh auth claude` captures it again — the copy is written again from it, and
+— `omh account login claude` captures it again — the copy is written again from it, and
 what the session made of it is discarded but its preferences, which are
 carried over for the review. A copy that is gone or no longer parses is written
 again with the values of its last review. The first launch after upgrading
@@ -556,14 +598,14 @@ Each step can be interrupted: the next launch finishes the job.
 
 - while a session started by an older omh still mounts the account — it would
   rename over the link, or keep reading the shared file. `omh sNN down` it
-  first. `omh auth codex` asks the same, once per account;
+  first. `omh account login codex` asks the same, once per account;
 - when the file selects a model provider other than OpenAI and the account
   has no [provider file](#a-model-provider-of-your-own): every later session
   would quietly send its turns to OpenAI instead. The refusal names the fix,
   which reads the provider out of that same file:
 
   ```console
-  $ omh auth codex --name work --provider ~/.omh/creds/codex/work/.codex/config.toml
+  $ omh account login codex --name work --provider ~/.omh/creds/codex/work/.codex/config.toml
   ```
 
 After the migration, a real file where the link goes was put there by a
@@ -629,7 +671,7 @@ link is there, omp never reads it again. A `config.yaml` beside a real
 `config.yml` is one omp never read, and is left as it is.
 
 It refuses, and changes nothing, while a session started by an older omh still
-mounts the account; `omh auth omp` asks the same, once per account. After the
+mounts the account; `omh account login omp` asks the same, once per account. After the
 migration, a real file where the link goes was put there by a session: it is
 linked again, said, and nothing in it is kept — and a `config.yaml` a session
 writes is never read while the link is there, and never kept.
@@ -715,7 +757,7 @@ Several accounts widens that gap rather than narrowing it. See
 <div class="cards">
 
 - [Commands](/reference/commands/)\
-  `omh auth`, `omh set` and every other command, with what each prints.
+  `omh account login`, `omh set` and every other command, with what each prints.
 - [Configuration](/reference/configuration/)\
   Where `account` and every other setting lives, and how the two layers resolve.
 - [Troubleshooting](/guides/troubleshooting/)\

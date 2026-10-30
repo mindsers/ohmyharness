@@ -58,5 +58,5 @@ body:
     attributes:
       label: Anything else
       description: >
-        Relevant profile layers, a `.omh/profile/policy.toml` excerpt, the
-        harness and account you used. Redact tokens.
+        What `omh info --repo` prints, the harness and the account you used.
+        Redact tokens.
