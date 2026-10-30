@@ -17043,8 +17043,10 @@ fn codex_account_with_a_shared_config(sb: &Sandbox, config: &str) -> PathBuf {
 /// The first launch on an account migrates its shared `config.toml`: the
 /// declared keys are kept at the account's root, the rest is named and
 /// dropped, the file becomes the link, and the session reads its own copy at
-/// `/omh/prefs` — and `omh s01 down` keeps what the session changed among its
-/// preferences, and nothing else.
+/// `/omh/prefs`. What the session changes among its preferences is left to
+/// review by `omh s01 down` with nobody at the terminal, refused by a bare
+/// `rm` before anything goes, and dropped by `rm --yes` — each named, and
+/// the account never changes without someone choosing it.
 #[test]
 fn a_codex_sessions_config_is_its_own_and_only_preferences_come_back() {
     let sb = sandbox();
@@ -17111,11 +17113,52 @@ fn a_codex_sessions_config_is_its_own_and_only_preferences_come_back() {
     std::fs::write(sb.bin.join("containers"), format!("{container}\n")).unwrap();
     let out = sb.omh(&["s01", "down"]);
     let said = printed(&out);
-    assert!(said.contains("kept 1 codex preference"), "{said}");
-    assert!(said.contains("not kept, not preferences: notify"), "{said}");
+    assert!(
+        said.contains(
+            "s01: 1 codex preference to review — model. `omh s01 down` at a terminal reviews \
+             them; `omh s01 rm --yes` drops them"
+        ),
+        "{said}"
+    );
+    // Down already, it is still named: how a session that ended unwatched
+    // is reviewed.
+    std::fs::write(sb.bin.join("containers"), "").unwrap();
+    let out = sb.omh(&["s01", "down"]);
+    assert!(
+        printed(&out).contains("s01: 1 codex preference to review — model"),
+        "{}",
+        printed(&out)
+    );
+    let listed = sb.omh(&["s", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", printed(&listed)));
+    assert_eq!(
+        listed["sessions"][0]["unreviewed"],
+        serde_json::json!(["model"]),
+        "{listed}"
+    );
+
+    let out = sb.omh(&["s01", "rm"]);
+    let said = printed(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("s01: 1 codex preference to review — model. `omh s01 rm` at a terminal")
+            && said.contains("nothing was removed"),
+        "{said}"
+    );
+    assert!(live.join("config.toml").is_file(), "rm removed something");
+
+    let out = sb.omh(&["s01", "rm", "--yes"]);
+    let said = printed(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("dropped 1 codex preference: s01 model")
+            && said.contains("s01: not kept, not preferences: notify"),
+        "{said}"
+    );
     assert_eq!(
         std::fs::read_to_string(&kept).unwrap(),
-        "model = \"gpt-5.5-mini\"\n"
+        "model = \"gpt-5.5\"\n"
     );
 }
 
@@ -17329,8 +17372,10 @@ fn mounted_at(log: &str, guest: &str) -> Option<String> {
 }
 
 /// A launch mounts the session's own `~/.claude.json`, seeded from the
-/// account's without its servers, and leaves the account's as it was; a
-/// login mounts the account's own, which is where its identity is written.
+/// account's without its servers, and leaves the account's as it was — and
+/// its own `settings.json` beside it, both from its preferences; a login
+/// mounts the account's own `~/.claude.json`, which is where its identity is
+/// written.
 #[test]
 fn a_launch_mounts_its_own_claude_json_and_a_login_the_accounts() {
     let sb = sandbox();
@@ -17347,8 +17392,14 @@ fn a_launch_mounts_its_own_claude_json_and_a_login_the_accounts() {
     let host = mounted_at(&seen, "/home/agent/.claude.json")
         .unwrap_or_else(|| panic!("nothing at ~/.claude.json: {}", printed(&out)));
     assert!(
-        host.ends_with("/s01/.home/claude/.claude.json") && host.contains("/.omh/run/"),
+        host.ends_with("/s01/.preferences/claude/live/.claude.json") && host.contains("/.omh/run/"),
         "a launch mounted {host}"
+    );
+    let settings = mounted_at(&seen, "/home/agent/.claude/settings.json")
+        .unwrap_or_else(|| panic!("nothing at ~/.claude/settings.json: {}", printed(&out)));
+    assert!(
+        settings.ends_with("/s01/.preferences/claude/live/settings.json"),
+        "a launch mounted {settings}"
     );
     let copy = std::fs::read_to_string(&host).expect("the session's copy was seeded");
     assert!(
@@ -17377,7 +17428,7 @@ fn a_launch_mounts_its_own_claude_json_and_a_login_the_accounts() {
     let copies = || -> Vec<PathBuf> {
         files_under(&scratch)
             .into_iter()
-            .filter(|p| p.ends_with("home/doctor/claude/.claude.json"))
+            .filter(|p| p.ends_with("prefs/doctor/claude/live/.claude.json"))
             .collect()
     };
     sb.omh(&["doctor", "--dry-run", "--harness", "claude"]);

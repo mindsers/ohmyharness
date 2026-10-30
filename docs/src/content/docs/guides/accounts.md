@@ -309,6 +309,90 @@ codex's entry, and the table goes back to one string once no harness differs.
   that failed to start leaves the previous credentials in place, which would
   otherwise read as a successful re-authentication.
 
+## Your preferences, from one session to the next
+
+A model you pick with `/model`, an effort level, a theme, an editor mode: set
+in one session, they are there in the next one on the same account — once you
+say so. Nothing else a session writes in the harness's own settings is: a hook,
+a permission, a plugin, an MCP server, a provider lasts the session that wrote
+it.
+
+Each account keeps the harness's preferences, those keys alone, at
+`~/.omh/creds/<harness>/<account>/preferences/`, and each session starts from
+a copy of them. What the session changes there is its own until you review it:
+
+| Harness | File | Kept |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` | `model`, `advisorModel`, `modelSettings`, `effortLevel`, `editorMode`, `tui`, `theme`, `verbose` |
+| | `~/.claude.json` | `copyFullResponse`, `copyOnSelect`, `defaultToAgentsView`, `leftArrowOpensAgents`, `prStatusFooterEnabled`, `respectGitignore` |
+| Codex | `~/.codex/config.toml` | `model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`, `service_tier`, the `tui` settings, and the notices Codex records once you dismiss one |
+
+omp and opencode are not covered yet (#197): their preferences behave as they
+did. The lists are each adapter's
+[`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps).
+
+### The review
+
+When the harness exits in your terminal, at `omh sNN down` — on a session
+already down too — and at `omh sNN rm`, omh shows what the session changed
+among its preferences and asks:
+
+```
+s01 changed 2 claude preferences on account `work`:
+  model       "claude-opus-5-5"  →  "claude-sonnet-5-5"
+  editorMode  "normal"           →  "vim"
+not kept, not preferences: hooks
+[k]eep all  [r]eview each  [d]rop all  — Enter leaves them to review
+  >
+```
+
+- **keep** — the account takes the session's value, and the next session
+  starts from it. `(unset)` is a value too: keeping it removes the key;
+- **drop** — the account keeps what it had, and the same change is not asked
+  about again;
+- a value **another session kept** since this one started is shown beside it.
+  "Keep all" keeps this session's; "review each" asks `[m]ine` or `[t]heirs`;
+- **Enter** decides nothing: the changes stay to review.
+
+```
+omh: kept 1 claude preference on account `work`: s01 model
+omh: dropped 1 claude preference: s01 editorMode
+```
+
+What is not a preference is named and never offered. Under dtach, a detach is
+not an exit: the harness is still running, and what it changes is reviewed when
+it ends. `omh s down` with no session named asks once per account, across every
+session on it.
+
+**With nobody at the terminal**, nothing reaches the account:
+
+- `down` leaves the changes to review, and says so:
+
+  ```
+  omh: s01: 1 codex preference to review — model. `omh s01 down` at a terminal reviews them; `omh s01 rm --yes` drops them
+  ```
+- `omh s` marks the session — `1 preference to review`, and the keys under
+  `unreviewed` in `--json`;
+- `omh sNN rm` refuses before it removes anything, and `--yes` drops them,
+  naming each:
+
+  ```
+  omh: dropped 1 codex preference: s01 model
+  ```
+
+A session that ended with nobody watching — the idle reap, `sync --down`, a
+reboot, a harness started by hand in an editor's terminal — keeps its changes
+until its next `down` or `rm`. `omh prune` keeps a session's run directory
+whose checkout is gone while it holds changes to review, and names them.
+
+**A login is not reviewed**: what you choose there — a theme at Claude's first
+start — is kept as you choose it. Claude's `~/.claude.json` keys are the
+exception, since a login writes the account's own file rather than a copy.
+
+A session relaunched on another account, and a new session started under an id
+an earlier session's changes are still under, are refused until those are
+reviewed or dropped — they belong to that account, and to that session.
+
 ## How accounts work
 
 ### Mount the directory, never the token file
@@ -371,10 +455,12 @@ each session gets a copy, seeded from the account's when it first launches:
   key from the environment, and a `CLAUDE.md` that includes files from outside
   the project (inferred from the keys dropped; not measured). omh trusts
   `/work` itself (inferred to skip the trust dialog; not measured);
-- **never written back:** nothing a session changes there reaches the account
-  or another session. A `/mcp` switch lasts that session; to turn a server off
-  for good, `omh unuse mcp <name>` — or `omh set memory off` and
-  `omh set codegraph off` for omh's own `omh-memory` and `omh-codegraph`.
+- **never written back,** but for its
+  [preferences](#your-preferences-from-one-session-to-the-next), through the
+  review: nothing else a session changes there reaches the account or another
+  session. A `/mcp` switch lasts that session; to turn a server off for good,
+  `omh unuse mcp <name>` — or `omh set memory off` and `omh set codegraph off`
+  for omh's own `omh-memory` and `omh-codegraph`.
 
 A `/login` inside a session replaces the account's shared tokens for every
 session on it, but the identity it writes stays in that session's copy — later
@@ -383,11 +469,30 @@ sessions carry the account's old `oauthAccount` beside the new tokens.
 writes the account's own file, after cleaning it the same way, and setting it
 aside if no session could be seeded from it.
 
-The copy lives at `~/.omh/run/<repo>/<session>/.home/claude/.claude.json` and
-goes with the session at `omh sNN rm`. It is seeded again — and what the
-session made of it discarded — when the session's account changes, when that
-account's own file does (after `omh auth claude` captures it again), or when the
-copy is gone or no longer parses.
+The copy lives at `~/.omh/run/<repo>/<session>/.preferences/claude/live/.claude.json`
+and goes with the session at `omh sNN rm`. When the account's own file changes
+— `omh auth claude` captures it again — the copy is written again from it, and
+what the session made of it is discarded but its preferences, which are
+carried over for the review. A copy that is gone or no longer parses is written
+again with the values of its last review. The first launch after upgrading
+keeps the preferences the account's own file already had.
+
+### `~/.claude/settings.json` is each session's own
+
+It is user settings, in the account's shared `~/.claude/`: a hook one session
+wrote there would load in every later one, and in running ones as it changed.
+So each session mounts its own, seeded with the account's preferences alone,
+and writes it freely — `/model` and most of `/config` save there (Claude Code's
+docs) — and none of what it writes reaches the account or another session but
+its preferences, through the review. omh's own settings never live in that file: they reach
+every `claude` in the sandbox by `--settings`, above it
+([Claude's settings document](/reference/adapters/#claudes-settings-document)).
+
+Claude saves the file by writing a new one and renaming it over; refused that
+through a mount, it writes the file in place, and the save lands in the
+session's copy (measured by hand at a terminal; in `tests/e2e`, through
+`claude plugin marketplace add`, which saves user settings). The copy lives at
+`~/.omh/run/<repo>/<session>/.preferences/claude/live/settings.json`.
 
 Claude Code 2.1.300 also reads `~/.claude/.config.json` *instead of*
 `~/.claude.json` when it is not empty, and that one sits in the account's
@@ -419,18 +524,9 @@ each session gets a copy of its own:
   it saves, and saves into the session's copy (`tests/e2e`: `codex mcp add`
   writes there and leaves the link).
 
-**What a session changed among its preferences reaches the account without
-asking** — when Codex exits in your terminal, or you detach from it, at
-`omh sNN down` and at `omh sNN rm`; changed keys only, and a value another
-session kept meanwhile is named as replaced. omh says what it kept, and names
-what the session wrote that is not a preference. A session that ended with
-nobody watching — the idle reap, a reboot — keeps its changes at its next
-`down` or `rm`; `omh prune` of a checkout that is gone does not. A later omh
-asks before keeping (#197).
-
-A session relaunched on another account keeps what it changed into the old
-one first, then starts again from the new one. The account's kept values are
-at `~/.omh/creds/codex/<account>/preferences/config.toml`; a session's copy at
+What a session changes among its preferences reaches the account through
+[the review](#the-review), as Claude's do. The account's kept values are at
+`~/.omh/creds/codex/<account>/preferences/config.toml`; a session's copy at
 `~/.omh/run/<repo>/<session>/.preferences/codex/live/config.toml`, and it goes
 with the session at `omh sNN rm`.
 

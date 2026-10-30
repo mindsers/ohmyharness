@@ -89,6 +89,10 @@ see [Something else](#something-else).
 | `current working directory is outside of container mount namespace root`, or `possible container breakout detected` | [Replace the container](#current-working-directory-is-outside-of-container-mount-namespace-root) |
 | `restarting the sandbox for omh/s01 — …` | [Not an error](#restarting-the-sandbox-for-omhs01--) |
 | `session s01 is running opencode and cannot be reused for this launch` | [Stop it, or work somewhere else](#session-s01-is-running-opencode-and-cannot-be-reused-for-this-launch) |
+| **Your preferences** | |
+| A preference from one session — `/model`, a theme — is not in the next | [Review it](#a-preference-from-one-session-is-not-in-the-next) |
+| `omh sNN rm` says `… preferences to review — … nothing was removed` | [Review them, or drop them](#omh-snn-rm-refuses-over-preferences-to-review) |
+| A launch says `… preferences … are still to review` or `an earlier session under this id left … preferences still to review` | [Review them, or drop them](#a-launch-is-refused-over-preferences-still-to-review) |
 | **Logging in** | |
 | You logged in, and the next session is logged out | [Find where the token was written](#i-logged-in-but-the-next-session-is-logged-out) |
 | Codex says "Login using `codex login` and then run this command again" | [Upgrade, then log in with a device code](#codex-says-login-using-codex-login-and-then-run-this-command-again) |
@@ -106,7 +110,6 @@ see [Something else](#something-else).
 | claude.ai connectors are missing in a session | [Expected](#claudeai-connectors-are-missing-in-a-session) |
 | A `/mcp` switch from one session is gone in the next, and a `/login` keeps only its tokens | [Expected](#a-mcp-switch-from-one-session-is-gone-in-the-next-and-a-login-keeps-only-its-tokens) |
 | `claude` says `omh could not merge your --settings … into its own` | [Fix the settings you passed](#claude-says-omh-could-not-merge-your---settings--into-its-own) |
-| `/model` or `/config` does not last, and `~/.claude/settings.json` cannot be written | [Expected, for now](#model-or-config-does-not-last-and-claudesettingsjson-cannot-be-written) |
 | Claude's commits and pull requests in a session carry no attribution | [Expected](#claudes-commits-and-pull-requests-in-a-session-carry-no-attribution) |
 | **omp** | |
 | A launch says `… models.yml defines … omh now hides it behind the account's provider file` | [Keep them, or remove the file](#a-launch-says-the-accounts-own-models-file-defines-providers) |
@@ -490,6 +493,57 @@ but something is live inside and restarting would kill it. Choose one:
 If you believe nothing is running, look at the sockets: `docker exec
 omh-<repo>-s01 ls /omh/sock`. One per live harness, removed when it exits.
 
+### Your preferences
+
+#### A preference from one session is not in the next
+
+It is still to review. A preference you set in a session — `/model`, a theme,
+Codex's reasoning effort — reaches the account once you keep it, and the
+review asks when the harness exits in your terminal, at `omh sNN down` and at
+`omh sNN rm`
+([the review](/guides/accounts/#the-review)). A session that ended with nobody
+at the terminal — the idle reap, `sync --down`, a harness started by hand in an
+editor's terminal, a detach — kept its changes to review, and `omh s` says so
+in its row:
+
+```console
+$ omh s01 down
+```
+
+at a terminal reviews them, on a session already down too. Only what the
+harness's adapter declares is a preference; the rest of what a session writes
+lasts that session.
+
+#### `omh sNN rm` refuses over preferences to review
+
+```
+omh: s01: 1 codex preference to review — model. `omh s01 rm` at a terminal reviews them; `omh s01 rm --yes` drops them — nothing was removed
+```
+
+The session changed preferences nobody has reviewed, and they would go with
+its run directory. Run `omh s01 rm` at a terminal to review them, or
+`omh s01 rm --yes` to drop them — it names each:
+
+```
+omh: dropped 1 codex preference: s01 model
+```
+
+#### A launch is refused over preferences still to review
+
+```
+omh: this session's codex preferences, from /Users/you/.omh/creds/codex/work, are still to review — model — and would be lost to a launch on /Users/you/.omh/creds/codex/personal: review them first (`omh <id> down` at a terminal), or drop them (`omh <id> rm --yes`)
+```
+
+The session's changes belong to the account it launched with, and a launch on
+another one would start it afresh from that one. Review them with
+`omh sNN down` at a terminal, or drop them with `omh sNN rm --yes`, then
+launch.
+
+The same holds for a new session started under an id whose earlier session
+left changes to review (`an earlier session under this id left … preferences
+still to review`): they are that session's. `omh <id> down` at a terminal
+reviews them, `omh <id> rm --yes` drops them.
+
 ### Logging in
 
 #### I logged in, but the next session is logged out
@@ -663,9 +717,9 @@ Expected, unless it is a preference. A session's `config.toml` is its own: a
 server added with `codex mcp add`, a feature toggled, `developer_instructions`,
 a `[profiles]` table last that session. Your
 [preferences](/guides/accounts/#codexconfigtoml-is-each-sessions-own) — the
-model, its reasoning effort, the `tui` settings — reach the account when Codex
-exits in your terminal and at `omh sNN down` and `rm`, and omh says which. A
-server you want in every session goes in your catalogue
+model, its reasoning effort, the `tui` settings — reach the account once you
+keep them in [the review](#a-preference-from-one-session-is-not-in-the-next).
+A server you want in every session goes in your catalogue
 ([`[use]`](/reference/configuration/#use--what-this-repo-takes-from-your-catalogue)).
 
 ### Claude Code
@@ -712,13 +766,6 @@ you pass is merged into them — Claude keeps only the last of two. The value
 you passed did not merge: a file that is not there or not JSON, or a value in
 braces that does not parse. Fix it and run again; nothing ran. See
 [Claude's settings document](/reference/adapters/#claudes-settings-document).
-
-#### `/model` or `/config` does not last, and `~/.claude/settings.json` cannot be written
-
-Expected, for now. That file is user settings, in the account every session on
-it shares, so a session's write would reach every later session: it is masked
-behind an empty read-only file. Keeping your preferences from one session to
-the next, and nothing else, is #197's next step.
 
 #### Claude's commits and pull requests in a session carry no attribution
 

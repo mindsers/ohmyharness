@@ -953,6 +953,18 @@ pub struct Session {
     /// asks the question out loud. JSON has always said `null` rather than a
     /// number nobody took.
     pub behind: Option<usize>,
+    /// The preferences the session changed and no review has answered.
+    /// **`None` means nobody asked** — `omh info` does not read them.
+    pub unreviewed: Option<Unreviewed>,
+}
+
+/// What a session changed among its preferences that no review has
+/// answered: the keys, or why omh could not tell — never an empty list for
+/// that, which is what a session with nothing to review shows.
+#[derive(Debug, Clone)]
+pub enum Unreviewed {
+    Keys(Vec<String>),
+    CouldNotTell(String),
 }
 
 /// Files more than one session is changing.
@@ -1074,6 +1086,23 @@ fn behind_cell(behind: Option<usize>, base: &str) -> Cell {
         Some(0) => Cell::plain(""),
         Some(n) => Cell::styled(format!("({n} behind {base})"), out::DIM),
         None => Cell::styled(format!("(how far behind {base}?)"), out::WARN),
+    }
+}
+
+/// A session's preferences still to review, as one cell: how many, or a
+/// question where omh could not read them.
+fn unreviewed_cell(unreviewed: &Option<Unreviewed>) -> Cell {
+    match unreviewed {
+        Some(Unreviewed::Keys(keys)) if !keys.is_empty() => Cell::styled(
+            format!(
+                "{} preference{} to review",
+                keys.len(),
+                if keys.len() == 1 { "" } else { "s" }
+            ),
+            out::WARN,
+        ),
+        Some(Unreviewed::CouldNotTell(_)) => Cell::styled("preferences to review?", out::WARN),
+        _ => Cell::plain(""),
     }
 }
 
@@ -1228,6 +1257,7 @@ impl Report for Sessions {
                     None => Cell::plain(""),
                 },
                 behind_cell(s.behind, &self.base),
+                unreviewed_cell(&s.unreviewed),
             ]);
         }
         let mut out = table.render(p);
@@ -1446,6 +1476,16 @@ impl Report for Sessions {
                 // every answer, which is the whole reason for the `Option`.
                 "work": s.work.as_ref().map(Work::json),
                 "behind": s.behind,
+                // The keys, `null` where nobody asked or omh could not tell —
+                // and then the reason beside it, as `running_unknown` has.
+                "unreviewed": match &s.unreviewed {
+                    Some(Unreviewed::Keys(keys)) => json!(keys),
+                    _ => serde_json::Value::Null,
+                },
+                "unreviewed_unknown": match &s.unreviewed {
+                    Some(Unreviewed::CouldNotTell(why)) => serde_json::Value::String(why.clone()),
+                    _ => serde_json::Value::Null,
+                },
             })).collect::<Vec<_>>(),
             "leftovers": self.leftovers,
             "unchecked": self.leftovers_unchecked,

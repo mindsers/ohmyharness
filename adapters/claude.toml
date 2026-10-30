@@ -186,8 +186,9 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # (`render::scrub`): identity — `oauthAccount`, `userID`, onboarding — still
 # comes from the account, tokens stay in the shared `.credentials.json`, and
 # nothing a session writes there reaches the account or any other session
-# [e2e]. `omh auth` mounts the account's own file — a login is where its
-# identity is written — after `auth::scrub_account` cleans it the same way.
+# [e2e] — but the preferences declared below, through the review. `omh auth`
+# mounts the account's own file — a login is where its identity is written —
+# after `auth::scrub_account` cleans it the same way.
 [policy]
 path   = "/etc/claude-code/managed-settings.d/omh.json"
 format = "claude-managed"
@@ -197,10 +198,52 @@ copy   = ["$HOME/.claude.json"]
 # account's shared, writable `~/.claude/`. Measured in `tests/e2e`: a server
 # planted there loaded in a session despite its own copy. Masked behind an
 # empty file, Claude falls through to the copy.
+mask   = ["$HOME/.claude/.config.json"]
+
+# A preference set in a session — `/model`, `/config` — lasts into the next
+# one on the account, and nothing else the session wrote does (`prefs`).
 #
-# `~/.claude/settings.json` is user settings, in the same shared directory: a
-# hook one session wrote there would load in every later one, and in running
-# ones live. Masked too until each session has its own (#197, step 2) — an
-# empty file Claude reads as no settings, at a terminal as with `-p`, where a
-# malformed one stops at a Settings Error [measured].
-mask   = ["$HOME/.claude/.config.json", "$HOME/.claude/settings.json"]
+# `~/.claude/settings.json` is user settings, in the account's shared
+# `~/.claude/`: a hook one session wrote there would load in every later one,
+# and in running ones live, since Claude reloads it [docs]. So each session
+# has its own, seeded with the declared keys alone from what the account
+# keeps (`~/.omh/creds/claude/<account>/preferences/`), and `~/.claude.json`'s
+# own preference keys likewise in its copy above. What the session changes
+# among them reaches the account through the review; nothing else does.
+#
+# `file`: one file mounted per copy. Claude saves `settings.json` by writing a
+# file beside it and renaming it over; refused through a single-file mount, it
+# writes the file in place, which lands in the session's copy, same inode
+# [measured in #197 at a terminal; `claude plugin marketplace add`, which
+# writes user settings, on Docker Desktop and on Linux in the nightly — e2e].
+#
+# The keys, each read in the 2.1.300 binary where Claude reads it [bin]:
+# `modelSettings` holds per-model `effortLevel`, `maxEffortLevel` and
+# `autoCompactWindow` and nothing else, so it is declared whole; `advisorModel`
+# is a model; `tui`, `editorMode`, `verbose` and `theme` are plain values, a
+# `custom:` theme naming a colours-only file. `theme` and `verbose` live in
+# `settings.json` at 2.1.300 [measured]. What a preference never is, whatever
+# a later release adds — hooks, permissions, plugins, `env`, `attribution` —
+# is `adapter::NEVER`.
+[preferences]
+mount = "file"
+
+[preferences.files]
+"$HOME/.claude/settings.json" = [
+  "model",
+  "advisorModel",
+  "modelSettings",
+  "effortLevel",
+  "editorMode",
+  "tui",
+  "theme",
+  "verbose",
+]
+"$HOME/.claude.json" = [
+  "copyFullResponse",
+  "copyOnSelect",
+  "defaultToAgentsView",
+  "leftArrowOpensAgents",
+  "prStatusFooterEnabled",
+  "respectGitignore",
+]

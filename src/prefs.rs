@@ -13,25 +13,79 @@
 //!   account   the account this session launched with
 //!   base/     the account's kept values when this session last synced
 //!   reviewed/ the live values at the last decision
-//!   live/     what the harness reads and writes, mounted at GUEST
+//!   live/     what the harness reads and writes: mounted at GUEST (`link`),
+//!             or file by file where the harness reads each (`file`)
+//!   rest/     for a file that is the session's copy of an account file
+//!             (`[policy] copy`), a digest of what the copy holds beside its
+//!             preferences
 //! ```
+//!
+//! Both formats are read into one model, JSON's, which TOML's maps into: a
+//! TOML datetime is carried as the tagged table `toml` serialises it as, and
+//! written back as a datetime.
 
 /// Where a container finds its session's `live/`, for a `link` adapter: the
 /// account's file is a link to the same name here.
 pub const GUEST: &str = "/omh/prefs";
 
+pub mod review;
+
 use crate::adapter::{Adapter, Declared, KeyPath, PrefMount};
 use crate::home::Home;
 use anyhow::{Context, Result};
+use serde::Deserialize as _;
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// A preferences file's content, whichever format it is written in.
+pub type Doc = serde_json::Map<String, serde_json::Value>;
+
+/// A value in a [`Doc`]: opaque — omh compares, carries and shows it, never
+/// reads inside it.
+pub type Value = serde_json::Value;
+
+pub use crate::adapter::PrefFormat as Format;
+
+impl Format {
+    /// `raw` as a document. An empty JSON file is the empty document — what
+    /// Claude itself reads it as, and `auth::prepare`'s placeholder.
+    pub fn parse(self, raw: &[u8]) -> Result<Doc> {
+        let text = std::str::from_utf8(raw).context("it is not UTF-8")?;
+        let value = match self {
+            Format::Toml => serde_json::to_value(crate::provider::parse(text)?)?,
+            Format::Json if text.trim().is_empty() => return Ok(Doc::new()),
+            Format::Json => serde_json::from_str(text).context("it is not JSON")?,
+        };
+        match value {
+            Value::Object(doc) => Ok(doc),
+            _ => anyhow::bail!("it is not a JSON object"),
+        }
+    }
+
+    /// `doc`, written in this format.
+    pub fn render(self, doc: &Doc) -> Result<Vec<u8>> {
+        match self {
+            Format::Toml => {
+                let table = toml::Table::deserialize(Value::Object(doc.clone()))
+                    .context("it cannot be written as TOML")?;
+                Ok(toml::to_string(&table)?.into_bytes())
+            }
+            Format::Json => {
+                let mut out = serde_json::to_vec_pretty(doc)?;
+                out.push(b'\n');
+                Ok(out)
+            }
+        }
+    }
+}
+
 /// The value at `key`, if `doc` has one.
-pub fn get<'a>(doc: &'a toml::Table, key: &KeyPath) -> Option<&'a toml::Value> {
+pub fn get<'a>(doc: &'a Doc, key: &KeyPath) -> Option<&'a Value> {
     let (last, above) = key.split_last()?;
     let mut table = doc;
     for name in above {
-        table = table.get(name)?.as_table()?;
+        table = table.get(name)?.as_object()?;
     }
     table.get(last)
 }
@@ -39,7 +93,7 @@ pub fn get<'a>(doc: &'a toml::Table, key: &KeyPath) -> Option<&'a toml::Value> {
 /// `doc` with `key` set to `value`, or removed when it is `None` — and a
 /// table emptied by the removal removed with it, so a deletion leaves nothing
 /// behind. A value in the way of a table is replaced by one.
-pub fn set(doc: &mut toml::Table, key: &KeyPath, value: Option<toml::Value>) {
+pub fn set(doc: &mut Doc, key: &KeyPath, value: Option<Value>) {
     let Some((first, rest)) = key.split_first() else {
         return;
     };
@@ -54,16 +108,16 @@ pub fn set(doc: &mut toml::Table, key: &KeyPath, value: Option<toml::Value>) {
         }
         return;
     }
-    if value.is_none() && !doc.get(first).is_some_and(toml::Value::is_table) {
+    if value.is_none() && !doc.get(first).is_some_and(Value::is_object) {
         return;
     }
     let entry = doc
         .entry(first.clone())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if !entry.is_table() {
-        *entry = toml::Value::Table(toml::Table::new());
+        .or_insert_with(|| Value::Object(Doc::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(Doc::new());
     }
-    if let toml::Value::Table(table) = entry {
+    if let Value::Object(table) = entry {
         set(table, &rest.to_vec(), value);
         if table.is_empty() {
             doc.remove(first);
@@ -74,12 +128,22 @@ pub fn set(doc: &mut toml::Table, key: &KeyPath, value: Option<toml::Value>) {
 /// The declared keys of `doc`, and nothing else: what an account keeps and a
 /// session is seeded with. Built key by key from parsed values, never copied
 /// as bytes.
-pub fn pick<'a>(doc: &toml::Table, keys: impl IntoIterator<Item = &'a KeyPath>) -> toml::Table {
-    let mut out = toml::Table::new();
+pub fn pick<'a>(doc: &Doc, keys: impl IntoIterator<Item = &'a KeyPath>) -> Doc {
+    let mut out = Doc::new();
     for key in keys {
         if let Some(v) = get(doc, key) {
             set(&mut out, key, Some(v.clone()));
         }
+    }
+    out
+}
+
+/// `rest` with each of `keys` as `values` has it — absent where `values` has
+/// none: a session's copy of a file that holds more than its preferences.
+fn compose<'a>(rest: &Doc, values: &Doc, keys: impl IntoIterator<Item = &'a KeyPath>) -> Doc {
+    let mut out = rest.clone();
+    for key in keys {
+        set(&mut out, key, get(values, key).cloned());
     }
     out
 }
@@ -89,14 +153,14 @@ pub fn pick<'a>(doc: &toml::Table, keys: impl IntoIterator<Item = &'a KeyPath>) 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Change {
     pub key: KeyPath,
-    pub from: Option<toml::Value>,
-    pub to: Option<toml::Value>,
+    pub from: Option<Value>,
+    pub to: Option<Value>,
 }
 
 /// What changed from `before` to `after`, declared key by declared key.
 pub fn changed<'a>(
-    before: &toml::Table,
-    after: &toml::Table,
+    before: &Doc,
+    after: &Doc,
     keys: impl IntoIterator<Item = &'a KeyPath>,
 ) -> Vec<Change> {
     keys.into_iter()
@@ -114,15 +178,15 @@ pub fn changed<'a>(
 /// The keys of `doc` no declared key covers, by name and never by value —
 /// values can be tokens. A table holding no declared key is named whole; one
 /// holding some is named down to what is left out of it.
-pub fn undeclared(doc: &toml::Table, keys: &[&KeyPath]) -> Vec<String> {
-    fn walk(table: &toml::Table, at: &mut KeyPath, keys: &[&KeyPath], out: &mut Vec<String>) {
+pub fn undeclared(doc: &Doc, keys: &[&KeyPath]) -> Vec<String> {
+    fn walk(table: &Doc, at: &mut KeyPath, keys: &[&KeyPath], out: &mut Vec<String>) {
         for (name, value) in table {
             at.push(name.clone());
             let covered = keys.iter().any(|k| at.starts_with(k));
             let inside = keys.iter().any(|k| k.len() > at.len() && k.starts_with(at));
             match (covered, inside, value) {
                 (true, _, _) => {}
-                (false, true, toml::Value::Table(t)) => walk(t, at, keys, out),
+                (false, true, Value::Object(t)) => walk(t, at, keys, out),
                 _ => out.push(dotted(at)),
             }
             at.pop();
@@ -151,9 +215,10 @@ pub fn dotted(key: &KeyPath) -> String {
 
 // ── On disk ─────────────────────────────────────────────────────────────────
 
-/// The most of a preferences file omh reads. Codex's own config is a few
-/// kilobytes; this is for a session that leaves a huge one to be read.
-const CAP: u64 = 1 << 20;
+/// The most of a preferences file omh reads: as much as `auth` reads of a
+/// `~/.claude.json`, which a session's copy of one is. A bound on what a
+/// session can make omh read.
+const CAP: u64 = 16 << 20;
 
 /// At the account's root, where no mount reaches: its kept values, by file
 /// name, and the files below.
@@ -170,13 +235,18 @@ const LOCK: &str = ".lock";
 /// In a session's preferences home: the account it was seeded from.
 const RECORD: &str = "account";
 
-/// The directory a container mounts at [`GUEST`].
+/// In a session's preferences home: a digest of each copy's rest, by name.
+const REST: &str = "rest";
+
+/// The directory a container mounts at [`GUEST`], or whose files it mounts
+/// one by one.
 pub fn live(home: &Home) -> PathBuf {
     home.path().join("live")
 }
 
-/// The account's own file, relative to the account directory.
-fn account_rel(d: &Declared) -> &str {
+/// The account's own file, relative to the account directory — and to the
+/// home, where the harness reads it.
+pub fn account_rel(d: &Declared) -> &str {
     d.path.trim_start_matches("$HOME/")
 }
 
@@ -256,33 +326,35 @@ fn read_raw(dir: &crate::held::Dir, name: &OsStr) -> Result<Option<Vec<u8>>> {
     Ok(Some(raw))
 }
 
-/// Bytes [`read_raw`] read, as TOML.
-fn parse_doc(raw: &[u8]) -> Result<toml::Table> {
-    crate::provider::parse(std::str::from_utf8(raw).context("it is not UTF-8")?)
-}
-
-/// [`read_raw`], as TOML.
-fn read_doc(dir: &crate::held::Dir, name: &OsStr) -> Result<Option<toml::Table>> {
-    read_raw(dir, name)?.map(|raw| parse_doc(&raw)).transpose()
+/// [`read_raw`], parsed as `format`.
+fn read_doc(dir: &crate::held::Dir, name: &OsStr, format: Format) -> Result<Option<Doc>> {
+    read_raw(dir, name)?
+        .map(|raw| format.parse(&raw))
+        .transpose()
 }
 
 /// The account's kept values for `d`, or none yet.
-fn kept(account: &Path, d: &Declared) -> Result<toml::Table> {
+fn kept(account: &Path, d: &Declared) -> Result<Doc> {
+    kept_if_any(account, d).map(Option::unwrap_or_default)
+}
+
+/// The account's kept values for `d`, or `None` where it keeps no file for
+/// it yet.
+fn kept_if_any(account: &Path, d: &Declared) -> Result<Option<Doc>> {
     let shown = || format!("{}", account.join(KEPT).join(&d.name).display());
     let rel = format!("{KEPT}/{}", d.name);
     let Some((dir, leaf)) = hold_parent(account, &rel, false).with_context(shown)? else {
-        return Ok(toml::Table::new());
+        return Ok(None);
     };
-    read_doc(&dir, leaf)
-        .map(Option::unwrap_or_default)
-        .with_context(shown)
+    read_doc(&dir, leaf, d.format()).with_context(shown)
 }
 
 /// What has to happen to the account's file before a session can read its
-/// own copy through the link.
+/// own copy.
 #[derive(Debug)]
 enum State {
-    /// The link, and the marker: nothing to do.
+    /// Nothing to do: for `link`, the link and the marker; for `file`, the
+    /// account keeps a file for it.
     Ready,
     /// The link, and no marker: a migration that stopped after laying it.
     Finish,
@@ -295,6 +367,10 @@ enum State {
     /// Something else where the link should be — `found` says what. Linked
     /// again; nothing in it is kept.
     Relink { found: String },
+    /// `file`: the account keeps nothing for it yet. Its declared keys in the
+    /// account's own file, where the harness wrote them before sessions had
+    /// their own, become the account's kept values; the file is left as it is.
+    Import,
 }
 
 #[derive(Debug)]
@@ -302,8 +378,8 @@ struct File {
     declared: Declared,
     state: State,
     /// What a session is seeded with: the account's kept values, or what the
-    /// migration is about to keep.
-    kept: toml::Table,
+    /// migration or the import is about to keep.
+    kept: Doc,
 }
 
 /// An account's preferences, read and checked for a launch — before anything
@@ -314,6 +390,7 @@ struct File {
 pub struct Account {
     harness: String,
     dir: PathBuf,
+    mount: PrefMount,
     marked: bool,
     files: Vec<File>,
 }
@@ -327,56 +404,16 @@ pub fn check(adapter: &Adapter, account: &Path) -> Result<Option<Account>> {
     let Some(prefs) = adapter.preferences.as_ref() else {
         return Ok(None);
     };
-    let PrefMount::Link = prefs.mount;
     let kept_dir = account.join(KEPT);
     let marked = kept_dir.join(MARKER).is_file();
     let mut files = Vec::new();
     for declared in prefs.declared() {
-        let rel = account_rel(&declared);
-        let shown = account.join(rel);
-        let found = hold_parent(account, rel, false)?;
-        let entry = match &found {
-            Some((dir, leaf)) => dir
-                .entry(leaf)
-                .with_context(|| format!("looking at {}", shown.display()))?,
-            None => crate::held::Entry::Absent,
+        let (state, kept) = match prefs.mount {
+            PrefMount::Link => check_link(adapter, account, &declared, marked)?,
+            PrefMount::File => check_file(account, &declared)?,
         };
-        let (state, kept) = match entry {
-            crate::held::Entry::Link(to) if to == target(&declared) => (
-                if marked { State::Ready } else { State::Finish },
-                self::kept(account, &declared)?,
-            ),
-            crate::held::Entry::Absent => (State::Lay, self::kept(account, &declared)?),
-            crate::held::Entry::File if !marked => {
-                let cannot = || format!("{} cannot be migrated", shown.display());
-                let (dir, leaf) = found.as_ref().context("a file with no directory")?;
-                let raw = read_raw(dir, leaf)
-                    .with_context(cannot)?
-                    .unwrap_or_default();
-                let doc = parse_doc(&raw).with_context(cannot)?;
-                refuse_a_lost_provider(adapter, account, &shown, &doc)?;
-                let keys: Vec<_> = declared.all().collect();
-                let dropped = undeclared(&doc, &keys);
-                (State::Migrate { dropped, raw }, pick(&doc, keys))
-            }
-            crate::held::Entry::File => (
-                State::Relink {
-                    found: "a file".into(),
-                },
-                self::kept(account, &declared)?,
-            ),
-            crate::held::Entry::Link(to) => (
-                State::Relink {
-                    found: format!("a link to {}", to.display()),
-                },
-                self::kept(account, &declared)?,
-            ),
-            crate::held::Entry::Dir | crate::held::Entry::Other => anyhow::bail!(
-                "{} is not a file — a session's copy of it is linked there, and omh will not \
-                 lay a link over whatever this is. Remove it and launch again",
-                shown.display()
-            ),
-        };
+        // The declared keys alone, whatever the file holds beside them.
+        let kept = pick(&kept, declared.all());
         files.push(File {
             declared,
             state,
@@ -386,9 +423,92 @@ pub fn check(adapter: &Adapter, account: &Path) -> Result<Option<Account>> {
     Ok(Some(Account {
         harness: adapter.name.as_str().to_string(),
         dir: account.to_path_buf(),
+        mount: prefs.mount,
         marked,
         files,
     }))
+}
+
+/// A `link` file: what is where the link goes, and what a session is seeded
+/// with.
+fn check_link(
+    adapter: &Adapter,
+    account: &Path,
+    declared: &Declared,
+    marked: bool,
+) -> Result<(State, Doc)> {
+    let rel = account_rel(declared);
+    let shown = account.join(rel);
+    let found = hold_parent(account, rel, false)?;
+    let entry = match &found {
+        Some((dir, leaf)) => dir
+            .entry(leaf)
+            .with_context(|| format!("looking at {}", shown.display()))?,
+        None => crate::held::Entry::Absent,
+    };
+    Ok(match entry {
+        crate::held::Entry::Link(to) if to == target(declared) => (
+            if marked { State::Ready } else { State::Finish },
+            self::kept(account, declared)?,
+        ),
+        crate::held::Entry::Absent => (State::Lay, self::kept(account, declared)?),
+        crate::held::Entry::File if !marked => {
+            let cannot = || format!("{} cannot be migrated", shown.display());
+            let (dir, leaf) = found.as_ref().context("a file with no directory")?;
+            let raw = read_raw(dir, leaf)
+                .with_context(cannot)?
+                .unwrap_or_default();
+            let doc = declared.format().parse(&raw).with_context(cannot)?;
+            refuse_a_lost_provider(adapter, account, &shown, &doc)?;
+            let keys: Vec<_> = declared.all().collect();
+            let dropped = undeclared(&doc, &keys);
+            (State::Migrate { dropped, raw }, pick(&doc, keys))
+        }
+        crate::held::Entry::File => (
+            State::Relink {
+                found: "a file".into(),
+            },
+            self::kept(account, declared)?,
+        ),
+        crate::held::Entry::Link(to) => (
+            State::Relink {
+                found: format!("a link to {}", to.display()),
+            },
+            self::kept(account, declared)?,
+        ),
+        crate::held::Entry::Dir | crate::held::Entry::Other => anyhow::bail!(
+            "{} is not a file — a session's copy of it is linked there, and omh will not \
+             lay a link over whatever this is. Remove it and launch again",
+            shown.display()
+        ),
+    })
+}
+
+/// A `file` file: the account's kept values, or — the first time — the
+/// declared keys of the account's own file, read as the agent's: through
+/// `held`, capped, a regular file or nothing.
+fn check_file(account: &Path, declared: &Declared) -> Result<(State, Doc)> {
+    if let Some(kept) = kept_if_any(account, declared)? {
+        return Ok((State::Ready, kept));
+    }
+    let rel = account_rel(declared);
+    let shown = account.join(rel);
+    let own = match hold_parent(account, rel, false)? {
+        Some((dir, leaf)) => read_raw(&dir, leaf)
+            .and_then(|raw| {
+                raw.map(|r| declared.format().parse(&r))
+                    .transpose()
+                    .map(Option::unwrap_or_default)
+            })
+            .with_context(|| {
+                format!(
+                    "{} cannot be read for its preferences — remove it, and launch again",
+                    shown.display()
+                )
+            })?,
+        None => Doc::new(),
+    };
+    Ok((State::Import, pick(&own, declared.all())))
 }
 
 /// Codex reads its model provider from the file a migration takes it out
@@ -400,7 +520,7 @@ fn refuse_a_lost_provider(
     adapter: &Adapter,
     account: &Path,
     shown: &Path,
-    doc: &toml::Table,
+    doc: &Doc,
 ) -> Result<()> {
     let Some(selected) = doc.get("model_provider").and_then(|p| p.as_str()) else {
         return Ok(());
@@ -435,16 +555,42 @@ fn refuse_a_lost_provider(
     )
 }
 
+/// Bytes a preferences file is written with: readable by the user alone for
+/// a `file` adapter, whose copy of `~/.claude.json` holds the account's
+/// identity, and as they always were for `link`.
+fn place(dir: &crate::held::Dir, name: &OsStr, body: &[u8], mount: PrefMount) -> Result<()> {
+    match mount {
+        PrefMount::File => dir.replace_private(name, body)?,
+        PrefMount::Link => dir.replace(name, body)?,
+    }
+    Ok(())
+}
+
 impl Account {
     /// Whether [`Account::apply`] changes the account's file where a session
     /// from before the link could still be reading it — which it would then
     /// rename over the link, or keep on reading as the shared file.
     pub fn needs_quiet(&self) -> bool {
         !self.marked
+            && self.mount == PrefMount::Link
             && self
                 .files
                 .iter()
                 .any(|f| !matches!(f.state, State::Ready | State::Finish))
+    }
+
+    /// The account files a session's copy of which this harness reads as
+    /// its preferences file — relative to the home — so that the copy is
+    /// written here, around the session's own values, and nowhere else.
+    pub fn copies(&self) -> Vec<String> {
+        match self.mount {
+            PrefMount::File => self
+                .files
+                .iter()
+                .map(|f| account_rel(&f.declared).to_string())
+                .collect(),
+            PrefMount::Link => Vec::new(),
+        }
     }
 
     /// One line for `omh doctor`: what the next launch does to the account's
@@ -460,7 +606,7 @@ impl Account {
             .map(|f| format!("{} — the account keeps {}", f.declared.name, names(&f.kept)))
             .collect();
         crate::out::untrusted(&format!(
-            "{}'s config is per session: {}",
+            "{}'s preferences are per session: {}",
             self.harness,
             kept.join("; ")
         ))
@@ -486,16 +632,24 @@ impl Account {
                      keeps nothing in it",
                     self.dir.join(account_rel(&f.declared)).display()
                 )),
+                State::Import => Some(format!(
+                    "{}'s {} preferences on this account are kept apart from the next launch — \
+                     keeping {}",
+                    self.harness,
+                    f.declared.name,
+                    names(&f.kept)
+                )),
                 _ => None,
             })
             .map(|s| crate::out::untrusted(&s))
             .collect()
     }
 
-    /// Do what the account's files need, under the account's lock: back the
-    /// real file up, keep its declared keys, lay the link, then the marker —
-    /// in that order, so each point a run can stop at leaves an account the
-    /// next launch finishes. `running` names the sessions still mounting the
+    /// Do what the account's files need, under the account's lock: for
+    /// `link`, back the real file up, keep its declared keys, lay the link,
+    /// then the marker — in that order, so each point a run can stop at
+    /// leaves an account the next launch finishes; for `file`, keep what the
+    /// import found, once. `running` names the sessions still mounting the
     /// account, asked only when something changes where one could read it;
     /// any is refused, and so is not being able to tell.
     pub fn apply(&self, running: &dyn Fn() -> Result<Vec<String>>) -> Result<Vec<String>> {
@@ -506,6 +660,29 @@ impl Account {
         let _lock = kept_dir
             .lock(OsStr::new(LOCK))
             .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?;
+        if self.mount == PrefMount::File {
+            let mut notes = Vec::new();
+            for f in &self.files {
+                let name = OsStr::new(&f.declared.name);
+                // Under the lock: a launch that took it first may have kept
+                // the file already, and a session since then a value in it.
+                if !matches!(f.state, State::Import)
+                    || !matches!(kept_dir.entry(name), Ok(crate::held::Entry::Absent))
+                {
+                    continue;
+                }
+                kept_dir.replace_private(name, &f.declared.format().render(&f.kept)?)?;
+                if !f.kept.is_empty() {
+                    notes.push(crate::out::untrusted(&format!(
+                        "{}'s {} preferences are kept apart on this account from now on — kept {}",
+                        self.harness,
+                        f.declared.name,
+                        names(&f.kept)
+                    )));
+                }
+            }
+            return Ok(notes);
+        }
         // Read under the lock: a launch that took it first may have finished
         // the migration this one was checked for — and its sandbox, now
         // running, is not one from before the link.
@@ -541,14 +718,14 @@ impl Account {
             let (dir, leaf) = make_parent(&self.dir, rel)?;
             let name = OsStr::new(&f.declared.name);
             match &f.state {
-                State::Ready => continue,
+                State::Ready | State::Import => continue,
                 State::Finish | State::Lay => {}
                 State::Migrate { dropped, raw } => {
                     let backup = format!("{}.before-omh", f.declared.name);
                     kept_dir
                         .replace_private(OsStr::new(&backup), raw)
                         .with_context(|| format!("backing up {}", self.dir.join(rel).display()))?;
-                    kept_dir.replace_private(name, toml::to_string(&f.kept)?.as_bytes())?;
+                    kept_dir.replace_private(name, &f.declared.format().render(&f.kept)?)?;
                     notes.push(crate::out::untrusted(&format!(
                         "{}'s {} is per session from now on — kept {}{}; the file as it was is \
                          at {}",
@@ -577,35 +754,84 @@ impl Account {
 
     /// Fill a session's copy: on a kept home, once — a relaunch continues
     /// from the session's own `live`, unless the session's account has
-    /// changed, which keeps what it changed into its old account first and
-    /// then seeds from this one; a scratch home every time. Written after the
-    /// reuse decision and before the container starts: never into a directory
-    /// a running container has mounted, and never missing when one mounts it.
-    pub fn seed(&self, adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
+    /// changed: refused while the session has changes to review, which
+    /// belong to its old account, then seeded afresh from this one; a scratch
+    /// home every time. Written after the reuse decision and before the
+    /// container starts: never into a directory a running container has
+    /// mounted, and never missing when one mounts it.
+    ///
+    /// `rests` holds, by [`Account::copies`]' paths, what a copy holds beside
+    /// its preferences — `auth::seeds`' scrubbed `~/.claude.json`. The copy is
+    /// that, with the declared keys set from the account's kept values; on a
+    /// relaunch whose rest has changed — the account captured again — from
+    /// the session's own, which its review has not seen yet.
+    ///
+    /// `created`: this launch made the session, so whatever is already in
+    /// its home is an earlier session's under the same id — seeded afresh,
+    /// or refused while that one's changes are still to review.
+    pub fn seed(
+        &self,
+        adapter: &Adapter,
+        home: &Home,
+        rests: &BTreeMap<String, String>,
+        created: bool,
+    ) -> Result<Vec<String>> {
         let root = home.path();
         std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
         let mut notes = Vec::new();
         let recorded = std::fs::read_to_string(root.join(RECORD)).ok();
         let this = self.dir.display().to_string();
-        let whole = self
-            .files
-            .iter()
-            .all(|f| live(home).join(&f.declared.name).is_file());
-        if let Home::Kept(_) = home {
+        let mut rest_of = BTreeMap::new();
+        for f in &self.files {
+            let rest = match rests.get(account_rel(&f.declared)) {
+                Some(body) => Format::Json.parse(body.as_bytes())?,
+                None => Doc::new(),
+            };
+            let rest = compose(&rest, &Doc::new(), f.declared.all());
+            let digest = match rests.contains_key(account_rel(&f.declared)) {
+                true => Some(format!(
+                    "{:016x}",
+                    crate::hash::fnv1a_64(&Format::Json.render(&rest)?)
+                )),
+                false => None,
+            };
+            rest_of.insert(f.declared.name.clone(), (rest, digest));
+        }
+        if let (Home::Kept(_), true, Some(_)) = (home, created, recorded.as_deref()) {
+            let left = review::unreviewed(adapter, home)?;
+            anyhow::ensure!(
+                left.is_empty(),
+                "an earlier session under this id left {} preferences still to review — {} — in \
+                 {}: review them (`omh <id> down` at a terminal) or drop them (`omh <id> rm \
+                 --yes`) before a new session takes the id",
+                self.harness,
+                left.join(", "),
+                root.display()
+            );
+        }
+        if let (Home::Kept(_), false) = (home, created) {
             match recorded.as_deref() {
-                Some(r) if r == this && whole => return Ok(notes),
-                Some(r) if r != this => {
-                    notes.extend(keep(adapter, home)?);
+                Some(r) if r == this => return self.continue_from_live(home, &rest_of),
+                Some(r) => {
+                    let left = review::unreviewed(adapter, home)?;
+                    anyhow::ensure!(
+                        left.is_empty(),
+                        "this session's {} preferences, from {r}, are still to review — {} — and \
+                         would be lost to a launch on {this}: review them first (`omh <id> \
+                         down` at a terminal), or drop them (`omh <id> rm --yes`)",
+                        self.harness,
+                        left.join(", ")
+                    );
                     notes.push(format!(
                         "this session's {} preferences were seeded again, from {}",
                         self.harness,
                         self.dir.display()
                     ));
                 }
-                _ => {}
+                None => {}
             }
         }
-        for part in ["base", "reviewed", "live"] {
+        for part in ["base", "reviewed", "live", REST] {
             let dir = root.join(part);
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => {}
@@ -613,27 +839,94 @@ impl Account {
                 Err(e) => return Err(e).with_context(|| format!("clearing {}", dir.display())),
             }
             std::fs::create_dir_all(&dir)?;
-            let held = crate::held::Dir::open(&dir)?;
-            for f in &self.files {
-                held.replace(
-                    OsStr::new(&f.declared.name),
-                    toml::to_string(&f.kept)?.as_bytes(),
-                )?;
+        }
+        // What the account keeps, read again under its lock — the one a
+        // review holds from its first reading to its last write — so a seed
+        // never starts from a value a review was about to change.
+        let (kept_dir, _) = make_parent(&self.dir, &format!("{KEPT}/{LOCK}"))?;
+        let _lock = kept_dir
+            .lock(OsStr::new(LOCK))
+            .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?;
+        for f in &self.files {
+            let name = OsStr::new(&f.declared.name);
+            let format = f.declared.format();
+            let (rest, digest) = &rest_of[&f.declared.name];
+            let kept = match kept_if_any(&self.dir, &f.declared)? {
+                Some(now) => pick(&now, f.declared.all()),
+                None => f.kept.clone(),
+            };
+            for part in ["base", "reviewed"] {
+                let held = crate::held::Dir::open(&root.join(part))?;
+                place(&held, name, &format.render(&kept)?, self.mount)?;
+            }
+            let held = crate::held::Dir::open(&live(home))?;
+            let copy = compose(rest, &kept, f.declared.all());
+            place(&held, name, &format.render(&copy)?, self.mount)?;
+            if let Some(digest) = digest {
+                crate::held::Dir::open(&root.join(REST))?.replace(name, digest.as_bytes())?;
             }
         }
         crate::held::Dir::open(root)?.replace(OsStr::new(RECORD), this.as_bytes())?;
         Ok(notes)
     }
+
+    /// A relaunch on the same account: the session's own `live` stands. A
+    /// copy whose rest has changed since it was written, or that is gone or
+    /// no longer parses, is written again around the session's own values —
+    /// as its last review left them where they cannot be read.
+    fn continue_from_live(
+        &self,
+        home: &Home,
+        rest_of: &BTreeMap<String, (Doc, Option<String>)>,
+    ) -> Result<Vec<String>> {
+        let root = home.path();
+        let live_dir = crate::held::Dir::open(&live(home))?;
+        let mut notes = Vec::new();
+        for f in &self.files {
+            let name = OsStr::new(&f.declared.name);
+            let format = f.declared.format();
+            let (rest, digest) = &rest_of[&f.declared.name];
+            let had = std::fs::read_to_string(root.join(REST).join(name)).ok();
+            let now = read_doc(&live_dir, name, format);
+            let intact = matches!(now, Ok(Some(_)));
+            if intact && had == *digest {
+                continue;
+            }
+            let values = match now {
+                Ok(Some(doc)) => doc,
+                _ => {
+                    notes.push(crate::out::untrusted(&format!(
+                        "this session's {} could not be read, and is written again from its \
+                         last review",
+                        f.declared.name
+                    )));
+                    read_doc(
+                        &crate::held::Dir::open(&root.join("reviewed"))?,
+                        name,
+                        format,
+                    )?
+                    .unwrap_or_default()
+                }
+            };
+            let copy = compose(rest, &values, f.declared.all());
+            place(&live_dir, name, &format.render(&copy)?, self.mount)?;
+            if let Some(digest) = digest {
+                std::fs::create_dir_all(root.join(REST))?;
+                crate::held::Dir::open(&root.join(REST))?.replace(name, digest.as_bytes())?;
+            }
+        }
+        Ok(notes)
+    }
 }
 
 /// The keys `doc` holds, dotted, or `nothing`.
-fn names(doc: &toml::Table) -> String {
+fn names(doc: &Doc) -> String {
     let mut out = Vec::new();
-    fn walk(t: &toml::Table, at: &mut KeyPath, out: &mut Vec<String>) {
+    fn walk(t: &Doc, at: &mut KeyPath, out: &mut Vec<String>) {
         for (k, v) in t {
             at.push(k.clone());
             match v {
-                toml::Value::Table(inner) if !inner.is_empty() => walk(inner, at, out),
+                Value::Object(inner) if !inner.is_empty() => walk(inner, at, out),
                 _ => out.push(dotted(at)),
             }
             at.pop();
@@ -646,12 +939,13 @@ fn names(doc: &toml::Table) -> String {
     }
 }
 
-/// Until the review (#197 §4): what a session changed among its declared
-/// keys, kept into its account without asking — changed keys only, last
-/// writer wins, each value another session had kept since named as replaced.
-/// Run when the harness exits in the terminal, at `down` and at `rm`, and
-/// after a login. What the session wrote that is not a preference is named
-/// and left where it is.
+/// A login's preferences, kept into its account without asking: the user
+/// chose them at the terminal, a theme picked at a first start — every
+/// session's go through the review instead (`review`). Changed keys only,
+/// last writer wins, each value another session had kept since named as
+/// replaced. What the login wrote that is not a preference is named and left
+/// where it is — except in a copy of an account file, whose other keys are
+/// the harness's own bookkeeping and were never the login's to keep.
 ///
 /// `live` is read as the sandbox's: through `held`, capped, regular files
 /// only. One that cannot be read is an error — "could not tell what this
@@ -678,6 +972,7 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
     let mut notes = Vec::new();
     for d in prefs.declared() {
         let name = OsStr::new(&d.name);
+        let format = d.format();
         let could_not_tell = |e: anyhow::Error| {
             e.context(format!(
                 "could not tell what this session changed in its {} — nothing was kept",
@@ -688,12 +983,12 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
             .as_ref()
             .map_err(|e| anyhow::anyhow!("{e}"))
             .map_err(could_not_tell)?;
-        let live = read_doc(live_dir, name)
+        let live = read_doc(live_dir, name, format)
             .map_err(could_not_tell)?
             .unwrap_or_default();
-        let base =
-            read_doc(&crate::held::Dir::open(&root.join("base"))?, name)?.unwrap_or_default();
-        let mut account_kept = read_doc(&kept_dir, name)?.unwrap_or_default();
+        let base = read_doc(&crate::held::Dir::open(&root.join("base"))?, name, format)?
+            .unwrap_or_default();
+        let mut account_kept = read_doc(&kept_dir, name, format)?.unwrap_or_default();
         let changes = changed(&base, &live, d.all());
         let mut kept_keys = Vec::new();
         for c in &changes {
@@ -707,7 +1002,7 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
             kept_keys.push(dotted(&c.key));
         }
         if !changes.is_empty() {
-            kept_dir.replace_private(name, toml::to_string(&account_kept)?.as_bytes())?;
+            kept_dir.replace_private(name, &format.render(&account_kept)?)?;
             notes.push(crate::out::untrusted(&format!(
                 "kept {} {} preference{} on account `{shown_account}`: {}",
                 changes.len(),
@@ -717,12 +1012,14 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
             )));
         }
         let keys: Vec<_> = d.all().collect();
-        let synced = toml::to_string(&pick(&live, keys.iter().copied()))?;
+        let synced = format.render(&pick(&live, keys.iter().copied()))?;
         for part in ["base", "reviewed"] {
-            crate::held::Dir::open(&root.join(part))?.replace(name, synced.as_bytes())?;
+            let held = crate::held::Dir::open(&root.join(part))?;
+            place(&held, name, &synced, prefs.mount)?;
         }
+        let copy = root.join(REST).join(name).is_file();
         let left = undeclared(&live, &keys);
-        if !left.is_empty() {
+        if !left.is_empty() && !copy {
             notes.push(crate::out::untrusted(&format!(
                 "not kept, not preferences: {}",
                 left.join(", ")
@@ -737,8 +1034,8 @@ mod tests {
     use super::*;
     use crate::adapter::key_path;
 
-    fn table(raw: &str) -> toml::Table {
-        toml::from_str(raw).unwrap()
+    fn table(raw: &str) -> Doc {
+        Format::Toml.parse(raw.as_bytes()).unwrap()
     }
 
     fn keys(list: &[&str]) -> Vec<KeyPath> {
@@ -808,14 +1105,14 @@ base_url = "https://example.invalid"
     /// with it, and leaves a missing key missing.
     #[test]
     fn a_removed_key_leaves_no_empty_table() {
-        let mut doc = toml::Table::new();
+        let mut doc = Doc::new();
         let theme = keys(&["tui.theme"]).remove(0);
         set(&mut doc, &theme, Some("t".into()));
         assert_eq!(doc, table("[tui]\ntheme = \"t\"\n"));
         set(&mut doc, &theme, None);
-        assert!(doc.is_empty(), "{doc}");
+        assert!(doc.is_empty(), "{doc:?}");
         set(&mut doc, &theme, None);
-        assert!(doc.is_empty(), "{doc}");
+        assert!(doc.is_empty(), "{doc:?}");
         let mut doc = table("tui = 1\n");
         set(&mut doc, &theme, Some("t".into()));
         assert_eq!(doc, table("[tui]\ntheme = \"t\"\n"));
@@ -921,7 +1218,7 @@ base_url = "https://example.invalid"
         assert_eq!(link_of(&file), Some(PathBuf::from(TARGET)));
         let kept = std::fs::read_to_string(account.join("preferences/config.toml")).unwrap();
         assert_eq!(
-            toml::from_str::<toml::Table>(&kept).unwrap(),
+            table(&kept),
             table("model = \"gpt-5.5\"\n[tui]\ntheme = \"dark\"\n")
         );
         let backup = account.join("preferences/config.toml.before-omh");
@@ -989,7 +1286,10 @@ base_url = "https://example.invalid"
 
         crate::provider::write(
             &account,
-            &table("model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n"),
+            &toml::from_str(
+                "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n",
+            )
+            .unwrap(),
         )
         .unwrap();
         check(&codex(), &account).unwrap().unwrap();
@@ -1105,8 +1405,9 @@ base_url = "https://example.invalid"
     }
 
     /// A session is seeded once from the account, and a relaunch continues
-    /// from its own copy; another account keeps what the session changed into
-    /// the old one first, then seeds from the new.
+    /// from its own copy; another account is refused while the session has a
+    /// change to review — it belongs to the old one — and seeds from the new
+    /// once it is reviewed.
     #[test]
     fn a_session_is_seeded_once_and_again_only_for_another_account() {
         let (root, work, _) = account();
@@ -1124,7 +1425,9 @@ base_url = "https://example.invalid"
         let seed = |acct: &Path| {
             let checked = check(&codex(), acct).unwrap().unwrap();
             checked.apply(&none_running).unwrap();
-            checked.seed(&codex(), &home).unwrap()
+            checked
+                .seed(&codex(), &home, &BTreeMap::new(), false)
+                .unwrap()
         };
         seed(&work);
         assert_eq!(
@@ -1138,14 +1441,31 @@ base_url = "https://example.invalid"
             "model = \"mine\"\n"
         );
 
-        let notes = seed(&personal).join("\n");
+        let checked = check(&codex(), &personal).unwrap().unwrap();
+        let err = format!(
+            "{:#}",
+            checked
+                .seed(&codex(), &home, &BTreeMap::new(), false)
+                .unwrap_err()
+        );
         assert!(
-            notes.contains("kept 1 codex preference on account `work`: model"),
-            "{notes}"
+            err.contains("are still to review — model") && err.contains("omh <id> rm --yes"),
+            "{err}"
         );
         assert_eq!(
-            std::fs::read_to_string(work.join("preferences/config.toml")).unwrap(),
+            std::fs::read_to_string(&at_live).unwrap(),
             "model = \"mine\"\n"
+        );
+        let sitting = review::Sitting {
+            id: "s01".into(),
+            home: Home::Kept(home.path().to_path_buf()),
+        };
+        review::review(&codex(), &[sitting], review::Answers::DropAll).unwrap();
+        let notes = seed(&personal).join("\n");
+        assert!(notes.contains("seeded again"), "{notes}");
+        assert_eq!(
+            std::fs::read_to_string(work.join("preferences/config.toml")).unwrap(),
+            "model = \"w\"\n"
         );
         assert_eq!(
             std::fs::read_to_string(&at_live).unwrap(),
@@ -1166,7 +1486,9 @@ base_url = "https://example.invalid"
         std::fs::write(work.join("preferences/config.toml"), "model = \"a\"\n").unwrap();
         let checked = check(&codex(), &work).unwrap().unwrap();
         checked.apply(&none_running).unwrap();
-        checked.seed(&codex(), &home).unwrap();
+        checked
+            .seed(&codex(), &home, &BTreeMap::new(), false)
+            .unwrap();
         std::fs::write(
             live(&home).join("config.toml"),
             "model = \"b\"\ndeveloper_instructions = \"planted\"\n[tui]\ntheme = \"t\"\n",
@@ -1186,10 +1508,7 @@ base_url = "https://example.invalid"
         );
         assert!(!notes.contains("planted"), "{notes}");
         let kept = std::fs::read_to_string(work.join("preferences/config.toml")).unwrap();
-        assert_eq!(
-            toml::from_str::<toml::Table>(&kept).unwrap(),
-            table("model = \"b\"\n[tui]\ntheme = \"t\"\n")
-        );
+        assert_eq!(table(&kept), table("model = \"b\"\n[tui]\ntheme = \"t\"\n"));
         // Kept once: the same change is not kept again.
         std::fs::write(work.join("preferences/config.toml"), "model = \"later\"\n").unwrap();
         keep(&codex(), &home).unwrap();
@@ -1205,6 +1524,341 @@ base_url = "https://example.invalid"
         assert_eq!(
             std::fs::read_to_string(work.join("preferences/config.toml")).unwrap(),
             "model = \"later\"\n"
+        );
+    }
+
+    // ── Both formats ──
+
+    /// TOML's datetimes and JSON's `null` are values like any other: read
+    /// into the one model and written back as what they were.
+    #[test]
+    fn each_format_reads_back_what_it_wrote() {
+        let toml = Format::Toml
+            .parse(b"at = 1979-05-27T07:32:00Z\n[tui]\ntheme = \"t\"\n")
+            .unwrap();
+        let written = String::from_utf8(Format::Toml.render(&toml).unwrap()).unwrap();
+        assert!(written.contains("at = 1979-05-27T07:32:00Z"), "{written}");
+        assert_eq!(Format::Toml.parse(written.as_bytes()).unwrap(), toml);
+
+        let json = Format::Json
+            .parse(br#"{"model":null,"modelSettings":{"x":{"effortLevel":"high"}}}"#)
+            .unwrap();
+        let written = Format::Json.render(&json).unwrap();
+        assert_eq!(Format::Json.parse(&written).unwrap(), json);
+        assert!(Format::Json.parse(b"").unwrap().is_empty());
+        for bad in [&b"[1]"[..], b"{", b"\xff"] {
+            assert!(Format::Json.parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    // ── `file` ──
+
+    fn claude() -> Adapter {
+        Adapter::find(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters"),
+            "claude",
+        )
+        .unwrap()
+    }
+
+    fn json(raw: &str) -> Doc {
+        Format::Json.parse(raw.as_bytes()).unwrap()
+    }
+
+    fn read_json(path: &Path) -> Doc {
+        json(&std::fs::read_to_string(path).unwrap())
+    }
+
+    /// The first launch keeps the declared keys of the account's own files —
+    /// where Claude wrote them before sessions had their own — and nothing
+    /// else, then never reads those files for preferences again.
+    #[test]
+    fn a_file_account_keeps_its_own_files_preferences_once() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/claude/work");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(
+            account.join(".claude.json"),
+            r#"{"copyOnSelect":false,"oauthAccount":{"emailAddress":"a@b"},"projects":{}}"#,
+        )
+        .unwrap();
+
+        let checked = check(&claude(), &account).unwrap().unwrap();
+        let pending = checked.pending().join("\n");
+        assert!(
+            pending.contains(".claude.json preferences on this account are kept apart")
+                && pending.contains("keeping copyOnSelect"),
+            "{pending}"
+        );
+        assert!(!account.join("preferences").exists(), "checking wrote");
+        let notes = checked.apply(&|| panic!("asked")).unwrap().join("\n");
+        assert!(notes.contains("kept copyOnSelect"), "{notes}");
+        assert_eq!(
+            read_json(&account.join("preferences/.claude.json")),
+            json(r#"{"copyOnSelect":false}"#)
+        );
+        assert!(read_json(&account.join("preferences/settings.json")).is_empty());
+
+        std::fs::write(account.join(".claude.json"), r#"{"copyOnSelect":true}"#).unwrap();
+        let again = check(&claude(), &account).unwrap().unwrap();
+        assert!(again.pending().is_empty(), "{:?}", again.pending());
+        again.apply(&|| panic!("asked")).unwrap();
+        assert_eq!(
+            read_json(&account.join("preferences/.claude.json")),
+            json(r#"{"copyOnSelect":false}"#)
+        );
+    }
+
+    /// A launch that took the lock first and kept the import is not undone by
+    /// the one checked beside it.
+    #[test]
+    fn an_import_another_launch_finished_is_not_done_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/claude/work");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(account.join(".claude.json"), r#"{"copyOnSelect":false}"#).unwrap();
+        let first = check(&claude(), &account).unwrap().unwrap();
+        let second = check(&claude(), &account).unwrap().unwrap();
+        first.apply(&|| panic!("asked")).unwrap();
+        std::fs::write(
+            account.join("preferences/.claude.json"),
+            r#"{"copyOnSelect":true}"#,
+        )
+        .unwrap();
+        second.apply(&|| panic!("asked")).unwrap();
+        assert_eq!(
+            read_json(&account.join("preferences/.claude.json")),
+            json(r#"{"copyOnSelect":true}"#)
+        );
+    }
+
+    /// An account file that is not one to read — a link — refuses the
+    /// launch, naming it, and nothing is kept.
+    #[test]
+    fn an_account_file_that_cannot_be_read_refuses_the_import() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/claude/work");
+        std::fs::create_dir_all(account.join(".claude")).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", account.join(".claude/settings.json")).unwrap();
+        let err = format!("{:#}", check(&claude(), &account).unwrap_err());
+        assert!(
+            err.contains(".claude/settings.json cannot be read for its preferences"),
+            "{err}"
+        );
+        assert!(!account.join("preferences").exists());
+    }
+
+    /// A copy of an account file that is a preferences file too is the
+    /// account file's rest — what `auth::seeds` scrubbed — with the declared
+    /// keys from the account's store, whatever the rest held for them; `base`
+    /// and `reviewed` hold the declared keys alone. Readable by the user
+    /// alone: the rest is the account's identity.
+    #[test]
+    fn a_copy_is_its_rest_with_the_values_the_account_keeps() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/claude/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/.claude.json"),
+            r#"{"copyOnSelect":false,"oauthAccount":"planted"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            account.join("preferences/settings.json"),
+            r#"{"model":"m"}"#,
+        )
+        .unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/claude"));
+        let rests = BTreeMap::from([(
+            ".claude.json".to_string(),
+            r#"{"oauthAccount":{"emailAddress":"a@b"},"copyOnSelect":true}"#.to_string(),
+        )]);
+        let checked = check(&claude(), &account).unwrap().unwrap();
+        assert_eq!(
+            checked.copies(),
+            vec![".claude.json", ".claude/settings.json"]
+        );
+        checked.seed(&claude(), &home, &rests, false).unwrap();
+
+        let copy = live(&home).join(".claude.json");
+        assert_eq!(
+            read_json(&copy),
+            json(r#"{"oauthAccount":{"emailAddress":"a@b"},"copyOnSelect":false}"#)
+        );
+        for part in ["base", "reviewed"] {
+            assert_eq!(
+                read_json(&home.path().join(part).join(".claude.json")),
+                json(r#"{"copyOnSelect":false}"#),
+                "{part}"
+            );
+        }
+        assert_eq!(
+            read_json(&live(&home).join("settings.json")),
+            json(r#"{"model":"m"}"#)
+        );
+        for file in [".claude.json", "settings.json"] {
+            let mode = std::fs::metadata(live(&home).join(file))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{file}");
+        }
+    }
+
+    /// A relaunch keeps the session's own copy; a rest that changed since —
+    /// the account captured again — is written in around the session's own
+    /// values, not the account's, so nothing it has not reviewed is lost or
+    /// shown as its own; and a copy that no longer parses is written again
+    /// from its last review, saying so.
+    #[test]
+    fn a_relaunch_keeps_the_sessions_values_around_a_new_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/claude/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/.claude.json"),
+            r#"{"copyOnSelect":false}"#,
+        )
+        .unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/claude"));
+        let rest = |who: &str| {
+            BTreeMap::from([(
+                ".claude.json".to_string(),
+                format!(r#"{{"oauthAccount":{{"emailAddress":"{who}"}}}}"#),
+            )])
+        };
+        let seed = |rests: &BTreeMap<String, String>| {
+            check(&claude(), &account)
+                .unwrap()
+                .unwrap()
+                .seed(&claude(), &home, rests, false)
+                .unwrap()
+        };
+        seed(&rest("a"));
+        let copy = live(&home).join(".claude.json");
+        std::fs::write(
+            &copy,
+            r#"{"oauthAccount":{"emailAddress":"a"},"copyOnSelect":true,"numStartups":3}"#,
+        )
+        .unwrap();
+        // Another session kept a value meanwhile: not this session's.
+        std::fs::write(
+            account.join("preferences/.claude.json"),
+            r#"{"copyOnSelect":false,"respectGitignore":false}"#,
+        )
+        .unwrap();
+
+        seed(&rest("a"));
+        assert_eq!(
+            read_json(&copy),
+            json(r#"{"oauthAccount":{"emailAddress":"a"},"copyOnSelect":true,"numStartups":3}"#)
+        );
+
+        seed(&rest("b"));
+        assert_eq!(
+            read_json(&copy),
+            json(r#"{"oauthAccount":{"emailAddress":"b"},"copyOnSelect":true}"#)
+        );
+
+        std::fs::write(&copy, "{ not json").unwrap();
+        let notes = seed(&rest("b")).join("\n");
+        assert!(
+            notes.contains(
+                ".claude.json could not be read, and is written again from its last review"
+            ),
+            "{notes}"
+        );
+        assert_eq!(
+            read_json(&copy),
+            json(r#"{"oauthAccount":{"emailAddress":"b"},"copyOnSelect":false}"#)
+        );
+    }
+
+    /// A launch that makes the session finds an earlier session's preferences
+    /// under the same id: refused while a change there is still to review,
+    /// naming it; seeded afresh once there is none — never continued.
+    #[test]
+    fn a_new_session_over_an_earlier_ones_preferences_starts_afresh_or_is_refused() {
+        let (root, work, _) = account();
+        std::fs::create_dir_all(work.join("preferences")).unwrap();
+        std::fs::write(work.join("preferences/config.toml"), "model = \"w\"\n").unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let at_live = live(&home).join("config.toml");
+        let seed = |created: bool| {
+            let checked = check(&codex(), &work).unwrap().unwrap();
+            checked.apply(&none_running).unwrap();
+            checked.seed(&codex(), &home, &BTreeMap::new(), created)
+        };
+        seed(false).unwrap();
+        std::fs::write(&at_live, "model = \"mine\"\n").unwrap();
+
+        let err = format!("{:#}", seed(true).unwrap_err());
+        assert!(
+            err.contains(
+                "an earlier session under this id left codex preferences still to review — model"
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"mine\"\n"
+        );
+
+        let sitting = review::Sitting {
+            id: "s01".into(),
+            home: Home::Kept(home.path().to_path_buf()),
+        };
+        review::review(&codex(), &[sitting], review::Answers::DropAll).unwrap();
+        seed(true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"w\"\n"
+        );
+    }
+
+    /// A seed reads what the account keeps again, under its lock: a value
+    /// kept between the launch's check and its seed is the one the session
+    /// starts from, never the one checked.
+    #[test]
+    fn a_seed_starts_from_what_the_account_keeps_when_it_seeds() {
+        let (root, work, _) = account();
+        std::fs::create_dir_all(work.join("preferences")).unwrap();
+        std::fs::write(work.join("preferences/config.toml"), "model = \"a\"\n").unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let checked = check(&codex(), &work).unwrap().unwrap();
+        checked.apply(&none_running).unwrap();
+        std::fs::write(work.join("preferences/config.toml"), "model = \"b\"\n").unwrap();
+        checked
+            .seed(&codex(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        for part in ["base", "reviewed", "live"] {
+            assert_eq!(
+                std::fs::read_to_string(home.path().join(part).join("config.toml")).unwrap(),
+                "model = \"b\"\n",
+                "{part}"
+            );
+        }
+    }
+
+    /// What the account keeps is its declared keys alone, whatever its store
+    /// holds beside them: `omh doctor`'s line names those, and nothing else.
+    #[test]
+    fn what_an_account_keeps_is_named_by_its_declared_keys_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/claude/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/settings.json"),
+            r#"{"model":"m","hooks":{"SessionStart":[]}}"#,
+        )
+        .unwrap();
+        std::fs::write(account.join("preferences/.claude.json"), "{}").unwrap();
+        let summary = check(&claude(), &account).unwrap().unwrap().summary();
+        assert_eq!(
+            summary,
+            "claude's preferences are per session: .claude.json — the account keeps nothing; \
+             settings.json — the account keeps model"
         );
     }
 }

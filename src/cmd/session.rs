@@ -174,6 +174,9 @@ pub(crate) fn session_up(
     profile: &Profile,
     adapter: &Adapter,
     session: &Session,
+    // This launch made the session: whatever its run directory already holds
+    // is an earlier session's under the same id.
+    created: bool,
     opts: container::Options,
     // The resolution behind `opts.image` — the recipe *and* the certificate the
     // tag was computed with. Handed in whole rather than derived here, so
@@ -230,15 +233,20 @@ pub(crate) fn session_up(
     // The session's copies of account files, read and checked now — before
     // a running container is replaced — and written below, after the reuse
     // decision, never into a file bind-mounted into a running container.
-    let seeds = match (opts.launch, &opts.account_dir) {
+    let mut seeds = match (opts.launch, &opts.account_dir) {
         (container::Launch::Session, Some(account)) => auth::seeds(adapter, account)?,
         _ => None,
     };
     // The account's preferences, checked now and done after the reuse
-    // decision, for the same reason.
+    // decision, for the same reason. A copy that is a preferences file too
+    // is written by them, around the session's own values.
     let prefs = match &opts.account_dir {
         Some(account) => crate::prefs::check(adapter, account)?.map(|p| (p, account.clone())),
         None => None,
+    };
+    let rests = match (&prefs, seeds.as_mut()) {
+        (Some((prefs, _)), Some(seeds)) => seeds.take(&prefs.copies()),
+        _ => std::collections::BTreeMap::new(),
     };
     let account_dir = opts.account_dir.clone();
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
@@ -280,7 +288,7 @@ pub(crate) fn session_up(
             ctx.warn(&note);
         }
         let home = container::prefs_home(paths, session, adapter.name.as_str());
-        for note in prefs.seed(adapter, &home)? {
+        for note in prefs.seed(adapter, &home, &rests, created)? {
             ctx.warn(&note);
         }
     }
@@ -503,6 +511,7 @@ pub(crate) fn attach(
         &profile,
         &adapter,
         &session,
+        false,
         container::Options {
             staging: container::Staging::Apply,
             persist: persist::Mode::None,
@@ -744,12 +753,15 @@ pub(crate) fn down(
     let mut sessions = Vec::new();
     let mut stuck = 0usize;
     let mut unasked = 0usize;
+    // The sessions now down — the ones whose preferences nothing can change
+    // any more, and which are reviewed below, together.
+    let mut down = Vec::new();
     let up = image::running_set(&backend);
     for i in &ids {
         let name = paths.container(i);
         match image::running_in(&up, &name) {
             image::Running::No => {
-                keep_preferences(&paths, i, ctx);
+                down.push(i.clone());
                 sessions.push((i.clone(), report::Stopped::WasNotRunning));
                 continue;
             }
@@ -778,7 +790,7 @@ pub(crate) fn down(
                 if let Err(e) = image::network_remove(&backend, &paths.session_network(i)) {
                     ctx.warn(&format!("{i}'s network was left behind: {e:#}"));
                 }
-                keep_preferences(&paths, i, ctx);
+                down.push(i.clone());
                 sessions.push((i.clone(), report::Stopped::Yes))
             }
             // Reported and carried on rather than returned: one container that
@@ -791,6 +803,18 @@ pub(crate) fn down(
             }
         }
     }
+    // At a terminal, one prompt per account across every session stopped;
+    // otherwise each change is left to review, and said. Before the report,
+    // so a prompt is not printed under a document a script reads.
+    review_preferences(
+        &paths,
+        &down,
+        match terminal {
+            true => Review::Ask,
+            false => Review::Leave,
+        },
+        ctx,
+    );
     ctx.say(&report::Down { sessions });
     // Both are failures and they are different sentences. The old text called
     // a session omh never asked about one that "would not stop".
@@ -810,26 +834,158 @@ pub(crate) fn down(
     Ok(())
 }
 
-/// What session `id` changed among its preferences, kept into its accounts
-/// — at `down` and `rm`, once nothing runs that could change them. Said, not
-/// failed: what is left in the session's copy is kept at the next of them.
-fn keep_preferences(paths: &Paths, id: &str, ctx: &out::Ctx) {
-    let dir = paths.runs().join(id).join(".preferences");
-    let harnesses = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => return ctx.warn(&format!("{id}: reading {}: {e}", dir.display())),
+/// How a session's preferences are reviewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Review {
+    /// Somebody is at the terminal: asked, one prompt per account.
+    Ask,
+    /// `rm --yes`: every change dropped, and named.
+    DropAll,
+    /// Nobody to ask: left to review, and said.
+    Leave,
+}
+
+/// What session `id` changed among its preferences and no review has
+/// answered, per harness it ran: the keys, or why omh could not tell.
+fn unreviewed(paths: &Paths, id: &str) -> Vec<(String, Result<Vec<String>>)> {
+    let homes = match crate::prefs::review::homes_of(&paths.runs().join(id)) {
+        Ok(homes) => homes,
+        Err(e) => return vec![(String::new(), Err(e))],
     };
-    for entry in harnesses.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let kept = Adapter::find(&paths.adapters(), &name).and_then(|adapter| {
-            crate::prefs::keep(&adapter, &crate::home::Home::Kept(entry.path()))
-        });
-        match kept {
-            Ok(notes) => notes.iter().for_each(|n| ctx.warn(n)),
-            Err(e) => ctx.warn(&format!("{id}: {e:#}")),
+    homes
+        .into_iter()
+        .map(|(harness, home)| {
+            let keys = Adapter::find(&paths.adapters(), &harness)
+                .and_then(|adapter| crate::prefs::review::unreviewed(&adapter, &home));
+            (harness, keys)
+        })
+        .collect()
+}
+
+/// The line that says session `id` has preferences to review — `keys`, of
+/// `harness` — and how each way out is spelled: `down`, or `rm` when it is
+/// `rm` that refuses, at a terminal reviews them; `rm --yes` drops them.
+fn to_review(id: &str, harness: &str, keys: &[String], rm: bool) -> String {
+    let reviews = match rm {
+        false => format!("`omh {id} down`"),
+        true => format!("`omh {id} rm`"),
+    };
+    out::untrusted(&format!(
+        "{id}: {} {harness} preference{} to review — {}. {reviews} at a terminal reviews them; \
+         `omh {id} rm --yes` drops them",
+        keys.len(),
+        if keys.len() == 1 { "" } else { "s" },
+        keys.join(", ")
+    ))
+}
+
+/// Review what sessions `ids` changed among their preferences — at their
+/// exit, `down` and `rm`, once nothing runs that could change them. One
+/// prompt per account, across every session on it. Said, never failed: what
+/// is not decided stays to review. Returns what is left, as `<id> <key>`.
+pub(crate) fn review_preferences(
+    paths: &Paths,
+    ids: &[String],
+    how: Review,
+    ctx: &out::Ctx,
+) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<
+        (String, std::path::PathBuf),
+        Vec<crate::prefs::review::Sitting>,
+    > = std::collections::BTreeMap::new();
+    let mut left = Vec::new();
+    for id in ids {
+        let homes = match crate::prefs::review::homes_of(&paths.runs().join(id)) {
+            Ok(homes) => homes,
+            Err(e) => {
+                ctx.warn(&format!(
+                    "{id}: could not tell what its preferences hold: {e:#}"
+                ));
+                left.push(format!("{id} (could not tell)"));
+                continue;
+            }
+        };
+        for (harness, home) in homes {
+            match crate::prefs::review::account_of(&home) {
+                Ok(Some(account)) => groups.entry((harness, account)).or_default().push(
+                    crate::prefs::review::Sitting {
+                        id: id.clone(),
+                        home,
+                    },
+                ),
+                Ok(None) => {}
+                Err(e) => {
+                    ctx.warn(&format!("{id}: {e:#}"));
+                    left.push(format!("{id} (could not tell)"));
+                }
+            }
         }
     }
+    for ((harness, _), sittings) in groups {
+        let adapter = match Adapter::find(&paths.adapters(), &harness) {
+            Ok(a) => a,
+            Err(e) => {
+                ctx.warn(&format!("{harness}: {e:#}"));
+                continue;
+            }
+        };
+        if how == Review::Leave {
+            for s in &sittings {
+                match crate::prefs::review::unreviewed(&adapter, &s.home) {
+                    Ok(keys) if keys.is_empty() => {}
+                    Ok(keys) => {
+                        ctx.warn(&to_review(&s.id, &harness, &keys, false));
+                        left.extend(keys.iter().map(|k| format!("{} {k}", s.id)));
+                    }
+                    Err(e) => {
+                        ctx.warn(&format!("{}: {e:#} — left to review", s.id));
+                        left.push(format!("{} (could not tell)", s.id));
+                    }
+                }
+            }
+            continue;
+        }
+        let (mut stdin, mut stderr) = (std::io::stdin().lock(), std::io::stderr());
+        let answers = match how {
+            Review::Ask => crate::prefs::review::Answers::Ask {
+                input: &mut stdin,
+                out: &mut stderr,
+            },
+            _ => crate::prefs::review::Answers::DropAll,
+        };
+        match crate::prefs::review::review(&adapter, &sittings, answers) {
+            Ok(outcome) => {
+                outcome.notes.iter().for_each(|n| ctx.warn(n));
+                left.extend(outcome.left);
+            }
+            Err(e) => {
+                ctx.warn(&format!("{harness}: {e:#} — left to review"));
+                left.extend(
+                    sittings
+                        .iter()
+                        .map(|s| format!("{} (could not tell)", s.id)),
+                );
+            }
+        }
+    }
+    // An answer nobody gave at the prompt is not silence: what is still to
+    // review is named, with where it is asked again.
+    if how == Review::Ask {
+        for id in ids {
+            let prefix = format!("{id} ");
+            let keys: Vec<&str> = left
+                .iter()
+                .filter_map(|l| l.strip_prefix(&prefix))
+                .collect();
+            if !keys.is_empty() {
+                ctx.warn(&out::untrusted(&format!(
+                    "{id}: left to review — {}. `omh {id} down` at a terminal reviews them",
+                    keys.join(", ")
+                )));
+            }
+        }
+    }
+    left
 }
 
 /// The harness a session recorded, for reading its transcript shape. `None`
@@ -1285,6 +1441,26 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                             None
                         }
                     },
+                    unreviewed: Some({
+                        let mut keys = Vec::new();
+                        let mut why = None;
+                        for (harness, found) in unreviewed(&paths, &id) {
+                            match found {
+                                Ok(found) => keys.extend(found),
+                                Err(e) => {
+                                    ctx.warn(&format!(
+                                        "could not tell what {id}'s {harness} preferences hold: \
+                                         {e:#}"
+                                    ));
+                                    why = Some(format!("{e:#}"));
+                                }
+                            }
+                        }
+                        match why {
+                            Some(why) => report::Unreviewed::CouldNotTell(why),
+                            None => report::Unreviewed::Keys(keys),
+                        }
+                    }),
                     id,
                 }
             })
@@ -2301,6 +2477,8 @@ pub(crate) fn run(
         start,
     )?;
     let session = Session::new(&paths.worktrees(), id);
+    // Before `ensure` makes it: whether this launch is the one that does.
+    let created = !session.worktree.exists();
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
         carry_in(&paths, &session, ctx)?;
@@ -2412,6 +2590,7 @@ pub(crate) fn run(
         &profile,
         &adapter,
         &session,
+        created,
         container::Options {
             tty: false,
             ..opts.clone()
@@ -2444,11 +2623,18 @@ pub(crate) fn run(
         .command()
         .args(backend.exec_args(&name, &plan.argv, true))
         .status()?;
-    // Back in the terminal — an exit, or a detach under dtach: what the
-    // session changed among its preferences so far reaches the account.
-    match crate::prefs::keep(&adapter, &container::prefs_home(&paths, &session, &harness)) {
-        Ok(notes) => notes.iter().for_each(|n| ctx.warn(n)),
-        Err(e) => ctx.warn(&format!("{e:#}")),
+    // Back in the terminal. An exit is when the session's preferences are
+    // reviewed, at a terminal; a detach under dtach leaves the harness
+    // running, and what it changes is reviewed when it ends — as is
+    // anything when omh cannot tell which of the two this was.
+    let probe = || {
+        let args = backend.exec_args(&name, &image::probe_command(), false);
+        image::container_probe(&backend, &args)
+    };
+    if exited(opts.persist, probe, &session.id, &harness)
+        && crate::cmd::harvest::Interactive::of_stdin().0
+    {
+        review_preferences(&paths, std::slice::from_ref(&session.id), Review::Ask, ctx);
     }
     // `omh s01 diff`, not `omh diff`. There is no top-level `diff` — the name
     // is not a command, so it comes
@@ -2458,6 +2644,29 @@ pub(crate) fn run(
     // omh_accepts` now reads it, and would have caught both.
     ctx.hint(&format!("\nreview with  omh {} diff", session.id));
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Whether the harness ended when the terminal came back — not a detach,
+/// which leaves it running under dtach. Asked of the container only under
+/// dtach: its socket gone, or the container gone with it, is an exit; one
+/// still listed is a detach; and a probe that could not run is not an exit,
+/// which would review what the harness may still change.
+fn exited(
+    mode: persist::Mode,
+    probe: impl FnOnce() -> image::Probe,
+    id: &str,
+    harness: &str,
+) -> bool {
+    match mode {
+        persist::Mode::None => true,
+        persist::Mode::Dtach => match probe() {
+            image::Probe::Listed(listing) => {
+                !persist::live(id, &listing).contains(&harness.to_string())
+            }
+            image::Probe::NotEnterable | image::Probe::Gone => true,
+            image::Probe::Unknown(_) => false,
+        },
+    }
 }
 
 /// The two things a launch needs from outside the plan: what omh contributes,
@@ -2529,6 +2738,25 @@ pub(crate) fn rm(
     //
     // So it joins `crate::cmd::harvest::AtStake::Unknown`, which has had exactly this shape and
     // exactly this escape since #58.
+    // Preferences the session changed and nobody reviewed go with its run
+    // directory. With nobody to ask and no `--yes` to say drop them, that is
+    // refused here, before anything goes; at a terminal they are reviewed
+    // below, once the container is down.
+    if consent == crate::cmd::harvest::Consent::CannotAsk {
+        for (harness, keys) in unreviewed(&paths, id) {
+            match keys {
+                Ok(keys) if keys.is_empty() => {}
+                Ok(keys) => anyhow::bail!(
+                    "{} — nothing was removed",
+                    to_review(id, &harness, &keys, true)
+                ),
+                Err(e) => anyhow::bail!(
+                    "could not tell whether {id} has {harness} preferences to review: {e:#} — \
+                     nothing was removed; `omh {id} rm --yes` removes it whatever they hold"
+                ),
+            }
+        }
+    }
     let snapshots =
         match shadow::Shadow::new(&paths.shadows(), &session.id).turns(&session.worktree) {
             Ok(None) => crate::cmd::harvest::Snapshots::None,
@@ -2643,7 +2871,21 @@ pub(crate) fn rm(
     // leaving it costs nothing that breaks — but the `last-used` marker beside
     // it is what says a session ran here, and a marker with no session behind it
     // is how `omh s` learns to report a leftover that is not there any more.
-    keep_preferences(&paths, id, ctx);
+    let how = match consent {
+        crate::cmd::harvest::Consent::Given => Review::DropAll,
+        crate::cmd::harvest::Consent::MayAsk => Review::Ask,
+        crate::cmd::harvest::Consent::CannotAsk => Review::Leave,
+    };
+    let left = review_preferences(&paths, &[id.to_string()], how, ctx);
+    // A change left to review would go with the run directory: the removal
+    // stops here, with the container down and everything else kept.
+    anyhow::ensure!(
+        how == Review::DropAll || left.is_empty(),
+        "{id} is down, and its preferences are still to review — {}. Its run directory, \
+         worktree and branch are kept: `omh {id} rm` again reviews them, `omh {id} rm --yes` \
+         drops them",
+        out::untrusted(&left.join(", "))
+    );
     match std::fs::remove_dir_all(paths.runs().join(id)) {
         Ok(()) => went.push("the run directory".to_string()),
         // Never made, or already gone: not a removal that failed.
@@ -2908,6 +3150,36 @@ pub(crate) fn rm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// dtach's exit told from a detach (#197 §4): only an exit is reviewed.
+    /// Under `persistence = none` the terminal coming back is the exit, and
+    /// the container is not asked. Under dtach, the harness's own socket
+    /// still listed is a detach — another harness's is not this one — and a
+    /// probe that could not run is not taken for an exit.
+    #[test]
+    fn dtachs_exit_is_told_from_a_detach() {
+        use crate::image::Probe;
+        let listed = |names: &'static str| move || Probe::Listed(names.to_string());
+        assert!(exited(
+            persist::Mode::None,
+            || panic!("asked the container"),
+            "s01",
+            "claude"
+        ));
+        let dtach = persist::Mode::Dtach;
+        assert!(!exited(dtach, listed("s01-claude\n"), "s01", "claude"));
+        assert!(exited(dtach, listed(""), "s01", "claude"));
+        assert!(exited(dtach, listed("s01-codex\n"), "s01", "claude"));
+        assert!(exited(dtach, listed("s02-claude\n"), "s01", "claude"));
+        assert!(exited(dtach, || Probe::Gone, "s01", "claude"));
+        assert!(exited(dtach, || Probe::NotEnterable, "s01", "claude"));
+        assert!(!exited(
+            dtach,
+            || Probe::Unknown("no daemon".into()),
+            "s01",
+            "claude"
+        ));
+    }
     use crate::session::Ran;
     use std::path::Path;
 
