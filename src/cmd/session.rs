@@ -2617,7 +2617,7 @@ pub(crate) fn run(
     if exited(opts.persist, probe, &session.id, &harness)
         && crate::cmd::harvest::Interactive::of_stdin().0
     {
-        review_preferences(&paths, &[session.id.clone()], Review::Ask, ctx);
+        review_preferences(&paths, std::slice::from_ref(&session.id), Review::Ask, ctx);
     }
     // `omh s01 diff`, not `omh diff`. There is no top-level `diff` — the name
     // is not a command, so it comes
