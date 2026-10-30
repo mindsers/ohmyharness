@@ -215,7 +215,7 @@ mask   = ["$HOME/.claude/.config.json"]
 # file beside it and renaming it over; refused through a single-file mount, it
 # writes the file in place, which lands in the session's copy, same inode
 # [measured in #197 at a terminal; `claude plugin marketplace add`, which
-# writes user settings, on Docker Desktop — e2e].
+# writes user settings, on Docker Desktop and on Linux in the nightly — e2e].
 #
 # The keys, each read in the 2.1.300 binary where Claude reads it [bin]:
 # `modelSettings` holds per-model `effortLevel`, `maxEffortLevel` and
