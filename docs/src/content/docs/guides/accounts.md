@@ -328,7 +328,8 @@ a copy of them. What the session changes there is its own until you review it:
 | Codex | `~/.codex/config.toml` | `model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`, `service_tier`, the `tui` settings, and the notices Codex records once you dismiss one |
 | omp | `~/.omp/agent/config.yml` | `modelRoles`, `defaultThinkingLevel`, `theme.dark`, `theme.light`, `enabledModels`, `cycleOrder`, `modelPresets`, `colorBlindMode`, `symbolPreset`, `composer.shape`, and the mark omp records once its setup wizard has run |
 
-opencode is not covered yet (#197): its preferences behave as they did. The lists are each adapter's
+| opencode | `~/.local/state/opencode/model.json` | `recent`, `favorite`, `variant` |
+| | `~/.local/state/opencode/kv.json` | the theme and its mode, the thinking mode, and what the TUI shows — tool details, metadata, scrollbar, animations, diffs and the diff viewer, paste summaries, the terminal title, the which-key layout, the sound pack — and the notices it records once dismissed | The lists are each adapter's
 [`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps).
 
 ### The review
@@ -637,6 +638,35 @@ writes is never read while the link is there, and never kept.
 
 **omp on `sbx` waits for #199**, as Codex does: laying the link asks which
 sandboxes still mount the account, and `sbx` keeps no labels to answer from.
+
+### `~/.local/state/opencode` is each session's own
+
+opencode keeps what you pick — the models you last used and starred, each
+one's variant, the theme, what its TUI shows — in its state directory,
+`~/.local/state/opencode`, which was never in the account: every session
+started without it. Now the account keeps those preferences and each session
+gets the whole directory as a copy of its own:
+
+- **kept:** the keys the opencode adapter declares under
+  [`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps) —
+  `recent`, `favorite` and `variant` in `model.json`; in `kv.json` the theme
+  and its mode, the thinking mode and the TUI's display settings — and the
+  notices opencode records once you dismiss one;
+- **the session's:** everything else in the directory — prompt history and
+  stash, file frecency, `plugin_enabled`, `share_consent`. It lasts the
+  session, its relaunches included, and goes with it at `omh sNN rm`;
+- **how:** the session's copy is mounted at `~/.local/state/opencode`. opencode
+  writes its files there by renaming over them, which a mounted directory
+  takes.
+
+A `model` in opencode's config wins over the one you last picked, at every
+start: omh's render never sets one, and a `model` in the repo's
+`opencode.json` or in `OPENCODE_CONFIG_CONTENT` still does. What a session changes among its
+preferences reaches the account through [the review](#the-review). The
+account's kept values are at `~/.omh/creds/opencode/<account>/preferences/`; a
+session's copy at `~/.omh/run/<repo>/<session>/.preferences/opencode/live/`.
+There is nothing to migrate: the first launch on an account starts from
+nothing kept, and a session without an account has no copy at all, as before.
 
 ### `token` is what proves a login
 
