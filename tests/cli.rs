@@ -17120,6 +17120,15 @@ fn a_codex_sessions_config_is_its_own_and_only_preferences_come_back() {
         ),
         "{said}"
     );
+    // Down already, it is still named: how a session that ended unwatched
+    // is reviewed.
+    std::fs::write(sb.bin.join("containers"), "").unwrap();
+    let out = sb.omh(&["s01", "down"]);
+    assert!(
+        printed(&out).contains("s01: 1 codex preference to review — model"),
+        "{}",
+        printed(&out)
+    );
     let listed = sb.omh(&["s", "--json"]);
     let listed: serde_json::Value = serde_json::from_slice(&listed.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", printed(&listed)));

@@ -276,110 +276,79 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
         crate::out::untrusted(&s)
     };
 
+    // The answer for them all: said in advance for `rm --yes`, asked once
+    // otherwise — and nothing, for Enter or a closed input.
+    let all = match &mut answers {
+        _ if items.is_empty() => None,
+        Answers::DropAll => Some('d'),
+        Answers::Ask { input, out } => {
+            let sessions: Vec<&str> = (0..read.len()).map(id).collect();
+            writeln!(
+                out,
+                "{} changed {} {} preference{} on account `{}`:",
+                crate::out::untrusted(&sessions.join(" and ")),
+                items.len(),
+                adapter.name,
+                if items.len() == 1 { "" } else { "s" },
+                crate::out::untrusted(&shown_account)
+            )?;
+            for item in &items {
+                writeln!(out, "  {}", line(item, &read[item.sitting].1, &kept))?;
+            }
+            for (r, (_, sides)) in read.iter().enumerate() {
+                let left = not_preferences(sides);
+                if !left.is_empty() {
+                    writeln!(
+                        out,
+                        "{}not kept, not preferences: {}",
+                        if many {
+                            format!("{}: ", id(r))
+                        } else {
+                            String::new()
+                        },
+                        crate::out::untrusted(&left.join(", "))
+                    )?;
+                }
+            }
+            ask(
+                &mut **input,
+                &mut **out,
+                "[k]eep all  [r]eview each  [d]rop all  — Enter leaves them to review",
+                &['k', 'r', 'd'],
+            )?
+        }
+    };
+
+    // Each change decided, and applied as it is, so the next one's conflict
+    // is read against what this one kept.
     let mut decided = vec![Decision::Leave; items.len()];
-    // Whether each decision was applied as it was made, which a walk through
-    // the changes does so the next one's conflict is read against it.
-    let mut applied = false;
-    if !items.is_empty() {
-        match &mut answers {
-            Answers::DropAll => decided.fill(Decision::Drop),
-            Answers::Ask { input, out } => {
-                let sessions: Vec<&str> = (0..read.len()).map(id).collect();
-                writeln!(
-                    out,
-                    "{} changed {} {} preference{} on account `{}`:",
-                    crate::out::untrusted(&sessions.join(" and ")),
-                    items.len(),
-                    adapter.name,
-                    if items.len() == 1 { "" } else { "s" },
-                    crate::out::untrusted(&shown_account)
-                )?;
-                for item in &items {
-                    writeln!(out, "  {}", line(item, &read[item.sitting].1, &kept))?;
-                }
-                for (r, (_, sides)) in read.iter().enumerate() {
-                    let left = not_preferences(sides);
-                    if !left.is_empty() {
-                        writeln!(
-                            out,
-                            "{}not kept, not preferences: {}",
-                            if many {
-                                format!("{}: ", id(r))
-                            } else {
-                                String::new()
-                            },
-                            crate::out::untrusted(&left.join(", "))
-                        )?;
-                    }
-                }
-                let all = ask(
-                    &mut **input,
-                    &mut **out,
-                    "[k]eep all  [r]eview each  [d]rop all  — Enter leaves them to review",
-                    &['k', 'r', 'd'],
-                )?;
-                match all {
-                    Some('d') => decided.fill(Decision::Drop),
-                    Some('k') | Some('r') => {
-                        applied = true;
-                        let each = all == Some('r');
-                        for (n, item) in items.iter().enumerate() {
-                            let (_, sides) = &read[item.sitting];
-                            let side = &sides[item.file];
-                            let conflict =
-                                get(&kept[item.file], &item.key) != get(&side.base, &item.key);
-                            // "Keep all" keeps this session's value over a
-                            // conflict shown above; one this review made, by
-                            // keeping another session's value a moment ago,
-                            // was not shown, so it is asked.
-                            let asked = each || (conflict && !item.conflict);
-                            decided[n] = match asked {
-                                false => Decision::Keep,
-                                true => {
-                                    let (question, keep_key, drop_key) = match conflict {
-                                        true => (
-                                            format!(
-                                                "{}   [m]ine  [t]heirs",
-                                                line(item, sides, &kept)
-                                            ),
-                                            'm',
-                                            't',
-                                        ),
-                                        false => (
-                                            format!(
-                                                "{}   [k]eep  [d]rop",
-                                                line(item, sides, &kept)
-                                            ),
-                                            'k',
-                                            'd',
-                                        ),
-                                    };
-                                    match ask(
-                                        &mut **input,
-                                        &mut **out,
-                                        &question,
-                                        &[keep_key, drop_key],
-                                    )? {
-                                        Some(c) if c == keep_key => Decision::Keep,
-                                        Some(_) => Decision::Drop,
-                                        None => Decision::Leave,
-                                    }
-                                }
-                            };
-                            // Applied as it is decided, so the next item's
-                            // conflict is read against what this one kept.
-                            apply(&mut read, &mut kept, item, decided[n]);
-                        }
-                    }
-                    _ => {}
+    for (n, item) in items.iter().enumerate() {
+        let (_, sides) = &read[item.sitting];
+        let side = &sides[item.file];
+        let conflict = get(&kept[item.file], &item.key) != get(&side.base, &item.key);
+        // "Keep all" keeps this session's value over a conflict shown above;
+        // one this review made, by keeping another session's value a moment
+        // ago, was not shown, so it is asked.
+        let asked = all == Some('r') || (all == Some('k') && conflict && !item.conflict);
+        decided[n] = match (all, &mut answers) {
+            (Some('d'), _) => Decision::Drop,
+            (Some('k') | Some('r'), Answers::Ask { input, out }) if asked => {
+                let (choices, keep_key) = match conflict {
+                    true => ("[m]ine  [t]heirs", 'm'),
+                    false => ("[k]eep  [d]rop", 'k'),
+                };
+                let question = format!("{}   {choices}", line(item, sides, &kept));
+                let drop_key = if conflict { 't' } else { 'd' };
+                match ask(&mut **input, &mut **out, &question, &[keep_key, drop_key])? {
+                    Some(c) if c == keep_key => Decision::Keep,
+                    Some(_) => Decision::Drop,
+                    None => Decision::Leave,
                 }
             }
-        }
-        if !applied {
-            for (item, d) in items.iter().zip(&decided) {
-                apply(&mut read, &mut kept, item, *d);
-            }
-        }
+            (Some('k') | Some('r'), _) => Decision::Keep,
+            _ => Decision::Leave,
+        };
+        apply(&mut read, &mut kept, item, decided[n]);
     }
 
     for (f, d) in declared.iter().enumerate() {
@@ -822,5 +791,92 @@ mod tests {
         let (outcome, _) = answered(std::slice::from_ref(&s), "k\n");
         assert_eq!(outcome.left, vec!["s01 (could not tell)"]);
         assert_eq!(fx.kept(), json(r#"{"model":"a"}"#));
+    }
+
+    /// A quiet key — bookkeeping the harness writes on its own — is kept
+    /// without asking, even when nothing else is answered.
+    #[test]
+    fn a_quiet_key_is_kept_without_asking() {
+        let adapters = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+        let codex = Adapter::find(&adapters, "codex").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/codex/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(account.join("preferences/config.toml"), "model = \"a\"\n").unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let checked = super::super::check(&codex, &account).unwrap().unwrap();
+        checked.apply(&|| Ok(Vec::new())).unwrap();
+        checked
+            .seed(&codex, &home, &BTreeMap::new(), false)
+            .unwrap();
+        std::fs::write(
+            super::super::live(&home).join("config.toml"),
+            "model = \"b\"\n[tui]\nmodel_availability_nux = 3\n",
+        )
+        .unwrap();
+        assert_eq!(unreviewed(&codex, &home).unwrap(), vec!["model"]);
+        let sitting = Sitting {
+            id: "s01".into(),
+            home,
+        };
+        let mut out = Vec::new();
+        let outcome = review(
+            &codex,
+            std::slice::from_ref(&sitting),
+            Answers::Ask {
+                input: &mut "".as_bytes(),
+                out: &mut out,
+            },
+        )
+        .unwrap();
+        let said = String::from_utf8(out).unwrap();
+        assert!(!said.contains("model_availability_nux"), "{said}");
+        assert_eq!(outcome.left, vec!["s01 model"]);
+        assert_eq!(
+            std::fs::read_to_string(account.join("preferences/config.toml")).unwrap(),
+            "model = \"a\"\n\n[tui]\nmodel_availability_nux = 3\n"
+        );
+    }
+
+    /// A copy of an account file holds the harness's own bookkeeping beside
+    /// its preferences; none of it is named as what the session wrote.
+    #[test]
+    fn a_copys_other_keys_are_never_named() {
+        let fx = Fx::new("{}");
+        let home = Home::Kept(fx.root.path().join("run/repo/s01/.preferences/claude"));
+        let rests = BTreeMap::from([(
+            ".claude.json".to_string(),
+            r#"{"oauthAccount":{"emailAddress":"a@b"}}"#.to_string(),
+        )]);
+        super::super::check(&claude(), &fx.account)
+            .unwrap()
+            .unwrap()
+            .seed(&claude(), &home, &rests, false)
+            .unwrap();
+        let copy = super::super::live(&home).join(".claude.json");
+        std::fs::write(
+            &copy,
+            r#"{"oauthAccount":{"emailAddress":"a@b"},"numStartups":2,"copyOnSelect":true}"#,
+        )
+        .unwrap();
+        write_live(
+            &Sitting {
+                id: "s01".into(),
+                home: Home::Kept(home.path().to_path_buf()),
+            },
+            r#"{"hooks":{}}"#,
+        );
+        let sitting = Sitting {
+            id: "s01".into(),
+            home,
+        };
+        let outcome = review(&claude(), std::slice::from_ref(&sitting), Answers::DropAll).unwrap();
+        assert_eq!(
+            outcome.notes,
+            vec![
+                "dropped 1 claude preference: s01 copyOnSelect".to_string(),
+                "s01: not kept, not preferences: hooks".to_string(),
+            ]
+        );
     }
 }

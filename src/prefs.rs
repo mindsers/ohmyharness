@@ -1816,4 +1816,28 @@ base_url = "https://example.invalid"
             "model = \"w\"\n"
         );
     }
+
+    /// A seed reads what the account keeps again, under its lock: a value
+    /// kept between the launch's check and its seed is the one the session
+    /// starts from, never the one checked.
+    #[test]
+    fn a_seed_starts_from_what_the_account_keeps_when_it_seeds() {
+        let (root, work, _) = account();
+        std::fs::create_dir_all(work.join("preferences")).unwrap();
+        std::fs::write(work.join("preferences/config.toml"), "model = \"a\"\n").unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let checked = check(&codex(), &work).unwrap().unwrap();
+        checked.apply(&none_running).unwrap();
+        std::fs::write(work.join("preferences/config.toml"), "model = \"b\"\n").unwrap();
+        checked
+            .seed(&codex(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        for part in ["base", "reviewed", "live"] {
+            assert_eq!(
+                std::fs::read_to_string(home.path().join(part).join("config.toml")).unwrap(),
+                "model = \"b\"\n",
+                "{part}"
+            );
+        }
+    }
 }
