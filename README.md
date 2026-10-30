@@ -604,17 +604,22 @@ reads — including asking `claude mcp list` whether the servers loaded, rather
 than trusting that a file landed:
 
 ```console
-$ omh doctor
-checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go unchecked…
-  ✓  starts           claude --version
-  ✓  rules            /work/CLAUDE.md
-  ✓  skills           /home/agent/.claude/skills
-  ✓  mcp              /work/.mcp.json
-  ✓  mcp-loaded       /work (claude mcp list: Connected)
-  ✓  commands         /home/agent/.claude/commands
-  ✓  subagents        /home/agent/.claude/agents
-  ✓  hooks            /home/agent/.claude/settings.json
-  …
+$ omh doctor --harness claude
+checking claude in omh/claude:794db230f74d46a0 — no account, so credentials go unchecked…
+…
+claude in omh/claude:794db230f74d46a0
+  ✓  starts      claude --version
+  ✓  git         git merge-tree -h 2>&1 | grep -q merge-base || { git --version 2>&1; exit 1; }
+  ✓  rules       /work/CLAUDE.md
+  ✓  skills      /home/agent/.claude/skills
+  ✓  mcp         /work/.mcp.json
+  ✓  mcp-loaded  /work (claude mcp list: Connected)
+  ✓  commands    /home/agent/.claude/commands
+  ✓  subagents   /home/agent/.claude/agents
+  ✓  hooks       /etc/omh/claude/settings.json
+  ✓  memory
+
+  all 21 checks passed — claude's adapter paths are verified
 ```
 
 Above those, in the same table, are the **host's** rows: whether the container
