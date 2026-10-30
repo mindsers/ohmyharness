@@ -242,8 +242,10 @@ drop   = [
 # (`config/model-settings.ts`, `session/settings.ts`, `modes/settings.ts`):
 # which model each role uses and the order `/model` cycles them, the models
 # offered, the presets `/modelpreset` saves — each a role's model and a
-# thinking level, nothing else — the default thinking level, and the dark and
-# light themes by name. None names a program, grants a consent or a trust,
+# thinking level, nothing else — the default thinking level, the dark and
+# light themes by name, and the three display choices its setup wizard asks
+# for (`modes/setup.ts`): colour-blind mode, the symbol preset and the
+# composer's shape. None names a program, grants a consent or a trust,
 # carries text before the model or picks where traffic goes:
 #
 # - a model id, `@upstream` route or role (`web`, `image`, `speech`) resolves
@@ -280,6 +282,9 @@ mount = "link"
   "enabledModels",
   "cycleOrder",
   "modelPresets",
+  "colorBlindMode",
+  "symbolPreset",
+  "composer.shape",
 ]
 
 [preferences.quiet]

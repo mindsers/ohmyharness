@@ -2590,10 +2590,12 @@ render = "concat"
         }
     }
 
-    /// omp's preferences are the issue's list, explicit, in the one file omp
-    /// 18.10.4 keeps its settings in (its source) — none a program, a
-    /// consent, a trust, text before the model or where traffic goes —
-    /// reaching it by a link, which omp resolves before it saves. `theme` is
+    /// omp's preferences are the issue's list and the display choices omp's
+    /// setup wizard asks for, explicit, in the one file omp 18.10.4 keeps its
+    /// settings in (its source) — none a program, a consent, a trust, text
+    /// before the model or where traffic goes — reaching it by a link, which
+    /// omp resolves before it saves; and the wizard's mark kept quietly, or
+    /// every session would start in the wizard. `theme` is
     /// named key by key; the two tables declared whole are named here, so a
     /// pin bump's diff touches them and they are read again. omp reads
     /// `config.yaml` where `config.yml` is absent, so that one is where an
@@ -2626,6 +2628,9 @@ render = "concat"
                 "enabledModels",
                 "cycleOrder",
                 "modelPresets",
+                "colorBlindMode",
+                "symbolPreset",
+                "composer.shape",
             ]
         );
         let quiet: Vec<String> = file.quiet.iter().map(dotted).collect();

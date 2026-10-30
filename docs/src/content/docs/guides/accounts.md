@@ -326,7 +326,7 @@ a copy of them. What the session changes there is its own until you review it:
 | Claude Code | `~/.claude/settings.json` | `model`, `advisorModel`, `modelSettings`, `effortLevel`, `editorMode`, `tui`, `theme`, `verbose` |
 | | `~/.claude.json` | `copyFullResponse`, `copyOnSelect`, `defaultToAgentsView`, `leftArrowOpensAgents`, `prStatusFooterEnabled`, `respectGitignore` |
 | Codex | `~/.codex/config.toml` | `model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`, `service_tier`, the `tui` settings, and the notices Codex records once you dismiss one |
-| omp | `~/.omp/agent/config.yml` | `modelRoles`, `defaultThinkingLevel`, `theme.dark`, `theme.light`, `enabledModels`, `cycleOrder`, `modelPresets`, and the mark omp records once its setup wizard has run |
+| omp | `~/.omp/agent/config.yml` | `modelRoles`, `defaultThinkingLevel`, `theme.dark`, `theme.light`, `enabledModels`, `cycleOrder`, `modelPresets`, `colorBlindMode`, `symbolPreset`, `composer.shape`, and the mark omp records once its setup wizard has run |
 
 opencode is not covered yet (#197): its preferences behave as they did. The lists are each adapter's
 [`[preferences]`](/reference/adapters/#preferences-what-a-session-keeps).
@@ -588,8 +588,10 @@ copy of its own:
   the model each role uses (`modelRoles`) and the order `/model` cycles them in
   (`cycleOrder`), the models it offers (`enabledModels`), the presets
   `/modelpreset` saves (`modelPresets`), the default thinking level, the dark
-  and light themes, and `setupVersion`, which omp records once its setup
-  wizard has run — without it, every session would start with the wizard;
+  and light themes, the display choices the setup wizard asks for —
+  colour-blind mode, symbols, the composer's shape — and `setupVersion`, which
+  omp records once that wizard has run: without it, every session would start
+  with the wizard;
 - **not kept:** everything else — extensions, tool and MCP settings,
   `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth`. They
   last the session that wrote them. Your providers are the account's

@@ -16734,15 +16734,14 @@ fn an_omp_accounts_settings_are_migrated_from_the_file_omp_reads_in_their_place(
     let yaml = agent.join("config.yaml");
     std::fs::write(
         &yaml,
-        "modelRoles:\n  default: corp/m\ncolorBlindMode: true\nauth:\n  broker:\n    token: sk-planted\n",
+        "modelRoles:\n  default: corp/m\ntodo:\n  enabled: false\nauth:\n  broker:\n    token: sk-planted\n",
     )
     .unwrap();
 
     let out = sb.omh(&["new", "omp", "--dry-run"]);
     assert!(out.status.success(), "{}", printed(&out));
     assert!(
-        printed(&out).contains("config.yaml")
-            && printed(&out).contains("dropping auth, colorBlindMode"),
+        printed(&out).contains("config.yaml") && printed(&out).contains("dropping auth, todo"),
         "a preview names the migration: {}",
         printed(&out)
     );
@@ -16753,7 +16752,7 @@ fn an_omp_accounts_settings_are_migrated_from_the_file_omp_reads_in_their_place(
     let said = printed(&out);
     assert!(
         said.contains("from the config.yaml omp read in its place")
-            && said.contains("dropped auth, colorBlindMode"),
+            && said.contains("dropped auth, todo"),
         "{said}"
     );
     assert!(!said.contains("sk-planted"), "a value was printed: {said}");
