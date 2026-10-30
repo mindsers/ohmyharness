@@ -1353,7 +1353,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("docs/src/content/docs/guides/accounts.md", 13),
         ("docs/src/content/docs/guides/code-graph.md", 1),
         ("docs/src/content/docs/guides/editors.md", 4),
-        ("docs/src/content/docs/guides/troubleshooting.md", 16),
+        ("docs/src/content/docs/guides/troubleshooting.md", 17),
         ("docs/src/content/docs/project/decisions.md", 1),
         ("docs/src/content/docs/reference/adapters.md", 2), // + `omh doctor --harness` in adding a harness
         // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,

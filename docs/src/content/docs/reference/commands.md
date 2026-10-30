@@ -165,29 +165,40 @@ how a script reads a launch plan.
 
 ```console
 $ omh s
-  s01  omh/s01  stopped  ?  (1 behind main)
+  s01  omh/s01  stopped      1 preference to review
 
 $ omh s --json
 {
   "base": "main",
+  "focus": null,
   "leftovers": [],
   "overlaps": [],
   "sessions": [
     {
-      "behind": 1,
+      "behind": 0,
       "id": "s01",
       "label": "omh/s01",
       "running": false,
       "running_unknown": null,
+      "unreviewed": [
+        "model"
+      ],
+      "unreviewed_unknown": null,
       "work": {
-        "state": "unknown"
+        "state": "clean"
       }
     }
   ],
+  "shell": null,
   "unchecked": [],
   "unreadable": []
 }
 ```
+
+**`unreviewed` is the preferences the session changed that no review has
+answered** — empty when there are none, `null` with the reason in
+`unreviewed_unknown` when omh could not read them — see
+[your preferences](/guides/accounts/#your-preferences-from-one-session-to-the-next).
 
 **`unchecked` and `unreadable` are how a partial answer says so.** Both render
 as nothing at all when they are empty, so without them a script cannot tell
@@ -1490,6 +1501,17 @@ proceeds without asking. A declined prompt stops nothing.
 **A sandbox omh could not ask about is left alone**, and said so — see
 [`up?`](#omh-sessions---s).
 
+**Then it reviews the preferences the stopped sessions changed** — once per
+account, across every session on it, at a terminal; on a session already down
+too, which is how one that ended unwatched is reviewed. With nobody to ask it
+leaves them to review and says so:
+
+```
+omh: s01: 1 codex preference to review — model. `omh s01 down` at a terminal reviews them; `omh s01 rm --yes` drops them
+```
+
+See [the review](/guides/accounts/#the-review).
+
 <details>
 <summary>Why a wide <code>down</code> asks, and why a script is not asked</summary>
 
@@ -1513,7 +1535,7 @@ omh sNN rm [--yes]
 
 | | |
 |---|---|
-| `--yes` `-y` | answer the question about unreviewed work in advance, for runs with nobody to ask |
+| `--yes` `-y` | answer the questions about unreviewed work and unreviewed preferences in advance, for runs with nobody to ask: remove the work, drop the preferences |
 
 **It counts the agent's commits before it removes anything.** The session's
 branch survives a removal and its files were on disk until it ran. The agent's
@@ -1548,6 +1570,24 @@ numbers what you can act on; this asks whether anything in that repository
 exists nowhere else, however the agent left it. Work thrown away with
 `reset --hard` is still in there, and so is a branch the agent wandered off —
 neither appears in the numbered list, and both are gone once the repository is.
+
+**It reviews the preferences the session changed**, once its container is
+down: at a terminal it asks, and a change left to review stops the removal
+there, with the run directory, worktree and branch kept. With nobody to ask it
+refuses before anything goes:
+
+```
+omh: s01: 1 codex preference to review — model. `omh s01 rm` at a terminal reviews them; `omh s01 rm --yes` drops them — nothing was removed
+```
+
+`--yes` drops them, naming each — never keeps them:
+
+```
+omh: dropped 1 codex preference: s01 model
+omh: s01: not kept, not preferences: notify
+```
+
+See [the review](/guides/accounts/#the-review).
 
 **A sandbox that never ran removes quietly. One omh cannot read does not**:
 that is a third answer, not a quiet yes, and it is the state a half-finished

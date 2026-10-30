@@ -254,6 +254,23 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
     let ids: Vec<String> = read.iter().map(|(i, _)| sittings[*i].id.clone()).collect();
     let id = |r: usize| ids[r].as_str();
     let many = read.len() > 1;
+    // Columns: the key, and the account's value, each as wide as the widest
+    // when the review began — a long value only as far as it needs.
+    let pad = |s: String, width: usize| {
+        let w = crate::out::display_width(&s);
+        format!("{s}{}", " ".repeat(width.saturating_sub(w)))
+    };
+    let key_width = items
+        .iter()
+        .map(|i| crate::out::display_width(&dotted(&i.key)))
+        .max()
+        .unwrap_or(0);
+    let from_width = items
+        .iter()
+        .map(|i| crate::out::display_width(&shown(get(&kept[i.file], &i.key))))
+        .max()
+        .unwrap_or(0)
+        .min(32);
     let line = |item: &Item, sides: &[Side], kept: &[Doc]| -> String {
         let side = &sides[item.file];
         let mut s = format!(
@@ -263,8 +280,8 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
             } else {
                 String::new()
             },
-            dotted(&item.key),
-            shown(get(&kept[item.file], &item.key)),
+            pad(dotted(&item.key), key_width),
+            pad(shown(get(&kept[item.file], &item.key)), from_width),
             shown(get(&side.live, &item.key)),
         );
         if get(&kept[item.file], &item.key) != get(&side.base, &item.key) {
@@ -753,9 +770,10 @@ mod tests {
         let (outcome, said) = answered(&[one, two], "k\nt\n");
         assert!(
             said.contains("s01 and s02 changed 3 claude preferences on account `work`:")
-                && said.contains(r#"s01  model  "a"  →  "b""#)
-                && said.contains(r#"s02  model  "a"  →  "c""#)
-                && said.contains(r#"s02  model  "b"  →  "c"   (another session kept "b" since this one started)   [m]ine  [t]heirs"#),
+                && said.contains(r#"s01  model    "a"      →  "b""#)
+                && said.contains(r#"s02  model    "a"      →  "c""#)
+                && said.contains(r#"s02  verbose  (unset)  →  true"#)
+                && said.contains(r#"s02  model    "b"      →  "c"   (another session kept "b" since this one started)   [m]ine  [t]heirs"#),
             "{said}"
         );
         assert_eq!(fx.kept(), json(r#"{"model":"b","verbose":true}"#));

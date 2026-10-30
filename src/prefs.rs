@@ -1840,4 +1840,25 @@ base_url = "https://example.invalid"
             );
         }
     }
+
+    /// What the account keeps is its declared keys alone, whatever its store
+    /// holds beside them: `omh doctor`'s line names those, and nothing else.
+    #[test]
+    fn what_an_account_keeps_is_named_by_its_declared_keys_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/claude/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/settings.json"),
+            r#"{"model":"m","hooks":{"SessionStart":[]}}"#,
+        )
+        .unwrap();
+        std::fs::write(account.join("preferences/.claude.json"), "{}").unwrap();
+        let summary = check(&claude(), &account).unwrap().unwrap().summary();
+        assert_eq!(
+            summary,
+            "claude's preferences are per session: .claude.json — the account keeps nothing; \
+             settings.json — the account keeps model"
+        );
+    }
 }

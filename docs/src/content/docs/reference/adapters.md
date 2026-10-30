@@ -155,7 +155,7 @@ temporary file and renaming it over.
 Claude Code reads omh's settings — its hooks, the approval of omh's MCP
 document and of omh's own servers' tools, `disableAllHooks: false` and
 `attribution: false` — from `--settings`, never from `~/.claude/settings.json`,
-which is in the account every session on it shares and is masked:
+which is each session's own [preferences file](#preferences-what-a-session-keeps):
 
 ```toml
 # adapters/claude.toml
@@ -245,13 +245,12 @@ launch and by `omh doctor`. `omh eject` writes the policy itself under
   are switched off in a session (read in the 2.1.300 binary; not measured):
   one is matched by its URL, and allowlisting that URL would let a session put
   its own server there. An organisation's own managed list replaces omh's
-  (Claude Code's docs; not measured). Two files in the account's shared
-  `~/.claude/` are masked: `.config.json`, which Claude reads *instead of*
-  `~/.claude.json` when it is not empty, and `settings.json`, user settings —
-  a hook written there would load in every later session, and in running ones
-  live. An empty file there is read as no settings (measured; a malformed one
-  stops Claude at a Settings Error). omh's own settings reach Claude another
-  way: [Claude's settings document](#claudes-settings-document).
+  (Claude Code's docs; not measured). `.config.json`, in the account's shared
+  `~/.claude/`, is masked: Claude reads it *instead of* `~/.claude.json` when
+  it is not empty. `settings.json` beside it, user settings, is each session's
+  own [preferences file](#preferences-what-a-session-keeps); omh's own
+  settings reach Claude another way:
+  [Claude's settings document](#claudes-settings-document).
 
 ### `[preferences]`: what a session keeps
 
@@ -267,16 +266,28 @@ mount = "link"
 "$HOME/.codex/config.toml" = ["notice.hide_rate_limit_model_nudge", …]
 ```
 
+```toml
+# adapters/claude.toml
+[preferences]
+mount = "file"
+
+[preferences.files]
+"$HOME/.claude/settings.json" = ["model", "advisorModel", "modelSettings", …]
+"$HOME/.claude.json"          = ["copyOnSelect", "respectGitignore", …]
+```
+
 A harness's own config file sits in the account, and a session writes it. The
 keys named here are the user's preferences: the account keeps them, at its
-root where no mount reaches, and each session starts from a copy of them.
-Everything else a session writes there lasts that session — see
-[`~/.codex/config.toml` is each session's own](/guides/accounts/#codexconfigtoml-is-each-sessions-own).
+root where no mount reaches, and each session starts from a copy of them. What
+a session changes among them reaches the account through
+[the review](/guides/accounts/#the-review); everything else it writes there
+lasts that session — see
+[your preferences](/guides/accounts/#your-preferences-from-one-session-to-the-next).
 
 | Field | What it says | Default |
 |---|---|---|
-| `mount` | how a session's copy reaches the harness. `link`: the account's file is a link to the same name under `/omh/prefs`, which each container mounts from its session's own copy — for a harness that saves by renaming over the file, which a mounted file refuses, and resolves the link first | required |
-| `files` | each file, one of `creds`' paths strictly inside one of its directories, with no `..`; TOML; and its keys that are preferences, as TOML dotted keys (`tui.theme`, `notice."a.b"`), a table declared whole by its name | required |
+| `mount` | how a session's copy reaches the harness. `link`: the account's file is a link to the same name under `/omh/prefs`, which each container mounts from its session's own copy — for a harness that saves by renaming over the file, which a mounted file refuses, and resolves the link first. `file`: the session's copy is mounted on its own where the harness reads it — for a harness that, its rename refused, writes the file in place | required |
+| `files` | each file and its keys that are preferences, as dotted keys (`tui.theme`, `notice."a.b"`), a table declared whole by its name. A file is TOML or JSON, by its extension; has no `..`; is named unlike every other, since each is kept and copied by its name alone; and is never a `[policy]` `mask` entry. For `link`, it is strictly inside one of `creds`' directories, where the link is laid; for `file`, one of `creds`' files or inside one of its directories. A `file` preferences file that is a `[policy]` `copy` too is one copy: the account file's rest, with the session's preferences | required |
 | `quiet` | keys of the same files the harness writes on its own — a notice dismissed — kept without asking | none |
 
 **The rule a key is judged by:** a preference never names a program or a
@@ -285,9 +296,12 @@ text the harness puts in front of the model, and never picks where traffic
 goes. omh holds a list of what that rules out per harness — for codex
 `mcp_servers`, `notify`, `model_provider`, `model_providers`, `profiles`,
 `features`, `developer_instructions`, `projects`, `hooks`, `approval_policy`,
-`sandbox_mode`, `notice.hide_full_access_warning` and their kin — and an
-adapter declaring a key at, inside or around one of them is refused when it
-loads. Every list is explicit: a key no list names is not kept.
+`sandbox_mode`, `notice.hide_full_access_warning` and their kin; for claude
+`hooks`, `disableAllHooks`, `permissions`, `enabledPlugins`,
+`extraKnownMarketplaces`, `mcpServers`, `statusLine`, `apiKeyHelper`, `env`,
+`attribution`, `outputStyle`, `projects` and their kin — and an adapter
+declaring a key at, inside or around one of them is refused when it loads.
+Every list is explicit: a key no list names is not kept.
 
 ### `[provider]`: the account's model provider
 
@@ -330,6 +344,7 @@ omh enforces each of these, with an error naming the adapter:
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
 - a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
 - a `[policy]` `mask` entry that is a capability's own path — two mounts at one path
+- a `[preferences]` file outside where its `mount` puts it, in a format other than TOML or JSON, with a `..`, masked, or named like another; a key that is not a dotted key, declared twice, inside another, or at, inside or around one the harness's never-list names
 - a `flag` that is not a long option (`--` and letters, digits, dashes), on anything but a `claude-settings` render, with a `path` not under `/etc/`, or with no `eject`; an `eject` outside `$HOME`, with a `..`, or without a `flag`
 
 One rule is yours to keep: **declare `verify` and `ready` together.** `doctor`

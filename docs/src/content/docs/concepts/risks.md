@@ -123,8 +123,9 @@ its own passes the lock, since the allowlist compares no `env` (measured in
 the account's without any server, switch, permission grant or consent, and the
 legacy `~/.claude/.config.json` Claude Code would read instead is masked — see
 [`~/.claude.json` is each session's own](/guides/accounts/#claudejson-is-each-sessions-own).
-Nothing a session writes there reaches the account; a session's own relaunch
-still reads what it wrote into its copy. `tests/e2e` launches with an account
+Nothing a session writes there reaches the account but the preferences its
+adapter declares, once someone keeps them in the review; a session's own
+relaunch still reads what it wrote into its copy. `tests/e2e` launches with an account
 holding such an entry — at the top, under `/work`, and in `.config.json` — with
 omh-memory switched off and a permission granted, checks the entry is one the
 lock admits, and asserts none of it reaches the session and nothing the
@@ -139,9 +140,18 @@ file every `claude` in the sandbox is handed — see
 true` written into the worktree's `.claude/settings.local.json` switched omh's
 hooks off for the session that wrote it, and `attribution` text there reached
 the model; neither does now (`tests/e2e`, red before). `~/.claude/settings.json`
-in the account is masked, so a hook written there is refused. A `claude` run
-by the real binary's absolute path is not handed the document: that session's
-own business, like any other file it can write.
+is each session's own copy, so a hook written there reaches neither the
+account nor any other session (`tests/e2e`). A `claude` run by the real
+binary's absolute path is not handed the document: that session's own
+business, like any other file it can write.
+
+**Preferences are reviewed before the account keeps them** (#197). A session's
+preference changes — `/model`, a theme — reach the account only when someone
+keeps them at a terminal, as values of keys the adapter declares, which never
+name a program, grant a consent or carry text before the model. Nobody at the
+terminal keeps nothing: `down` leaves them to review, `rm` refuses, and
+`rm --yes` drops them (`tests/e2e`, red before — Codex's were kept without
+asking). See [your preferences](/guides/accounts/#your-preferences-from-one-session-to-the-next).
 
 **Closed across sessions on Codex** (#197): the requirements identity
 compares neither `env` nor `cwd` (read in Codex's source), so an entry with
