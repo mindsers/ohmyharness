@@ -259,7 +259,7 @@ moved. Two real failures came from never asking:
   image does not contain, and the harness's whole staged profile stayed
   unmounted.
 - **An account change nobody noticed.** Changing the account between launches
-  went on quietly using the old one — the exact thing `omh auth` refuses to
+  went on quietly using the old one — the exact thing `omh account login` refuses to
   guess about elsewhere. It was `--account work` then; the account is
   `omh set account <name>` now, and the mount it resolves to is part of the
   stamp either way.

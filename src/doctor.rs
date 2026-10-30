@@ -1202,7 +1202,7 @@ pub fn provider_check(adapter: &Adapter, account: Option<&std::path::Path>) -> O
         (
             false,
             format!(
-                "{e:#} — every {} start refuses until it is fixed: omh auth {} --provider <file>",
+                "{e:#} — every {} start refuses until it is fixed: omh account login {} --provider <file>",
                 adapter.name, adapter.name
             ),
         )
@@ -2124,7 +2124,7 @@ pub fn probe_script(checks: &[Check]) -> String {
             // has to come from the answer, not from a warning printed beside
             // it; both are still quoted back on failure, because "no account"
             // and "no such subcommand" are indistinguishable from an exit code
-            // and decide whether the user runs `omh auth` or fixes the adapter.
+            // and decide whether the user runs `omh account login` or fixes the adapter.
             //
             // `grep -F`: `ready` is a marker an adapter author wrote, not a
             // pattern. Read as a basic regex, `usage: omp [options]` matches

@@ -59,7 +59,7 @@ use adapter::Adapter;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Cmd, MemoryCmd, SessionsCmd, SettingsCmd};
+use cli::{AccountCmd, Cli, Cmd, MemoryCmd, SessionsCmd, SettingsCmd};
 use profile::Paths;
 
 fn main() -> std::process::ExitCode {
@@ -340,12 +340,24 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
 
     match &cli.cmd {
         Cmd::Init => cmd::init::init(&cwd, ctx),
-        Cmd::Auth {
-            harness,
-            account,
-            import,
-            provider,
-        } => cmd::auth::auth_cmd(&cwd, harness, account, *import, provider.as_deref(), ctx),
+        Cmd::Account { cmd: None } => cmd::account::list(&cwd, ctx),
+        Cmd::Account {
+            cmd:
+                Some(AccountCmd::Login {
+                    harness,
+                    account,
+                    import,
+                    provider,
+                }),
+        } => cmd::account::login(&cwd, harness, account, *import, provider.as_deref(), ctx),
+        Cmd::Account {
+            cmd:
+                Some(AccountCmd::Forget {
+                    harness,
+                    key,
+                    account,
+                }),
+        } => cmd::account::forget(&cwd, harness, key, account.as_deref(), cli.dry_run, ctx),
         Cmd::Info { repo } => {
             if *repo {
                 cmd::settings::show_repo(&cwd, ctx)

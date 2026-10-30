@@ -16,7 +16,7 @@
 //! prompt. Within a provider, only fields that are data pass: what reads the
 //! host's environment (`env_key`, `env_http_headers`), runs a command
 //! (`auth`), or reaches a profile or a login flow (`aws`, `gateway_oauth`)
-//! cannot be satisfied in a sandbox — `omh auth codex --provider` resolves the
+//! cannot be satisfied in a sandbox — `omh account login codex --provider` resolves the
 //! environment ones once into the file, and refuses the rest by name.
 //!
 //! The fields are `ModelProviderInfo`'s at the pinned tag
@@ -86,7 +86,7 @@ pub fn validate(doc: &toml::Table) -> Result<()> {
         for field in fields.keys() {
             anyhow::ensure!(
                 DATA.contains(&field.as_str()),
-                "`model_providers.{id}.{field}` {} — `omh auth codex --provider <file>` \
+                "`model_providers.{id}.{field}` {} — `omh account login codex --provider <file>` \
                  resolves an environment variable into the file, and refuses a command",
                 match field.as_str() {
                     "env_key" | "env_http_headers" | "env_key_instructions" =>

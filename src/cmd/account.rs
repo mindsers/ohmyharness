@@ -1,8 +1,11 @@
-//! `omh auth` — run a harness’s own login once, and keep what it wrote.
+//! `omh account` — your accounts and what each keeps; `login` runs a
+//! harness’s own login once and keeps what it wrote; `forget` takes one kept
+//! preference back.
 //!
 //! Accounts are per harness, and which one a project uses is a project-level
 //! setting, because that is how it actually varies. `crate::auth` owns the
-//! capture; this drives it and reports.
+//! capture and `crate::prefs` what an account keeps; this drives them and
+//! reports.
 
 use crate::adapter::{Adapter, ProviderFormat};
 use crate::out;
@@ -23,9 +26,93 @@ impl Drop for NetworkCleanup<'_> {
     }
 }
 
+/// Every harness's accounts, the one a launch here uses, and what each keeps.
+pub(crate) fn list(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let mut harnesses = Vec::new();
+    for adapter in Adapter::load_dir(&paths.adapters())? {
+        let names = auth::accounts(&paths, &adapter)?;
+        let configured = auth::configured(&paths, &adapter)?;
+        // `resolve`'s rule, without its refusals: the one named, if a login
+        // answers to it, or the only one.
+        let selected = match (&configured, names.as_slice()) {
+            (Some(name), _) => names.iter().find(|n| *n == name).cloned(),
+            (None, [only]) => Some(only.clone()),
+            (None, _) => None,
+        };
+        let mut accounts = Vec::new();
+        for name in names {
+            let kept = crate::prefs::kept_by_file(&adapter, &auth::dir(&paths, &adapter, &name))?;
+            accounts.push(report::Account {
+                name,
+                keys: kept.iter().flat_map(|k| k.keys.clone()).collect(),
+                kept: kept.into_iter().map(|k| (k.file, k.doc)).collect(),
+            });
+        }
+        harnesses.push(report::HarnessAccounts {
+            harness: adapter.name.to_string(),
+            configured,
+            selected,
+            accounts,
+        });
+    }
+    ctx.say(&report::Accounts { harnesses });
+    Ok(())
+}
+
+/// Take one preference from what an account keeps: the account a launch
+/// here uses, or the one named.
+pub(crate) fn forget(
+    cwd: &std::path::Path,
+    harness: &str,
+    key: &str,
+    account: Option<&str>,
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let adapter = Adapter::find(&paths.adapters(), harness)?;
+    let account = match account {
+        Some(name) => {
+            auth::validate_name(name)?;
+            anyhow::ensure!(
+                auth::is_captured(&paths, &adapter, name),
+                "no account `{name}` for {harness} — `omh account` lists them"
+            );
+            name.to_string()
+        }
+        None => {
+            let configured = auth::configured(&paths, &adapter)?;
+            auth::resolve(&paths, &adapter, configured.as_deref())?
+        }
+    };
+    let dir = auth::dir(&paths, &adapter, &account);
+    let forgot = crate::prefs::forget(&adapter, &dir, &account, key, dry_run)?;
+    let said = format!("{harness}'s {} on account `{account}`", forgot.key);
+    let mut action = report::Action::new(
+        "preference-forgotten",
+        match dry_run {
+            true => format!("would forget {said}"),
+            false => format!("forgot {said}"),
+        },
+    )
+    .data(serde_json::json!({
+        "harness": harness,
+        "account": account,
+        "key": forgot.key,
+        "file": forgot.file,
+        "was": forgot.was,
+    }));
+    if !dry_run {
+        action = action.note("a session already started keeps its own copy");
+    }
+    ctx.say(&action);
+    Ok(())
+}
+
 /// Capture an account: run the harness's own login in a sandbox, or with
 /// `--import` copy the login this machine already holds.
-pub(crate) fn auth_cmd(
+pub(crate) fn login(
     cwd: &std::path::Path,
     harness: &str,
     account: &str,
@@ -381,7 +468,10 @@ fn login_in_sandbox(
             )
         })
         .collect();
-    auth::login_outcome(status.success(), &unfilled)
-        .map_err(|e| e.context(format!("run `omh auth {harness} --name {account}` again")))?;
+    auth::login_outcome(status.success(), &unfilled).map_err(|e| {
+        e.context(format!(
+            "run `omh account login {harness} --name {account}` again"
+        ))
+    })?;
     Ok(())
 }

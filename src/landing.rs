@@ -65,7 +65,7 @@ impl Proof {
 /// *omh could not tell*, and one of them is a deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Holding {
-    /// A scratch session (`omh auth`, `omh doctor`), or an id nothing created.
+    /// A scratch session (`omh account login`, `omh doctor`), or an id nothing created.
     NoBranch,
     /// Trunk already contains these commits, by ancestry. Nothing to keep.
     Nothing,

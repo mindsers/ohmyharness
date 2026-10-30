@@ -1756,7 +1756,7 @@ fn focus_json(focus: &Focus) -> serde_json::Value {
 #[derive(Debug, Clone)]
 pub struct Harness {
     pub name: String,
-    /// Empty means nobody has run `omh auth` for it yet.
+    /// Empty means nobody has run `omh account login` for it yet.
     pub accounts: Vec<String>,
 }
 
@@ -1902,6 +1902,117 @@ impl Report for Inventory {
                 "capability": c.capability,
                 "count": c.entries.len(),
                 "entries": c.entries,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+// ── omh account ─────────────────────────────────────────────────────────────
+
+/// An account, and the preferences it keeps.
+#[derive(Debug, Clone)]
+pub struct Account {
+    pub name: String,
+    /// Each file's kept values, by file name; empty where it keeps nothing
+    /// of one.
+    pub kept: Vec<(String, crate::prefs::Doc)>,
+    /// The same values by key, dotted, in the adapter's order: what the
+    /// listing prints.
+    pub keys: Vec<(String, crate::prefs::Value)>,
+}
+
+/// A harness's accounts, and which one a launch here uses.
+#[derive(Debug, Clone)]
+pub struct HarnessAccounts {
+    pub harness: String,
+    /// What `omh set account` names for it here, if anything.
+    pub configured: Option<String>,
+    /// The account a launch here uses: the one named, or the only one.
+    /// `None` with several and none named, or a name no login answers to.
+    pub selected: Option<String>,
+    pub accounts: Vec<Account>,
+}
+
+/// What `omh account` found: every harness's accounts.
+#[derive(Debug, Clone)]
+pub struct Accounts {
+    pub harnesses: Vec<HarnessAccounts>,
+}
+
+impl Report for Accounts {
+    fn human(&self, p: &out::Palette) -> String {
+        let mut s = String::new();
+        for h in &self.harnesses {
+            s.push_str(&out::heading(p, &format!("{}:", h.harness)));
+            if h.accounts.is_empty() {
+                s.push_str(&out::nothing(
+                    p,
+                    &format!("no account — omh account login {}", h.harness),
+                ));
+                continue;
+            }
+            match (&h.configured, &h.selected) {
+                (Some(name), None) => s.push_str(&out::nothing(
+                    p,
+                    &format!(
+                        "set to `{name}`, which no login answers to — omh account login {} --name {name}",
+                        h.harness
+                    ),
+                )),
+                (None, None) => s.push_str(&out::nothing(
+                    p,
+                    "none selected — omh set account <name>",
+                )),
+                _ => {}
+            }
+            for a in &h.accounts {
+                let selected = h.selected.as_deref() == Some(a.name.as_str());
+                s.push_str(&format!(
+                    "  {}{}\n",
+                    p.paint(out::NAME, &a.name),
+                    match selected {
+                        true => format!("  {}", p.paint(out::OK, "(selected here)")),
+                        false => String::new(),
+                    }
+                ));
+                let lines: Vec<(&str, String)> = a
+                    .keys
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.to_string()))
+                    .collect();
+                if lines.is_empty() {
+                    s.push_str(&format!("    {}\n", p.paint(out::DIM, "keeps nothing")));
+                    continue;
+                }
+                let width = lines
+                    .iter()
+                    .map(|(k, _)| out::display_width(k))
+                    .max()
+                    .unwrap_or(0);
+                for (key, value) in lines {
+                    let pad = " ".repeat(width.saturating_sub(out::display_width(key)));
+                    // A session's values, kept in a review: JSON escapes what
+                    // it can, and `untrusted` the rest.
+                    s.push_str(&out::untrusted(&format!("    {key}{pad}  {value}\n")));
+                }
+            }
+        }
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "harnesses": self.harnesses.iter().map(|h| json!({
+                "harness": h.harness,
+                "configured": h.configured,
+                "selected": h.selected,
+                "accounts": h.accounts.iter().map(|a| json!({
+                    "name": a.name,
+                    "kept": a.kept.iter()
+                        .filter(|(_, doc)| !doc.is_empty())
+                        .map(|(file, doc)| (file.clone(), serde_json::Value::Object(doc.clone())))
+                        .collect::<serde_json::Map<_, _>>(),
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })
     }

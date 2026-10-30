@@ -118,12 +118,12 @@ ready  = "Connected"           # what that answer calls a server it loaded
 
 | Field | What it says | Default |
 |---|---|---|
-| `name` | the harness's name, as `omh new`, `omh auth` and `omh doctor --harness` take it. Letters, digits, `-` and `_` only — it is joined into paths | required |
+| `name` | the harness's name, as `omh new`, `omh account login` and `omh doctor --harness` take it. Letters, digits, `-` and `_` only — it is joined into paths | required |
 | `bin` | the executable to run inside the sandbox | required |
 | `install` | the command that installs `bin` into the image; it may interpolate the pin as `{{version}}` | required |
 | `version` | the harness version this adapter pins. `install` must interpolate it | no pin |
 | `checksums` | SHA-256 sums keyed by `uname -m` (`x86_64`, `aarch64`), for a harness delivered as a release binary rather than an npm package | none |
-| `creds` | the paths holding credentials, captured by `omh auth` and remounted on every launch. **A trailing `/` declares a directory** | none |
+| `creds` | the paths holding credentials, captured by `omh account login` and remounted on every launch. **A trailing `/` declares a directory** | none |
 | `token` | the file(s) whose contents prove a login — see [below](#token-or-token-probe-never-both) | none |
 | `[token-probe]` | `run` and `ready`: ask the harness whether it is logged in, where no file can say | none |
 | `login` | what you have to do once the harness opens, to log in | none |
@@ -356,7 +356,7 @@ renders it where the session cannot write — see
 | Field | What it says | Default |
 |---|---|---|
 | `format` | the provider file's schema, and where it is rendered. `codex-config`: `model_provider` and `[model_providers.*]`, kept in `provider.toml` and rendered into Codex's system layer beside omh's hooks. `omp-models`: omp's `models.yml`, kept in `provider.yml` and rendered over `path` | required |
-| `import` | the host file, under `$HOME`, that `omh auth --import` reads the harness's own provider from | required |
+| `import` | the host file, under `$HOME`, that `omh account login --import` reads the harness's own provider from | required |
 | `path` | for `omp-models`, the file the harness reads providers from, strictly inside one of `creds`' directories, with no `..`: the render is mounted over it read-only, `{}` when the account has none. `codex-config` takes none | — |
 | `drop` | files in the account, each strictly inside one of `creds`' directories, that can carry a provider's address into the next session and that the harness rebuilds: removed before each launch | none |
 
@@ -440,7 +440,7 @@ run   = "omp usage --json"   # asked inside the sandbox, where the credentials a
 ready = "accountId"          # what that answer says when the login is real
 ```
 
-**`omh doctor` settles a probe, not `omh auth`.** `omh auth` tears the container
+**`omh doctor` settles a probe, not `omh account login`.** `omh account login` tears the container
 down before it can ask, so on such a harness it records the account and says the
 login is **unconfirmed**.
 

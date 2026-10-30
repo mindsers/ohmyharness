@@ -15,7 +15,7 @@
 //!
 //! `the_crate_root_stays_a_crate_root` in `main.rs` keeps it that way.
 
-pub mod auth;
+pub mod account;
 pub mod catalogue;
 pub mod eject;
 pub mod harvest;

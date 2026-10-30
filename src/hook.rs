@@ -704,7 +704,7 @@ impl Vocabulary {
 /// handed to the user must carry none of omh's own plumbing), for anything
 /// that only inspects a rendering rather than staging one, and — per
 /// `container::plan`'s own rule, `session.branch.is_some()` — for a scratch
-/// session (`omh auth`, `omh doctor`'s probe), which never mounts the shadow
+/// session (`omh account login`, `omh doctor`'s probe), which never mounts the shadow
 /// gitdir this path would point into.
 pub fn render(
     name: &str,

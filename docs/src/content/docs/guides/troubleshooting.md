@@ -115,7 +115,7 @@ see [Something else](#something-else).
 | **omp** | |
 | A launch says `… models.yml defines … omh now hides it behind the account's provider file` | [Keep them, or remove the file](#a-launch-says-the-accounts-own-models-file-defines-providers) |
 | A launch stops on `provider.yml`, or `omh doctor`'s `model provider` row is `✗` | [Fix the account's provider file](#a-launch-stops-on-provideryml) |
-| `omh auth --provider` says a file `is under … .omh, which a session can write` | [Check it, copy it out, name the copy](#a-launch-says-the-accounts-own-models-file-defines-providers) |
+| `omh account login --provider` says a file `is under … .omh, which a session can write` | [Check it, copy it out, name the copy](#a-launch-says-the-accounts-own-models-file-defines-providers) |
 | A session cannot write `~/.omp/agent/models.yml` (`Read-only file system`) | [Expected](#a-launch-says-the-accounts-own-models-file-defines-providers) |
 | A launch says `… is in use by omh-…, started before omp's config was per session` | [Stop that session, then launch](#a-launch-says-the-account-is-in-use-by-a-session-started-before) |
 | An omp setting from one session is gone in the next | [Expected, unless it is a preference](#an-omp-setting-from-one-session-is-gone-in-the-next) |
@@ -574,7 +574,7 @@ does: [Accounts](/guides/accounts/#mount-the-directory-never-the-token-file).
 
 That line is Codex 0.5.0's, the pin omh shipped before 0.154.0. Its
 `codex login` signs in through a browser redirect that waits inside the
-sandbox, where your browser never arrives, so `omh auth codex` could not
+sandbox, where your browser never arrives, so `omh account login codex` could not
 finish that way and a launch started logged out.
 
 <div class="steps">
@@ -588,11 +588,11 @@ finish that way and a launch started logged out.
 3. Log in again, one of two ways.
 
    ```console
-   $ omh auth codex                     # choose "Sign in with Device Code"
-   $ omh auth codex --import            # or copy the login this machine has
+   $ omh account login codex             # choose "Sign in with Device Code"
+   $ omh account login codex --import    # or copy the login this machine has
    ```
 
-   With `account` set for the repo, use that name: `omh auth codex --name <it>`.
+   With `account` set for the repo, use that name: `omh account login codex --name <it>`.
 
 </div>
 
@@ -677,7 +677,7 @@ Every launch on the account stops until it is fixed, `omh doctor` among them.
 Write it again from a file that holds the provider:
 
 ```console
-$ omh auth codex --name work --provider ~/.codex/config.toml
+$ omh account login codex --name work --provider ~/.codex/config.toml
 ```
 
 A field that reads the environment (`env_key`), runs a command (`auth`) or
@@ -696,7 +696,7 @@ Nothing has changed yet:
 ```
 omh: /Users/you/.omh/creds/codex/work/.codex/config.toml selects `model_provider = "azure"`, at https://example.openai.azure.com/openai, and sessions no longer read it from there — this launch would go to OpenAI instead. Keep it as the account's provider:
 
-    omh auth codex --name work --provider /Users/you/.omh/creds/codex/work/.codex/config.toml
+    omh account login codex --name work --provider /Users/you/.omh/creds/codex/work/.codex/config.toml
 
 or remove `model_provider` from that file to use OpenAI
 ```
@@ -765,7 +765,7 @@ and never written back — see
 To turn a server off for good, `omh unuse mcp <name>` — or `omh set memory off`
 and `omh set codegraph off` for omh's own servers. A `/login` inside a session
 replaces the account's shared tokens, but the identity it writes stays in that
-session: to change who an account is, `omh auth claude --name <account>`; to
+session: to change who an account is, `omh account login claude --name <account>`; to
 launch with another account, `omh set account claude:<name>`. If your account
 carried `env` or `apiKeyHelper` in `.claude.json` (which 2.1.300 reads as a
 legacy fallback: read in the binary, not measured), a session no longer gets
@@ -799,7 +799,7 @@ account defines providers that file does not hold, so the launch stops rather
 than hide them, and nothing has changed yet:
 
 ```
-omh: /Users/you/.omh/creds/omp/work/.omp/agent/models.yml defines corp (https://llm.example.com/v1) — omp read it from the account, which any session can write, and omh now hides it behind the account's provider file, which holds none. If they are yours, keep them: `omh auth omp --name work --provider /Users/you/.omh/creds/omp/work/.omp/agent/models.yml`; if not, remove the file
+omh: /Users/you/.omh/creds/omp/work/.omp/agent/models.yml defines corp (https://llm.example.com/v1) — omp read it from the account, which any session can write, and omh now hides it behind the account's provider file, which holds none. If they are yours, keep them: `omh account login omp --name work --provider /Users/you/.omh/creds/omp/work/.omp/agent/models.yml`; if not, remove the file
 ```
 
 Read the addresses first — a session could have written that file. If they
@@ -815,7 +815,7 @@ omh: /Users/you/.omh/creds/omp/work/.omp/agent/models.yml
 
 A session cannot write `models.yml` — `Read-only file system` — so a provider
 added there lasts nowhere. Add it to a `models.yml` of your own and run
-`omh auth omp --provider` with it.
+`omh account login omp --provider` with it.
 
 #### An omp setting from one session is gone in the next
 
@@ -842,7 +842,7 @@ Every launch on the account stops until it is fixed, `omh doctor` among them.
 Write it again from a `models.yml` that holds the providers:
 
 ```console
-$ omh auth omp --name work --provider ~/.omp/agent/models.yml
+$ omh account login omp --name work --provider ~/.omp/agent/models.yml
 ```
 
 ### Your setup in the session
@@ -1398,7 +1398,7 @@ own input.
 #### `--dry-run is not something this command can answer yet`
 
 `--dry-run` runs everything and withholds the writes, so it only means anything
-on a command that writes. `init`, `auth`, `graph`, `settings edit` and the
+on a command that writes. `init`, `account login`, `graph`, `settings edit` and the
 session verbs except `resume` refuse it instead of running, and so do read-only
 commands.
 
@@ -1426,7 +1426,7 @@ spelling now, and every command that launches or probes reads it:
 
 1. Capture it.
 
-   `omh auth <harness> -n <name>`
+   `omh account login <harness> -n <name>`
 
 2. Choose it for this project.
 

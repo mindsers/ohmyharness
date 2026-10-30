@@ -3035,7 +3035,7 @@ fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
 /// Starting logged out is allowed — the harness prompts — but the prompt is
 /// the harness's, and it names the harness's own login: Codex told a user to
 /// run `codex login` inside a sandbox where that login cannot finish, and
-/// nothing mentioned `omh auth`. `--import` is offered once there is a login
+/// nothing mentioned `omh account login`. `--import` is offered once there is a login
 /// on this machine to import, and once an account exists the line goes.
 #[test]
 fn a_launch_with_no_account_points_at_omh_auth() {
@@ -3055,8 +3055,8 @@ fn a_launch_with_no_account_points_at_omh_auth() {
 
     let err = launch();
     assert!(
-        err.contains("starting logged out") && err.contains("omh auth codex"),
-        "a logged-out launch is not pointed at `omh auth`: {err}"
+        err.contains("starting logged out") && err.contains("omh account login codex"),
+        "a logged-out launch is not pointed at `omh account login`: {err}"
     );
     assert!(
         !err.contains("--import"),
@@ -3068,7 +3068,7 @@ fn a_launch_with_no_account_points_at_omh_auth() {
     std::fs::write(sb.home.join(".codex/auth.json"), login).unwrap();
     let err = launch();
     assert!(
-        err.contains("omh auth codex --import"),
+        err.contains("omh account login codex --import"),
         "a login to import, and `--import` not offered: {err}"
     );
 
@@ -3140,7 +3140,7 @@ fn doctor_checks_the_memory_server_before_any_launch() {
 /// ```
 ///
 /// The key was only ever made on the launch path — `session_up`, and `attach`
-/// through it. `doctor` and `auth` mounted the directory and left it to
+/// through it. `doctor` and the login mounted the directory and left it to
 /// Docker. Invisible on Docker Desktop, which maps such a mount to the calling
 /// user (measured on 29.8.0), so it took a Linux CI runner and a sweep that
 /// happens to run `doctor` before `new` to see it at all.
@@ -3165,7 +3165,7 @@ fn doctor_makes_the_host_key_rather_than_letting_the_mount_make_it() {
     );
 }
 
-/// `omh auth` makes the sandbox's host key too, for `doctor`'s reason.
+/// `omh account login` makes the sandbox's host key too, for `doctor`'s reason.
 ///
 /// Its own test rather than a row in the sweep, because the sweep runs it in a
 /// sandbox where `init` and `doctor` have already made the key — so the row
@@ -3184,7 +3184,7 @@ fn auth_makes_the_host_key_rather_than_letting_the_mount_make_it() {
 
     // The login path fails at the end — there is no terminal to hand Claude
     // Code — and by then it has done everything this asserts.
-    let out = sb.omh(&["auth", "claude"]);
+    let out = sb.omh(&["account", "login", "claude"]);
     assert!(
         sb.keyed("keys").join("host/ssh_host_ed25519_key").is_file(),
         "auth left the host key to the mount: {}",
@@ -6433,7 +6433,7 @@ fn the_account_is_the_setting_and_there_is_no_second_way_to_say_it() {
 
 /// `omh set account` refuses a name no login answers to.
 ///
-/// The account is one thing with one spelling now: `omh auth <harness> -n work`
+/// The account is one thing with one spelling now: `omh account login <harness> -n work`
 /// creates it, `omh set account work` selects it, and every command that
 /// launches or probes reads the setting. The global `-a` that used to override
 /// it per invocation is gone — it recorded nothing, so a session started with
@@ -6460,7 +6460,7 @@ fn setting_an_account_refuses_a_name_no_login_answers_to() {
     let said = String::from_utf8_lossy(&none.stderr).to_string();
     assert!(!none.status.success(), "no login answers to `work`: {said}");
     assert!(
-        said.contains("omh auth"),
+        said.contains("omh account login"),
         "and the answer is the command that creates one: {said}"
     );
 
@@ -10561,7 +10561,7 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
 /// is the one that matters: an orphan holding a session id is what produced the
 /// mount-namespace failure in the first place.
 ///
-/// `doctor` and `auth` stage into the same tree under their own names and are
+/// `doctor` and the login stage into the same tree under their own names and are
 /// not sessions anybody can resume, so the marker `idle::touch` writes is what
 /// separates a session that ran from scratch staging that never was one.
 /// The everyday path, end to end: work is on the branch, the session goes, and
@@ -12497,7 +12497,7 @@ fn doctor_checks_the_credentials_of_the_account_it_was_given() {
 /// The parser guard beside these proves the *grammar* changed — that `--name`
 /// and `--harness` parse and the bare words are refused. It cannot prove the
 /// value arrives anywhere, and six mutations that drop it on the way to the
-/// handler passed the whole suite: `auth` capturing into `default` whatever you
+/// handler passed the whole suite: the login capturing into `default` whatever you
 /// asked for, `doctor` verifying the harness you did not name, and the account
 /// validator deleted outright.
 ///
@@ -12514,7 +12514,7 @@ fn a_named_value_is_the_value_the_command_uses() {
     // **writable** — `../../..` resolves to `~` and hands the agent the real
     // credential store. `validate_name` is well covered as a function; what was
     // not covered is that anything still calls it.
-    let traversal = sb.omh(&["auth", "claude", "--name", "../../.."]);
+    let traversal = sb.omh(&["account", "login", "claude", "--name", "../../.."]);
     let err = String::from_utf8_lossy(&traversal.stderr).to_string();
     assert!(
         !traversal.status.success(),
@@ -12543,11 +12543,11 @@ fn a_named_value_is_the_value_the_command_uses() {
     );
 }
 
-/// `omh auth codex --import` copies this machine's login into the account
+/// `omh account login codex --import` copies this machine's login into the account
 /// named, and needs no container runtime to do it.
 ///
 /// Through the binary, because the function being right says nothing about
-/// the flag reaching it: an `--import` dropped on the way to `auth_cmd` runs
+/// the flag reaching it: an `--import` dropped on the way to `login` runs
 /// the sandbox login instead, and a `--name` dropped captures into `default`.
 ///
 /// A runtime that refuses every call is what proves "no runtime". A log with
@@ -12563,7 +12563,9 @@ fn an_imported_login_is_the_hosts_in_the_named_account() {
     std::fs::create_dir_all(sb.home.join(".codex")).unwrap();
     std::fs::write(sb.home.join(".codex/auth.json"), login).unwrap();
 
-    let out = sb.omh(&["--json", "auth", "codex", "--name", "work", "--import"]);
+    let out = sb.omh(&[
+        "--json", "account", "login", "codex", "--name", "work", "--import",
+    ]);
 
     assert!(
         out.status.success(),
@@ -12588,10 +12590,271 @@ fn an_imported_login_is_the_hosts_in_the_named_account() {
     assert_eq!(doc["reauthenticated"], false, "{doc}");
 
     // Again, over the account it just made: a replacement, and said to be one.
-    let again = sb.omh(&["--json", "auth", "codex", "--name", "work", "--import"]);
+    let again = sb.omh(&[
+        "--json", "account", "login", "codex", "--name", "work", "--import",
+    ]);
     assert!(again.status.success());
     let doc: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
     assert_eq!(doc["reauthenticated"], true, "{doc}");
+}
+
+/// A login is `omh account login`, and the verb it replaced is refused with
+/// the line that replaced it.
+///
+/// Clap alone would say *unrecognized subcommand* and stop: true, and no help
+/// to the person with the old line in their fingers or in a script. Nothing
+/// is printed to stdout — a refusal that answered first and then failed would
+/// pass a test of the exit status alone.
+#[test]
+fn a_login_is_omh_account_login_and_omh_auth_names_it() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    std::fs::write(sb.bin.join("docker-refuses"), "").unwrap();
+    sb.seed_adapters();
+    let login = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#;
+    std::fs::create_dir_all(sb.home.join(".codex")).unwrap();
+    std::fs::write(sb.home.join(".codex/auth.json"), login).unwrap();
+
+    let old = sb.omh(&["auth", "codex", "--import"]); // types the retired verb on purpose
+    assert!(!old.status.success(), "{}", printed(&old));
+    assert!(old.stdout.is_empty(), "{}", printed(&old));
+    let said = String::from_utf8_lossy(&old.stderr).to_string();
+    assert!(
+        said.contains("omh account login <harness>"),
+        "the refusal names the line that replaced it: {said}"
+    );
+    assert!(
+        !sb.home.join(".omh/creds/codex").exists(),
+        "and nothing was captured"
+    );
+
+    let new = sb.omh(&["account", "login", "codex", "--name", "work", "--import"]);
+    assert!(new.status.success(), "{}", printed(&new));
+    assert_eq!(
+        std::fs::read_to_string(sb.home.join(".omh/creds/codex/work/.codex/auth.json")).unwrap(),
+        login
+    );
+}
+
+/// `omh account`: each harness's accounts, the one this repo launches with,
+/// and what each keeps — by key, with its value.
+///
+/// The values are a session's, kept in a review: shown as JSON, so a newline
+/// or an escape in one is printed escaped rather than drawn.
+#[test]
+fn omh_account_lists_each_accounts_kept_preferences_and_the_one_selected_here() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
+    sb.account("claude", "personal");
+    let kept = sb.home.join(".omh/creds/claude/work/preferences");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::write(
+        kept.join("settings.json"),
+        r#"{"model":"claude-opus-5-5","theme":"dark\u001b[2J"}"#,
+    )
+    .unwrap();
+
+    // Two accounts and no setting: neither is the one, and it says how to pick.
+    let out = sb.omh(&["--json", "account"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let claude = doc["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["harness"] == "claude")
+        .unwrap_or_else(|| panic!("no claude: {doc}"));
+    assert_eq!(claude["selected"], serde_json::Value::Null, "{doc}");
+    let out = sb.omh(&["account"]);
+    assert!(
+        printed(&out).contains("none selected — omh set account <name>"),
+        "{}",
+        printed(&out)
+    );
+
+    assert!(sb.omh(&["set", "account", "work"]).status.success());
+    let out = sb.omh(&["--json", "account"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let harnesses = doc["harnesses"].as_array().unwrap();
+    let claude = harnesses.iter().find(|h| h["harness"] == "claude").unwrap();
+    assert_eq!(claude["selected"], "work", "{doc}");
+    assert_eq!(
+        claude["accounts"],
+        serde_json::json!([
+            {"name": "personal", "kept": {}},
+            {"name": "work", "kept": {"settings.json": {
+                "model": "claude-opus-5-5", "theme": "dark\u{1b}[2J"
+            }}},
+        ]),
+        "{doc}"
+    );
+    let codex = harnesses.iter().find(|h| h["harness"] == "codex").unwrap();
+    assert_eq!(codex["accounts"], serde_json::json!([]), "{doc}");
+
+    let out = sb.omh(&["account"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    for line in [
+        "work  (selected here)",
+        "model  \"claude-opus-5-5\"",
+        "theme  \"dark\\u001b[2J\"",
+        "personal",
+        "keeps nothing",
+        "no account — omh account login codex",
+    ] {
+        assert!(said.contains(line), "`{line}` in:\n{said}");
+    }
+    assert!(!said.contains('\u{1b}'), "a value was drawn: {said:?}");
+}
+
+/// An account whose kept preferences omh cannot read is an error naming
+/// them — never an account that keeps nothing.
+#[test]
+fn omh_account_says_it_could_not_read_what_an_account_keeps() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
+    let kept = sb.home.join(".omh/creds/claude/work/preferences");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::write(kept.join("settings.json"), r#"{"model":"m"}"#).unwrap();
+    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = sb.omh(&["account"]);
+    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("creds/claude/work/preferences"),
+        "{}",
+        printed(&out)
+    );
+    assert!(
+        !printed(&out).contains("keeps nothing"),
+        "{}",
+        printed(&out)
+    );
+}
+
+/// `omh account forget` takes one key from what an account keeps, and
+/// nothing else: not the file's other keys, not another file, not another
+/// account. On the account this repo launches with, or the one `--name`
+/// names.
+#[test]
+fn forgetting_a_kept_preference_takes_that_key_alone() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters"]);
+    let mut kept = Vec::new();
+    for name in ["work", "personal"] {
+        sb.account("claude", name);
+        let dir = sb
+            .home
+            .join(".omh/creds/claude")
+            .join(name)
+            .join("preferences");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"model":"claude-opus-5-5","theme":"dark"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".claude.json"), "{\"copyOnSelect\": true}\n").unwrap();
+        kept.push(dir);
+    }
+    let (work, personal) = (&kept[0], &kept[1]);
+    let read = |p: &Path| std::fs::read(p).unwrap();
+    let doc = |p: &Path| serde_json::from_slice::<serde_json::Value>(&read(p)).unwrap();
+    assert!(sb.omh(&["set", "account", "work"]).status.success());
+
+    // A preview changes nothing.
+    let before = read(&work.join("settings.json"));
+    let out = sb.omh(&["--dry-run", "account", "forget", "claude", "theme"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("would forget claude's theme on account `work`"),
+        "{}",
+        printed(&out)
+    );
+    assert_eq!(read(&work.join("settings.json")), before);
+
+    let out = sb.omh(&["account", "forget", "claude", "theme"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("forgot claude's theme on account `work`"),
+        "{}",
+        printed(&out)
+    );
+    assert_eq!(
+        doc(&work.join("settings.json")),
+        serde_json::json!({"model": "claude-opus-5-5"})
+    );
+    assert_eq!(
+        read(&work.join(".claude.json")),
+        b"{\"copyOnSelect\": true}\n",
+        "another file was rewritten"
+    );
+    assert_eq!(
+        doc(&personal.join("settings.json")),
+        serde_json::json!({"model": "claude-opus-5-5", "theme": "dark"}),
+        "another account lost it"
+    );
+
+    // Gone, so a second time is refused by name, and so is a key that is
+    // not one of claude's preferences at all.
+    let again = sb.omh(&["account", "forget", "claude", "theme"]);
+    assert!(!again.status.success(), "{}", printed(&again));
+    assert!(
+        printed(&again).contains("account `work` keeps no claude theme"),
+        "{}",
+        printed(&again)
+    );
+    let never = sb.omh(&["account", "forget", "claude", "hooks"]);
+    assert!(!never.status.success(), "{}", printed(&never));
+    assert!(
+        printed(&never).contains("`hooks` is not one of claude's preferences"),
+        "{}",
+        printed(&never)
+    );
+
+    // An account name is one path component, here as at a login: the
+    // directory it names is written.
+    let escape = sb.omh(&["account", "forget", "claude", "model", "--name", "../../.."]);
+    assert!(!escape.status.success(), "{}", printed(&escape));
+    assert!(
+        printed(&escape).contains("single name") || printed(&escape).contains("not a path"),
+        "refused as a path: {}",
+        printed(&escape)
+    );
+
+    // `--name` reaches the account it names.
+    let out = sb.omh(&[
+        "--json", "account", "forget", "claude", "model", "--name", "personal",
+    ]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(said["account"], "personal", "{said}");
+    assert_eq!(said["key"], "model", "{said}");
+    assert_eq!(said["was"], "claude-opus-5-5", "{said}");
+    assert_eq!(
+        doc(&personal.join("settings.json")),
+        serde_json::json!({"theme": "dark"})
+    );
+    assert_eq!(
+        doc(&work.join("settings.json")),
+        serde_json::json!({"model": "claude-opus-5-5"}),
+        "the selected account lost it instead"
+    );
 }
 
 /// The inventory answers to `info`, and `ls` is gone from the top level too.
@@ -13127,7 +13390,7 @@ impl Sandbox {
     /// `auth::is_captured` asks the adapter what proves a login and checks each
     /// of those paths exists under the account's directory, so a fixture has to
     /// create exactly those — inventing a file would make the fixture stop
-    /// resembling what `omh auth` leaves behind.
+    /// resembling what `omh account login` leaves behind.
     fn account(&self, harness: &str, name: &str) {
         let dir = self.home.join(".omh/creds").join(harness).join(name);
         let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -16320,7 +16583,7 @@ fn omh_s_does_not_say_no_sessions_over_a_directory_it_could_not_read() {
 /// while `auth::dir` built the mount path from the typed word. The launch then
 /// reports the account it resolved and binds a directory that does not hold it
 /// — the agent starts logged out, and whatever token it obtains is written
-/// where `omh auth` will never look for it.
+/// where `omh account login` will never look for it.
 ///
 /// Asserted as an invariant over every `creds` mount rather than on one
 /// expected string: the failure is a path built from the wrong half, and any
@@ -16338,7 +16601,7 @@ fn a_launch_mounts_the_credentials_of_the_adapter_it_resolved() {
     let adapters = sb.home.join(".omh/adapters");
     std::fs::copy(adapters.join("claude.toml"), adapters.join("alias.toml")).unwrap();
 
-    // Captured for `claude`, because that is the adapter's name. `omh auth`
+    // Captured for `claude`, because that is the adapter's name. `omh account login`
     // stores it there whichever filename found the adapter.
     sb.account("claude", "work");
     let set = sb.omh(&["set", "account", "work"]);
@@ -16512,7 +16775,13 @@ fn a_provider_for_a_harness_that_takes_none_touches_nothing() {
     let file = sb.home.join("provider.toml");
     std::fs::write(&file, "model_provider = \"p\"\n").unwrap();
 
-    let out = sb.omh(&["auth", "claude", "--provider", file.to_str().unwrap()]);
+    let out = sb.omh(&[
+        "account",
+        "login",
+        "claude",
+        "--provider",
+        file.to_str().unwrap(),
+    ]);
     assert!(!out.status.success(), "{}", printed(&out));
     assert!(
         printed(&out).contains("codex and omp only"),
@@ -16531,7 +16800,7 @@ fn a_provider_for_a_harness_that_takes_none_touches_nothing() {
     );
 }
 
-/// `omh auth codex --provider` keeps the provider a Codex config names in a
+/// `omh account login codex --provider` keeps the provider a Codex config names in a
 /// file of the account's own, resolved for a sandbox and readable by the user
 /// alone, and the account counts as captured on it; a launch hands it to Codex
 /// in the System layer; a command it runs is refused, and nothing is kept.
@@ -16555,14 +16824,26 @@ fn a_provider_authored_for_an_account_reaches_its_launches() {
         "model_provider = \"p\"\n[model_providers.p]\nname = \"P\"\nauth = { command = \"/bin/token\" }\n",
     )
     .unwrap();
-    let out = sb.omh(&["auth", "codex", "--provider", refused.to_str().unwrap()]);
+    let out = sb.omh(&[
+        "account",
+        "login",
+        "codex",
+        "--provider",
+        refused.to_str().unwrap(),
+    ]);
     assert!(!out.status.success(), "{}", printed(&out));
     assert!(printed(&out).contains("auth"), "{}", printed(&out));
     let kept = sb.home.join(".omh/creds/codex/default/provider.toml");
     assert!(!kept.exists(), "a refused provider was kept");
 
     let out = Command::new(env!("CARGO_BIN_EXE_omh"))
-        .args(["auth", "codex", "--provider", config.to_str().unwrap()])
+        .args([
+            "account",
+            "login",
+            "codex",
+            "--provider",
+            config.to_str().unwrap(),
+        ])
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
         .env("E2E_AZURE_KEY", "sk-from-the-shell")
@@ -16604,7 +16885,7 @@ fn a_provider_authored_for_an_account_reaches_its_launches() {
     );
 }
 
-/// `omh auth omp --provider` keeps the providers an omp `models.yml` defines
+/// `omh account login omp --provider` keeps the providers an omp `models.yml` defines
 /// in a file of the account's own, resolved for a sandbox and readable by the
 /// user alone; a launch renders them over the `models.yml` omp reads,
 /// read-only, and removes the model cache from the account first — on a real
@@ -16630,7 +16911,13 @@ fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
          apiKey: \"!op read op://vault/key\"\n",
     )
     .unwrap();
-    let out = sb.omh(&["auth", "omp", "--provider", refused.to_str().unwrap()]);
+    let out = sb.omh(&[
+        "account",
+        "login",
+        "omp",
+        "--provider",
+        refused.to_str().unwrap(),
+    ]);
     assert!(!out.status.success(), "{}", printed(&out));
     assert!(printed(&out).contains("apiKey"), "{}", printed(&out));
     assert!(!printed(&out).contains("op://"), "{}", printed(&out));
@@ -16639,7 +16926,13 @@ fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
     assert!(!kept.exists(), "a refused provider was kept");
 
     let out = Command::new(env!("CARGO_BIN_EXE_omh"))
-        .args(["auth", "omp", "--provider", models.to_str().unwrap()])
+        .args([
+            "account",
+            "login",
+            "omp",
+            "--provider",
+            models.to_str().unwrap(),
+        ])
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
         .env("E2E_OMP_KEY", "sk-from-the-shell")
@@ -16785,7 +17078,7 @@ fn an_omp_accounts_settings_are_migrated_from_the_file_omp_reads_in_their_place(
     );
 }
 
-/// `omh auth omp --import` keeps the host's own providers even though omp's
+/// `omh account login omp --import` keeps the host's own providers even though omp's
 /// login is nothing omh can copy: the account holds its providers, and that is
 /// the capture — said as one, not as a login waiting to be confirmed.
 #[test]
@@ -16800,7 +17093,7 @@ fn an_omp_import_keeps_the_hosts_providers_as_the_capture() {
          apiKey: sk-corp\n    api: openai-completions\n",
     )
     .unwrap();
-    let out = sb.omh(&["auth", "omp", "--import"]);
+    let out = sb.omh(&["account", "login", "omp", "--import"]);
     assert!(out.status.success(), "{}", printed(&out));
     let said = printed(&out);
     assert!(
@@ -16831,7 +17124,10 @@ fn an_omp_accounts_own_providers_refuse_and_name_the_fix() {
          apiKey: sk-secret\n    api: openai-completions\n",
     )
     .unwrap();
-    let fix = format!("omh auth omp --name default --provider {}", own.display());
+    let fix = format!(
+        "omh account login omp --name default --provider {}",
+        own.display()
+    );
     for argv in [&["new", "omp", "--dry-run"][..], &["new", "omp"][..]] {
         let out = sb.omh(argv);
         assert!(!out.status.success(), "{argv:?}: {}", printed(&out));
@@ -16843,7 +17139,8 @@ fn an_omp_accounts_own_providers_refuse_and_name_the_fix() {
         assert!(!said.contains("sk-secret"), "{said}");
     }
     let out = sb.omh(&[
-        "auth",
+        "account",
+        "login",
         "omp",
         "--name",
         "default",
@@ -16884,7 +17181,13 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
         ("codex", &codex, "provider.toml"),
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_omh"))
-            .args(["auth", harness, "--provider", file.to_str().unwrap()])
+            .args([
+                "account",
+                "login",
+                harness,
+                "--provider",
+                file.to_str().unwrap(),
+            ])
             .current_dir(&sb.repo)
             .env("HOME", &sb.home)
             .env("E2E_HOST_VALUE", "sk-host-value")
@@ -16924,7 +17227,13 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     let link = omp.with_extension("yaml");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_omh"))
-        .args(["auth", "omp", "--provider", link.to_str().unwrap()])
+        .args([
+            "account",
+            "login",
+            "omp",
+            "--provider",
+            link.to_str().unwrap(),
+        ])
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
         .env("E2E_HOST_VALUE", "sk-host-value")
@@ -17005,7 +17314,7 @@ fn doctor_names_omps_providers_and_its_own_ones() {
     assert_eq!(r["ok"], serde_json::json!(false), "{r}");
     let detail = r["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("omh auth omp --name default --provider"),
+        detail.contains("omh account login omp --name default --provider"),
         "{detail}"
     );
     let seen = std::fs::read_to_string(&log).unwrap_or_default();
@@ -17282,14 +17591,15 @@ fn a_provider_the_migration_would_lose_refuses_and_names_the_fix() {
         let out = sb.omh(argv);
         assert!(!out.status.success(), "{argv:?}: {}", printed(&out));
         let fix = format!(
-            "omh auth codex --name default --provider {}",
+            "omh account login codex --name default --provider {}",
             shared.display()
         );
         assert!(printed(&out).contains(&fix), "{argv:?}: {}", printed(&out));
     }
     assert!(std::fs::symlink_metadata(&shared).unwrap().is_file());
     let out = sb.omh(&[
-        "auth",
+        "account",
+        "login",
         "codex",
         "--name",
         "default",
@@ -17305,7 +17615,7 @@ fn a_provider_the_migration_would_lose_refuses_and_names_the_fix() {
     );
 }
 
-/// `omh auth codex` logs in the way a session reads: the account migrated,
+/// `omh account login codex` logs in the way a session reads: the account migrated,
 /// and the login's own copy under `scratch/`, never under `run/` where `omh
 /// s` would take it for a session.
 #[test]
@@ -17316,7 +17626,7 @@ fn a_codex_login_reads_its_preferences_as_a_session_does() {
     let account =
         codex_account_with_a_shared_config(&sb, "model = \"gpt-5.5\"\nnotify = [\"/tmp/x\"]\n");
     std::fs::write(&log, "").unwrap();
-    let out = sb.omh(&["auth", "codex"]);
+    let out = sb.omh(&["account", "login", "codex"]);
     assert!(out.status.success(), "{}", printed(&out));
     assert_eq!(
         std::fs::read_link(account.join(".codex/config.toml")).ok(),
@@ -17334,7 +17644,7 @@ fn a_codex_login_reads_its_preferences_as_a_session_does() {
 }
 
 /// The model cache a session left goes before every start of omp on the
-/// account, not only a session's: an `omh auth` login and `omh doctor`'s
+/// account, not only a session's: a login by `omh account login` and `omh doctor`'s
 /// probe each run omp on it too — and each reads the providers the launch
 /// renders, read-only.
 #[test]
@@ -17359,7 +17669,7 @@ fn omps_model_cache_goes_before_a_login_and_a_probe_too() {
     let log = sb.fake_docker();
     plant();
     std::fs::write(&log, "").unwrap();
-    let out = sb.omh(&["auth", "omp"]);
+    let out = sb.omh(&["account", "login", "omp"]);
     let seen = std::fs::read_to_string(&log).unwrap_or_default();
     let guest = "/home/agent/.omp/agent/models.yml";
     let host = mounted_at(&seen, guest).unwrap_or_else(|| panic!("{}", printed(&out)));
@@ -17423,7 +17733,7 @@ fn doctor_names_a_pending_migration_and_does_not_run_it() {
     assert!(!out.status.success(), "{}", printed(&out));
     let said = printed(&out);
     assert!(
-        said.contains("omh auth codex --name default --provider"),
+        said.contains("omh account login codex --name default --provider"),
         "{said}"
     );
 }
@@ -17480,7 +17790,7 @@ fn a_launch_mounts_its_own_claude_json_and_a_login_the_accounts() {
     );
 
     std::fs::write(&log, "").unwrap();
-    sb.omh(&["auth", "claude", "--name", "x"]);
+    sb.omh(&["account", "login", "claude", "--name", "x"]);
     let seen = std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(
         mounted_at(&seen, "/home/agent/.claude.json").map(PathBuf::from),
@@ -17794,7 +18104,7 @@ fn an_unreadable_catalogue_is_named_rather_than_listed_as_empty() {
 /// path the credential fix edited. With `creds/<harness>/` unreadable,
 /// `resolve_for_launch` answers `Ok(None)`, `run` mounts no credentials, and
 /// the launch exits 0: the agent starts logged out and whatever token it
-/// obtains is written where `omh auth` does not look — which is verbatim the
+/// obtains is written where `omh account login` does not look — which is verbatim the
 /// symptom `auth::dir`'s own doc comment says it exists to end.
 ///
 /// The `.flatten()` half is narrower and worse: one entry that fails to read
@@ -17840,7 +18150,7 @@ fn an_unreadable_credential_directory_stops_the_launch() {
     assert!(
         said.contains("creds") || said.contains("Permission denied"),
         "the refusal has to name what omh could not read, or it reads as \
-         `omh auth` never having been run: {said}"
+         `omh account login` never having been run: {said}"
     );
 }
 
@@ -18217,6 +18527,26 @@ const EXERCISES: &[Exercise] = &[
         runtime: false,
     },
     Exercise {
+        argv: &["account"],
+        needs: Needs::Repo,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // Refusals: this half captures no account. That a kept preference is
+    // taken, and only it, is `forgetting_a_kept_preference_takes_that_key_alone`.
+    Exercise {
+        argv: &["account", "forget", "claude", "model"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["no account for claude"]),
+        runtime: false,
+    },
+    Exercise {
+        argv: &["account", "forget", "claude", "model", "--name", "work"],
+        needs: Needs::Repo,
+        expect: Expect::Refuses(&["no account `work` for claude"]),
+        runtime: false,
+    },
+    Exercise {
         argv: &["--json", "info"],
         needs: Needs::Repo,
         expect: Expect::Ok,
@@ -18578,17 +18908,17 @@ const EXERCISES: &[Exercise] = &[
         runtime: true,
     },
     // The *login* branch, which is the one that starts a container.
-    // `auth --import` below copies a file and returns before
+    // `account login --import` below copies a file and returns before
     // `login_in_sandbox` is reached — so with only that row, the host key
-    // `auth` now makes was on a path no test ran at all.
+    // the login now makes was on a path no test ran at all.
     Exercise {
-        argv: &["auth", "claude"],
+        argv: &["account", "login", "claude"],
         needs: Needs::Repo,
         expect: Expect::Refuses(&["nothing was captured", "tty"]),
         runtime: true,
     },
     Exercise {
-        argv: &["auth", "claude", "--name", "work", "--import"],
+        argv: &["account", "login", "claude", "--name", "work", "--import"],
         needs: Needs::Repo,
         expect: Expect::Ok,
         runtime: true,
@@ -18597,7 +18927,13 @@ const EXERCISES: &[Exercise] = &[
     // real one is kept and launched with is
     // `a_provider_authored_for_an_account_reaches_its_launches`.
     Exercise {
-        argv: &["auth", "codex", "--provider", "no-such-provider.toml"],
+        argv: &[
+            "account",
+            "login",
+            "codex",
+            "--provider",
+            "no-such-provider.toml",
+        ],
         needs: Needs::Repo,
         expect: Expect::Refuses(&["no-such-provider.toml"]),
         runtime: true,
@@ -18605,7 +18941,13 @@ const EXERCISES: &[Exercise] = &[
     // omp's, the same way; kept and launched with in
     // `an_omp_provider_authored_for_an_account_reaches_its_launches`.
     Exercise {
-        argv: &["auth", "omp", "--provider", "no-such-models.yml"],
+        argv: &[
+            "account",
+            "login",
+            "omp",
+            "--provider",
+            "no-such-models.yml",
+        ],
         needs: Needs::Repo,
         expect: Expect::Refuses(&["no-such-models.yml"]),
         runtime: true,
@@ -18772,7 +19114,7 @@ fn staged_for(needs: Needs) -> Sandbox {
     .unwrap();
     std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
-    // The other fake: a login for `omh auth claude --import` to copy, since
+    // The other fake: a login for `omh account login claude --import` to copy, since
     // the real path is a browser and a person. Deliberately not `{}` — that is
     // what `auth::prepare` writes for *no credential captured*, so a fixture
     // using it would seed the absent marker and pass against the bug.

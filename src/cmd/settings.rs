@@ -584,7 +584,7 @@ pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
 
 /// A value only omh can check: which captured login `account` names.
 ///
-/// The account is one thing with one spelling — `omh auth <harness> -n work`
+/// The account is one thing with one spelling — `omh account login <harness> -n work`
 /// creates it, this selects it, and everything that launches or probes reads
 /// the setting. The global `-a` that used to override it per invocation is
 /// gone, so a typo here is now the only way to point a launch at credentials
@@ -661,7 +661,7 @@ pub(crate) fn no_account_that_no_login_answers_to(
     anyhow::bail!(
         "no captured login called `{name}`.\n  {}",
         if all.is_empty() {
-            "omh auth <harness> -n <name>   capture one first".to_string()
+            "omh account login <harness> -n <name>   capture one first".to_string()
         } else {
             format!("captured: {}", all.join(", "))
         }

@@ -278,8 +278,9 @@ pub enum Launch {
     /// from the account by `auth::seeds` under [`session_home`], and admits
     /// the servers the launch staged.
     Session,
-    /// `omh auth`'s login: it mounts the account's own files, since that is
-    /// where a login writes the identity every later session is seeded with.
+    /// The login, `omh account login`: it mounts the account's own files, since
+    /// that is where a login writes the identity every later session is seeded
+    /// with.
     /// `auth::scrub_account` has cleaned them first; and a login needs no MCP
     /// server, so its policy admits none.
     Login,
@@ -301,8 +302,8 @@ pub fn session_home(paths: &Paths, session: &Session, harness: &str) -> crate::a
 
 /// Where a session's preferences live (`prefs`): in its run directory for a
 /// real session, kept between its launches; under `scratch/` for `omh
-/// doctor`'s probe and `omh auth`'s login, seeded afresh each time. Dotted
-/// like `.home`.
+/// doctor`'s probe and the login, `omh account login`, seeded afresh each
+/// time. Dotted like `.home`.
 pub fn prefs_home(paths: &Paths, session: &Session, harness: &str) -> crate::home::Home {
     match session.branch {
         Some(_) => crate::home::Home::Kept(
@@ -421,8 +422,8 @@ pub fn plan(
 
     // The sandbox's ssh host key, for the entrypoint to install as root. Read
     // only, and the directory rather than the file, so the `.pub` rides along.
-    // `session_up` generates it before the launch, and so do `doctor` and
-    // `auth` — whoever is about to start a container, because a mount the
+    // `session_up` generates it before the launch, and so do `doctor` and the
+    // login — whoever is about to start a container, because a mount the
     // daemon creates instead is root's. A plan that is only printed names the
     // path either way.
     mounts.push(Mount {
@@ -433,7 +434,7 @@ pub fn plan(
     });
 
     // `Some` exactly when the shadow gitdir is mounted below — a scratch
-    // session (`omh auth`, `omh doctor`) has no branch and no shadow, and a
+    // session (`omh account login`, `omh doctor`) has no branch and no shadow, and a
     // hook's log statement would be writing into a mount that is not there.
     let log = session
         .branch
@@ -513,7 +514,7 @@ pub fn plan(
     // normalised form, so a pattern written `./.env` or `certs/` reaches git as
     // something it can match.
     // `branch.is_some()` as well as `Apply`, and the first is the one that
-    // matters. `omh doctor` and `omh auth` borrow a writable `/work` for one
+    // matters. `omh doctor` and `omh account login` borrow a writable `/work` for one
     // command through `Session::scratch`, and neither calls `carry_in` — that
     // runs in `run` and `attach` only. Keyed on `Apply` alone this staged a
     // plaintext copy of the user's `.env` and mounted it read-write into the
@@ -581,7 +582,7 @@ pub fn plan(
     // does not track. Deriving it from `mounts` means a capability added later
     // is covered without anyone remembering to come back here.
     //
-    // Only for a session that has a branch: a scratch session is `omh auth` or
+    // Only for a session that has a branch: a scratch session is `omh account login` or
     // `omh doctor` borrowing a writable `/work` for one command, with no work
     // to check point and nothing that could ever be harvested from it.
     if session.branch.is_some() {
@@ -641,7 +642,7 @@ pub fn plan(
         });
 
         // Staged rather than written into the worktree: `/work` is the user's
-        // branch, and a `.git` file omh authored there would be a file the
+        // branch, and a `.git` file omh wrote there would be a file the
         // worktree's own git has to explain. Here it exists only as something
         // to mount, and the mount is what the container sees.
         let pointer = stage.join("shadow-gitdir");
@@ -863,7 +864,7 @@ pub fn plan(
         //   at all (`omh doctor`'s scratch): the checkout's copy if `carry_in`
         //   brings it in, which is what lands in `/work`, else `opts.base`,
         //   which a new session's worktree is made from.
-        // - no base (`omh auth`, which prints no notes): the scratch itself,
+        // - no base (`omh account login`, which prints no notes): the scratch itself,
         //   which holds nothing.
         let worktree =
             session.branch.is_some() && !matches!(session.worktree.try_exists(), Ok(false));
@@ -2487,13 +2488,13 @@ mod tests {
         );
     }
 
-    /// `omh doctor` and `omh auth` must not be handed the user's secrets.
+    /// `omh doctor` and `omh account login` must not be handed the user's secrets.
     ///
     /// Both borrow a writable `/work` for one command through
     /// `Session::scratch`, and neither calls `carry_in` — that runs only in
     /// `run` and `attach`. So staging keyed on `Staging::Apply` alone put a
     /// plaintext copy of the user's `.env` into the doctor probe container and
-    /// into the OAuth container `auth` gives network access to, with nothing
+    /// into the OAuth container the login gives network access to, with nothing
     /// printed: `carry_in`'s entire reporting surface is in the launcher it
     /// never reached. `omh doctor --dry-run` wrote the copy to disk too.
     ///
@@ -3901,7 +3902,10 @@ mod tests {
             file.display().to_string(),
             "corp".to_string(),
             "llm.example.invalid".to_string(),
-            format!("omh auth omp --name default --provider {}", file.display()),
+            format!(
+                "omh account login omp --name default --provider {}",
+                file.display()
+            ),
         ] {
             assert!(err.contains(&said), "{said}: {err}");
         }
@@ -4175,7 +4179,7 @@ mod tests {
         );
     }
 
-    /// A scratch session (`omh auth`, `omh doctor`'s probe) has no branch and
+    /// A scratch session (`omh account login`, `omh doctor`'s probe) has no branch and
     /// mounts no shadow gitdir at all — `log` is `None` for it
     /// (`session.branch.is_some()`, tested once for `log` and again for the
     /// mount, the two some distance apart in `plan`), so there is no events

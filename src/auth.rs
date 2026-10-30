@@ -40,7 +40,7 @@ pub use crate::image::GUEST_HOME;
 /// caller outside this module handed it the typed word bar one, so a launch
 /// resolved an account out of one directory and mounted another. The report named the
 /// account, the agent started logged out, and the token it went on to obtain
-/// was written where `omh auth` does not look.
+/// was written where `omh account login` does not look.
 ///
 /// Taking the `Adapter` is the whole fix: there is no longer a second string
 /// to pass, so the two halves cannot be keyed differently.
@@ -55,7 +55,7 @@ pub fn dir(paths: &Paths, adapter: &Adapter, account: &str) -> PathBuf {
 /// `.flatten()`, so a `creds/<harness>/` omh could not read answered "no
 /// accounts" — `resolve_for_launch` then returned `Ok(None)`, the launch
 /// mounted no credentials and exited 0, and the agent started logged out with
-/// its next token written where `omh auth` does not look. That is the symptom
+/// its next token written where `omh account login` does not look. That is the symptom
 /// [`dir`] above says it exists to end, reached by the other door.
 ///
 /// The per-entry read matters on its own: one entry dropped silently is one
@@ -66,7 +66,7 @@ pub fn accounts(paths: &Paths, adapter: &Adapter) -> Result<Vec<String>> {
     let at = paths.creds(adapter.name.as_str());
     let entries = match std::fs::read_dir(&at) {
         Ok(entries) => entries,
-        // Nobody has run `omh auth` for this harness yet, which is an ordinary
+        // Nobody has run `omh account login` for this harness yet, which is an ordinary
         // state and the one `resolve` already has words for.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
@@ -96,7 +96,7 @@ pub fn accounts(paths: &Paths, adapter: &Adapter) -> Result<Vec<String>> {
 /// an interrupted login must never look like a successful one.
 pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     // Defined in terms of `unfilled` so the two answers can never disagree —
-    // they did, and `omh auth` failed while `omh info` listed the account.
+    // they did, and `omh account login` failed while `omh info` listed the account.
     // An account holding only its model provider is one too: a provider's
     // token is the login for a harness pointed at it (#197 §6).
     let dir = dir(paths, adapter, account);
@@ -128,7 +128,7 @@ pub fn resolve_with_home(
         // this is the line a user with `account` set sees, and the setting is
         // one name for every harness.
         let import = import_offer(adapter, host_home);
-        anyhow::bail!("no account for {harness} — run `omh auth {harness}` first{import}");
+        anyhow::bail!("no account for {harness} — run `omh account login {harness}` first{import}");
     }
 
     // One source. It was `explicit.or(configured)` — a global `-a` overriding
@@ -402,7 +402,7 @@ pub struct Seeds {
     /// Each copy, relative to the home, and what it is seeded with.
     files: Vec<(String, String)>,
     /// The account, and a digest of each seed: another account, or the same
-    /// one captured again by `omh auth`, or an omh that scrubs differently,
+    /// one captured again by `omh account login`, or an omh that scrubs differently,
     /// seeds again.
     stamp: String,
 }
@@ -509,7 +509,7 @@ fn account_document(dir: &std::path::Path, rel: &str) -> Result<serde_json::Valu
 }
 
 /// Why `rel` under the account cannot seed a session, and the command that
-/// repairs it: `omh auth` sets an unusable file aside before its login.
+/// repairs it: `omh account login` sets an unusable file aside before its login.
 fn unusable(
     adapter: &Adapter,
     account_dir: &std::path::Path,
@@ -522,7 +522,7 @@ fn unusable(
         .unwrap_or_default();
     anyhow::anyhow!(
         "{} cannot seed a session: {why:#}. A session before this omh could have \
-         written it — `omh auth {} --name {name}` sets it aside and captures the \
+         written it — `omh account login {} --name {name}` sets it aside and captures the \
          account again",
         account_dir.join(rel).display(),
         adapter.name,
@@ -618,7 +618,7 @@ pub fn resolve_for_launch(
 pub fn logged_out(adapter: &Adapter, host_home: &std::path::Path) -> String {
     let harness = &adapter.name;
     let import = import_offer(adapter, host_home);
-    format!("no {harness} account — starting logged out. `omh auth {harness}` to log in{import}")
+    format!("no {harness} account — starting logged out. `omh account login {harness}` to log in{import}")
 }
 
 /// Does this file hold more than what `prepare` put there?
@@ -695,7 +695,7 @@ fn placeholder(path: &std::path::Path) -> &'static str {
 ///
 /// omp shipped in exactly that state. `unfilled` came back empty because
 /// `~/.omp/agent/` held `agent.db`, written by starting omp and never by
-/// logging in, and `omh auth omp` announced a captured account to a user who
+/// logging in, and `omh account login omp` announced a captured account to a user who
 /// had opened the harness, run nothing, and quit. The probe was added to
 /// prevent that false positive and was wired into `doctor` alone, leaving the
 /// function its own documentation cites still answering the old way.
@@ -753,7 +753,7 @@ pub fn unfilled(
 /// Reject an account name that is not a single path component.
 ///
 /// `auth::dir` joins this onto the creds root, and credentials mount
-/// **writable** — so `omh auth claude --name ../../..` would resolve to `~`
+/// **writable** — so `omh account login claude --name ../../..` would resolve to `~`
 /// and hand the agent the user's real credential store. `Path::join` with an absolute
 /// path discards the prefix entirely, which needs no traversal at all.
 pub fn validate_name(name: &str) -> Result<()> {
@@ -815,7 +815,7 @@ pub fn import(
     if adapter.token.is_empty() {
         anyhow::bail!(
             "{harness} keeps its login where omh cannot copy it — no file on its \
-             own proves one — so there is nothing to import; run `omh auth {harness}`"
+             own proves one — so there is nothing to import; run `omh account login {harness}`"
         );
     }
     let pairs = token_pairs(adapter, account_dir, host_home)?;
@@ -841,7 +841,7 @@ pub fn import(
         anyhow::bail!(
             "no {harness} login file to import — nothing in:\n{}\n\
              {harness} may keep its login elsewhere (a keychain, or a home set \
-             by its own environment variable); `omh auth {harness}` logs in \
+             by its own environment variable); `omh account login {harness}` logs in \
              instead",
             missing.join("\n")
         );
@@ -960,7 +960,7 @@ pub fn import_offer(adapter: &Adapter, host_home: &std::path::Path) -> String {
                 .all(|(host, _)| matches!(read_login(host), HostLogin::Present(_)))
         });
     if importable {
-        format!(", or `omh auth {harness} --import` to copy this machine's login")
+        format!(", or `omh account login {harness} --import` to copy this machine's login")
     } else {
         String::new()
     }
@@ -1033,7 +1033,7 @@ mod tests {
     /// through to "does the creds directory hold anything", which is true from
     /// the harness's first boot — settings, model_perf, usage_history. An empty
     /// `unfilled` there means *nothing is obviously missing*, never *the login
-    /// worked*, and `omh auth` said the second.
+    /// worked*, and `omh account login` said the second.
     #[test]
     fn a_probe_adapter_is_never_decided_by_its_files() {
         assert!(
@@ -1401,13 +1401,13 @@ mod tests {
         let placeholder = host_with(".codex/auth.json", "{}");
         let omp_home = host_with(".omp/agent/agent.db", "SQLite format 3\0…");
 
-        assert!(import_offer(&codex(), with.path()).contains("omh auth codex --import"));
+        assert!(import_offer(&codex(), with.path()).contains("omh account login codex --import"));
         assert_eq!(import_offer(&codex(), without.path()), "");
         assert_eq!(import_offer(&codex(), placeholder.path()), "");
         assert_eq!(import_offer(&omp(), omp_home.path()), "");
     }
 
-    /// Both messages that name `omh auth` carry the offer — the logged-out
+    /// Both messages that name `omh account login` carry the offer — the logged-out
     /// warning and the refusal a configured account gets.
     #[test]
     fn the_offer_reaches_both_messages() {
@@ -1491,7 +1491,7 @@ mod tests {
         assert!(accounts(&paths, &opencode()).unwrap().is_empty());
     }
 
-    /// Regression in spirit: an interrupted `omh auth` used to leave a directory
+    /// Regression in spirit: an interrupted `omh account login` used to leave a directory
     /// behind that reported as authed.
     #[test]
     fn an_empty_account_directory_is_not_captured() {
@@ -1547,7 +1547,7 @@ mod tests {
     fn no_accounts_at_all_points_at_omh_auth() {
         let (_d, paths) = fixture();
         let err = resolve(&paths, &claude(), None).unwrap_err().to_string();
-        assert!(err.contains("omh auth claude"), "got: {err}");
+        assert!(err.contains("omh account login claude"), "got: {err}");
     }
 
     #[test]
@@ -2115,7 +2115,7 @@ mod tests {
             "a scratch home kept a copy"
         );
 
-        // `omh auth` capturing the same account again reaches the sessions.
+        // `omh account login` capturing the same account again reaches the sessions.
         std::fs::write(
             other.path().join(".claude.json"),
             r#"{"userID":"relogged"}"#,
@@ -2168,7 +2168,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let remedy = format!("omh auth claude --name {name}");
+        let remedy = format!("omh account login claude --name {name}");
 
         let err = format!("{:#}", seeds(&claude(), account.path()).err().unwrap());
         assert!(
@@ -2189,7 +2189,7 @@ mod tests {
             let err = format!("{:#}", seeds(&claude(), account.path()).err().unwrap());
             assert!(err.contains(cause), "{cause}: {err}");
             assert!(
-                err.contains(&format!("omh auth claude --name {name}")),
+                err.contains(&format!("omh account login claude --name {name}")),
                 "{err}"
             );
         }
@@ -2259,7 +2259,7 @@ mod tests {
 
     // ── did the login actually happen ───────────────────────────────────────
 
-    /// Regression: `omh auth` reported success after the harness merely wrote
+    /// Regression: `omh account login` reported success after the harness merely wrote
     /// its default config on startup. The token file was still empty and the
     /// next session was logged out.
     #[test]
@@ -2458,7 +2458,7 @@ mod tests {
         }
     }
 
-    /// Regression: the two predicates disagreed, so `omh auth` could fail with
+    /// Regression: the two predicates disagreed, so `omh account login` could fail with
     /// "the login did not complete" while `omh info` listed the account and the
     /// next launch happily used it.
     #[test]

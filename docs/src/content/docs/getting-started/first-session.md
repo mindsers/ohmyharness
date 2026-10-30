@@ -47,7 +47,7 @@ git repository, and access to Claude Code.
 2. Log in to Claude.
 
    ```console
-   $ omh auth claude --name personal
+   $ omh account login claude --name personal
    ```
 
    This runs Claude Code's own login and keeps the result under

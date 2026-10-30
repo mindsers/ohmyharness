@@ -45,7 +45,7 @@ pub struct Adapter {
     /// empty session.
     #[serde(default)]
     pub transcripts: Option<String>,
-    /// Paths holding credentials, captured by `omh auth` and remounted on
+    /// Paths holding credentials, captured by `omh account login` and remounted on
     /// launch. **A trailing slash declares a directory** — load-bearing, because
     /// a bind-mounted *file* cannot be replaced by rename and every tool saves
     /// its token by writing a temp file and renaming over it.
@@ -109,7 +109,7 @@ pub struct Adapter {
 #[serde(deny_unknown_fields)]
 pub struct Provider {
     pub format: ProviderFormat,
-    /// Where the harness keeps its own provider on the host, for `omh auth
+    /// Where the harness keeps its own provider on the host, for `omh account login
     /// --import` to read. `$HOME` is the user's.
     pub import: String,
     /// The file the harness reads providers from, hidden behind the render,
@@ -847,7 +847,7 @@ pub enum Render {
 ///
 /// `Adapter::find` and `Editor::find` resolve a word by joining it into
 /// `<dir>/<word>.toml`, and the word arrives from every command that names a
-/// harness — `omh new`, `omh auth`, `omh doctor`, `omh eject`, `omh import` —
+/// harness — `omh new`, `omh account login`, `omh doctor`, `omh eject`, `omh import` —
 /// and from a `.harness` marker on disk, which
 /// `session::harness_of` already distrusts on the grounds that "omh wrote this,
 /// but a file on disk is not omh's word". Unchecked, `..` in that word named a
@@ -1411,6 +1411,21 @@ impl Adapter {
                     );
                 }
                 seen.push((raw.as_str(), key));
+            }
+        }
+        // A key names one preference: `omh account` lists it, and `forget`
+        // takes it, by the key alone.
+        let mut files_of: BTreeMap<KeyPath, &str> = BTreeMap::new();
+        for (file, keys) in &prefs.files {
+            let quiet = prefs.quiet.get(file).into_iter().flatten();
+            for raw in keys.iter().chain(quiet) {
+                let key = key_path(raw).map_err(|e| anyhow::anyhow!("adapter {shown}: {e}"))?;
+                if let Some(other) = files_of.insert(key, file) {
+                    anyhow::bail!(
+                        "adapter {shown}: `{raw}` is declared in two files, {other:?} and \
+                         {file:?} — a preference is named by its key alone"
+                    );
+                }
             }
         }
         Ok(())
@@ -2936,6 +2951,7 @@ render = "concat"
             ("file", CREDS, "[preferences.files]\n\"$HOME/.claude/x.ini\" = [\"model\"]".to_string(), "only TOML, JSON and YAML"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/elsewhere.json\" = [\"model\"]".to_string(), "must be one of this adapter's credential files, or inside one of its directories"),
             ("file", CREDS, format!("{}\n\"$HOME/.claude/x/settings.json\" = [\"theme\"]", file("\"model\"")), "two preferences files are named `settings.json`"),
+            ("file", CREDS, format!("{}\n\"$HOME/.claude.json\" = [\"model\"]", file("\"model\"")), "`model` is declared in two files"),
             ("link", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"theme\"]".to_string(), "strictly inside one of this adapter's credential directories"),
             ("file", &format!("{CREDS}\n\n[policy]\npath = \"/etc/claude-code/managed-settings.d/omh.json\"\nformat = \"claude-managed\"\nmask = [\"$HOME/.claude/settings.json\"]"), file("\"model\""), "is masked by `[policy]`"),
         ] {
@@ -3038,7 +3054,7 @@ install="x""#,
         );
     }
 
-    /// `omh auth` drops you into the harness and it is not obvious what to do
+    /// `omh account login` drops you into the harness and it is not obvious what to do
     /// next — Claude Code just shows "Not logged in" in the status bar. An
     /// adapter that declares credentials has to say how to fill them.
     #[test]

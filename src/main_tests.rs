@@ -803,7 +803,7 @@ fn nothing_still_offers_a_verb_that_was_retired() {
     // was: the JSON guard went on invoking a line that no longer parsed,
     // and passed, because its empty stdout read as nothing to say.
     const ON_PURPOSE: &str = "types the retired verb on purpose";
-    let gone: [String; 25] = [
+    let gone: [String; 33] = [
         // `attach` became a session verb in 2026.08.
         //
         // **No trailing character.** The first version of this needle had a
@@ -909,6 +909,17 @@ fn nothing_still_offers_a_verb_that_was_retired() {
         // is a live verb under `s`, `memory` and `settings` itself.
         format!("omh settings mcp {}", "rm"), // types the retired verb on purpose
         format!("{:?}, {:?}", "mcp", "rm"),   // types the retired verb on purpose
+        // The login, under the `account` noun since #197. Prose, and the argv
+        // forms the suite types: a harness after it, `--json` or `omh` before.
+        // Not `["auth", ` alone, which is also a provider key refused by name.
+        format!("omh {}", "auth"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "auth", "claude"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "auth", "codex"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "auth", "omp"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "auth", "opencode"), // types the retired verb on purpose
+        format!("[{:?}, harness", "auth"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "--json", "auth"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "omh", "auth"), // types the retired verb on purpose
     ];
     let mut found = Vec::new();
     let mut read = Vec::new();
@@ -1344,13 +1355,15 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud, and a shape leaving one page while another gains lines is
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
-        ("README.md", 57), // + the omh upgrade command in the list
+        // + the omh upgrade command in the list, + `omh account` beside its
+        // `login` there
+        ("README.md", 58),
         ("docs/src/content/docs/concepts/sessions.md", 11),
         ("docs/src/content/docs/concepts/trust.md", 3), // + `omh use` in the commands table
         // Getting started was one page until it became two, and all fifteen
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
-        ("docs/src/content/docs/guides/accounts.md", 13),
+        ("docs/src/content/docs/guides/accounts.md", 14), // + `omh account forget`
         ("docs/src/content/docs/guides/code-graph.md", 1),
         ("docs/src/content/docs/guides/editors.md", 4),
         ("docs/src/content/docs/guides/troubleshooting.md", 17),
@@ -1363,8 +1376,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // + `omh settings rm`'s console example; its synopsis line replaced
         // the server's own `rm`. + the header of the settings screen's drawing,
         // + the command its status line names. + `omh settings set <feature>`,
-        // `use`, `unuse` and `use --all` in the synopsis.
-        ("docs/src/content/docs/reference/commands.md", 152),
+        // `use`, `unuse` and `use --all` in the synopsis. + `omh account forget`'s
+        // console example.
+        ("docs/src/content/docs/reference/commands.md", 153),
         // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
         // the `--anyway` line it prints, and the run with it. + the same two for
         // a key nothing reads: the `--anyway` line it prints, and the run.
@@ -1932,8 +1946,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/adapter.rs", 1),
         ("src/auth.rs", 8),
         ("src/base.rs", 3),
-        ("src/cli.rs", 25), // + the retired --force, --file and server-rm sentences
-        ("src/cmd/auth.rs", 3),
+        // + the retired --force, --file and server-rm sentences, + the retired
+        // `auth`'s three
+        ("src/cli.rs", 28),
+        // + `omh account`, where `forget` names an account no login answers to
+        ("src/cmd/account.rs", 4),
         // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as
         // the way back from a guard's list, and `omh settings set <feature>
         // off` with its `omh init` for a name omh owns. + `omh settings rm`
@@ -1996,8 +2013,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // be imported into your catalogue, `omh upgrade` and `omh unuse hooks`
         // beside a hook omh ships, `omh <line>` when a child will not start
         // and in the error when the screen cannot come back after `$EDITOR`,
-        // and `omh auth <harness> -n <name>` in the account's hint. +
-        // `omh auth <harness>` where no login is captured, and `omh upgrade`
+        // and `omh account login <harness> -n <name>` in the account's hint. +
+        // `omh account login <harness>` where no login is captured, and `omh upgrade`
         // after an edit to a hook omh ships. + `omh init` and `omh set
         // <feature> off` in a feature row's about, and `omh init` in the
         // `[use]` row's about and its warning. + `omh init` in the `[unuse]`
@@ -2020,7 +2037,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // One of them was written `omh s rm <id>`, which does not parse,
         // and the scan caught it.
         // + `omh info --repo` in the `use` row's detail, and
-        // `omh auth <harness> --provider <file>` in a broken provider's.
+        // `omh account login <harness> --provider <file>` in a broken provider's.
         ("src/doctor.rs", 8),
         // Four. One is the `# `omh set --local ca_cert`` line `ca_layer`
         // writes into the generated Dockerfile, telling whoever reads the
@@ -2047,26 +2064,30 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/memory.rs", 2),
         ("src/memory/ingest.rs", 2),
         ("src/notice.rs", 2),
-        // `omh auth <harness> --name <account> --provider <file>`, when a
+        // `omh account login <harness> --name <account> --provider <file>`, when a
         // migration would lose a provider, and `omh sNN down`, when a session
         // still mounts the account; `omh <id> down` and `omh <id> rm --yes`
         // in the refusal of a launch on another account with preferences
         // still to review, and the same two in the refusal of a new session
         // over an earlier one's under the same id.
-        ("src/prefs.rs", 6),
+        // + `omh account`, where `forget` refuses a key that is no preference
+        ("src/prefs.rs", 7),
         // `omh s down`, in the refusal when a live sandbox blocks the move
         // off the pre-2026.08 repo key.
         ("src/profile.rs", 1),
-        // `omh auth codex --provider <file>`, in a provider field's refusal.
+        // `omh account login codex --provider <file>`, in a provider field's refusal.
         ("src/provider.rs", 1),
-        // `omh auth omp --name <account> --provider <file>`, when the
+        // `omh account login omp --name <account> --provider <file>`, when the
         // account's own models file defines providers a launch would hide.
         ("src/provider/omp.rs", 1),
         ("src/render.rs", 1),
         // `select`'s refusal when only the unmeasured backend is present
         // names `omh doctor` as the way to check it first.
         ("src/runtime.rs", 1),
-        ("src/report.rs", 18), // + the SyncedAll report's next-action lines
+        // + the SyncedAll report's next-action lines, + `omh account`'s three:
+        // a login for a harness with none, one for a name no login answers to,
+        // and `omh set account` where several have none chosen
+        ("src/report.rs", 21),
         ("src/rules.rs", 1),
         ("src/selection.rs", 1),
         ("src/session.rs", 4),
@@ -2186,12 +2207,7 @@ fn a_leading_session_id_survives_the_flags_in_front_of_it() {
 /// names for one session on every ordinary invocation.
 #[test]
 fn a_value_belonging_to_a_flag_is_not_a_session_prefix() {
-    for line in [
-        vec!["-s", "s02", "diff"],
-        vec!["--session", "s02", "diff"],
-        vec!["-a", "s02", "info"],
-        vec!["--account", "s02", "info"],
-    ] {
+    for line in [vec!["-s", "s02", "diff"], vec!["--session", "s02", "diff"]] {
         assert_eq!(
             cli::session_prefix(cli_argv(&line)),
             (None, cli_argv(&line)),
@@ -6432,9 +6448,9 @@ fn definitions_omh_does_not_ship_are_left_alone() {
 
 /// A second thing on the line is a flag, not a position.
 ///
-/// `auth` and `doctor` each took an optional bare word after their first
-/// argument — an account for one, a harness for the other. Two problems.
-/// A reader cannot tell `omh auth claude work` from `omh auth work claude`
+/// The login (`auth`, then) and `doctor` each took an optional bare word after
+/// their first argument — an account for one, a harness for the other. Two
+/// problems. A reader cannot tell `claude work` from `work claude` after it
 /// without already knowing which slot is the account — both are well formed
 /// under the old grammar and they mean different things. And `doctor` is due
 /// a `--session` as well, at which point a bare word beside two flags is the
@@ -6445,9 +6461,9 @@ fn definitions_omh_does_not_ship_are_left_alone() {
 #[test]
 fn the_optional_second_word_is_named_rather_than_positional() {
     for line in [
-        vec!["omh", "auth", "claude", "--name", "work"],
-        vec!["omh", "auth", "claude", "-n", "work"],
-        vec!["omh", "auth", "claude"],
+        vec!["omh", "account", "login", "claude", "--name", "work"],
+        vec!["omh", "account", "login", "claude", "-n", "work"],
+        vec!["omh", "account", "login", "claude"],
         vec!["omh", "doctor", "--harness", "claude"],
         vec!["omh", "doctor"],
         // The alias is advertised in two command tables, and nothing
@@ -6464,16 +6480,15 @@ fn the_optional_second_word_is_named_rather_than_positional() {
     // And the positional forms are gone rather than quietly still working,
     // which is the half a rename that only adds the new spelling skips.
     for line in [
-        vec!["omh", "auth", "claude", "work"],
+        vec!["omh", "account", "login", "claude", "work"],
         vec!["omh", "doctor", "claude"],
-        // The global `-a`/`--account` names the same thing and is refused
-        // here, which is worth pinning because the reason is incidental:
-        // this field is still literally called `account`, so it collides
-        // with the global's clap id. Rename the field and the global would
-        // silently start being accepted-and-discarded on `auth` — measured,
-        // and nothing else in the suite would have noticed.
-        vec!["omh", "auth", "claude", "-a", "work"],
-        vec!["omh", "auth", "claude", "--account", "work"],
+        // The global `-a`/`--account` named the same thing and is refused
+        // here. Pinned when the reason was incidental — the field is called
+        // `account`, which collided with the global's clap id — and kept now
+        // that the global is long gone, so neither spelling comes back as a
+        // flag accepted and discarded.
+        vec!["omh", "account", "login", "claude", "-a", "work"],
+        vec!["omh", "account", "login", "claude", "--account", "work"],
     ] {
         let Err(refused) = Cli::try_parse_from(&line) else {
             panic!("`{}` is not a line omh takes any more", line[1..].join(" "));
@@ -6486,6 +6501,77 @@ fn the_optional_second_word_is_named_rather_than_positional() {
             line[1..].join(" ")
         );
     }
+}
+
+/// Accounts are a noun, `omh account`, and the login is its verb: the
+/// listing, `login` and `forget` parse, and `auth` does not.
+#[test]
+fn accounts_are_a_noun_and_auth_is_not_a_command() {
+    for line in [
+        vec!["omh", "account"],
+        vec!["omh", "account", "login", "codex", "--import"],
+        vec!["omh", "account", "login", "omp", "--provider", "models.yml"],
+        vec!["omh", "account", "forget", "codex", "tui.theme"],
+        vec![
+            "omh",
+            "account",
+            "forget",
+            "codex",
+            "tui.theme",
+            "--name",
+            "work",
+        ],
+        vec![
+            "omh",
+            "account",
+            "forget",
+            "codex",
+            "tui.theme",
+            "-n",
+            "work",
+        ],
+    ] {
+        assert!(
+            Cli::try_parse_from(&line).is_ok(),
+            "omh accepts `{}`",
+            line[1..].join(" ")
+        );
+    }
+    for line in [
+        vec!["omh", "auth", "claude"], // types the retired verb on purpose
+        vec!["omh", "account", "claude"],
+        vec!["omh", "account", "forget", "codex"],
+    ] {
+        assert!(
+            Cli::try_parse_from(&line).is_err(),
+            "`{}` is not a line omh takes",
+            line[1..].join(" ")
+        );
+    }
+}
+
+/// The globals `verb_position` steps over with their value are the globals
+/// that take one — asked of clap, so a global added or retired without a
+/// line there fails here by name.
+///
+/// `-a`/`--account` outlived its flag there by several releases.
+#[test]
+fn the_globals_stepped_over_with_a_value_are_the_ones_clap_declares() {
+    use clap::CommandFactory as _;
+    let mut declared: Vec<String> = Cli::command()
+        .get_arguments()
+        .filter(|a| a.is_global_set() && a.get_action().takes_values())
+        .flat_map(|a| {
+            a.get_short()
+                .map(|c| format!("-{c}"))
+                .into_iter()
+                .chain(a.get_long().map(|l| format!("--{l}")))
+        })
+        .collect();
+    declared.sort();
+    let mut listed: Vec<String> = cli::TAKES_A_VALUE.iter().map(|s| s.to_string()).collect();
+    listed.sort();
+    assert_eq!(listed, declared);
 }
 
 /// Every argument says what it is.
@@ -8449,7 +8535,7 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
 /// What that reaches: `paths.creds(&adapter.name)` (mounted **writable** over
 /// the harness's config directory) and `paths.staging(&session.id,
 /// &adapter.name)`. So `name = "../../escaped"` in a file called anything at
-/// all put `omh auth`'s `create_dir_all` outside `~/.omh/creds` and bound the
+/// all put `omh account login`'s `create_dir_all` outside `~/.omh/creds` and bound the
 /// result into the sandbox. Measured against the branch before this test: the
 /// launch reached `no account for ../../escaped`.
 ///

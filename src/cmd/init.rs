@@ -1239,7 +1239,7 @@ pub(crate) fn ask_all(
 /// Bundled files are **managed**: `init` writes them on a first run and
 /// `omh upgrade` refreshes them after — because a fix omh ships has to reach
 /// people who already ran it once. The one that mattered was a wrong credential
-/// path, which made `omh auth` capture nothing while reporting success.
+/// path, which made `omh account login` capture nothing while reporting success.
 /// Definitions you add yourself are left alone.
 ///
 /// The contents come from [`bundled`], embedded at compile time. Reading them

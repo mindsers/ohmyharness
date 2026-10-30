@@ -523,7 +523,7 @@ impl Paths {
 
     /// The network a scratch verb shares: the per-repo `omh-<repo_id>`.
     ///
-    /// `omh auth` and `omh doctor` run a one-shot `--rm` container and need a
+    /// `omh account login` and `omh doctor` run a one-shot `--rm` container and need a
     /// network, but not isolation from each other — they hold no services. A
     /// per-session network for each would be a leftover nothing removes (they
     /// are not in the session list) and one `id_in_network` would misattribute

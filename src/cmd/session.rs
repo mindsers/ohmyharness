@@ -1212,7 +1212,7 @@ fn read_hooks(
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Not every session with hooks has one: a scratch session
-            // (`omh auth`, `omh doctor`) never mounts the shadow gitdir at
+            // (`omh account login`, `omh doctor`) never mounts the shadow gitdir at
             // all, and a session launched by an omh built before this
             // feature shipped never wrote one either. Neither is a damaged
             // record.
@@ -1827,7 +1827,7 @@ pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
 /// `git worktree remove` strands from here on.
 ///
 /// A run directory counts only when it carries the marker `idle::touch` writes.
-/// `omh doctor` and `omh auth` stage into the same tree under their own names,
+/// `omh doctor` and `omh account login` stage into the same tree under their own names,
 /// and neither is a session anybody could resume or would want reported.
 pub(crate) fn leftovers(
     paths: &Paths,
@@ -1908,7 +1908,7 @@ pub(crate) fn leftovers(
     };
 
     // A run directory counts only when it carries the marker `idle::touch`
-    // writes: `omh doctor` and `omh auth` stage into this same tree under their
+    // writes: `omh doctor` and `omh account login` stage into this same tree under their
     // own names, and neither is a session anybody could resume.
     found.extend(
         match opened(

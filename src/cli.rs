@@ -289,24 +289,12 @@ pub(crate) enum Cmd {
         #[arg(long)]
         stop: bool,
     },
-    /// Log a harness in once. Repeat with different names for several accounts.
-    Auth {
-        /// Which harness to log in: `claude`, `codex`, `opencode`, `omp`.
-        harness: String,
-        /// Account name, e.g. `personal` or `work`.
-        #[arg(long = "name", short = 'n', default_value = auth::DEFAULT_ACCOUNT)]
-        account: String,
-        /// Copy the login this machine already has instead of logging in
-        /// again — for a harness whose login cannot finish inside a sandbox.
-        /// Codex's own model provider comes along, from `~/.codex/config.toml`.
-        #[arg(long)]
-        import: bool,
-        /// Take the account's model provider from this file — a Codex
-        /// `config.toml` or a provider file — and log nothing in. Kept where no
-        /// session can write it; an environment variable it reads is read now,
-        /// once, and a command it runs is refused.
-        #[arg(long, value_name = "FILE")]
-        provider: Option<std::path::PathBuf>,
+    /// Your accounts: each harness's, the one this repo launches with, and the
+    /// preferences each keeps.
+    Account {
+        /// `None` is the listing itself.
+        #[command(subcommand)]
+        cmd: Option<AccountCmd>,
     },
     /// What you have here: harnesses, editors, sessions, your catalogue.
     Info {
@@ -765,6 +753,43 @@ pub(crate) enum SettingsCmd {
     },
 }
 
+/// What `omh account` does besides list them.
+#[derive(Subcommand)]
+pub(crate) enum AccountCmd {
+    /// Log a harness in once. Repeat with different names for several accounts.
+    Login {
+        /// Which harness to log in: `claude`, `codex`, `opencode`, `omp`.
+        harness: String,
+        /// Account name, e.g. `personal` or `work`.
+        #[arg(long = "name", short = 'n', default_value = auth::DEFAULT_ACCOUNT)]
+        account: String,
+        /// Copy the login this machine already has instead of logging in
+        /// again — for a harness whose login cannot finish inside a sandbox.
+        /// Codex's own model provider comes along, from `~/.codex/config.toml`.
+        #[arg(long)]
+        import: bool,
+        /// Take the account's model provider from this file — a Codex
+        /// `config.toml` or a provider file — and log nothing in. Kept where no
+        /// session can write it; an environment variable it reads is read now,
+        /// once, and a command it runs is refused.
+        #[arg(long, value_name = "FILE")]
+        provider: Option<std::path::PathBuf>,
+    },
+    /// Forget a preference an account keeps — the way out when a harness
+    /// update refuses a value it kept.
+    ///
+    /// The account only: a session already started keeps its own copy.
+    Forget {
+        /// The harness whose account keeps it.
+        harness: String,
+        /// The preference, as `omh account` names it: `model`, `tui.theme`.
+        key: String,
+        /// The account, when not the one this repo launches with.
+        #[arg(long = "name", short = 'n')]
+        account: Option<String>,
+    },
+}
+
 /// Deliberately short: a subcommand that prints "not implemented" is worse
 /// than its absence, because `--help` advertises it.
 #[derive(Subcommand)]
@@ -883,6 +908,11 @@ pub(crate) const RETIRED: &[Retired] = &[
         said: "`config` is gone — it is `omh settings` now:\n  omh settings              your defaults\n  omh settings set <key> <value>\n  omh settings edit         $EDITOR on them\n  omh settings mcp ls       your MCP servers",
     },
     Retired {
+        spellings: &["auth"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "`auth` is gone — accounts are `omh account` now:\n  omh account login <harness>   log one in\n  omh account                   your accounts, and what each keeps",
+    },
+    Retired {
         spellings: &["ls"], // types the retired verb on purpose
         // Only under `sessions`. Top-level `ls` became `omh info`, and that
         // rename deliberately kept no sentence at all — `the_inventory_answers_
@@ -981,20 +1011,23 @@ pub(crate) enum At {
     Flag(&'static [(&'static str, &'static [&'static str])]),
 }
 
+/// The globals that take a value, each spelling: [`verb_position`] steps over
+/// the value with the flag.
+///
+/// A global added without its line here makes `retired` fall silent for lines
+/// that start with it — quiet, and the direction that costs a sentence rather
+/// than invents one. `the_globals_stepped_over_with_a_value_are_the_ones_clap_declares`
+/// holds it to what clap declares.
+pub(crate) const TAKES_A_VALUE: [&str; 3] = ["-s", "--session", "--color"];
+
 /// Where the verb sits, once the global options in front of it are stepped
 /// over.
 ///
 /// `i == 0` was the first attempt and it broke `omh -s s01 attach`, which is
 /// exactly the line the `attach` entry exists for: the globals are declared
-/// `global = true`, so they may precede the subcommand, and three of them take
-/// a value that would otherwise read as the verb.
-///
-/// Named here rather than derived from clap, which has no public way to ask.
-/// A global added without a line here makes `retired` fall silent for lines
-/// that start with it — quiet, and the direction that costs a sentence rather
-/// than invents one.
+/// `global = true`, so they may precede the subcommand, and some of them take
+/// a value that would otherwise read as the verb — [`TAKES_A_VALUE`].
 pub(crate) fn verb_position(words: &[&str]) -> Option<usize> {
-    const TAKES_A_VALUE: [&str; 5] = ["-s", "--session", "-a", "--account", "--color"];
     let mut i = 0;
     while let Some(word) = words.get(i) {
         if !word.starts_with('-') {
@@ -1119,7 +1152,14 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
         // withhold and nothing to describe. Refusing says that, where accepting
         // would imply a preview it never gives.
         Cmd::Info { .. } | Cmd::Why { .. } => false,
-        Cmd::Init | Cmd::Auth { .. } | Cmd::Graph { .. } => false,
+        Cmd::Account { cmd } => match cmd {
+            // What it would take from the account is read the same way the
+            // real run reads it, so the preview is that run's own decision.
+            Some(AccountCmd::Forget { .. }) => true,
+            // Read-only, or a login a person finishes.
+            None | Some(AccountCmd::Login { .. }) => false,
+        },
+        Cmd::Init | Cmd::Graph { .. } => false,
     }
 }
 
@@ -1167,6 +1207,9 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
             | Some(SettingsCmd::Rm { .. })
             | Some(SettingsCmd::Mcp { .. }) => true,
         },
+        Cmd::Account { cmd } => match cmd {
+            None | Some(AccountCmd::Login { .. }) | Some(AccountCmd::Forget { .. }) => true,
+        },
         Cmd::Memory { cmd } => match cmd {
             Some(MemoryCmd::Serve { .. }) => false,
             None
@@ -1181,7 +1224,6 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
         | Cmd::Upgrade
         | Cmd::Why { .. }
         | Cmd::Graph { .. }
-        | Cmd::Auth { .. }
         | Cmd::Info { .. }
         | Cmd::Use { .. }
         | Cmd::Unuse { .. }
@@ -1238,7 +1280,7 @@ pub(crate) fn consumes_session(cmd: &Cmd) -> bool {
         // which belong to no one session.
         | Cmd::Upgrade
         | Cmd::Why { .. }
-        | Cmd::Auth { .. }
+        | Cmd::Account { .. }
         | Cmd::Info { .. }
         | Cmd::Settings { .. }
         | Cmd::Set { .. }

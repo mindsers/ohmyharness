@@ -13,7 +13,9 @@ yours in the table, then follow it to its entry.
 | **Set up** | |
 | [`omh init`](#omh-init) | Set this repo up, once. Decides everything, asks nothing. |
 | [`omh upgrade`](#omh-upgrade) | Apply a newer omh: refresh the catalogue, check again which provides apply, rebuild the images whose recipe moved. |
-| [`omh auth <harness>`](#omh-auth-harness---name-account---import---provider-file) | Log a harness in once; repeat with `--name` for several accounts. |
+| [`omh account`](#omh-account) | Your accounts, the one this repo uses, and the preferences each keeps. |
+| [`omh account login <harness>`](#omh-account-login-harness---name-account---import---provider-file) | Log a harness in once; repeat with `--name` for several accounts. |
+| [`omh account forget`](#omh-account-forget-harness-key---name-account) | Forget one preference an account keeps. |
 | [`omh doctor`](#omh-doctor---harness-name--d) · `d` | Check, inside a real sandbox, that a harness sees your setup. |
 | **Sessions** | |
 | [`omh new <harness>`](#omh-new-harness----args) | Start a session and run an agent in it. |
@@ -60,7 +62,7 @@ file is left alone.
 
 | Previews | Refuses `--dry-run` |
 |---|---|
-| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `rm` and `mcp` verbs, `memory rm` | `init`, `auth`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
+| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `rm` and `mcp` verbs, `memory rm`, `account forget` | `init`, `account` and `account login`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
 
 <details>
 <summary>Why a command refuses the flag rather than guessing, or ignoring it</summary>
@@ -346,12 +348,47 @@ that instead.
 **It runs in a repo already set up**; in one that is not, it refuses and points
 at `omh init`.
 
-## `omh auth <harness> [--name <account>] [--import] [--provider <file>]`
+## `omh account`
+
+Your accounts: each harness's, the one a launch in this repo uses, and the
+preferences each keeps.
+
+```text title="omh account"
+claude:
+  personal
+    keeps nothing
+  work  (selected here)
+    copyOnSelect  true
+    model         "claude-opus-5-5"
+    effortLevel   "high"
+    tui           "fullscreen"
+codex:
+  work  (selected here)
+    model      "gpt-5.5"
+    tui.theme  "dark"
+omp:
+  (no account — omh account login omp)
+opencode:
+  (no account — omh account login opencode)
+```
+
+**Selected here** is the account a launch in this repo uses: the one
+[`omh set account`](/guides/accounts/#log-in-and-choose-an-account) names, or
+the only one. With several and none named, the harness says `none selected`;
+a launch would refuse to guess.
+
+**A value is shown as JSON** — it was written by a session and kept in a
+[review](/guides/accounts/#the-review), so a newline or an escape in it is
+printed escaped. An account whose kept preferences omh cannot read is an
+error naming the file, never an account that keeps nothing. `--json` gives
+each harness's `selected` account and each account's `kept` values, by file.
+
+## `omh account login <harness> [--name <account>] [--import] [--provider <file>]`
 
 Runs the harness's own login and captures the result.
 
 ```
-omh auth <harness> [-n <acct>] [--import] [--provider <file>]
+omh account login <harness> [-n <acct>] [--import] [--provider <file>]
 ```
 
 | | | Default |
@@ -362,8 +399,8 @@ omh auth <harness> [-n <acct>] [--import] [--provider <file>]
 | `--provider <file>` | keep the account's model provider from this file — a Codex `config.toml` or an omp `models.yml`, or a provider file — and log nothing in. Codex and omp only, so far | |
 
 ```console
-$ omh auth claude --name personal
-$ omh auth claude --name work
+$ omh account login claude --name personal
+$ omh account login claude --name work
 ```
 
 **Log in once per account.** Repeat with another `--name` for several. See
@@ -376,10 +413,10 @@ to copy. A harness with no `token` file (omp) is refused, unless the import
 brings its providers, which the account then holds alone. One that has it:
 
 ```console
-$ omh auth codex --name work --import
+$ omh account login codex --name work --import
 ```
 
-```text title="omh auth codex --import"
+```text title="omh account login codex --import"
 `work` captured for codex
   copied from /Users/you/.codex/auth.json
 ```
@@ -387,11 +424,11 @@ $ omh auth codex --name work --import
 **`--provider` keeps a model provider, and only that.** omh reads the file's
 `model_provider` and `[model_providers.*]` tables, resolves for a sandbox what
 it reads from the host — an `env_key` becomes the token it names, read once
-from the shell running `omh auth` — and writes them to the account's
+from the shell running `omh account login` — and writes them to the account's
 `provider.toml`, `0600`. Anything a sandbox cannot satisfy is refused by name
 and nothing is kept. The output names providers, never values:
 
-```text title="omh auth codex --name work --provider ~/azure.toml"
+```text title="omh account login codex --name work --provider ~/azure.toml"
 `work` captured for codex
   model provider azure kept in /Users/you/.omh/creds/codex/work/provider.toml
 ```
@@ -403,6 +440,31 @@ write — is read with nothing from your environment.
 
 An account holding only a provider counts as captured. See
 [Accounts](/guides/accounts/#a-model-provider-of-your-own).
+
+## `omh account forget <harness> <key> [--name <account>]`
+
+Takes one preference from what an account keeps — the way out when a harness
+update refuses a value the account kept, as Claude Code does with a blocking
+Settings Error, or Codex with a value its options no longer list.
+
+| | | Default |
+|---|---|---|
+| `<harness>` | `claude`, `codex`, `opencode` or `omp` | |
+| `<key>` | the preference, as `omh account` names it: `model`, `tui.theme` | |
+| `--name <account>` `-n` | the account to take it from | the one [selected here](#omh-account) |
+
+```console
+$ omh account forget codex tui.theme
+forgot codex's tui.theme on account `work`
+  a session already started keeps its own copy
+```
+
+**Only that key, and only the account.** The file's other keys stay as they
+were, and so does every other account. A session already started keeps its
+own copy; a value its review keeps reaches the account again. A key the
+account does not keep, and one that is not a preference of the harness, are
+refused by name. `--dry-run` reads and refuses the same way, and says `would
+forget`.
 
 ## `omh doctor [--harness <name>]` · `d`
 
@@ -2235,7 +2297,7 @@ pages are one line along the top.
 ▌ 1 Defaults      │ Defaults  11
   2 Rules       1 │
   3 Skills      2 │   carry_in        nothing carried                          ┃
-  4 Servers     1 │   account         no login captured — `omh auth <harness>`…┃
+  4 Servers     1 │   account         no login captured — `omh account login <…┃
   5 Commands    0 │ ✓ idle_timeout    45m                                      ┃
   6 Subagents   0 │   sandbox_memory  the runtime's own                        ┃
   7 Hooks       0 │   sandbox_cpus    the runtime's own                        ┃
