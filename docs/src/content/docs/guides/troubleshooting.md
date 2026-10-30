@@ -813,8 +813,8 @@ Expected, unless it is a preference. A session's `config.yml` is its own: an
 extension, a tool or MCP setting, `disabledProviders`, `auth` last that
 session. Your
 [preferences](/guides/accounts/#ompagentconfigyml-is-each-sessions-own) — the
-model each role uses, the thinking level, the themes, your presets — reach the
-account once you keep them in
+model each role uses, the thinking level, the themes, your presets, the display
+choices omp's setup wizard asks for — reach the account once you keep them in
 [the review](#a-preference-from-one-session-is-not-in-the-next). Providers go
 in the account's [provider file](/guides/accounts/#omps-providers).
 
