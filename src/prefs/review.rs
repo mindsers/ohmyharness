@@ -170,8 +170,11 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
         return Ok(Outcome::default());
     };
     let mut outcome = Outcome::default();
+    // The account first, from each session's record — then its lock, under
+    // which every reading below is taken, and held to the last write: two
+    // reviews of one account never decide over the same reading.
     let mut account = None;
-    let mut read: Vec<(usize, Vec<Side>)> = Vec::new();
+    let mut on: Vec<usize> = Vec::new();
     for (i, s) in sittings.iter().enumerate() {
         let Some(this) = account_of(&s.home)? else {
             continue;
@@ -182,6 +185,22 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
             s.id
         );
         account = Some(this);
+        on.push(i);
+    }
+    let Some(account) = account else {
+        return Ok(outcome);
+    };
+    let shown_account = account
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (kept_dir, _) = super::make_parent(&account, &format!("{KEPT}/{LOCK}"))?;
+    let _lock = kept_dir
+        .lock(OsStr::new(LOCK))
+        .with_context(|| format!("locking {}", account.join(KEPT).display()))?;
+    let mut read: Vec<(usize, Vec<Side>)> = Vec::new();
+    for i in on {
+        let s = &sittings[i];
         let sides: Result<Vec<Side>> = prefs
             .declared()
             .into_iter()
@@ -198,17 +217,6 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
             }
         }
     }
-    let Some(account) = account else {
-        return Ok(outcome);
-    };
-    let shown_account = account
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (kept_dir, _) = super::make_parent(&account, &format!("{KEPT}/{LOCK}"))?;
-    let _lock = kept_dir
-        .lock(OsStr::new(LOCK))
-        .with_context(|| format!("locking {}", account.join(KEPT).display()))?;
     let declared = prefs.declared();
     let mut kept: Vec<Doc> = Vec::new();
     for d in &declared {

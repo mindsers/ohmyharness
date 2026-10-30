@@ -840,16 +840,27 @@ impl Account {
             }
             std::fs::create_dir_all(&dir)?;
         }
+        // What the account keeps, read again under its lock — the one a
+        // review holds from its first reading to its last write — so a seed
+        // never starts from a value a review was about to change.
+        let (kept_dir, _) = make_parent(&self.dir, &format!("{KEPT}/{LOCK}"))?;
+        let _lock = kept_dir
+            .lock(OsStr::new(LOCK))
+            .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?;
         for f in &self.files {
             let name = OsStr::new(&f.declared.name);
             let format = f.declared.format();
             let (rest, digest) = &rest_of[&f.declared.name];
+            let kept = match kept_if_any(&self.dir, &f.declared)? {
+                Some(now) => pick(&now, f.declared.all()),
+                None => f.kept.clone(),
+            };
             for part in ["base", "reviewed"] {
                 let held = crate::held::Dir::open(&root.join(part))?;
-                place(&held, name, &format.render(&f.kept)?, self.mount)?;
+                place(&held, name, &format.render(&kept)?, self.mount)?;
             }
             let held = crate::held::Dir::open(&live(home))?;
-            let copy = compose(rest, &f.kept, f.declared.all());
+            let copy = compose(rest, &kept, f.declared.all());
             place(&held, name, &format.render(&copy)?, self.mount)?;
             if let Some(digest) = digest {
                 crate::held::Dir::open(&root.join(REST))?.replace(name, digest.as_bytes())?;
@@ -928,14 +939,13 @@ fn names(doc: &Doc) -> String {
     }
 }
 
-/// Until the review (#197 §4): what a session changed among its declared
-/// keys, kept into its account without asking — changed keys only, last
-/// writer wins, each value another session had kept since named as replaced.
-/// Run when the harness exits in the terminal, at `down` and at `rm`, and
-/// after a login. What the session wrote that is not a preference is named
-/// and left where it is — except in a copy of an account file, whose other
-/// keys are the harness's own bookkeeping and were never the session's to
-/// keep.
+/// A login's preferences, kept into its account without asking: the user
+/// chose them at the terminal, a theme picked at a first start — every
+/// session's go through the review instead (`review`). Changed keys only,
+/// last writer wins, each value another session had kept since named as
+/// replaced. What the login wrote that is not a preference is named and left
+/// where it is — except in a copy of an account file, whose other keys are
+/// the harness's own bookkeeping and were never the login's to keep.
 ///
 /// `live` is read as the sandbox's: through `held`, capped, regular files
 /// only. One that cannot be read is an error — "could not tell what this

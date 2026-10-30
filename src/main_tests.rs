@@ -1968,11 +1968,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh <id> resume <harness>` the way the `Resume` arm does.
         // + the `omh s` pointer when rm names no session, and the `omh <id> rm`
         // in the reason `leftovers` gives for naming nothing.
-        // + `omh {id} down` and `omh {id} rm --yes` in the line naming a
-        // session's preferences to review, the same two and `omh {id} rm` in
-        // `rm`'s refusal once its container is down, and `omh {id} rm --yes`
-        // in its refusal when omh could not tell.
-        ("src/cmd/session.rs", 20),
+        // + `omh {id} down`, `omh {id} rm` and `omh {id} rm --yes` in the
+        // line naming a session's preferences to review, `omh {id} rm` and
+        // `omh {id} rm --yes` in `rm`'s refusal once its container is down,
+        // and `omh {id} rm --yes` in its refusal when omh could not tell.
+        ("src/cmd/session.rs", 21),
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         // + `omh settings edit mcp`, in the refusal of a name for a server.

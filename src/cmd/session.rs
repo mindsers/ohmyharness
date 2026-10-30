@@ -863,11 +863,16 @@ fn unreviewed(paths: &Paths, id: &str) -> Vec<(String, Result<Vec<String>>)> {
 }
 
 /// The line that says session `id` has preferences to review — `keys`, of
-/// `harness` — and how each way out is spelled.
-fn to_review(id: &str, harness: &str, keys: &[String]) -> String {
+/// `harness` — and how each way out is spelled: `down`, or `rm` when it is
+/// `rm` that refuses, at a terminal reviews them; `rm --yes` drops them.
+fn to_review(id: &str, harness: &str, keys: &[String], rm: bool) -> String {
+    let reviews = match rm {
+        false => format!("`omh {id} down`"),
+        true => format!("`omh {id} rm`"),
+    };
     out::untrusted(&format!(
-        "{id}: {} {harness} preference{} to review — {}. `omh {id} down` at a terminal reviews \
-         them; `omh {id} rm --yes` drops them",
+        "{id}: {} {harness} preference{} to review — {}. {reviews} at a terminal reviews them; \
+         `omh {id} rm --yes` drops them",
         keys.len(),
         if keys.len() == 1 { "" } else { "s" },
         keys.join(", ")
@@ -929,7 +934,7 @@ pub(crate) fn review_preferences(
                 match crate::prefs::review::unreviewed(&adapter, &s.home) {
                     Ok(keys) if keys.is_empty() => {}
                     Ok(keys) => {
-                        ctx.warn(&to_review(&s.id, &harness, &keys));
+                        ctx.warn(&to_review(&s.id, &harness, &keys, false));
                         left.extend(keys.iter().map(|k| format!("{} {k}", s.id)));
                     }
                     Err(e) => {
@@ -2605,20 +2610,13 @@ pub(crate) fn run(
     // reviewed, at a terminal; a detach under dtach leaves the harness
     // running, and what it changes is reviewed when it ends — as is
     // anything when omh cannot tell which of the two this was.
-    let exited = match opts.persist {
-        persist::Mode::None => true,
-        persist::Mode::Dtach => {
-            let probe = backend.exec_args(&name, &image::probe_command(), false);
-            match image::container_probe(&backend, &probe) {
-                image::Probe::Listed(listing) => {
-                    !persist::live(&session.id, &listing).contains(&harness)
-                }
-                image::Probe::NotEnterable | image::Probe::Gone => true,
-                image::Probe::Unknown(_) => false,
-            }
-        }
+    let probe = || {
+        let args = backend.exec_args(&name, &image::probe_command(), false);
+        image::container_probe(&backend, &args)
     };
-    if exited && crate::cmd::harvest::Interactive::of_stdin().0 {
+    if exited(opts.persist, probe, &session.id, &harness)
+        && crate::cmd::harvest::Interactive::of_stdin().0
+    {
         review_preferences(&paths, &[session.id.clone()], Review::Ask, ctx);
     }
     // `omh s01 diff`, not `omh diff`. There is no top-level `diff` — the name
@@ -2629,6 +2627,29 @@ pub(crate) fn run(
     // omh_accepts` now reads it, and would have caught both.
     ctx.hint(&format!("\nreview with  omh {} diff", session.id));
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Whether the harness ended when the terminal came back — not a detach,
+/// which leaves it running under dtach. Asked of the container only under
+/// dtach: its socket gone, or the container gone with it, is an exit; one
+/// still listed is a detach; and a probe that could not run is not an exit,
+/// which would review what the harness may still change.
+fn exited(
+    mode: persist::Mode,
+    probe: impl FnOnce() -> image::Probe,
+    id: &str,
+    harness: &str,
+) -> bool {
+    match mode {
+        persist::Mode::None => true,
+        persist::Mode::Dtach => match probe() {
+            image::Probe::Listed(listing) => {
+                !persist::live(id, &listing).contains(&harness.to_string())
+            }
+            image::Probe::NotEnterable | image::Probe::Gone => true,
+            image::Probe::Unknown(_) => false,
+        },
+    }
 }
 
 /// The two things a launch needs from outside the plan: what omh contributes,
@@ -2710,11 +2731,7 @@ pub(crate) fn rm(
                 Ok(keys) if keys.is_empty() => {}
                 Ok(keys) => anyhow::bail!(
                     "{} — nothing was removed",
-                    to_review(id, &harness, &keys).replacen(
-                        "down` at a terminal reviews",
-                        "rm` at a terminal reviews",
-                        1
-                    )
+                    to_review(id, &harness, &keys, true)
                 ),
                 Err(e) => anyhow::bail!(
                     "could not tell whether {id} has {harness} preferences to review: {e:#} — \
@@ -3116,6 +3133,36 @@ pub(crate) fn rm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// dtach's exit told from a detach (#197 §4): only an exit is reviewed.
+    /// Under `persistence = none` the terminal coming back is the exit, and
+    /// the container is not asked. Under dtach, the harness's own socket
+    /// still listed is a detach — another harness's is not this one — and a
+    /// probe that could not run is not taken for an exit.
+    #[test]
+    fn dtachs_exit_is_told_from_a_detach() {
+        use crate::image::Probe;
+        let listed = |names: &'static str| move || Probe::Listed(names.to_string());
+        assert!(exited(
+            persist::Mode::None,
+            || panic!("asked the container"),
+            "s01",
+            "claude"
+        ));
+        let dtach = persist::Mode::Dtach;
+        assert!(!exited(dtach, listed("s01-claude\n"), "s01", "claude"));
+        assert!(exited(dtach, listed(""), "s01", "claude"));
+        assert!(exited(dtach, listed("s01-codex\n"), "s01", "claude"));
+        assert!(exited(dtach, listed("s02-claude\n"), "s01", "claude"));
+        assert!(exited(dtach, || Probe::Gone, "s01", "claude"));
+        assert!(exited(dtach, || Probe::NotEnterable, "s01", "claude"));
+        assert!(!exited(
+            dtach,
+            || Probe::Unknown("no daemon".into()),
+            "s01",
+            "claude"
+        ));
+    }
     use crate::session::Ran;
     use std::path::Path;
 

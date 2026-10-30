@@ -753,9 +753,10 @@ pub fn plan(
     // because OAuth tokens refresh in place.
     //
     // A credential file the policy copies is the session's own copy instead,
-    // seeded from the account by `auth::seed_copies` — never by `plan`, which
-    // runs before the reuse decision and would rewrite a file bind-mounted
-    // into a running container.
+    // seeded from the account by `auth::Seeds::write` — or by
+    // `prefs::Account::seed`, for one that is a preferences file too — never
+    // by `plan`, which runs before the reuse decision and would rewrite a
+    // file bind-mounted into a running container.
     if let Some(account) = &opts.account_dir {
         let copied: Vec<PathBuf> = match opts.launch {
             Launch::Session => adapter

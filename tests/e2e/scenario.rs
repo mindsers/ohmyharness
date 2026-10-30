@@ -882,8 +882,8 @@ fn own_copy(s: &Session) {
 ///   `/work/.claude/settings.local.json` switched omh's hooks off and put the
 ///   text before the model, for the session that wrote them; the document's
 ///   own `false`s outrank both;
-/// - `~/.claude/settings.json`, in the account, is masked: a hook written
-///   there is refused;
+/// - a hook written to `~/.claude/settings.json` lands in the session's own
+///   copy, and neither in the account's file nor in what the account keeps;
 /// - a caller's own `--settings` — a file, `--settings=`, inline JSON — is
 ///   merged into omh's rather than replacing it, as a second `--settings`
 ///   would: omh's servers stay connected though the caller's says otherwise,
@@ -999,9 +999,9 @@ fn claude_settings(s: &Session) {
 ///   reaches no copy;
 /// - `copyOnSelect`, in the account's own `~/.claude.json` before it had a
 ///   store, is kept into one and seeded from it;
-/// - Claude's own settings writer — `claude plugin marketplace add`, the save
-///   `/model` and `/config` share — saves through the single-file mount into
-///   the session's file, and the account keeps none of it.
+/// - Claude's own writer of user settings — `claude plugin marketplace add`
+///   — saves through the single-file mount into the session's file, and the
+///   account keeps none of it.
 ///
 /// Only for claude.
 fn own_preferences(s: &Session) {
