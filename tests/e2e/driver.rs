@@ -351,9 +351,29 @@ pub const OMP: Driver = Driver {
     drops: &["e2e-before-inject", "e2e-end-inject", "e2e-start-inject", "git-note", "graph-first", "graph-orient", "graph-read"],
 };
 
+/// An opencode account: a login that is none — a key for a provider nobody
+/// configures — and the preferences it keeps, the model last picked. opencode
+/// runs on that one where nothing else names a model (`Provider.defaultModel`);
+/// with none picked, on the first of the fake provider's models in its own
+/// order, `fake-model`.
+fn opencode_account() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            ".local/share/opencode/auth.json",
+            r#"{"e2e":{"type":"api","key":"not-a-login"}}"#.to_string(),
+        ),
+        (
+            "preferences/model.json",
+            r#"{"recent":[{"providerID":"fake","modelID":"fake-kept"}]}"#.to_string(),
+        ),
+    ]
+}
+
 /// opencode's provider comes in through `OPENCODE_CONFIG_CONTENT`, which it
 /// merges over its config files rather than replacing them — omh's MCP
-/// servers and plugin stay. The model id must not contain `gpt-`, which swaps
+/// servers and plugin stay — and its model from the account's preferences
+/// (`opencode_account`): the driver names none, since a configured model
+/// wins over the one last picked. No model id may contain `gpt-`, which swaps
 /// `edit` and `write` for `apply_patch`. Not `--pure`: it drops plugins, and
 /// omh's hooks are one.
 pub const OPENCODE: Driver = Driver {
@@ -361,24 +381,15 @@ pub const OPENCODE: Driver = Driver {
     env: &[
         (
             "OPENCODE_CONFIG_CONTENT",
-            r#"{"model":"fake/fake-model","agent":{"title":{"disable":true}},"provider":{"fake":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"{url}/v1","apiKey":"fake"},"models":{"fake-model":{"tool_call":true}}}}}"#,
+            r#"{"agent":{"title":{"disable":true}},"provider":{"fake":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"{url}/v1","apiKey":"fake"},"models":{"fake-model":{"tool_call":true},"fake-kept":{"tool_call":true}}}}}"#,
         ),
         ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
     ],
     files: &[],
     turn: |prompt, _| {
-        [
-            "opencode",
-            "run",
-            "--auto",
-            "--format",
-            "json",
-            "-m",
-            "fake/fake-model",
-            prompt,
-        ]
-        .map(String::from)
-        .to_vec()
+        ["opencode", "run", "--auto", "--format", "json", prompt]
+            .map(String::from)
+            .to_vec()
     },
     shell: |command| tool("bash", json!({ "command": command, "description": "e2e" })),
     read: |file| tool("read", json!({ "filePath": abs(file) })),
@@ -399,7 +410,7 @@ pub const OPENCODE: Driver = Driver {
     // plugins it loads, with no switch to stop it.
     elsewhere: &[GRAPH_UPDATE_CHECK, "registry.npmjs.org:443"],
     transcripts: false,
-    account: None,
+    account: Some(opencode_account),
     drops: &[
         "e2e-before-inject",
         "e2e-end-inject",

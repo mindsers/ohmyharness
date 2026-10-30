@@ -807,7 +807,8 @@ pub fn plan(
         // `prefs::Account::seed` after the reuse decision, never by `plan`:
         // for `link`, the directory the account's file links into; for
         // `file`, each file where the harness reads it, after the account's
-        // directories, which they land inside.
+        // directories, which they land inside; for `dir`, the whole directory
+        // at its `root`, which no account path is inside or around.
         let live = crate::prefs::live(&prefs_home(paths, session, adapter.name.as_str()));
         match adapter.preferences.as_ref().map(|p| p.mount) {
             Some(crate::adapter::PrefMount::Link) => mounts.push(Mount {
@@ -816,6 +817,16 @@ pub fn plan(
                 read_only: false,
                 file: false,
             }),
+            Some(crate::adapter::PrefMount::Dir) => {
+                if let Some(root) = adapter.preferences.as_ref().and_then(|p| p.root.as_deref()) {
+                    mounts.push(Mount {
+                        host: live,
+                        guest: expand(root, GUEST_HOME),
+                        read_only: false,
+                        file: false,
+                    });
+                }
+            }
             Some(crate::adapter::PrefMount::File) => {
                 for (guest, name) in own {
                     mounts.push(Mount {
@@ -2332,6 +2343,37 @@ mod tests {
             .mounts
             .iter()
             .all(|m| m.guest != Path::new(crate::prefs::GUEST)));
+    }
+
+    /// An opencode session's state directory is its own copy, mounted whole
+    /// from its run directory where opencode keeps its state — so what it
+    /// writes there beside its preferences is the session's too. With no
+    /// account there are no preferences to seed it from, and nothing is
+    /// mounted there.
+    #[test]
+    fn an_opencode_sessions_state_directory_is_its_own_copy() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/opencode/work");
+        let p = plan_account(&fx, "opencode", Some(account));
+        let state = Path::new(GUEST_HOME).join(".local/state/opencode");
+        let at: Vec<_> = p.mounts.iter().filter(|m| m.guest == state).collect();
+        let [m] = at.as_slice() else {
+            panic!("one mount at {}: {at:?}", state.display());
+        };
+        assert!(!m.read_only && !m.file, "{m:?}");
+        assert_eq!(
+            m.host,
+            fx.paths
+                .runs()
+                .join(&fx.session.id)
+                .join(".preferences/opencode/live")
+        );
+        assert!(p
+            .mounts
+            .iter()
+            .all(|m| m.guest != Path::new(crate::prefs::GUEST)));
+        let none = plan_account(&fx, "opencode", None);
+        assert!(none.mounts.iter().all(|m| m.guest != state));
     }
 
     /// Every session gets its own network, named like its container. One

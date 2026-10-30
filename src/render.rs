@@ -3047,6 +3047,21 @@ mod tests {
         );
     }
 
+    /// opencode's config `model` wins over the model a session last picked,
+    /// which it keeps in `model.json` as a preference, on every restart — so
+    /// the document omh renders into its config holds servers and nothing
+    /// else, `model` above all (#197 §2). A regression guard: it has never
+    /// held one.
+    #[test]
+    fn opencodes_render_never_sets_a_model() {
+        let (_d, files) = servers(&[("", L1)]);
+        let m = merge_servers(&files).unwrap();
+        let oc = mcp(Render::OpencodeJson, &m).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&oc).unwrap();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["$schema", "mcp"]);
+    }
+
     /// A wrong schema means the harness silently sees zero MCP servers, so each
     /// format asserts the shape the harness actually parses.
     #[test]

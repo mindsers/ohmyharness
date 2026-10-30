@@ -823,7 +823,8 @@ pub fn ensure_stack(
     Ok(tag)
 }
 
-/// Parents of every mount target under the agent's home.
+/// Parents of every mount target under the agent's home — a `dir`
+/// preferences root among them.
 ///
 /// The home itself is excluded — the base image already owns it — and
 /// `/work` is a mount omh controls rather than one the image prepares.
@@ -834,6 +835,7 @@ fn mount_parents(adapter: &Adapter) -> Vec<String> {
         .map(|b| b.path.clone())
         .chain(adapter.creds.iter().cloned())
         .chain(adapter.token.iter().cloned())
+        .chain(adapter.preferences.iter().flat_map(|p| p.root.clone()))
         .flat_map(|template| {
             let path = crate::adapter::expand(template.trim_end_matches('/'), GUEST_HOME);
             // `/work` is a mount omh owns; only the home side needs preparing.
@@ -5033,6 +5035,19 @@ mod tests {
                     at = parent;
                 }
             }
+        }
+    }
+
+    /// A `dir` preferences root is a mount target under the home too —
+    /// opencode's `~/.local/state/opencode` — and Docker makes a missing one's
+    /// parents as root when it mounts there: `~/.local/state` is no parent of
+    /// anything else omh mounts, so nothing else would hand it over.
+    #[test]
+    fn a_preferences_directorys_parents_belong_to_the_agent() {
+        let a = Adapter::find(adapters(), "opencode").unwrap();
+        let owned = mount_parents(&a);
+        for want in ["/home/agent/.local/state", "/home/agent/.local"] {
+            assert!(owned.iter().any(|d| d == want), "{want}: {owned:?}");
         }
     }
 

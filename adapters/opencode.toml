@@ -112,3 +112,66 @@ template = 'output.output = String(output.output ?? "") + "\n\n" + {{text}}'
 # paraphrased in the reply.
 [capabilities.hooks.refuse]
 template = "throw new Error({{text}})"
+
+# The keys of opencode's state that are your preferences, kept per account and
+# copied into each session (#197 §1, §3). opencode 1.19.0 keeps them in two
+# files of its state directory (`Global.Path.state`): `model.json` — the
+# models you last picked and starred, and each one's variant — and `kv.json`,
+# what its TUI remembers, by key (`tui/src/context/kv.tsx`). Each key listed is
+# one opencode itself reads or writes there; none names a program, grants a
+# consent or a trust, carries text before the model or picks where traffic
+# goes. `theme` names one of the themes opencode finds — colours only. A
+# `model` in opencode's config wins over `recent` on every start
+# (`Provider.defaultModel`), so omh's render never sets one.
+#
+# `dir`: that directory was never in the account — `creds` is
+# `~/.local/share/opencode/` — so there is no file to migrate, and each
+# session's copy of the whole directory is mounted there. opencode writes its
+# files by renaming over them (`writeJsonAtomic`), which a directory mount
+# takes; what else it keeps there — its prompt history and stash, file
+# frecency, plugin metadata, `session.json` — is the session's, and lasts its
+# relaunches.
+#
+# `quiet`: what opencode records on its own — the version you skipped, a
+# notice dismissed, the tips hidden, its upsell's last showing and "don't show
+# again".
+[preferences]
+mount = "dir"
+root  = "$HOME/.local/state/opencode"
+
+[preferences.files]
+"model.json" = ["recent", "favorite", "variant"]
+"kv.json" = [
+  "theme",
+  "theme_mode",
+  "theme_mode_lock",
+  "thinking_mode",
+  "tool_details_visibility",
+  "assistant_metadata_visibility",
+  "scrollbar_visible",
+  "generic_tool_output_visibility",
+  "animations_enabled",
+  "file_context_enabled",
+  "diff_wrap_mode",
+  "paste_summary_enabled",
+  "terminal_title_enabled",
+  "session_directory_filter_enabled",
+  "which_key_layout",
+  "which_key_pending_preview",
+  "diff_viewer_view",
+  "diff_viewer_show_file_tree",
+  "diff_viewer_single_patch",
+  "attention_sound_pack",
+]
+
+[preferences.quiet]
+"kv.json" = [
+  "skipped_version",
+  "update_dismissed_until",
+  "tips_hidden",
+  "dismissed_getting_started",
+  "go_upsell_last_seen_at",
+  "go_upsell_dont_show",
+  "go_upsell_account_rate_limit_last_seen_at",
+  "go_upsell_account_rate_limit_dont_show",
+]
