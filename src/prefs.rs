@@ -1854,9 +1854,10 @@ base_url = "https://example.invalid"
 
     /// A `dir` account has no file of its own to migrate or import — the
     /// harness's state directory was never in it — so a launch changes
-    /// nothing in the account, asks about no running session, and seeds the
-    /// session's directory with what the account keeps, declared keys alone,
-    /// and an empty document for a file it keeps nothing of. What the harness
+    /// nothing in the account and asks about no running session. What the
+    /// account keeps, declared keys alone, is what `omh doctor` names and
+    /// what a launch seeds the session's directory with — an empty document
+    /// for a file it keeps nothing of. What the harness
     /// writes beside them in its directory is the session's, and a relaunch
     /// keeps it.
     #[test]
@@ -1873,6 +1874,13 @@ base_url = "https://example.invalid"
         let checked = check(&opencode(), &account).unwrap().unwrap();
         assert!(!checked.needs_quiet());
         assert!(checked.pending().is_empty(), "{:?}", checked.pending());
+        let summary = checked.summary();
+        assert!(
+            summary.contains("model.json — the account keeps recent")
+                && summary.contains("kv.json — the account keeps nothing")
+                && !summary.contains("planted"),
+            "{summary}"
+        );
         assert!(checked
             .apply(&|| panic!("a dir account asks about running sessions"))
             .unwrap()
