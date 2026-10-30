@@ -190,7 +190,7 @@ the second reversal it forced, is under
 
 ### Capability floor: a superset, adapters degrade
 
-**The profile is the superset of what any harness can express; an adapter
+**The catalogue is the superset of what any harness can express; an adapter
 degrades by leaving keys out.** omh must never cost you a feature you already
 had. → [Adapters](/reference/adapters/#capabilities-are-optional-keys)
 
@@ -232,8 +232,8 @@ omh settings mcp add …
 | memory | ✅ | survives harness switches — one store per repo, shared by its sessions and never committed; hub pages do not ship, and the committed layer was removed in 0.14 |
 | egress allowlist | ⬜ | inherited from the runtime |
 
-**If a further entry needs a paragraph to justify, it belongs in a profile, not
-the base set.**
+**If a further entry needs a paragraph to justify, it belongs in your
+catalogue, not the base set.**
 
 The set lives in a versioned manifest rather than in the binary, and the
 justification is enforced by a test rather than by convention — see

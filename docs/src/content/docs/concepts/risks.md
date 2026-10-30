@@ -717,7 +717,7 @@ likely to kill the project, and it is not a technical one.
   holds copies of them. Nothing reads those, `omh why` names them as not read,
   and `omh upgrade` takes them out — keeping the file as it was in
   `mcp.json.yours` when a copy was not what omh ships now.
-- **`omh why` answers about one repo's profile.** It reads the layers resolved
+- **`omh why` answers about one repo.** It reads the layers resolved
   for the current repo, so the same entry can legitimately answer differently in
   two checkouts. That is correct and occasionally surprising.
 

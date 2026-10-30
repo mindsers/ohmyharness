@@ -43,7 +43,7 @@ harnesses take turns inhabiting.
  │  codebase-memory-mcp ──── daemon: the index stays warm │
  │                                                       │
  │  /work  ← worktree (host dir, bind-mounted)           │
- │  staged profile, read-only                            │
+ │  staged catalogue, read-only                          │
  │  /omh/cache ← volume keyed by REPO, not harness       │
  └──────────────────────────────────────────────────────┘
 ```
@@ -256,7 +256,7 @@ moved. Two real failures came from never asking:
 
 - **A harness the image does not have.** `omh s01 resume opencode` on a session
   started by `omh new claude` was instant and wrong: it execed a binary that
-  image does not contain, and the harness's whole staged profile stayed
+  image does not contain, and the harness's whole staged catalogue stayed
   unmounted.
 - **An account change nobody noticed.** Changing the account between launches
   went on quietly using the old one — the exact thing `omh account login` refuses to

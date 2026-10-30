@@ -35,7 +35,7 @@ which proves their paths and nothing about their behaviour.
 **Step 2 is not optional, and it is not a formality.** Adapter facts are
 unverified claims about external software that ships weekly, and they break
 *silently* — a wrong path means the harness starts fine and simply never sees
-your profile. A green unit suite proves omh mounted a path faithfully. It cannot
+your catalogue. A green unit suite proves omh mounted a path faithfully. It cannot
 prove anything read it. See [Troubleshooting](/guides/troubleshooting/#why-it-exists).
 
 ### The bar for shipping one
@@ -48,7 +48,7 @@ hooks included on every one. Any fifth adapter inherits the same bar.
   distinction is deliberate, is repeated wherever the claim appears, and applies
   to `opencode`, `omp` and `codex` in the same words.
 - **The check count is not an adapter fact.** It varies with the capabilities
-  your profile declares and with whether a login has been captured for that
+  your catalogue declares and with whether a login has been captured for that
   harness.
 
 <details>
@@ -369,7 +369,7 @@ omh enforces each of these, with an error naming the adapter:
 - a `version` that `install` never interpolates, or a `{{version}}` with no `version` to fill it
 - an `install` that runs `sha256sum -c` while declaring no `checksums`
 - `token` and `token-probe` together
-- no capabilities at all — it would launch a harness that can see none of your profile
+- no capabilities at all — it would launch a harness that can see none of your catalogue
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
 - a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
 - a `[policy]` `mask` entry that is a capability's own path — two mounts at one path
@@ -401,7 +401,7 @@ of a host `docker build`.
 
 ## Capabilities are optional keys
 
-The profile carries the **superset** of what any harness might express. An
+The catalogue carries the **superset** of what any harness might express. An
 adapter declares which parts its harness can actually express, and where. The
 capability classes are `rules`, `skills`, `mcp`, `commands`, `subagents` and
 `hooks`.

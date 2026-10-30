@@ -26,7 +26,7 @@
 //! The sandbox is what makes this a disclosure rather than a hole. A repo hook
 //! cannot reach your checkout, your home directory or your credentials.
 
-use crate::profile::Paths;
+use crate::catalogue::Paths;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -159,11 +159,11 @@ fn record_path(paths: &Paths) -> PathBuf {
 /// reason to refuse to start work, and a name that resolves to nothing costs
 /// only itself.
 ///
-/// omh's own are excluded from both — `Profile::entries` never lists them and
+/// omh's own are excluded from both — `Catalogue::entries` never lists them and
 /// [`crate::selection::Selection`] never reports one — so nothing of omh's is
 /// reported as something `omh use` could fix: `omh use` refuses to write it.
 pub fn selection(
-    profile: &crate::profile::Profile,
+    catalogue: &crate::catalogue::Catalogue,
     selection: &crate::selection::Selection,
     // What this repo could take, per capability, where that is narrower than
     // what the catalogue holds. Resolved by the caller, which is the only place
@@ -177,7 +177,7 @@ pub fn selection(
     let mut unselected: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
     for cap in crate::adapter::Capability::ALL {
-        let available = profile.entries(cap)?;
+        let available = catalogue.entries(cap)?;
         // *What you are not using.* Narrowed to what this repo could ever have
         // used: once omh ships a conventional hook per ecosystem, a rust repo's
         // catalogue holds `go-test` and `python-format`, and listing them here
@@ -840,12 +840,12 @@ mod tests {
         // tests are about the selection, not about which ecosystem a hook
         // belongs to, which `a_hook_for_an_ecosystem_this_repo_is_not_is_not_offered`
         // covers on its own.
-        let profile = crate::profile::Profile::resolve(&fx.paths);
+        let catalogue = crate::catalogue::Catalogue::resolve(&fx.paths);
         let applicable = crate::adapter::Capability::ALL
             .into_iter()
-            .map(|cap| (cap, profile.entries(cap).unwrap_or_default()))
+            .map(|cap| (cap, catalogue.entries(cap).unwrap_or_default()))
             .collect();
-        selection(&profile, &policy.selection, &applicable).unwrap()
+        selection(&catalogue, &policy.selection, &applicable).unwrap()
     }
 
     /// The report that makes an expanded `[use]` safe.

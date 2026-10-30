@@ -2030,7 +2030,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // than decorative: every one goes to somebody whose next step is
         // the command it names. `omh <id> rm` and `docker volume ls` from
         // the leftovers row; `omh init` three times — from `host_checks`
-        // for a profile with no stack definitions, and from `seeded_from`
+        // for a catalogue with no stack definitions, and from `seeded_from`
         // for a checkout that never recorded which omh set it up and for
         // one an older omh seeded; and `omh sNN sync` from the git row.
         //
@@ -2074,7 +2074,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/prefs.rs", 7),
         // `omh s down`, in the refusal when a live sandbox blocks the move
         // off the pre-2026.08 repo key.
-        ("src/profile.rs", 1),
+        ("src/catalogue.rs", 1),
         // `omh account login codex --provider <file>`, in a provider field's refusal.
         ("src/provider.rs", 1),
         // `omh account login omp --name <account> --provider <file>`, when the
@@ -6618,6 +6618,37 @@ fn every_argument_says_what_it_is() {
         bare.is_empty(),
         "these render in `--help` as a name with nothing beside it: {bare:#?}"
     );
+}
+
+/// The catalogue is called a catalogue: no command's or argument's help says
+/// "profile", the word #21 left behind for it.
+#[test]
+fn the_help_calls_the_catalogue_a_catalogue() {
+    fn walk(cmd: &clap::Command, path: &str, said: &mut Vec<(String, String)>) {
+        let own = [cmd.get_about(), cmd.get_long_about()];
+        let args = cmd
+            .get_arguments()
+            .flat_map(|a| [a.get_help(), a.get_long_help()]);
+        for text in own.into_iter().chain(args).flatten() {
+            said.push((path.to_string(), text.to_string()));
+        }
+        for sub in cmd.get_subcommands() {
+            walk(sub, &format!("{path} {}", sub.get_name()), said);
+        }
+    }
+    let mut said = Vec::new();
+    walk(&Cli::command(), "omh", &mut said);
+    // A walk that read nothing would find nothing.
+    assert!(said.len() > 100, "the walk read {} texts", said.len());
+    assert!(
+        said.iter().any(|(_, t)| t.contains("catalogue")),
+        "the walk never reached a text naming the catalogue"
+    );
+    let profile: Vec<_> = said
+        .iter()
+        .filter(|(_, t)| t.to_lowercase().contains("profile"))
+        .collect();
+    assert!(profile.is_empty(), "{profile:#?}");
 }
 
 /// Aliases only earn their keep if they are actually short.

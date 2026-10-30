@@ -23,9 +23,9 @@
 //! so.
 
 use crate::adapter::{Adapter, Capability};
+use crate::catalogue::Paths;
 use crate::cmd::harvest::plural;
 use crate::cmd::settings::{self, Edited};
-use crate::profile::Paths;
 use crate::tui::{Act, App, Edit, Import, Model, Next, Page, Row, Section};
 use crate::{config, hook, key};
 use anyhow::{Context, Result};
@@ -641,7 +641,7 @@ fn redraw(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
 /// Everything the screen shows, read fresh.
 ///
 /// **Your catalogue alone** — `~/.omh` — and never this checkout's own hooks,
-/// which `Profile::entries` adds for a launch. The screen removes what it
+/// which `Catalogue::entries` adds for a launch. The screen removes what it
 /// lists, and a list that mixed the two would offer the repo's files under
 /// your catalogue's name.
 pub(crate) fn model(paths: &Paths) -> Model {
@@ -818,7 +818,7 @@ fn names_nothing(paths: &Paths, table: &str) -> Option<String> {
         };
         // The catalogue as the kind's page reads it: what is on disk, whether
         // or not `~/.omh/base` can be read.
-        let catalogue = match crate::profile::Profile::resolve(paths).entries(cap) {
+        let catalogue = match crate::catalogue::Catalogue::resolve(paths).entries(cap) {
             Ok(names) => names,
             Err(e) => {
                 wrong.push(format!("could not check [{table}] {cap}: {e:#}"));
@@ -1373,7 +1373,7 @@ fn entries(paths: &Paths, cap: Capability) -> Section {
             return out;
         }
     }
-    let listed = match crate::profile::listed(&dir, cap) {
+    let listed = match crate::catalogue::listed(&dir, cap) {
         Ok(listed) => listed,
         Err(e) => {
             out.problem = Some(format!("{e:#}"));

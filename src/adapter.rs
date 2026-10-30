@@ -1,6 +1,6 @@
 //! An adapter is data, not code.
 //!
-//! The profile carries the *superset* of what any harness can do. An adapter
+//! The catalogue carries the *superset* of what any harness can do. An adapter
 //! declares which of those capabilities its harness can express, and where each
 //! one lives. An absent key means "this harness cannot do this" — so graceful
 //! degradation is a missing map entry rather than special-case logic.
@@ -573,7 +573,7 @@ pub fn related(a: &KeyPath, b: &KeyPath) -> bool {
     a[..n] == b[..n]
 }
 
-/// The capability classes a profile can carry. Ordered as declared, which is
+/// The capability classes a catalogue can carry. Ordered as declared, which is
 /// also the order they are staged and reported in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1018,7 +1018,7 @@ impl Adapter {
         if adapter.capabilities.is_empty() {
             anyhow::bail!(
                 "adapter {} declares no capabilities — it would launch a harness \
-                 that can see none of your profile",
+                 that can see none of your catalogue",
                 path.display()
             );
         }
@@ -1967,7 +1967,7 @@ mod tests {
     /// The paths a harness reads, pinned to what its documentation says.
     ///
     /// These are the claims CONTRIBUTING puts at the top: a wrong one does not
-    /// crash anything — the harness starts and simply never sees your profile,
+    /// crash anything — the harness starts and simply never sees your catalogue,
     /// and `omh doctor` cannot tell, because its `dir` check verifies that the
     /// directory *omh mounted* holds what omh put there. It passes identically
     /// whether the path is right or wrong.
@@ -3041,7 +3041,12 @@ bin="e"
 install="x""#,
         );
         let err = Adapter::find(d.path(), "empty").unwrap_err();
-        assert!(err.to_string().contains("no capabilities"), "got: {err}");
+        assert!(
+            err.to_string().contains(
+                "no capabilities — it would launch a harness that can see none of your catalogue"
+            ),
+            "got: {err}"
+        );
     }
 
     #[test]

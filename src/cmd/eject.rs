@@ -18,13 +18,13 @@
 //! tree by default would be the opposite of reassuring.
 
 use crate::adapter::{Adapter, Binding, Capability, Render};
+use crate::catalogue::{settled, Catalogue, Paths};
 use crate::out;
-use crate::profile::{settled, Paths, Profile};
 use crate::{render, report};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Render every capability this profile carries into `to`.
+/// Render every capability this catalogue carries into `to`.
 pub(crate) fn eject(
     cwd: &Path,
     harness: &str,
@@ -33,7 +33,7 @@ pub(crate) fn eject(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let profile = Profile::resolve(&paths);
+    let catalogue = Catalogue::resolve(&paths);
     // Named rather than guessed. Every other harness-taking command refuses an
     // unknown name here, and an eject that quietly wrote an empty directory
     // would be discovered three commands later with nothing to explain it.
@@ -86,7 +86,7 @@ pub(crate) fn eject(
             dropped.push(cap.to_string());
             continue;
         };
-        let sources = profile.sources(cap)?;
+        let sources = catalogue.sources(cap)?;
         if !crate::container::carries(cap, &sources, &rules_doc, &own, &adapter) {
             continue;
         }
@@ -174,7 +174,7 @@ pub(crate) fn eject(
     // The policy a launch writes beside those documents, from the same list of
     // servers. A system path, so it lands under `system/`.
     if let Some(policy) = &adapter.policy {
-        let sources = profile.sources(Capability::Mcp)?;
+        let sources = catalogue.sources(Capability::Mcp)?;
         let servers = crate::container::admitted(&sources, &rules_doc, &own, &repo, &adapter)?;
         let at = to.join("system").join(policy.path.trim_start_matches('/'));
         write_file(&at, &render::policy(policy.format, &servers)?, dry_run)?;
@@ -359,7 +359,7 @@ fn copy_selected(
             let name = entry.file_name();
             if !repo
                 .selection
-                .allows(cap, &crate::profile::entry_name(&name))
+                .allows(cap, &crate::catalogue::entry_name(&name))
             {
                 continue;
             }

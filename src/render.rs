@@ -1694,7 +1694,7 @@ fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>, ours: &[&str]) -> R
     //
     // Blanket rather than per-server, because the only project document in
     // there is the one omh mounted: the mount covers the worktree's own
-    // `.mcp.json`, so this approves omh's rendering of what the profile
+    // `.mcp.json`, so this approves omh's rendering of what the catalogue
     // already decided, not whatever a checkout happened to ship.
     // Claude asks before every MCP tool call in its default permission mode.
     // `mcp__<server>` is the rule that allows every tool of one server — the

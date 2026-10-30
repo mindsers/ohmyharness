@@ -522,13 +522,13 @@ pub const GRAPH_BIN: &str = "codebase-memory-mcp";
 /// every other session's graph anyway — N identical websites. Matching the
 /// server's scope to its data's scope removes the duplication, survives
 /// sessions starting and stopping, and lets the container mount *only* the
-/// index: no worktree, no credentials, no profile.
+/// index: no worktree, no credentials, no catalogue.
 ///
-/// `repo` is the repo id, respelled by [`crate::profile::runtime_id`] here
+/// `repo` is the repo id, respelled by [`crate::catalogue::runtime_id`] here
 /// rather than by every caller, because docker refuses a name outside its
 /// charset.
 pub fn ui_container(repo: &str) -> String {
-    format!("omh-graph-{}", crate::profile::runtime_id(repo))
+    format!("omh-graph-{}", crate::catalogue::runtime_id(repo))
 }
 
 /// A stable loopback port for the graph UI.
@@ -590,7 +590,7 @@ pub fn ui_run_args(image: &str, container: &str, cache_volume: &str, port: u16) 
         container.into(),
         "-p".into(),
         format!("127.0.0.1:{port}:{GRAPH_UI_PORT}"),
-        // The index and nothing else. No worktree, no credentials, no profile.
+        // The index and nothing else. No worktree, no credentials, no catalogue.
         "-v".into(),
         format!("{cache_volume}:{GRAPH_CACHE}"),
         image.into(),
@@ -636,11 +636,11 @@ pub const PROJECT_ENV: &str = "OMH_GRAPH_PROJECT";
 /// A graph is per-session, because a session's worktree is not the checkout the
 /// agent started from — it holds whatever the agent has since written.
 ///
-/// Respelled by [`crate::profile::runtime_id`], because the name is quoted
+/// Respelled by [`crate::catalogue::runtime_id`], because the name is quoted
 /// into a shell line in the sandbox (`drop_graph_command`) and a `'` in a
 /// checkout's directory name would end the quote.
 pub fn project_name(repo: &str, session: &str) -> String {
-    format!("{}-{session}", crate::profile::runtime_id(repo))
+    format!("{}-{session}", crate::catalogue::runtime_id(repo))
 }
 
 /// Read a note and take it away in one command.

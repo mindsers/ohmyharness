@@ -8,8 +8,8 @@
 //! trade and is recorded on the decisions page.
 
 use crate::adapter::{self, Adapter};
+use crate::catalogue::{Catalogue, Paths};
 use crate::out;
-use crate::profile::{Paths, Profile};
 use crate::{auth, base, config, key, notice, report, selection, settings};
 use anyhow::{Context, Result};
 use std::process::Command;
@@ -127,7 +127,7 @@ pub(crate) fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 /// deriving it separately is two answers that are free to disagree, and the
 /// one a person reads first is `init`'s.
 pub(crate) fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<report::Using>> {
-    let profile = Profile::resolve(paths);
+    let catalogue = Catalogue::resolve(paths);
     let policy = settings::resolve(paths, manifest)?;
     // What omh's own features bring, which `[use]` never names — a feature owns
     // its entries, so they are excluded from the selection. Reported beside the
@@ -136,7 +136,7 @@ pub(crate) fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec
     let owned = manifest.owns();
     let mut using = Vec::new();
     for cap in adapter::Capability::ALL {
-        let entries = profile.entries(cap)?;
+        let entries = catalogue.entries(cap)?;
         let unselected = policy.selection.unselected(cap, &entries);
         let from_a_feature: Vec<String> = owned
             .get(&cap)
@@ -180,7 +180,7 @@ pub(crate) fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec
 /// them.
 pub(crate) fn selection_notices(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<String>> {
     notice::selection(
-        &Profile::resolve(paths),
+        &Catalogue::resolve(paths),
         &settings::resolve(paths, manifest)?.selection,
         &crate::cmd::catalogue::catalogue_lists(paths)?,
     )
@@ -562,13 +562,13 @@ pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
     // `Skills` alone, so a rule or a command of the same name got the dead key
     // instead — the same mistake one word over, which is what the refusal
     // exists to catch. `Capability::ALL` is the list that cannot rot.
-    let profile = Profile::resolve(paths);
+    let catalogue = Catalogue::resolve(paths);
     for cap in adapter::Capability::ALL {
-        // Not `.flatten()`. `Profile::entries` returns `Result` precisely so a
+        // Not `.flatten()`. `Catalogue::entries` returns `Result` precisely so a
         // half-read catalogue is not reported as an empty one — its own
         // comment says so — and swallowing that here turns an unreadable
         // directory into a bare key written to a committed file.
-        match profile.entries(cap) {
+        match catalogue.entries(cap) {
             Ok(entries) if entries.iter().any(|e| e == name) => {
                 return Names::ACatalogueEntry(cap);
             }
@@ -1618,7 +1618,7 @@ fn find_entry(cap: adapter::Capability, name: &str, dir: &std::path::Path) -> Re
     let mut matches = Vec::new();
     for entry in listing {
         let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-        let entry_name = crate::profile::entry_name(&entry.file_name());
+        let entry_name = crate::catalogue::entry_name(&entry.file_name());
         if entry_name == name {
             matches.push(entry.path());
         } else if selection::validate_entry_name(&entry_name, cap, dir).is_ok() {
@@ -1701,7 +1701,7 @@ pub(crate) fn shipped_hooks() -> Vec<String> {
     crate::bundled::Shipped::Hooks
         .files()
         .iter()
-        .map(|f| crate::profile::entry_name(std::ffi::OsStr::new(f.name)))
+        .map(|f| crate::catalogue::entry_name(std::ffi::OsStr::new(f.name)))
         .collect()
 }
 

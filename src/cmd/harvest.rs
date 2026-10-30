@@ -5,10 +5,10 @@
 //! this is the half that runs on the host, decides what the user is allowed
 //! to do next, and says why when the answer is no.
 
+use crate::catalogue::Catalogue;
+use crate::catalogue::Paths;
 use crate::landing::{Holding, Settling};
 use crate::out;
-use crate::profile::Paths;
-use crate::profile::Profile;
 use crate::session::{self, Session};
 use crate::{adapter, config, doctor, image, render, report, runtime, shadow, stack};
 use anyhow::{Context, Result};
@@ -1556,7 +1556,7 @@ fn checks_for(paths: &Paths, ctx: &out::Ctx) -> std::result::Result<Vec<(String,
         .collect();
     let (own, repo) = crate::cmd::session::resolved(paths)
         .map_err(|e| format!("could not read this repo's setup — {e:#}"))?;
-    let dirs = Profile::resolve(paths)
+    let dirs = Catalogue::resolve(paths)
         .sources(adapter::Capability::Hooks)
         .map_err(|e| format!("could not read this repo's hooks — {e:#}"))?;
     let hooks = render::merge_hooks(&dirs, &own, &repo)

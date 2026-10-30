@@ -6,8 +6,8 @@
 //! sees. The rest read what is already on disk.
 
 use crate::adapter::Adapter;
+use crate::catalogue::{Catalogue, Paths};
 use crate::out;
-use crate::profile::{Paths, Profile};
 use crate::session::{self, Session};
 use crate::{
     adapter, auth, base, config, container, detect, doctor, editor, image, key, memory, persist,
@@ -157,7 +157,7 @@ pub(crate) fn doctor_cmd(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let profile = Profile::resolve(&paths);
+    let catalogue = Catalogue::resolve(&paths);
 
     // **The host, before anything that depends on it.** `git_checks` reaches
     // the report through `harvest::every_check`, which runs on the probe's
@@ -221,16 +221,16 @@ pub(crate) fn doctor_cmd(
     let volumes = volumes_on_this_machine(&paths, chosen.as_ref().ok());
     let split = match &volumes {
         Ok(names) => doctor::attributed(names, &|name| match name.strip_prefix("omh-cache-") {
-            Some(id) => crate::profile::attribution_of(
+            Some(id) => crate::catalogue::attribution_of(
                 &paths.root,
                 id,
                 // A diagnostic that writes what a delete command later acts on
                 // is not read-only. `omh doctor` reports; it does not decide.
-                crate::profile::Backfill::DoNot,
+                crate::catalogue::Backfill::DoNot,
             ),
             // A name omh does not key that way is not something it may reason
             // about at all.
-            None => crate::profile::Attribution::Unknown(
+            None => crate::catalogue::Attribution::Unknown(
                 "omh does not recognise this name's shape".into(),
             ),
         }),
@@ -483,7 +483,7 @@ pub(crate) fn doctor_cmd(
                 &paths,
                 &backend,
                 &adapter,
-                &profile.sources(adapter::Capability::Hooks)?,
+                &catalogue.sources(adapter::Capability::Hooks)?,
                 &own,
                 &repo,
                 ctx,
@@ -493,7 +493,7 @@ pub(crate) fn doctor_cmd(
         // the sandbox can work at all, and neither depends on what omh mounted.
         let mut checks = vec![doctor::start_check(&adapter), doctor::sandbox_git_check()];
         checks.extend(doctor::checks(
-            &profile,
+            &catalogue,
             &adapter,
             &own,
             &repo,
@@ -542,7 +542,7 @@ pub(crate) fn doctor_cmd(
             ctx.say(
                 &report::Action::new(
                     "doctor-nothing-to-check",
-                    "nothing to check: the profile is empty",
+                    "nothing to check: the catalogue is empty",
                 )
                 .data(serde_json::json!({ "harness": name, "checks": 0 })),
             );
@@ -631,8 +631,8 @@ pub(crate) fn doctor_cmd(
             (Some(prefs), Some(seeds)) => seeds.take(&prefs.copies()),
             _ => std::collections::BTreeMap::new(),
         };
-        crate::cmd::session::say_selection(&paths, &profile, &opts.repo, ctx);
-        let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
+        crate::cmd::session::say_selection(&paths, &catalogue, &opts.repo, ctx);
+        let mut plan = container::plan(&paths, &catalogue, &adapter, &session, &[], opts)?;
         crate::cmd::session::say_rules(&plan, ctx);
         crate::cmd::session::say_policy(&plan, ctx);
         // The probe's own copies, reseeded every run: nothing an earlier
@@ -760,7 +760,7 @@ pub(crate) fn doctor_cmd(
 /// `omh why <thing>` — who put this here, and on what grounds.
 ///
 /// Needs no container and no session: it is a pure function of the manifest and
-/// the resolved profile, which is why it can answer even for something you have
+/// the resolved catalogue, which is why it can answer even for something you have
 /// removed.
 pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -813,7 +813,7 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
     let detected = stack::detected(&stack_defs, &paths.repo);
     let (own, repo_policy) = crate::cmd::session::resolved(&paths)?;
     let merged = render::merge_hooks(
-        &Profile::resolve(&paths).sources(adapter::Capability::Hooks)?,
+        &Catalogue::resolve(&paths).sources(adapter::Capability::Hooks)?,
         &own,
         &repo_policy,
     )?;
@@ -887,12 +887,12 @@ pub(crate) fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
     // What your catalogue holds. It belonged to the command 0.7.0 deleted, and that is
     // gone — `omh info` means *what you have here*, which a catalogue is.
-    let profile = Profile::resolve(&paths);
+    let mine = Catalogue::resolve(&paths);
     let mut catalogue = Vec::new();
     for cap in adapter::Capability::ALL {
         catalogue.push(report::Catalogue {
             capability: cap.to_string(),
-            entries: profile.entries(cap)?,
+            entries: mine.entries(cap)?,
         });
     }
 

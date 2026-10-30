@@ -35,7 +35,7 @@ it. In rough order of how much they matter:
   session's worktree.
 - **Egress that bypasses policy** once the allowlist is wired.
 - **A supply-chain hole in the base set or an adapter** — anything that causes
-  omh to fetch and run something the profile did not declare.
+  omh to fetch and run something your catalogue did not declare.
 
 ## What is out of scope
 

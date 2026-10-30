@@ -5,9 +5,9 @@
 //! command surface over it.
 
 use crate::adapter::{self, Adapter};
+use crate::catalogue::Paths;
 use crate::cli::McpCmd;
 use crate::out;
-use crate::profile::Paths;
 use crate::{config, render, report, settings};
 use anyhow::{Context, Result};
 

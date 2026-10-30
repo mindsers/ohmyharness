@@ -2564,7 +2564,7 @@ fn hooks_for(cwd: &Path, tree: &Path) -> Result<Hooks> {
     let at = Path::new(&value);
     let inside = !at.is_absolute() || {
         let at = lexically(at);
-        at.starts_with(lexically(tree)) || at.starts_with(crate::profile::settled(tree))
+        at.starts_with(lexically(tree)) || at.starts_with(crate::catalogue::settled(tree))
     };
     Ok(match inside {
         true => Hooks::SetAside(value),
@@ -6162,7 +6162,7 @@ mod tests {
         std::fs::write(s.worktree.join("tracked.txt"), "the agent's edit\n").unwrap();
 
         let changed = s.changed().unwrap();
-        let paths = crate::profile::Paths {
+        let paths = crate::catalogue::Paths {
             root: d.path().join("omh"),
             repo: root.clone(),
         };
@@ -6271,7 +6271,7 @@ mod tests {
         for inside in [
             s.worktree.join(".husky/_"),
             s.worktree.join("src/../.husky/_"),
-            crate::profile::settled(&s.worktree).join(".husky/_"),
+            crate::catalogue::settled(&s.worktree).join(".husky/_"),
         ] {
             set(&inside);
             assert_eq!(

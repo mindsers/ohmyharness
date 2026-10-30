@@ -35,7 +35,7 @@ claude in omh/claude:8eae0d5c1511fa89
 ```
 
 **Run it** after changing an adapter, after upgrading a harness, and any time a
-session behaves as though your profile is not there. A preview —
+session behaves as though your catalogue is not there. A preview —
 `omh doctor --dry-run` — builds nothing; it prints the probe script.
 
 ### Reading the report
@@ -1635,7 +1635,7 @@ means the paths are right: only `claude` has been driven for real work — see
 [Adapters](/reference/adapters/#the-bar-for-shipping-one).
 
 The *number* of checks is not a property of the adapter: it counts the
-capabilities your profile declares, plus a `token` check only when you have
+capabilities your catalogue declares, plus a `token` check only when you have
 captured a login for that harness, plus `memory` when the base set's server is
 installed. Two harnesses showing different totals usually means you are logged
 in to one of them.

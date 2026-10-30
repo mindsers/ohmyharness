@@ -84,7 +84,7 @@ impl Recipe {
     /// An unreadable certificate is `Unknowable`, never a digest: it is the
     /// same "the recipe is not what this would compute" case as the sandbox,
     /// arriving by a different road.
-    pub fn here(paths: &crate::profile::Paths) -> Self {
+    pub fn here(paths: &crate::catalogue::Paths) -> Self {
         match crate::image::ca_for(paths) {
             Err(e) => Self::Unknowable(format!(
                 "the image recipe depends on `ca_cert`, which could not be read: {e:#}"
@@ -360,7 +360,7 @@ pub fn evaluate(trigger: Option<&Trigger>, facts: &Facts) -> Verdict {
 /// Only the files the notes actually name. Walking the repo would make `stale`
 /// O(repo) and slow enough that nobody runs it, and a check nobody runs is a
 /// check that does not exist.
-pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
+pub fn gather(paths: &crate::catalogue::Paths, triggers: &[Trigger]) -> Facts {
     let mut facts = Facts::default();
 
     for trigger in triggers {
@@ -455,7 +455,10 @@ pub struct Judged {
 }
 
 /// `omh memory stale` — a join, in one pass.
-pub fn judge(paths: &crate::profile::Paths, notes: &[crate::memory::Note]) -> Result<Vec<Judged>> {
+pub fn judge(
+    paths: &crate::catalogue::Paths,
+    notes: &[crate::memory::Note],
+) -> Result<Vec<Judged>> {
     let triggers: Vec<Trigger> = notes
         .iter()
         .filter_map(|n| n.invalidated_by.as_deref())
@@ -495,9 +498,9 @@ mod tests {
 
     // ── gathering ───────────────────────────────────────────────────────────
 
-    fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::profile::Paths) {
+    fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::catalogue::Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::profile::Paths {
+        let paths = crate::catalogue::Paths {
             root: dir.path().join("home"),
             repo: dir.path().join("repo"),
         };
@@ -719,7 +722,7 @@ mod tests {
         let harnesses = crate::adapter::Adapter::load_dir(shipped).unwrap();
         assert!(!harnesses.is_empty(), "no adapters to check: {shipped:?}");
 
-        // Into the profile `gather` would actually read, or this guards a
+        // Into the catalogue `gather` would actually read, or this guards a
         // directory the code under test never looks at — the fixture would be
         // empty, `load_dir` would return nothing, and the mistake this exists
         // to catch would sail through.

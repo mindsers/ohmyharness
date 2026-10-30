@@ -8,8 +8,8 @@
 //! reports.
 
 use crate::adapter::{Adapter, ProviderFormat};
+use crate::catalogue::{Catalogue, Paths};
 use crate::out;
-use crate::profile::{Paths, Profile};
 use crate::session::Session;
 use crate::{auth, container, image, memory, persist, report, runtime};
 use anyhow::{Context, Result};
@@ -349,7 +349,7 @@ fn login_in_sandbox(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let harness = adapter.name.as_str();
-    let profile = Profile::resolve(paths);
+    let catalogue = Catalogue::resolve(paths);
     let backend = runtime::select(&crate::runtime_preference(paths), &|p| {
         runtime::installed(p)
     })?;
@@ -374,7 +374,7 @@ fn login_in_sandbox(
 
     let plan = container::plan(
         paths,
-        &profile,
+        &catalogue,
         adapter,
         &session,
         &[],

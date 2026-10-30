@@ -31,7 +31,7 @@
 //! user would see a working session with no automation in it and no reason
 //! given.
 
-use crate::profile::Paths;
+use crate::catalogue::Paths;
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 

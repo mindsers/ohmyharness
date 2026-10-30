@@ -84,8 +84,8 @@ only version of curation a project this size can sustain.
 
 </div>
 
-If a further entry needs a paragraph to justify itself, it belongs in a profile
-rather than the base set.
+If a further entry needs a paragraph to justify itself, it belongs in your
+catalogue rather than the base set.
 
 ## An entry
 

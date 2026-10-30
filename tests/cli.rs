@@ -13662,7 +13662,7 @@ fn imported_hooks_are_selected_or_they_land_dead() {
 /// both files, so the whole session fails rather than that one hook.
 ///
 /// Asserted through the real consumer — `omh why`, which builds the same
-/// profile a launch does — rather than by checking the file is absent. What
+/// catalogue a launch does — rather than by checking the file is absent. What
 /// matters is that omh still works afterwards.
 #[test]
 fn importing_refuses_a_name_omh_ships() {
@@ -14529,7 +14529,7 @@ fn a_system_path_ejects_under_system() {
 /// harness can read without a container.
 ///
 /// Asserted **by capability**, not against a list of filenames. The point is
-/// that everything the profile carries comes out; which file each harness
+/// that everything the catalogue carries comes out; which file each harness
 /// wants is the adapter's business and changes without this test being wrong.
 #[test]
 fn eject_writes_what_each_capability_renders_to() {
@@ -14538,7 +14538,7 @@ fn eject_writes_what_each_capability_renders_to() {
     std::fs::create_dir_all(sb.home.join(".omh/skills/refactor")).unwrap();
     std::fs::write(sb.home.join(".omh/skills/refactor/SKILL.md"), "how\n").unwrap();
     std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n\nBe careful.\n").unwrap();
-    // A server in the catalogue, because the profile has to actually *carry*
+    // A server in the catalogue, because the catalogue has to actually *carry*
     // each capability for "everything it carries comes out" to mean anything.
     // Without this the mcp assertion below passes or fails on whether the
     // fixture happens to have one, which is not the property under test.
@@ -14592,7 +14592,7 @@ fn eject_writes_what_each_capability_renders_to() {
 /// omh's servers come out of `eject` like its hooks and rules sections — they
 /// are generated, not read from your catalogue, so a catalogue holding none of
 /// yours still ejects them. It ejected none: the document was skipped for a
-/// profile with no `mcp.json`, and Claude's settings came out approving a
+/// catalogue with no `mcp.json`, and Claude's settings came out approving a
 /// server nothing defined.
 #[test]
 fn eject_writes_omhs_servers_with_no_catalogue_of_yours() {

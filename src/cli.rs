@@ -252,7 +252,7 @@ pub(crate) enum Cmd {
         #[arg(long)]
         dangerously_include_unsafe: bool,
     },
-    /// Verify a harness actually sees the profile, inside a real sandbox.
+    /// Verify a harness actually sees your catalogue, inside a real sandbox.
     #[command(visible_alias = "d")]
     Doctor {
         /// Which harness to verify. Without it, the one your host says you use.
