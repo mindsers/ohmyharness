@@ -235,3 +235,60 @@ drop   = [
   "$HOME/.omp/agent/models.db-wal",
   "$HOME/.omp/agent/models.db-shm",
 ]
+
+# The keys of omp's settings that are your preferences, kept per account and
+# copied into each session; nothing else a session writes in `config.yml`
+# reaches another (#197 §1, §3). Each is a setting omp 18.10.4 registers
+# (`config/model-settings.ts`, `session/settings.ts`, `modes/settings.ts`):
+# which model each role uses and the order `/model` cycles them, the models
+# offered, the presets `/modelpreset` saves — each a role's model and a
+# thinking level, nothing else — the default thinking level, the dark and
+# light themes by name, and the three display choices its setup wizard asks
+# for (`modes/setup.ts`): colour-blind mode, the symbol preset and the
+# composer's shape. None names a program, grants a consent or a trust,
+# carries text before the model or picks where traffic goes:
+#
+# - a model id, `@upstream` route or role (`web`, `image`, `speech`) resolves
+#   only against providers the account's provider file (`[provider]`) or its
+#   login already configured — it chooses among them, never adds one;
+# - a theme name that is not built in loads `themes/<name>.json` from the
+#   agent directory, whose schema holds colours and symbols alone
+#   (`additionalProperties: false`), as Claude's `custom:` theme does.
+#
+# `quiet`: `setupVersion`, which omp writes once its setup wizard has run
+# (`modes/setup.ts`) and below which every interactive start runs the wizard
+# again (`main.ts`) — a session's copy without it would start with the wizard.
+#
+# `link`: omp saves `config.yml` by writing beside it and renaming over it,
+# which a single-file mount refuses, and resolves a link before it does
+# (`#resolveYamlWritePath`: `realpath`, or the chain hop by hop where it
+# dangles) — so the account's file becomes a link to the session's own copy
+# [measured in #197 through `omp config set`, the writer its pickers share; the
+# e2e saves through it].
+#
+# `fallback`: omp reads `config.yaml` where `config.yml` is absent
+# (`MAIN_CONFIG_FILENAMES`), so an account's preferences can be there before
+# the link — migrated from it, and it goes. Once the link is laid, omp never
+# reads `config.yaml` again.
+[preferences]
+mount = "link"
+
+[preferences.files]
+"$HOME/.omp/agent/config.yml" = [
+  "modelRoles",
+  "defaultThinkingLevel",
+  "theme.dark",
+  "theme.light",
+  "enabledModels",
+  "cycleOrder",
+  "modelPresets",
+  "colorBlindMode",
+  "symbolPreset",
+  "composer.shape",
+]
+
+[preferences.quiet]
+"$HOME/.omp/agent/config.yml" = ["setupVersion"]
+
+[preferences.fallback]
+"$HOME/.omp/agent/config.yml" = ["$HOME/.omp/agent/config.yaml"]

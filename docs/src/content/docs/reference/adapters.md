@@ -276,6 +276,18 @@ mount = "file"
 "$HOME/.claude.json"          = ["copyOnSelect", "respectGitignore", …]
 ```
 
+```toml
+# adapters/omp.toml
+[preferences]
+mount = "link"
+
+[preferences.files]
+"$HOME/.omp/agent/config.yml" = ["modelRoles", "defaultThinkingLevel", "theme.dark", …]
+
+[preferences.fallback]
+"$HOME/.omp/agent/config.yml" = ["$HOME/.omp/agent/config.yaml"]
+```
+
 A harness's own config file sits in the account, and a session writes it. The
 keys named here are the user's preferences: the account keeps them, at its
 root where no mount reaches, and each session starts from a copy of them. What
@@ -287,8 +299,9 @@ lasts that session — see
 | Field | What it says | Default |
 |---|---|---|
 | `mount` | how a session's copy reaches the harness. `link`: the account's file is a link to the same name under `/omh/prefs`, which each container mounts from its session's own copy — for a harness that saves by renaming over the file, which a mounted file refuses, and resolves the link first. `file`: the session's copy is mounted on its own where the harness reads it — for a harness that, its rename refused, writes the file in place | required |
-| `files` | each file and its keys that are preferences, as dotted keys (`tui.theme`, `notice."a.b"`), a table declared whole by its name. A file is TOML or JSON, by its extension; has no `..`; is named unlike every other, since each is kept and copied by its name alone; and is never a `[policy]` `mask` entry. For `link`, it is strictly inside one of `creds`' directories, where the link is laid; for `file`, one of `creds`' files or inside one of its directories. A `file` preferences file that is a `[policy]` `copy` too is one copy: the account file's rest, with the session's preferences | required |
+| `files` | each file and its keys that are preferences, as dotted keys (`tui.theme`, `notice."a.b"`), a table declared whole by its name. A file is TOML, JSON or YAML, by its extension; has no `..`; is named unlike every other, since each is kept and copied by its name alone; and is never a `[policy]` `mask` entry. For `link`, it is strictly inside one of `creds`' directories, where the link is laid; for `file`, one of `creds`' files or inside one of its directories. A `file` preferences file that is a `[policy]` `copy` too is one copy: the account file's rest, with the session's preferences | required |
 | `quiet` | keys of the same files the harness writes on its own — a notice dismissed — kept without asking | none |
+| `fallback` | for a `link` file, the files the harness reads in its place while it is absent, in the order it tries them — omp's `config.yaml` for its `config.yml`. Before the link, the account's preferences are migrated from the first one there, which then leaves the account; after it, the harness never reads one again, and nothing in one is kept. Each is beside the file it stands in for, TOML, JSON or YAML, and neither that file nor another preferences file | none |
 
 **The rule a key is judged by:** a preference never names a program or a
 capability, never grants a consent, a trust or a permission, never carries
@@ -299,7 +312,10 @@ goes. omh holds a list of what that rules out per harness — for codex
 `sandbox_mode`, `notice.hide_full_access_warning` and their kin; for claude
 `hooks`, `disableAllHooks`, `permissions`, `enabledPlugins`,
 `extraKnownMarketplaces`, `mcpServers`, `statusLine`, `apiKeyHelper`, `env`,
-`attribution`, `outputStyle`, `projects` and their kin — and an adapter
+`attribution`, `outputStyle`, `projects` and their kin; for omp
+`extensions`, `mcp`, `tools`, `bash`, `skills`, `personality`,
+`contextFiles`, `auth`, `providers`, `enabledProviders`, `disabledProviders`,
+`modelProviderOrder`, `retry` and their kin — and an adapter
 declaring a key at, inside or around one of them is refused when it loads.
 Every list is explicit: a key no list names is not kept.
 
@@ -344,7 +360,7 @@ omh enforces each of these, with an error naming the adapter:
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
 - a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
 - a `[policy]` `mask` entry that is a capability's own path — two mounts at one path
-- a `[preferences]` file outside where its `mount` puts it, in a format other than TOML or JSON, with a `..`, masked, or named like another; a key that is not a dotted key, declared twice, inside another, or at, inside or around one the harness's never-list names
+- a `[preferences]` file outside where its `mount` puts it, in a format other than TOML, JSON or YAML, with a `..`, masked, or named like another; a key that is not a dotted key, declared twice, inside another, or at, inside or around one the harness's never-list names; a `fallback` for a file that is not declared, for a `file` mount, outside a credential directory, not beside its file, in another format, or that is a preferences file itself
 - a `flag` that is not a long option (`--` and letters, digits, dashes), on anything but a `claude-settings` render, with a `path` not under `/etc/`, or with no `eject`; an `eject` outside `$HOME`, with a `..`, or without a `flag`
 
 One rule is yours to keep: **declare `verify` and `ready` together.** `doctor`
