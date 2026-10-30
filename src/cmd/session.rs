@@ -968,6 +968,23 @@ pub(crate) fn review_preferences(
             }
         }
     }
+    // An answer nobody gave at the prompt is not silence: what is still to
+    // review is named, with where it is asked again.
+    if how == Review::Ask {
+        for id in ids {
+            let prefix = format!("{id} ");
+            let keys: Vec<&str> = left
+                .iter()
+                .filter_map(|l| l.strip_prefix(&prefix))
+                .collect();
+            if !keys.is_empty() {
+                ctx.warn(&out::untrusted(&format!(
+                    "{id}: left to review — {}. `omh {id} down` at a terminal reviews them",
+                    keys.join(", ")
+                )));
+            }
+        }
+    }
     left
 }
 

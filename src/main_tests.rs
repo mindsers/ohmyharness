@@ -1971,8 +1971,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // + `omh {id} down`, `omh {id} rm` and `omh {id} rm --yes` in the
         // line naming a session's preferences to review, `omh {id} rm` and
         // `omh {id} rm --yes` in `rm`'s refusal once its container is down,
-        // and `omh {id} rm --yes` in its refusal when omh could not tell.
-        ("src/cmd/session.rs", 21),
+        // and `omh {id} rm --yes` in its refusal when omh could not tell, and
+        // `omh {id} down` after a review that left something undecided.
+        ("src/cmd/session.rs", 22),
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         // + `omh settings edit mcp`, in the refusal of a name for a server.
