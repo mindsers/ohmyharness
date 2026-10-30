@@ -208,7 +208,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     // directory, so anything omh will mount *inside* a credential directory has
     // to exist on the host first or the launch fails outright.
     // A masked path is a file mount like a rendered document's, and so is the
-    // file a provider render hides.
+    // file a provider render hides, and a session's own preferences file.
     let masked = adapter
         .policy
         .iter()
@@ -219,11 +219,19 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         .iter()
         .flat_map(|p| p.path.iter())
         .map(|path| (path, Point::File));
+    // A `file` adapter's preferences: the session's own copy is mounted over
+    // each, which a `link` adapter's never is.
+    let preferred = adapter
+        .preferences
+        .iter()
+        .filter(|p| p.mount == crate::adapter::PrefMount::File)
+        .flat_map(|p| p.files.keys())
+        .map(|path| (path, Point::File));
     let bound = adapter.capabilities.values().map(|b| match b.render {
         crate::adapter::Render::Dir => (&b.path, Point::Dir),
         _ => (&b.path, Point::File),
     });
-    for (path, point) in bound.chain(masked).chain(provided) {
+    for (path, point) in bound.chain(masked).chain(provided).chain(preferred) {
         let guest = crate::adapter::expand(path, guest_home);
         let Some(cred) = creds
             .iter()
@@ -423,12 +431,26 @@ pub fn seeds(adapter: &Adapter, account_dir: &std::path::Path) -> Result<Option<
 }
 
 impl Seeds {
+    /// The seeds of the copies at `rels`, taken out: each is a harness's
+    /// preferences file too, and `prefs` writes it around the session's own
+    /// values (`prefs::Account::copies`) — [`Seeds::write`] then leaves it.
+    pub fn take(&mut self, rels: &[String]) -> std::collections::BTreeMap<String, String> {
+        let (taken, left) = std::mem::take(&mut self.files)
+            .into_iter()
+            .partition(|(rel, _)| rels.contains(rel));
+        self.files = left;
+        taken.into_iter().collect()
+    }
+
     /// Write the copies into `home`, unless a kept home already holds these
     /// seeds and a copy of each that still parses — the session's own, which
     /// a relaunch continues from. Written whole and atomically, never through
     /// a link, readable by the user alone: a copy holds the account's API key
     /// when it has one.
     pub fn write(&self, home: &Home) -> Result<()> {
+        if self.files.is_empty() {
+            return Ok(());
+        }
         let dir = home.path();
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let stamped = dir.join(SEEDED_FROM);
@@ -1825,7 +1847,7 @@ mod tests {
         );
         assert!(
             d.path().join(".claude/settings.json").is_file(),
-            "hooks mountpoint"
+            "the mountpoint of the session's own settings.json"
         );
     }
 
@@ -2539,5 +2561,26 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode));
         }
+    }
+
+    /// A copy `prefs` writes is taken out of the seeds, and never written by
+    /// them: one writer, around the session's own values.
+    #[test]
+    fn a_copy_taken_for_preferences_is_not_written_by_the_seeds() {
+        let account = tempfile::tempdir().unwrap();
+        std::fs::write(account.path().join(".claude.json"), r#"{"theme":"x"}"#).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut seeds = seeds(&claude(), account.path()).unwrap().unwrap();
+        let taken = seeds.take(&[".claude.json".to_string()]);
+        assert_eq!(
+            taken.keys().collect::<Vec<_>>(),
+            vec![".claude.json"],
+            "{taken:?}"
+        );
+        seeds.write(&Home::Kept(home.path().to_path_buf())).unwrap();
+        assert!(
+            std::fs::read_dir(home.path()).unwrap().next().is_none(),
+            "the seeds wrote something"
+        );
     }
 }

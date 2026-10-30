@@ -372,6 +372,18 @@ impl Session {
         std::fs::read_to_string(self.worktree().join(file)).ok()
     }
 
+    /// A file of the session's own preferences, on the host — the copy the
+    /// harness reads and writes.
+    pub fn preferences(&self, file: &str) -> PathBuf {
+        self.home
+            .join(".omh/run")
+            .join(&self.id)
+            .join("s01/.preferences")
+            .join(self.harness.name)
+            .join("live")
+            .join(file)
+    }
+
     /// The account a driver with one launches with, on the host.
     pub fn account(&self) -> PathBuf {
         self.home

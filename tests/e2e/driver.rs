@@ -100,6 +100,12 @@ pub fn omh_memory_argv() -> (String, Vec<String>) {
 ///   2.1.300 reads *instead of* `~/.claude.json` when it is not empty (read in
 ///   the binary) — inside the account's shared `~/.claude/`.
 ///
+/// And the account's preferences, as an account captured before they were
+/// kept apart has them: `copyOnSelect` in `~/.claude.json` itself, and no
+/// store for that file yet. The store for `settings.json` keeps a model —
+/// one 2.1.300 knows, so it warns of nothing, and not its default — beside a
+/// hook, which no preferences file is seeded with.
+///
 /// `.credentials.json` holds no login, only enough not to read as an empty
 /// account: the driver's key is in the environment.
 fn claude_account() -> Vec<(&'static str, String)> {
@@ -118,11 +124,19 @@ fn claude_account() -> Vec<(&'static str, String)> {
             "disabledMcpjsonServers": ["omh-memory"],
             "allowedTools": ["Bash(e2e-granted)"],
         } },
+        "copyOnSelect": false,
     });
     let legacy = json!({ "mcpServers": { "e2e-legacy": planted } });
+    let kept = json!({
+        "model": "claude-haiku-4-5",
+        "hooks": { "SessionStart": [{ "matcher": "", "hooks": [
+            { "type": "command", "command": "touch /tmp/e2e-kept-hook" },
+        ] }] },
+    });
     vec![
         (".claude.json", account.to_string()),
         (".claude/.config.json", legacy.to_string()),
+        ("preferences/settings.json", kept.to_string()),
         (
             ".claude/.credentials.json",
             r#"{"e2e":"not a login"}"#.to_string(),

@@ -766,8 +766,23 @@ pub fn plan(
                 .collect(),
             Launch::Login => Vec::new(),
         };
+        // A `file` adapter's preferences files are the session's own copies,
+        // mounted below — a credential file among them too, except in a login,
+        // which writes the account's identity into the account's own.
+        let own: Vec<(PathBuf, String)> = match &adapter.preferences {
+            Some(prefs) if prefs.mount == crate::adapter::PrefMount::File => prefs
+                .declared()
+                .into_iter()
+                .filter(|d| opts.launch == Launch::Session || !adapter.creds.contains(&d.path))
+                .map(|d| (expand(&d.path, GUEST_HOME), d.name))
+                .collect(),
+            _ => Vec::new(),
+        };
         let home = session_home(paths, session, adapter.name.as_str());
         for cred in crate::auth::mounts(adapter, account, GUEST_HOME) {
+            if own.iter().any(|(guest, _)| *guest == cred.guest) {
+                continue;
+            }
             let host = match copied.contains(&cred.guest) {
                 // `check_policy` holds every copy under `$HOME`; never fall back
                 // to the account's own file, which is what a copy replaces.
@@ -787,16 +802,30 @@ pub fn plan(
                 file: cred.file,
             });
         }
-        // The harness's preferences: the account's file is a link to the same
-        // name here, and this is the session's own copy — seeded by
-        // `prefs::Account::seed` after the reuse decision, never by `plan`.
-        if adapter.preferences.is_some() {
-            mounts.push(Mount {
-                host: crate::prefs::live(&prefs_home(paths, session, adapter.name.as_str())),
+        // The harness's preferences, the session's own copy — seeded by
+        // `prefs::Account::seed` after the reuse decision, never by `plan`:
+        // for `link`, the directory the account's file links into; for
+        // `file`, each file where the harness reads it, after the account's
+        // directories, which they land inside.
+        let live = crate::prefs::live(&prefs_home(paths, session, adapter.name.as_str()));
+        match adapter.preferences.as_ref().map(|p| p.mount) {
+            Some(crate::adapter::PrefMount::Link) => mounts.push(Mount {
+                host: live,
                 guest: PathBuf::from(crate::prefs::GUEST),
                 read_only: false,
                 file: false,
-            });
+            }),
+            Some(crate::adapter::PrefMount::File) => {
+                for (guest, name) in own {
+                    mounts.push(Mount {
+                        host: live.join(name),
+                        guest,
+                        read_only: false,
+                        file: true,
+                    });
+                }
+            }
+            None => {}
         }
     }
 
@@ -2071,15 +2100,16 @@ mod tests {
 
     /// omh's settings document reaches Claude on its command line — the
     /// image's wrapper hands it to every `claude` — from a file outside the
-    /// home and the worktree, read-only. Never at `~/.claude/settings.json`,
-    /// inside the account every session on it shares: that file is masked,
-    /// empty and without a write bit, which Claude 2.1.300 reads as no
-    /// settings [measured], so what a session writes there reaches no
-    /// session.
+    /// home and the worktree, read-only. `~/.claude/settings.json` and
+    /// `~/.claude.json` are the session's own preferences files, mounted one
+    /// file each from its run directory and writable: never the account's,
+    /// which every session on it shares, and never masked. A `file` adapter
+    /// has nothing at `prefs::GUEST`.
     #[test]
-    fn claudes_settings_document_is_handed_on_its_own_and_its_users_file_is_masked() {
+    fn claudes_settings_document_is_handed_on_its_own_and_its_users_files_are_the_sessions() {
         let fx = fixture();
-        let p = plan_for(&fx, "claude");
+        let account = fx.paths.root.join("creds/claude/work");
+        let p = plan_account(&fx, "claude", Some(account));
         let stage = fx.paths.staging(&fx.session.id, "claude");
 
         let doc = p
@@ -2093,19 +2123,38 @@ mod tests {
             "the document lands where a harness or a session reads it on its own: {doc:?}"
         );
 
-        let own = expand("$HOME/.claude/settings.json", GUEST_HOME);
-        let masks: Vec<&Mount> = p.mounts.iter().filter(|m| m.guest == own).collect();
-        assert_eq!(masks.len(), 1, "{masks:?}");
-        let mask = masks[0];
-        assert!(mask.read_only && mask.file, "{mask:?}");
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(&mask.host).unwrap();
-        assert_eq!(meta.len(), 0, "{} is not empty", mask.host.display());
-        assert_eq!(
-            meta.permissions().mode() & 0o222,
-            0,
-            "{mask:?} can be written"
-        );
+        let live = fx
+            .paths
+            .runs()
+            .join(&fx.session.id)
+            .join(".preferences/claude/live");
+        for (path, name) in [
+            ("$HOME/.claude/settings.json", "settings.json"),
+            ("$HOME/.claude.json", ".claude.json"),
+        ] {
+            let guest = expand(path, GUEST_HOME);
+            let at: Vec<&Mount> = p.mounts.iter().filter(|m| m.guest == guest).collect();
+            let [m] = at.as_slice() else {
+                panic!("one mount at {}: {at:?}", guest.display());
+            };
+            assert!(!m.read_only && m.file, "{m:?}");
+            assert_eq!(m.host, live.join(name), "{m:?}");
+            let last = p
+                .mounts
+                .iter()
+                .rposition(|m| guest.starts_with(&m.guest))
+                .unwrap();
+            assert!(
+                std::ptr::eq(&p.mounts[last], *m),
+                "another mount covers {}: {:?}",
+                guest.display(),
+                p.mounts[last]
+            );
+        }
+        assert!(p
+            .mounts
+            .iter()
+            .all(|m| m.guest != Path::new(crate::prefs::GUEST)));
     }
 
     /// Codex's system config ships with every launch, hooks or none, because it
@@ -2881,16 +2930,15 @@ mod tests {
 
     /// A launch mounts the session's own `~/.claude.json`, never the
     /// account's — writable, so the harness can save it — while the rest of
-    /// the account, `.credentials.json` included, is the account's.
+    /// the account, `.credentials.json` included, is the account's. The copy
+    /// is Claude's preferences file too, so it lives with them.
     #[test]
     fn a_session_mounts_its_own_copy_of_the_account_file() {
         let fx = fixture();
         let m = claude_json_mount(&fx, &fx.session, Launch::Session);
         assert_eq!(
             m.host,
-            session_home(&fx.paths, &fx.session, "claude")
-                .path()
-                .join(".claude.json")
+            crate::prefs::live(&prefs_home(&fx.paths, &fx.session, "claude")).join(".claude.json")
         );
         assert!(m.host.starts_with(fx.paths.runs()), "{m:?}");
         assert!(!m.read_only && m.file, "{m:?}");

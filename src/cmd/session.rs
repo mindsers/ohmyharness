@@ -230,15 +230,20 @@ pub(crate) fn session_up(
     // The session's copies of account files, read and checked now — before
     // a running container is replaced — and written below, after the reuse
     // decision, never into a file bind-mounted into a running container.
-    let seeds = match (opts.launch, &opts.account_dir) {
+    let mut seeds = match (opts.launch, &opts.account_dir) {
         (container::Launch::Session, Some(account)) => auth::seeds(adapter, account)?,
         _ => None,
     };
     // The account's preferences, checked now and done after the reuse
-    // decision, for the same reason.
+    // decision, for the same reason. A copy that is a preferences file too
+    // is written by them, around the session's own values.
     let prefs = match &opts.account_dir {
         Some(account) => crate::prefs::check(adapter, account)?.map(|p| (p, account.clone())),
         None => None,
+    };
+    let rests = match (&prefs, seeds.as_mut()) {
+        (Some((prefs, _)), Some(seeds)) => seeds.take(&prefs.copies()),
+        _ => std::collections::BTreeMap::new(),
     };
     let account_dir = opts.account_dir.clone();
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
@@ -280,7 +285,7 @@ pub(crate) fn session_up(
             ctx.warn(&note);
         }
         let home = container::prefs_home(paths, session, adapter.name.as_str());
-        for note in prefs.seed(adapter, &home)? {
+        for note in prefs.seed(adapter, &home, &rests)? {
             ctx.warn(&note);
         }
     }

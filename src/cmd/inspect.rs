@@ -623,9 +623,13 @@ pub(crate) fn doctor_cmd(
             auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
         }
         // Read and checked before anything runs; written below.
-        let seeds = match &account {
+        let mut seeds = match &account {
             Some(account_dir) => auth::seeds(&adapter, account_dir)?,
             None => None,
+        };
+        let rests = match (&prefs, seeds.as_mut()) {
+            (Some(prefs), Some(seeds)) => seeds.take(&prefs.copies()),
+            _ => std::collections::BTreeMap::new(),
         };
         crate::cmd::session::say_selection(&paths, &profile, &opts.repo, ctx);
         let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
@@ -644,6 +648,7 @@ pub(crate) fn doctor_cmd(
             prefs.seed(
                 &adapter,
                 &container::prefs_home(&paths, &session, adapter.name.as_str()),
+                &rests,
             )?;
         }
         if let Some(account_dir) = account.as_ref().filter(|_| !dry_run) {

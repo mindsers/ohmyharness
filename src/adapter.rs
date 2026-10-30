@@ -238,6 +238,10 @@ pub enum PrefMount {
     /// file and renaming over it, which a single-file mount refuses with
     /// `EBUSY`, and that resolves the link before it saves.
     Link,
+    /// The session's copy of the file, mounted on its own where the harness
+    /// reads it — for a harness that, its rename refused, writes the file in
+    /// place, which lands in the mounted file.
+    File,
 }
 
 /// A key inside a preferences file, one segment per table.
@@ -259,6 +263,32 @@ impl Declared {
     /// Every key kept, asked about or not.
     pub fn all(&self) -> impl Iterator<Item = &KeyPath> {
         self.keys.iter().chain(&self.quiet)
+    }
+
+    /// What the file is written in — `check_preferences` has held its name
+    /// to one `prefs` reads.
+    pub fn format(&self) -> PrefFormat {
+        PrefFormat::of(&self.name).unwrap_or(PrefFormat::Toml)
+    }
+}
+
+/// What a preferences file is written in, by its extension; `prefs` reads
+/// and writes each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefFormat {
+    Toml,
+    Json,
+}
+
+impl PrefFormat {
+    /// The format of a file named `file`, or `None` for one `prefs` does not
+    /// read.
+    pub fn of(file: &str) -> Option<PrefFormat> {
+        match Path::new(file).extension()?.to_str()? {
+            "toml" => Some(PrefFormat::Toml),
+            "json" => Some(PrefFormat::Json),
+            _ => None,
+        }
     }
 }
 
@@ -331,33 +361,77 @@ pub fn key_path(s: &str) -> Result<KeyPath, String> {
 /// the account's provider file (`provider.rs`) holds instead. A key at, inside
 /// or around one is refused. Read in each harness's source at the version
 /// `adapters/` pins; a table is listed whole where any of it would qualify.
-pub const NEVER: &[(&str, &[&str])] = &[(
-    "codex",
-    &[
-        "mcp_servers",
-        "notify",
-        "model_provider",
-        "model_providers",
-        "profile",
-        "profiles",
-        "features",
-        "developer_instructions",
-        "instructions",
-        "model_instructions_file",
-        "experimental_instructions_file",
-        "projects",
-        "hooks",
-        "approval_policy",
-        "sandbox_mode",
-        "sandbox_workspace_write",
-        "shell_environment_policy",
-        "tools",
-        "chatgpt_base_url",
-        "openai_base_url",
-        "notice.hide_full_access_warning",
-        "notice.hide_world_writable_warning",
-    ],
-)];
+pub const NEVER: &[(&str, &[&str])] = &[
+    (
+        "codex",
+        &[
+            "mcp_servers",
+            "notify",
+            "model_provider",
+            "model_providers",
+            "profile",
+            "profiles",
+            "features",
+            "developer_instructions",
+            "instructions",
+            "model_instructions_file",
+            "experimental_instructions_file",
+            "projects",
+            "hooks",
+            "approval_policy",
+            "sandbox_mode",
+            "sandbox_workspace_write",
+            "shell_environment_policy",
+            "tools",
+            "chatgpt_base_url",
+            "openai_base_url",
+            "notice.hide_full_access_warning",
+            "notice.hide_world_writable_warning",
+        ],
+    ),
+    (
+        "claude",
+        &[
+            // Programs, servers and plugins, and where they come from.
+            "hooks",
+            "disableAllHooks",
+            "statusLine",
+            "fileSuggestion",
+            "apiKeyHelper",
+            "awsAuthRefresh",
+            "awsCredentialExport",
+            "otelHeadersHelper",
+            "mcpServers",
+            "enabledMcpjsonServers",
+            "disabledMcpjsonServers",
+            "enableAllProjectMcpServers",
+            "allowedMcpServers",
+            "deniedMcpServers",
+            "enabledPlugins",
+            "extraKnownMarketplaces",
+            "diffTool",
+            "autoConnectIde",
+            "autoInstallIdeExtension",
+            "claudeInChromeDefaultEnabled",
+            "remoteControlAtStartup",
+            "agentPushNotifEnabled",
+            // Consents, trusts and permissions.
+            "permissions",
+            "sandbox",
+            "autoMode",
+            "skipAutoPermissionPrompt",
+            "customApiKeyResponses",
+            "projects",
+            // Text before the model, and what a session runs as.
+            "attribution",
+            "includeCoAuthoredBy",
+            "outputStyle",
+            "env",
+            "oauthAccount",
+            "primaryApiKey",
+        ],
+    ),
+];
 
 /// [`NEVER`]'s keys for `harness`, parsed.
 pub fn never_for(harness: &str) -> Vec<KeyPath> {
@@ -1029,12 +1103,16 @@ impl Adapter {
         Ok(())
     }
 
-    /// A preferences file is one the account keeps, strictly inside one of
-    /// `creds`' directories, where its link is laid; TOML, the one format
-    /// `prefs` reads so far; with no `..` to walk, since it is joined into the
-    /// account directory on the host. Its keys are TOML keys, each declared
-    /// once, none inside another, and none at, inside or around a [`NEVER`]
-    /// key.
+    /// A preferences file is one the account keeps: for `link`, strictly
+    /// inside one of `creds`' directories, where its link is laid; for
+    /// `file`, one of `creds`' files or inside one of its directories, since
+    /// the session's copy is mounted where the account's would be. TOML or
+    /// JSON, the formats `prefs` reads; with no `..` to walk, since it is
+    /// joined into the account directory on the host; never masked, which
+    /// would hide the copy; and named unlike every other, since each file
+    /// lives by its name in one directory. Its keys are dotted keys, each
+    /// declared once, none inside another, and none at, inside or around a
+    /// [`NEVER`] key.
     fn check_preferences(&self, path: &Path) -> Result<()> {
         let Some(prefs) = &self.preferences else {
             return Ok(());
@@ -1047,14 +1125,38 @@ impl Adapter {
             .map(String::as_str)
             .collect();
         let never = never_for(self.name.as_str());
+        let masked: &[String] = self.policy.as_ref().map_or(&[], |p| &p.mask);
+        let mut names: Vec<&str> = Vec::new();
         for (file, keys) in &prefs.files {
+            let inside = dirs
+                .iter()
+                .any(|d| file.strip_prefix(d).is_some_and(|rest| !rest.is_empty()));
+            match prefs.mount {
+                PrefMount::Link => anyhow::ensure!(
+                    inside,
+                    "adapter {shown}: preferences file {file:?} must be strictly inside one of \
+                     this adapter's credential directories ({})",
+                    dirs.join(", ")
+                ),
+                PrefMount::File => anyhow::ensure!(
+                    inside || self.creds.iter().any(|c| c == file && !c.ends_with('/')),
+                    "adapter {shown}: preferences file {file:?} must be one of this adapter's \
+                     credential files, or inside one of its directories ({})",
+                    self.creds.join(", ")
+                ),
+            }
             anyhow::ensure!(
-                dirs.iter()
-                    .any(|d| file.strip_prefix(d).is_some_and(|rest| !rest.is_empty())),
-                "adapter {shown}: preferences file {file:?} must be strictly inside one of this \
-                 adapter's credential directories ({})",
-                dirs.join(", ")
+                !masked.contains(file),
+                "adapter {shown}: preferences file {file:?} is masked by `[policy]` — the \
+                 session's own copy goes there"
             );
+            let name = file.rsplit('/').next().unwrap_or_default();
+            anyhow::ensure!(
+                !names.contains(&name),
+                "adapter {shown}: two preferences files are named `{name}` — each is kept, and \
+                 copied into a session, by its name alone"
+            );
+            names.push(name);
             anyhow::ensure!(
                 !Path::new(file)
                     .components()
@@ -1063,8 +1165,9 @@ impl Adapter {
                  account directory on the host"
             );
             anyhow::ensure!(
-                file.ends_with(".toml"),
-                "adapter {shown}: preferences file {file:?} — only TOML preferences are read so far"
+                PrefFormat::of(file).is_some(),
+                "adapter {shown}: preferences file {file:?} — only TOML and JSON preferences are \
+                 read"
             );
             anyhow::ensure!(
                 !keys.is_empty(),
@@ -2183,25 +2286,22 @@ render = "concat"
     }
 
     /// Claude reads omh's settings document from `--settings` alone, and its
-    /// own `~/.claude/settings.json` — in the account every session on it
-    /// shares — is masked. `attribution: false` in that document needs Claude
-    /// 2.1.281 or later; an older one skips the whole file, hooks included
-    /// [bin, #197] — so the pin holds at or above it.
+    /// own `~/.claude/settings.json` is the session's preferences file, never
+    /// the one in the account every session on it shares. `attribution:
+    /// false` in that document needs Claude 2.1.281 or later; an older one
+    /// skips the whole file, hooks included [bin, #197] — so the pin holds at
+    /// or above it.
     #[test]
     fn claudes_settings_reach_it_by_flag_from_a_pin_that_reads_them() {
         let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
         let hooks = claude.supports(Capability::Hooks).unwrap();
         assert_eq!(hooks.flag.as_deref(), Some("--settings"));
         assert_eq!(hooks.eject.as_deref(), Some("$HOME/.claude/settings.json"));
+        let prefs = claude.preferences.as_ref().unwrap();
         assert!(
-            claude
-                .policy
-                .as_ref()
-                .unwrap()
-                .mask
-                .contains(&"$HOME/.claude/settings.json".to_string()),
-            "{:?}",
-            claude.policy
+            prefs.mount == PrefMount::File
+                && prefs.files.contains_key("$HOME/.claude/settings.json"),
+            "{prefs:?}"
         );
         let pin: Vec<u32> = claude
             .version
@@ -2265,6 +2365,130 @@ render = "concat"
         }
     }
 
+    /// Claude's preferences are the issue's lists, explicit, in its two files
+    /// — each a key 2.1.300 reads there (its binary), none a program, a
+    /// consent, a trust or text before the model — reaching it by a
+    /// single-file mount, which Claude saves through when its rename is
+    /// refused [measured]. The one table declared whole is named here, so a
+    /// pin bump's diff touches it and it is read again.
+    #[test]
+    fn claudes_preferences_are_its_own_lists_and_never_a_never_key() {
+        let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
+        let prefs = claude
+            .preferences
+            .as_ref()
+            .expect("claude declares preferences");
+        assert_eq!(prefs.mount, PrefMount::File);
+        let declared = prefs.declared();
+        let dotted = |k: &KeyPath| k.join(".");
+        let got: Vec<(&str, &str, Vec<String>)> = declared
+            .iter()
+            .map(|d| {
+                assert!(d.quiet.is_empty(), "{d:?}");
+                (
+                    d.path.as_str(),
+                    d.name.as_str(),
+                    d.keys.iter().map(dotted).collect(),
+                )
+            })
+            .collect();
+        let owned = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "$HOME/.claude.json",
+                    ".claude.json",
+                    owned(&[
+                        "copyFullResponse",
+                        "copyOnSelect",
+                        "defaultToAgentsView",
+                        "leftArrowOpensAgents",
+                        "prStatusFooterEnabled",
+                        "respectGitignore",
+                    ])
+                ),
+                (
+                    "$HOME/.claude/settings.json",
+                    "settings.json",
+                    owned(&[
+                        "model",
+                        "advisorModel",
+                        "modelSettings",
+                        "effortLevel",
+                        "editorMode",
+                        "tui",
+                        "theme",
+                        "verbose",
+                    ])
+                ),
+            ]
+        );
+        for d in &declared {
+            for key in &d.keys {
+                for never in never_for("claude") {
+                    assert!(
+                        !related(key, &never),
+                        "{} is near never-key {}",
+                        dotted(key),
+                        never.join(".")
+                    );
+                }
+            }
+        }
+        const WHOLE_TABLES: &[&str] = &["modelSettings"];
+        for table in WHOLE_TABLES {
+            assert!(
+                got.iter()
+                    .any(|(_, _, keys)| keys.iter().any(|k| k == table)),
+                "{table} is no longer declared — drop it from this list"
+            );
+        }
+    }
+
+    /// A `file` preferences file is mounted where the harness reads it, so it
+    /// may be one of `creds`' files as well as inside one of its directories
+    /// — never somewhere a link mount or a mask already claims, never with
+    /// another file's name, since both land under one directory by name;
+    /// and what Claude reads as a program, a consent or text before the
+    /// model is never a preference.
+    #[test]
+    fn a_claude_preference_that_is_not_one_is_refused_by_name() {
+        const CREDS: &str = "creds = [\"$HOME/.claude/\", \"$HOME/.claude.json\"]";
+        let file =
+            |keys: &str| format!("[preferences.files]\n\"$HOME/.claude/settings.json\" = [{keys}]");
+        for (mount, top, body, names) in [
+            ("file", CREDS, file("\"hooks\""), "`hooks` is never a preference"),
+            ("file", CREDS, file("\"permissions.allow\""), "`permissions.allow` is never a preference"),
+            ("file", CREDS, file("\"enabledPlugins\""), "`enabledPlugins` is never a preference"),
+            ("file", CREDS, file("\"extraKnownMarketplaces\""), "`extraKnownMarketplaces` is never a preference"),
+            ("file", CREDS, file("\"env\""), "`env` is never a preference"),
+            ("file", CREDS, file("\"attribution\""), "`attribution` is never a preference"),
+            ("file", CREDS, file("\"statusLine\""), "`statusLine` is never a preference"),
+            ("file", CREDS, file("\"disableAllHooks\""), "`disableAllHooks` is never a preference"),
+            ("file", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"projects\"]".to_string(), "`projects` is never a preference"),
+            ("file", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"mcpServers\"]".to_string(), "`mcpServers` is never a preference"),
+            ("file", CREDS, "[preferences.files]\n\"$HOME/.claude/x.yaml\" = [\"model\"]".to_string(), "only TOML and JSON"),
+            ("file", CREDS, "[preferences.files]\n\"$HOME/elsewhere.json\" = [\"model\"]".to_string(), "must be one of this adapter's credential files, or inside one of its directories"),
+            ("file", CREDS, format!("{}\n\"$HOME/.claude/x/settings.json\" = [\"theme\"]", file("\"model\"")), "two preferences files are named `settings.json`"),
+            ("link", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"theme\"]".to_string(), "strictly inside one of this adapter's credential directories"),
+            ("file", &format!("{CREDS}\n\n[policy]\npath = \"/etc/claude-code/managed-settings.d/omh.json\"\nformat = \"claude-managed\"\nmask = [\"$HOME/.claude/settings.json\"]"), file("\"model\""), "is masked by `[policy]`"),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "claude.toml",
+                &format!(
+                    "name = \"claude\"\nbin = \"claude\"\ninstall = \"true\"\n{top}\n\n\
+                     [capabilities.rules]\npath = \"/work/CLAUDE.md\"\nrender = \"concat\"\n\n\
+                     [preferences]\nmount = \"{mount}\"\n\n{body}\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "claude").unwrap_err().to_string();
+            assert!(err.contains(names), "{mount} {body}: {err}");
+        }
+    }
+
     /// What a preference never is, refused by name at load — and the shapes a
     /// preferences table cannot take, each in words of its own.
     #[test]
@@ -2283,7 +2507,7 @@ render = "concat"
             (CREDS, format!("[preferences.files]\n{FILE} = [\"model\"]\n[preferences.quiet]\n\"$HOME/.codex/other.toml\" = [\"x\"]"), "quiet file \"$HOME/.codex/other.toml\" is not one of"),
             (CREDS, "[preferences.files]\n\"$HOME/elsewhere.toml\" = [\"model\"]".to_string(), "strictly inside one of this adapter's credential directories"),
             (CREDS, "[preferences.files]\n\"$HOME/.codex/x/../../y.toml\" = [\"model\"]".to_string(), "has a `..`"),
-            (CREDS, "[preferences.files]\n\"$HOME/.codex/config.json\" = [\"model\"]".to_string(), "only TOML"),
+            (CREDS, "[preferences.files]\n\"$HOME/.codex/config.yml\" = [\"model\"]".to_string(), "only TOML and JSON"),
             (CREDS, format!("[preferences.files]\n{FILE} = []"), "declares no keys"),
         ] {
             let d = tempfile::tempdir().unwrap();

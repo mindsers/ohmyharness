@@ -102,6 +102,10 @@ const SCENARIOS: &[Scenario] = &[
         run: claude_settings,
     },
     Scenario {
+        name: "claude's preferences are the session's own, seeded from what the account keeps",
+        run: own_preferences,
+    },
+    Scenario {
         name: "the session's ~/.codex/config.toml is its own, migrated from the account's",
         run: own_config,
     },
@@ -917,13 +921,40 @@ fn claude_settings(s: &Session) {
         .any(|r| Turn::seen(r).contains("E2E-ATTRIBUTION"));
     assert!(!said, "the session's attribution reached the model");
 
-    let write = r#"printf '%s' '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"touch /tmp/e2e-planted-hook"}]}]}}' > ~/.claude/settings.json"#;
-    let wrote = s.sh(write);
-    assert!(
-        !wrote.status.success() && crate::sandbox::text(&wrote).contains("Read-only file system"),
-        "a session wrote the account's settings.json: {}",
-        crate::sandbox::text(&wrote)
+    let mine = ok(
+        &s.sh("cat ~/.claude/settings.json"),
+        "the session's settings",
     );
+    let write = r#"printf '%s' '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"touch /tmp/e2e-planted-hook"}]}]}}' > ~/.claude/settings.json"#;
+    ok(&s.sh(write), write);
+    let live = std::fs::read_to_string(s.preferences("settings.json")).unwrap_or_default();
+    ok(
+        &s.sh(&format!(
+            "printf '%s' '{}' > ~/.claude/settings.json",
+            mine.trim()
+        )),
+        "putting the session's settings back",
+    );
+    assert!(
+        live.contains("e2e-planted-hook"),
+        "the write missed the session's own settings.json: {live}"
+    );
+    for (what, file) in [
+        (
+            "the account's settings.json",
+            s.account().join(".claude/settings.json"),
+        ),
+        (
+            "the account's preferences",
+            s.account().join("preferences/settings.json"),
+        ),
+    ] {
+        let there = std::fs::read_to_string(&file).unwrap_or_default();
+        assert!(
+            !there.contains("e2e-planted-hook"),
+            "the hook reached {what}: {there}"
+        );
+    }
 
     let yours = r#"{"enableAllProjectMcpServers":false,"env":{"E2E_YOURS":"1"}}"#;
     ok(
@@ -958,6 +989,82 @@ fn claude_settings(s: &Session) {
         "omh's hooks did not run beside the caller's: {}",
         turn.printed()
     );
+}
+
+/// Claude's preferences are the session's own: `settings.json` and
+/// `~/.claude.json` are seeded from the account's store, which holds their
+/// declared keys alone, and what the session writes stays in its copies:
+/// - the turn runs on the model the store keeps — the driver names none, and
+///   Claude's default is another — and the hook beside it in the store
+///   reaches no copy;
+/// - `copyOnSelect`, in the account's own `~/.claude.json` before it had a
+///   store, is kept into one and seeded from it;
+/// - Claude's own settings writer — `claude plugin marketplace add`, the save
+///   `/model` and `/config` share — saves through the single-file mount into
+///   the session's file, and the account keeps none of it.
+///
+/// Only for claude.
+fn own_preferences(s: &Session) {
+    if s.harness.name != "claude" {
+        return;
+    }
+    let turn = s.turn("Say hello.", &[]);
+    ran(&turn);
+    assert_eq!(
+        turn.asks()[0]["body"]["model"],
+        "claude-haiku-4-5",
+        "the turn did not run on the model the account kept"
+    );
+    let settings = ok(
+        &s.sh("cat ~/.claude/settings.json"),
+        "the session's settings",
+    );
+    assert!(
+        !settings.contains("e2e-kept-hook"),
+        "the store's hook was seeded: {settings}"
+    );
+    let copy: Value = serde_json::from_str(&ok(&s.sh("cat ~/.claude.json"), "~/.claude.json"))
+        .expect("the session's ~/.claude.json is JSON");
+    assert_eq!(copy["copyOnSelect"], false, "copyOnSelect was not seeded");
+    let store =
+        std::fs::read_to_string(s.account().join("preferences/.claude.json")).unwrap_or_default();
+    assert_eq!(
+        serde_json::from_str::<Value>(&store).ok(),
+        Some(serde_json::json!({ "copyOnSelect": false })),
+        "the account's ~/.claude.json preferences were not kept: {store}"
+    );
+
+    let add = r#"mkdir -p /tmp/e2e-mkt/.claude-plugin /tmp/e2e-mkt/plugins/p1/.claude-plugin && printf '%s' '{"name":"e2e-local","owner":{"name":"e2e"},"plugins":[{"name":"p1","source":"./plugins/p1","description":"e2e"}]}' > /tmp/e2e-mkt/.claude-plugin/marketplace.json && printf '%s' '{"name":"p1","version":"0.0.1","description":"e2e"}' > /tmp/e2e-mkt/plugins/p1/.claude-plugin/plugin.json && claude plugin marketplace add /tmp/e2e-mkt"#;
+    let added = s.sh(add);
+    let live = std::fs::read_to_string(s.preferences("settings.json")).unwrap_or_default();
+    let _ = s.sh("claude plugin marketplace remove e2e-local");
+    ok(&added, "claude plugin marketplace add");
+    assert!(
+        live.contains("e2e-local") && live.contains("claude-haiku-4-5"),
+        "Claude's own save missed the session's settings.json: {live}"
+    );
+    let kept =
+        std::fs::read_to_string(s.account().join("preferences/settings.json")).unwrap_or_default();
+    assert!(!kept.contains("e2e-local"), "the account kept it: {kept}");
+}
+
+/// A preference a driver's session changes in its own copy, by hand: its
+/// key, the command that writes it, and the one that reads it back. `None`
+/// for a harness whose preferences are not kept per session yet.
+fn a_preference(s: &Session) -> Option<(&'static str, &'static str, &'static str)> {
+    match s.harness.name {
+        "claude" => Some((
+            "editorMode",
+            r#"jq '.editorMode = "vim"' ~/.claude/settings.json > /tmp/e2e-p && cat /tmp/e2e-p > ~/.claude/settings.json"#,
+            "jq -r .editorMode ~/.claude/settings.json",
+        )),
+        "codex" => Some((
+            "model_reasoning_effort",
+            r#"{ printf 'model_reasoning_effort = "high"\n'; cat /omh/prefs/config.toml; } > /tmp/e2e-p && cat /tmp/e2e-p > /omh/prefs/config.toml"#,
+            r#"sed -n 's/^model_reasoning_effort = "\(.*\)"$/\1/p' /omh/prefs/config.toml"#,
+        )),
+        _ => None,
+    }
 }
 
 /// omp reads its providers from `~/.omp/agent/models.yml`, in the account
@@ -1166,10 +1273,34 @@ fn lifecycle_sync(s: &Session) {
 /// `down` removes the container — it runs with `--rm` — and `resume` starts a
 /// new one, which stops at the terminal like `omh new` does. The worktree
 /// carries over; what the driver wrote into the old container does not.
+/// `down` with nobody at a terminal leaves a changed preference to review,
+/// saying so, and `resume` continues from the session's own copy.
 fn lifecycle_down_resume(s: &Session) {
-    ok(&s.omh(&["s01", "down"]), "omh s01 down");
+    let changed = a_preference(s);
+    if let Some((_, write, _)) = changed {
+        ok(&s.sh(write), write);
+    }
+    let down = s.omh(&["s01", "down"]);
+    ok(&down, "omh s01 down");
+    let listed = crate::sandbox::text(&s.omh(&["s"]));
     assert!(!s.running(), "the session is still running after down");
     s.resume();
+    if let Some((key, _, read)) = changed {
+        let down = crate::sandbox::text(&down);
+        assert!(
+            down.contains(key) && down.contains("to review"),
+            "down did not leave {key} to review: {down}"
+        );
+        assert!(
+            listed.contains("to review"),
+            "omh s does not mark the session: {listed}"
+        );
+        let value = ok(&s.sh(read), read);
+        assert!(
+            ["vim", "high"].contains(&value.trim()),
+            "the resumed session lost its own {key}: {value}"
+        );
+    }
     // A new container: what the session-start hook appended before is gone.
     let before = lines(s, "/tmp/e2e-start-run");
     let turn = s.turn("Read it.", &[(s.harness.read)("lifecycle.txt")]);
@@ -1183,8 +1314,35 @@ fn lifecycle_down_resume(s: &Session) {
     }
 }
 
+/// With a preference to review and nobody at a terminal, `rm` refuses before
+/// anything goes, naming it; `--yes` drops it, naming it, and the account
+/// never keeps it.
 fn lifecycle_rm(s: &Session) {
-    ok(&s.omh(&["s01", "rm", "--yes", "--json"]), "omh s01 rm");
+    if let Some((key, _, _)) = a_preference(s) {
+        let refused = s.omh(&["s01", "rm"]);
+        let said = crate::sandbox::text(&refused);
+        assert!(
+            !refused.status.success() && said.contains(key) && said.contains("to review"),
+            "rm did not refuse over {key}: {said}"
+        );
+        assert!(s.worktree().exists(), "rm removed the worktree it refused");
+    }
+    let removed = s.omh(&["s01", "rm", "--yes", "--json"]);
+    let said = crate::sandbox::text(&removed);
+    ok(&removed, "omh s01 rm");
+    if let Some((key, _, _)) = a_preference(s) {
+        assert!(
+            said.contains("dropped") && said.contains(key),
+            "rm --yes did not name {key} as dropped: {said}"
+        );
+        let store = std::fs::read_dir(s.account().join("preferences"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+            .collect::<String>();
+        assert!(!store.contains(key), "the account kept {key}: {store}");
+    }
     assert!(!s.running(), "the container is still running after rm");
     assert!(
         !s.worktree().exists(),
