@@ -54,8 +54,9 @@ const FIELDS: &[&str] = &[
     "transport",
 ];
 
-/// `config.yml` keys that choose among providers, which omp reads from the
-/// account's `config.yml` and never from `models.yml`.
+/// `config.yml` keys that choose among providers, which omp reads from
+/// `config.yml` and never from `models.yml` — and never preferences either
+/// (`adapter::NEVER`), so one a session sets lasts that session.
 const SELECTION: &[&str] = &[
     "enabledProviders",
     "disabledProviders",
@@ -78,7 +79,7 @@ pub fn validate(doc: &Value) -> Result<()> {
             key == "providers",
             "`{key}` {} — a provider file holds `providers:` only",
             match SELECTION.contains(&key.as_str()) {
-                true => "is a key of omp's config.yml, which omp still reads from the account",
+                true => "is a key of omp's config.yml, not of its models.yml",
                 false => "is not a key of omp's models.yml",
             }
         );
@@ -526,8 +527,8 @@ mod tests {
         validate(&parse(FAKE).unwrap()).unwrap();
         validate(&json!({})).unwrap();
         validate(&Value::Null).unwrap();
-        // The selection keys are config.yml's, which omp still reads from the
-        // account; a file holding one would say a thing the render drops.
+        // The selection keys are config.yml's; a file holding one would say a
+        // thing the render drops.
         for key in [
             "enabledProviders",
             "disabledProviders",

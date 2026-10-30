@@ -276,37 +276,52 @@ pub const CODEX: Driver = Driver {
     drops: &["graph-first", "graph-read", "e2e-end-inject"],
 };
 
-/// An omp account holding only its provider file: the fake provider,
-/// speaking `openai-completions`, which was measured completing a turn as is.
-/// omh renders it over the `models.yml` omp reads, read-only — so every omp
-/// turn of every scenario is a turn through the account's provider file.
+/// An omp account with its provider file — the fake provider, speaking
+/// `openai-completions`, which was measured completing a turn as is; omh
+/// renders it over the `models.yml` omp reads, read-only — and the
+/// `config.yml` omp shared across sessions before it was per session: the
+/// model it runs on, beside a setting that is not a preference. The launch
+/// migrates it, so every omp turn of every scenario is a turn through the
+/// account's provider file, on the model its preferences keep.
 fn omp_account() -> Vec<(&'static str, String)> {
-    vec![(
-        "provider.yml",
-        format!(
-            "providers:\n  fake:\n    baseUrl: {}/v1\n    auth: none\n    \
-             api: openai-completions\n    models:\n      - id: fake-model\n        \
-             reasoning: false\n        contextWindow: 1000000\n",
-            crate::sandbox::fake_url()
+    vec![
+        (
+            "provider.yml",
+            format!(
+                "providers:\n  fake:\n    baseUrl: {}/v1\n    auth: none\n    \
+                 api: openai-completions\n    models:\n      - id: fake-model\n        \
+                 reasoning: false\n        contextWindow: 1000000\n",
+                crate::sandbox::fake_url()
+            ),
         ),
-    )]
+        (
+            ".omp/agent/config.yml",
+            "modelRoles:\n  default: fake/fake-model\ntodo:\n  enabled: false\n".to_string(),
+        ),
+    ]
 }
 
-/// omp's provider comes from its account (`omp_account`). The providers it
-/// would otherwise ask for model lists are switched off, in the account's
-/// `config.yml`, which a session still shares. Not `--no-extensions`: omh's
+/// omp's provider comes from its account, and its model from the account's
+/// preferences (`omp_account`): the driver names none. The providers it
+/// would otherwise ask for model lists are switched off in an overlay omp
+/// reads above `config.yml` and never writes back (`PI_CONFIG_FILES`) — not
+/// in `config.yml`, the session's preferences, where every new container
+/// would write over what the session keeps. Not `--no-extensions`: omh's
 /// hooks are an extension.
 pub const OMP: Driver = Driver {
     name: "omp",
-    env: &[("PI_AUTO_QA", "0")],
+    env: &[
+        ("PI_AUTO_QA", "0"),
+        ("PI_CONFIG_FILES", "/home/agent/.omp-e2e.yml"),
+    ],
     files: &[
         (
-            "~/.omp/agent/config.yml",
+            "~/.omp-e2e.yml",
             "disabledProviders: [alibaba-coding-plan, charm-hyper, commandcode, kilo, venice, zenmux, ollama, llama.cpp, lm-studio]\n",
         ),
     ],
     turn: |prompt, _| {
-        ["omp", "-p", "--mode", "json", "--model", "fake/fake-model", "--auto-approve", "--no-title", prompt]
+        ["omp", "-p", "--mode", "json", "--auto-approve", "--no-title", prompt]
             .map(String::from)
             .to_vec()
     },

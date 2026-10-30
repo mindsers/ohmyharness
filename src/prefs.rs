@@ -20,9 +20,10 @@
 //!             preferences
 //! ```
 //!
-//! Both formats are read into one model, JSON's, which TOML's maps into: a
-//! TOML datetime is carried as the tagged table `toml` serialises it as, and
-//! written back as a datetime.
+//! Each format is read into one model, JSON's, which TOML's and YAML's map
+//! into: a TOML datetime is carried as the tagged table `toml` serialises it
+//! as, and written back as a datetime; YAML is read as omp reads it
+//! (`provider::omp::parse`), a file with no document as no settings.
 
 /// Where a container finds its session's `live/`, for a `link` adapter: the
 /// account's file is a link to the same name here.
@@ -56,6 +57,13 @@ impl Format {
             Format::Toml => serde_json::to_value(crate::provider::parse(text)?)?,
             Format::Json if text.trim().is_empty() => return Ok(Doc::new()),
             Format::Json => serde_json::from_str(text).context("it is not JSON")?,
+            // As omp reads it: a file with no document is no settings.
+            Format::Yaml => {
+                match crate::provider::omp::parse(text).map_err(|e| anyhow::anyhow!("it {e}"))? {
+                    Value::Null => return Ok(Doc::new()),
+                    v => v,
+                }
+            }
         };
         match value {
             Value::Object(doc) => Ok(doc),
@@ -76,6 +84,9 @@ impl Format {
                 out.push(b'\n');
                 Ok(out)
             }
+            Format::Yaml => Ok(serde_saphyr::to_string(&Value::Object(doc.clone()))
+                .context("it cannot be written as YAML")?
+                .into_bytes()),
         }
     }
 }
@@ -362,8 +373,14 @@ enum State {
     Lay,
     /// The account's real file, before omh ever linked it: its declared keys
     /// become the account's kept values, the rest is dropped by name, and the
-    /// bytes are backed up.
-    Migrate { dropped: Vec<String>, raw: Vec<u8> },
+    /// bytes are backed up. `from`: where the file is absent, the one the
+    /// harness read in its place (relative to the account), which goes once
+    /// it is backed up — nothing reads it once the link is there.
+    Migrate {
+        dropped: Vec<String>,
+        raw: Vec<u8>,
+        from: Option<String>,
+    },
     /// Something else where the link should be — `found` says what. Linked
     /// again; nothing in it is kept.
     Relink { found: String },
@@ -451,18 +468,36 @@ fn check_link(
             if marked { State::Ready } else { State::Finish },
             self::kept(account, declared)?,
         ),
+        crate::held::Entry::Absent if !marked => match in_its_place(account, declared)? {
+            Some((from, raw)) => {
+                let format = Format::of(&from).unwrap_or(declared.format());
+                migrate(
+                    adapter,
+                    account,
+                    declared,
+                    &account.join(&from),
+                    raw,
+                    format,
+                    Some(from),
+                )?
+            }
+            None => (State::Lay, self::kept(account, declared)?),
+        },
         crate::held::Entry::Absent => (State::Lay, self::kept(account, declared)?),
         crate::held::Entry::File if !marked => {
-            let cannot = || format!("{} cannot be migrated", shown.display());
             let (dir, leaf) = found.as_ref().context("a file with no directory")?;
             let raw = read_raw(dir, leaf)
-                .with_context(cannot)?
+                .with_context(|| format!("{} cannot be migrated", shown.display()))?
                 .unwrap_or_default();
-            let doc = declared.format().parse(&raw).with_context(cannot)?;
-            refuse_a_lost_provider(adapter, account, &shown, &doc)?;
-            let keys: Vec<_> = declared.all().collect();
-            let dropped = undeclared(&doc, &keys);
-            (State::Migrate { dropped, raw }, pick(&doc, keys))
+            migrate(
+                adapter,
+                account,
+                declared,
+                &shown,
+                raw,
+                declared.format(),
+                None,
+            )?
         }
         crate::held::Entry::File => (
             State::Relink {
@@ -482,6 +517,43 @@ fn check_link(
             shown.display()
         ),
     })
+}
+
+/// The file the harness reads in `declared`'s place while it is absent — the
+/// first of its fallbacks the account holds, relative to the account — and
+/// its bytes, read as the agent's: one that is not a regular file is refused
+/// rather than passed over, since the harness reads through it.
+fn in_its_place(account: &Path, declared: &Declared) -> Result<Option<(String, Vec<u8>)>> {
+    for fallback in &declared.fallback {
+        let rel = fallback.trim_start_matches("$HOME/");
+        let cannot = || format!("{} cannot be migrated", account.join(rel).display());
+        let Some((dir, leaf)) = hold_parent(account, rel, false).with_context(cannot)? else {
+            continue;
+        };
+        if let Some(raw) = read_raw(&dir, leaf).with_context(cannot)? {
+            return Ok(Some((rel.to_string(), raw)));
+        }
+    }
+    Ok(None)
+}
+
+/// A real file's migration: its declared keys kept, the rest dropped by name.
+fn migrate(
+    adapter: &Adapter,
+    account: &Path,
+    declared: &Declared,
+    shown: &Path,
+    raw: Vec<u8>,
+    format: Format,
+    from: Option<String>,
+) -> Result<(State, Doc)> {
+    let doc = format
+        .parse(&raw)
+        .with_context(|| format!("{} cannot be migrated", shown.display()))?;
+    refuse_a_lost_provider(adapter, account, shown, &doc)?;
+    let keys: Vec<_> = declared.all().collect();
+    let dropped = undeclared(&doc, &keys);
+    Ok((State::Migrate { dropped, raw, from }, pick(&doc, keys)))
 }
 
 /// A `file` file: the account's kept values, or — the first time — the
@@ -617,10 +689,11 @@ impl Account {
         self.files
             .iter()
             .filter_map(|f| match &f.state {
-                State::Migrate { dropped, .. } => Some(format!(
-                    "{}'s {} on this account becomes per session at the next launch — keeping {}{}",
+                State::Migrate { dropped, from, .. } => Some(format!(
+                    "{}'s {} on this account becomes per session at the next launch{} — keeping {}{}",
                     self.harness,
                     f.declared.name,
+                    in_place_of(from.as_deref(), &self.harness, "reads"),
                     names(&f.kept),
                     match dropped.is_empty() {
                         true => String::new(),
@@ -720,17 +793,34 @@ impl Account {
             match &f.state {
                 State::Ready | State::Import => continue,
                 State::Finish | State::Lay => {}
-                State::Migrate { dropped, raw } => {
-                    let backup = format!("{}.before-omh", f.declared.name);
+                State::Migrate { dropped, raw, from } => {
+                    let source = from.as_deref().unwrap_or(rel);
+                    let source_name = Path::new(source)
+                        .file_name()
+                        .context("a migrated file with no name")?;
+                    let backup = format!("{}.before-omh", source_name.to_string_lossy());
                     kept_dir
                         .replace_private(OsStr::new(&backup), raw)
-                        .with_context(|| format!("backing up {}", self.dir.join(rel).display()))?;
+                        .with_context(|| {
+                            format!("backing up {}", self.dir.join(source).display())
+                        })?;
                     kept_dir.replace_private(name, &f.declared.format().render(&f.kept)?)?;
+                    // Before the link: stopped between the two, the next
+                    // launch finds neither file and lays the link over what
+                    // was just kept.
+                    if let Some(from) = from {
+                        if let Some((at, leaf)) = hold_parent(&self.dir, from, false)? {
+                            at.remove(leaf).with_context(|| {
+                                format!("removing {}", self.dir.join(from).display())
+                            })?;
+                        }
+                    }
                     notes.push(crate::out::untrusted(&format!(
-                        "{}'s {} is per session from now on — kept {}{}; the file as it was is \
+                        "{}'s {} is per session from now on{} — kept {}{}; the file as it was is \
                          at {}",
                         self.harness,
                         f.declared.name,
+                        in_place_of(from.as_deref(), &self.harness, "read"),
                         names(&f.kept),
                         match dropped.is_empty() {
                             true => String::new(),
@@ -916,6 +1006,18 @@ impl Account {
             }
         }
         Ok(notes)
+    }
+}
+
+/// Where a migration reads the file the harness reads in a declared one's
+/// place: that file, named — `reads` in the tense of the sentence.
+fn in_place_of(from: Option<&str>, harness: &str, reads: &str) -> String {
+    match from.and_then(|f| Path::new(f).file_name()) {
+        Some(name) => format!(
+            ", from the {} {harness} {reads} in its place",
+            name.to_string_lossy()
+        ),
+        None => String::new(),
     }
 }
 
@@ -1527,7 +1629,7 @@ base_url = "https://example.invalid"
         );
     }
 
-    // ── Both formats ──
+    // ── Each format ──
 
     /// TOML's datetimes and JSON's `null` are values like any other: read
     /// into the one model and written back as what they were.
@@ -1549,6 +1651,191 @@ base_url = "https://example.invalid"
         for bad in [&b"[1]"[..], b"{", b"\xff"] {
             assert!(Format::Json.parse(bad).is_err(), "{bad:?}");
         }
+
+        let yaml = Format::Yaml
+            .parse(b"modelRoles:\n  default: fake/a\ndefaultThinkingLevel: high\nenabledModels: [a, 'on']\nx: null\n")
+            .unwrap();
+        assert_eq!(yaml["enabledModels"], serde_json::json!(["a", "on"]));
+        let written = Format::Yaml.render(&yaml).unwrap();
+        assert_eq!(Format::Yaml.parse(&written).unwrap(), yaml);
+        // What omp reads as no settings at all, and what nothing renders as.
+        assert!(Format::Yaml.parse(b"").unwrap().is_empty());
+        assert!(Format::Yaml.parse(b"# nothing\n").unwrap().is_empty());
+        let empty = Format::Yaml.render(&Doc::new()).unwrap();
+        assert!(Format::Yaml.parse(&empty).unwrap().is_empty());
+        for bad in [
+            &b"- 1\n"[..],
+            b"a: [\n",
+            b"\xff",
+            b"a: 1\na: 2\n",
+            b"a: &x {b: 1}\nc:\n  <<: *x\n",
+            b"a: 1\n---\nb: 2\n",
+            b"plain\n",
+        ] {
+            assert!(Format::Yaml.parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    // ── `link`, a YAML file omp reads in its place ──
+
+    fn omp() -> Adapter {
+        Adapter::find(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters"),
+            "omp",
+        )
+        .unwrap()
+    }
+
+    /// An omp account dir under a temp root, its `config.yml`, and the
+    /// `config.yaml` omp reads in that one's place.
+    fn omp_account() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/omp/work");
+        let agent = account.join(".omp/agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        (
+            root,
+            account,
+            agent.join("config.yml"),
+            agent.join("config.yaml"),
+        )
+    }
+
+    const OMP_ORIGINAL: &str = "modelRoles:\n  default: fake/a\ntheme:\n  dark: night\n\
+                                extensions: [/tmp/planted.ts]\nauth:\n  broker:\n    token: sk-planted\n";
+
+    /// omp's own file is migrated the way codex's is — declared keys kept,
+    /// written as YAML, the rest dropped by name, the bytes backed up — and a
+    /// `config.yaml` beside it, which omp never read, is left as it is.
+    #[test]
+    fn an_omp_account_is_migrated_and_kept_as_yaml() {
+        let (_root, account, yml, yaml) = omp_account();
+        std::fs::write(&yml, OMP_ORIGINAL).unwrap();
+        std::fs::write(&yaml, "theme:\n  dark: other\n").unwrap();
+        let notes = check(&omp(), &account)
+            .unwrap()
+            .unwrap()
+            .apply(&none_running)
+            .unwrap()
+            .join("\n");
+        assert!(notes.contains("dropped auth, extensions"), "{notes}");
+        assert!(!notes.contains("sk-planted"), "a value was named: {notes}");
+        assert_eq!(link_of(&yml), Some(PathBuf::from("/omh/prefs/config.yml")));
+        let kept = std::fs::read(account.join("preferences/config.yml")).unwrap();
+        assert_eq!(
+            Format::Yaml.parse(&kept).unwrap(),
+            Format::Yaml
+                .parse(b"modelRoles:\n  default: fake/a\ntheme:\n  dark: night\n")
+                .unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(account.join("preferences/config.yml.before-omh")).unwrap(),
+            OMP_ORIGINAL
+        );
+        assert_eq!(
+            std::fs::read_to_string(&yaml).unwrap(),
+            "theme:\n  dark: other\n"
+        );
+    }
+
+    /// Where `config.yml` is absent, omp reads `config.yaml`: that is the
+    /// account's file then, migrated like one and taken out of the account
+    /// — which every session mounts — once its bytes are backed up, since
+    /// the link makes omp stop reading it.
+    #[test]
+    fn the_file_omp_reads_in_its_place_is_migrated_and_taken_away() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, account, yml, yaml) = omp_account();
+        std::fs::write(&yaml, OMP_ORIGINAL).unwrap();
+        let checked = check(&omp(), &account).unwrap().unwrap();
+        assert!(checked.needs_quiet(), "a session could be reading it");
+        let pending = checked.pending().join("\n");
+        assert!(
+            pending.contains("config.yaml") && pending.contains("dropping auth, extensions"),
+            "{pending}"
+        );
+        let notes = checked.apply(&none_running).unwrap().join("\n");
+        assert!(
+            notes.contains("config.yaml") && notes.contains("dropped auth, extensions"),
+            "{notes}"
+        );
+        assert!(!notes.contains("sk-planted"), "a value was named: {notes}");
+        assert_eq!(link_of(&yml), Some(PathBuf::from("/omh/prefs/config.yml")));
+        assert!(!yaml.exists(), "config.yaml is still in the account");
+        let kept = std::fs::read(account.join("preferences/config.yml")).unwrap();
+        assert_eq!(
+            Format::Yaml.parse(&kept).unwrap(),
+            Format::Yaml
+                .parse(b"modelRoles:\n  default: fake/a\ntheme:\n  dark: night\n")
+                .unwrap()
+        );
+        let backup = account.join("preferences/config.yaml.before-omh");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), OMP_ORIGINAL);
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// Stopped before `config.yaml` goes, a launch migrates it again to the
+    /// same result; stopped after, before the link, it lays the link over
+    /// what was kept.
+    #[test]
+    fn a_migration_from_the_file_omp_reads_in_its_place_is_finished_by_the_next_launch() {
+        let (_root, account, yml, yaml) = omp_account();
+        std::fs::write(&yaml, OMP_ORIGINAL).unwrap();
+        let want = Format::Yaml
+            .parse(b"modelRoles:\n  default: fake/a\ntheme:\n  dark: night\n")
+            .unwrap();
+        // Stopped after the backup and the keep, before config.yaml went.
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/config.yml"),
+            "theme:\n  dark: half\n",
+        )
+        .unwrap();
+        check(&omp(), &account)
+            .unwrap()
+            .unwrap()
+            .apply(&none_running)
+            .unwrap();
+        let kept = std::fs::read(account.join("preferences/config.yml")).unwrap();
+        assert_eq!(Format::Yaml.parse(&kept).unwrap(), want);
+        assert!(!yaml.exists());
+        // Stopped after config.yaml went, before the link and the marker.
+        std::fs::remove_file(&yml).unwrap();
+        std::fs::remove_file(account.join("preferences/linked")).unwrap();
+        check(&omp(), &account)
+            .unwrap()
+            .unwrap()
+            .apply(&none_running)
+            .unwrap();
+        assert_eq!(link_of(&yml), Some(PathBuf::from("/omh/prefs/config.yml")));
+        let kept = std::fs::read(account.join("preferences/config.yml")).unwrap();
+        assert_eq!(Format::Yaml.parse(&kept).unwrap(), want);
+        assert!(account.join("preferences/linked").is_file());
+    }
+
+    /// After the link, a `config.yaml` is a session's — omp does not read it
+    /// while the link is there, and nothing in it is ever kept.
+    #[test]
+    fn after_the_link_the_file_omp_reads_in_its_place_is_never_kept() {
+        let (_root, account, yml, yaml) = omp_account();
+        check(&omp(), &account)
+            .unwrap()
+            .unwrap()
+            .apply(&none_running)
+            .unwrap();
+        std::fs::remove_file(&yml).unwrap();
+        std::fs::write(&yaml, OMP_ORIGINAL).unwrap();
+        let checked = check(&omp(), &account).unwrap().unwrap();
+        assert!(!checked.needs_quiet());
+        checked.apply(&|| panic!("asked")).unwrap();
+        assert_eq!(link_of(&yml), Some(PathBuf::from("/omh/prefs/config.yml")));
+        let kept = std::fs::read(account.join("preferences/config.yml")).unwrap_or_default();
+        assert!(
+            Format::Yaml.parse(&kept).unwrap().is_empty(),
+            "kept from it"
+        );
+        assert!(yaml.exists(), "a session's file is not omh's to remove");
     }
 
     // ── `file` ──

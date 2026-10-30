@@ -226,6 +226,12 @@ pub struct Preferences {
     /// kept without asking. Judged by the same rule.
     #[serde(default)]
     pub quiet: BTreeMap<String, Vec<String>>,
+    /// For a file the harness reads another in the place of while it is
+    /// absent — omp's `config.yaml` for its `config.yml` — that one, in the
+    /// order the harness tries them: where the account's preferences are
+    /// before the link replaces the file.
+    #[serde(default)]
+    pub fallback: BTreeMap<String, Vec<String>>,
 }
 
 /// How a session's copy of a preferences file reaches the harness.
@@ -257,6 +263,9 @@ pub struct Declared {
     pub name: String,
     pub keys: Vec<KeyPath>,
     pub quiet: Vec<KeyPath>,
+    /// What the harness reads in this file's place while it is absent, as
+    /// the adapter names each.
+    pub fallback: Vec<String>,
 }
 
 impl Declared {
@@ -278,6 +287,7 @@ impl Declared {
 pub enum PrefFormat {
     Toml,
     Json,
+    Yaml,
 }
 
 impl PrefFormat {
@@ -287,6 +297,7 @@ impl PrefFormat {
         match Path::new(file).extension()?.to_str()? {
             "toml" => Some(PrefFormat::Toml),
             "json" => Some(PrefFormat::Json),
+            "yml" | "yaml" => Some(PrefFormat::Yaml),
             _ => None,
         }
     }
@@ -309,6 +320,7 @@ impl Preferences {
                 name: path.rsplit('/').next().unwrap_or_default().to_string(),
                 keys: parse(Some(keys)),
                 quiet: parse(self.quiet.get(path)),
+                fallback: self.fallback.get(path).cloned().unwrap_or_default(),
             })
             .collect()
     }
@@ -429,6 +441,98 @@ pub const NEVER: &[(&str, &[&str])] = &[
             "env",
             "oauthAccount",
             "primaryApiKey",
+        ],
+    ),
+    (
+        "omp",
+        &[
+            // Programs, tools and capabilities, and where they come from.
+            "extensions",
+            "disabledExtensions",
+            "mcp",
+            "lsp",
+            "eval",
+            "python",
+            "shellPath",
+            "bash",
+            "bashInterceptor",
+            "shellMinimizer",
+            "ida",
+            "browser",
+            "goal",
+            "autolearn",
+            "memories",
+            "model",
+            "marketplace",
+            "commands",
+            "skills",
+            "externalThinking",
+            "archive",
+            "ask",
+            "astEdit",
+            "astGrep",
+            "async",
+            "checkpoint",
+            "computer",
+            "debug",
+            "fetch",
+            "find",
+            "generate_image",
+            "github",
+            "glob",
+            "grep",
+            "launch",
+            "ratchet",
+            "security",
+            "speechgen",
+            "todo",
+            "vault",
+            "web_search",
+            "git",
+            "edit",
+            "advisor",
+            "isolation",
+            // Consents, trusts and permissions.
+            "tools",
+            "secrets",
+            "codexResets",
+            "claudeResets",
+            "task",
+            "worktree",
+            "workspace",
+            "plan",
+            // Text before the model, and what decides it.
+            "personality",
+            "contextFiles",
+            "ttsr",
+            "includeWorkspaceTree",
+            "skillful",
+            "includeModelInPrompt",
+            "inlineToolDescriptors",
+            "magicKeywords",
+            "tui.reactions",
+            "tui.renderMermaid",
+            "tui.renderSvg",
+            "tui.autoGraph",
+            // Where traffic goes: providers, endpoints, brokers, credentials.
+            "auth",
+            "providers",
+            "enabledProviders",
+            "disabledProviders",
+            "modelProviderOrder",
+            "retry",
+            "compaction",
+            "memory",
+            "mnemopi",
+            "hindsight",
+            "exa",
+            "searxng",
+            "images",
+            "collab",
+            "share",
+            "stream",
+            "dev",
+            "telemetry",
         ],
     ),
 ];
@@ -1106,13 +1210,14 @@ impl Adapter {
     /// A preferences file is one the account keeps: for `link`, strictly
     /// inside one of `creds`' directories, where its link is laid; for
     /// `file`, one of `creds`' files or inside one of its directories, since
-    /// the session's copy is mounted where the account's would be. TOML or
-    /// JSON, the formats `prefs` reads; with no `..` to walk, since it is
-    /// joined into the account directory on the host; never masked, which
-    /// would hide the copy; and named unlike every other, since each file
-    /// lives by its name in one directory. Its keys are dotted keys, each
-    /// declared once, none inside another, and none at, inside or around a
-    /// [`NEVER`] key.
+    /// the session's copy is mounted where the account's would be. TOML,
+    /// JSON or YAML, the formats `prefs` reads; with no `..` to walk, since
+    /// it is joined into the account directory on the host; never masked,
+    /// which would hide the copy; and named unlike every other, since each
+    /// file lives by its name in one directory. Its keys are dotted keys,
+    /// each declared once, none inside another, and none at, inside or around
+    /// a [`NEVER`] key. A fallback is for a `link` file, beside it, in a
+    /// format `prefs` reads, and neither the file itself nor another one.
     fn check_preferences(&self, path: &Path) -> Result<()> {
         let Some(prefs) = &self.preferences else {
             return Ok(());
@@ -1166,8 +1271,8 @@ impl Adapter {
             );
             anyhow::ensure!(
                 PrefFormat::of(file).is_some(),
-                "adapter {shown}: preferences file {file:?} — only TOML and JSON preferences are \
-                 read"
+                "adapter {shown}: preferences file {file:?} — only TOML, JSON and YAML \
+                 preferences are read"
             );
             anyhow::ensure!(
                 !keys.is_empty(),
@@ -1179,6 +1284,45 @@ impl Adapter {
                 prefs.files.contains_key(file),
                 "adapter {shown}: quiet file {file:?} is not one of `[preferences.files]`"
             );
+        }
+        for (file, fallbacks) in &prefs.fallback {
+            anyhow::ensure!(
+                prefs.files.contains_key(file),
+                "adapter {shown}: fallback for {file:?} is not one of `[preferences.files]`"
+            );
+            anyhow::ensure!(
+                prefs.mount == PrefMount::Link,
+                "adapter {shown}: {file:?} has a fallback, and a fallback is read only where a \
+                 link replaces the file — `mount = \"link\"`"
+            );
+            for fallback in fallbacks {
+                anyhow::ensure!(
+                    fallback != file,
+                    "adapter {shown}: {fallback:?} is a fallback for itself"
+                );
+                anyhow::ensure!(
+                    !prefs.files.contains_key(fallback),
+                    "adapter {shown}: fallback {fallback:?} is a preferences file of its own"
+                );
+                anyhow::ensure!(
+                    dirs.iter().any(|d| fallback
+                        .strip_prefix(d)
+                        .is_some_and(|rest| !rest.is_empty())),
+                    "adapter {shown}: fallback {fallback:?} must be strictly inside one of this \
+                     adapter's credential directories ({})",
+                    dirs.join(", ")
+                );
+                anyhow::ensure!(
+                    Path::new(fallback).parent() == Path::new(file).parent(),
+                    "adapter {shown}: fallback {fallback:?} is not beside the file it stands in \
+                     for, {file:?}"
+                );
+                anyhow::ensure!(
+                    PrefFormat::of(fallback).is_some(),
+                    "adapter {shown}: fallback {fallback:?} — only TOML, JSON and YAML \
+                     preferences are read"
+                );
+            }
         }
         for (file, keys) in &prefs.files {
             let quiet = prefs.quiet.get(file).into_iter().flatten();
@@ -2446,6 +2590,133 @@ render = "concat"
         }
     }
 
+    /// omp's preferences are the issue's list, explicit, in the one file omp
+    /// 18.10.4 keeps its settings in (its source) — none a program, a
+    /// consent, a trust, text before the model or where traffic goes —
+    /// reaching it by a link, which omp resolves before it saves. `theme` is
+    /// named key by key; the two tables declared whole are named here, so a
+    /// pin bump's diff touches them and they are read again. omp reads
+    /// `config.yaml` where `config.yml` is absent, so that one is where an
+    /// account's preferences are found before the link.
+    #[test]
+    fn omps_preferences_are_its_own_list_and_never_a_never_key() {
+        let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
+        let prefs = omp.preferences.as_ref().expect("omp declares preferences");
+        assert_eq!(prefs.mount, PrefMount::Link);
+        let declared = prefs.declared();
+        let [file] = declared.as_slice() else {
+            panic!("one file: {declared:?}");
+        };
+        assert_eq!(file.path, "$HOME/.omp/agent/config.yml");
+        assert_eq!(file.name, "config.yml");
+        assert_eq!(file.format(), PrefFormat::Yaml);
+        assert_eq!(
+            file.fallback,
+            vec!["$HOME/.omp/agent/config.yaml".to_string()]
+        );
+        let dotted = |k: &KeyPath| k.join(".");
+        let keys: Vec<String> = file.keys.iter().map(dotted).collect();
+        assert_eq!(
+            keys,
+            [
+                "modelRoles",
+                "defaultThinkingLevel",
+                "theme.dark",
+                "theme.light",
+                "enabledModels",
+                "cycleOrder",
+                "modelPresets",
+            ]
+        );
+        let quiet: Vec<String> = file.quiet.iter().map(dotted).collect();
+        assert_eq!(quiet, ["setupVersion"]);
+        let never = never_for("omp");
+        assert!(!never.is_empty(), "omp has no never-list");
+        for key in file.keys.iter().chain(&file.quiet) {
+            for n in &never {
+                assert!(
+                    !related(key, n),
+                    "{} is near never-key {}",
+                    dotted(key),
+                    n.join(".")
+                );
+            }
+        }
+        const WHOLE_TABLES: &[&str] = &["modelRoles", "modelPresets"];
+        for table in WHOLE_TABLES {
+            assert!(
+                keys.iter().any(|k| k == table),
+                "{table} is no longer declared — drop it from this list"
+            );
+        }
+    }
+
+    /// What omp reads as a program, a consent, text before the model or where
+    /// traffic goes is never a preference — one key from each part of its
+    /// never-list, refused by name; `model` is a table of its own, so
+    /// `modelRoles` beside it is not near it.
+    #[test]
+    fn an_omp_preference_that_is_not_one_is_refused_by_name() {
+        for key in [
+            "extensions",
+            "mcp.enableProjectConfig",
+            "tools.approvalMode",
+            "personality",
+            "tui.renderMermaid",
+            "auth.broker.url",
+            "disabledProviders",
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "omp.toml",
+                &format!(
+                    "name = \"omp\"\nbin = \"omp\"\ninstall = \"true\"\ncreds = [\"$HOME/.omp/agent/\"]\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
+                     [preferences]\nmount = \"link\"\n\n[preferences.files]\n\
+                     \"$HOME/.omp/agent/config.yml\" = [\"modelRoles\", \"{key}\"]\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "omp").unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("`{key}` is never a preference")),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    /// A fallback is a file the harness reads in a declared one's place while
+    /// that one is absent — found in the account only before the link, so
+    /// only for `link`, beside the file it stands in for, in a format `prefs`
+    /// reads, and never a file of its own.
+    #[test]
+    fn a_fallback_that_is_not_one_is_refused_by_name() {
+        const FILE: &str = "\"$HOME/.omp/agent/config.yml\"";
+        let files = format!("[preferences.files]\n{FILE} = [\"theme.dark\"]");
+        for (mount, body, names) in [
+            ("link", format!("{files}\n[preferences.fallback]\n\"$HOME/.omp/agent/other.yml\" = [\"$HOME/.omp/agent/x.yaml\"]"), "fallback for \"$HOME/.omp/agent/other.yml\" is not one of `[preferences.files]`"),
+            ("link", format!("{files}\n[preferences.fallback]\n{FILE} = [\"$HOME/.omp/x.yaml\"]"), "must be strictly inside one of this adapter's credential directories"),
+            ("link", format!("{files}\n[preferences.fallback]\n{FILE} = [\"$HOME/.omp/agent/sub/config.yaml\"]"), "beside the file it stands in for"),
+            ("link", format!("{files}\n[preferences.fallback]\n{FILE} = [\"$HOME/.omp/agent/config.ini\"]"), "only TOML, JSON and YAML"),
+            ("link", format!("{files}\n[preferences.fallback]\n{FILE} = [{FILE}]"), "is a fallback for itself"),
+            ("link", format!("{files}\n\"$HOME/.omp/agent/b.yml\" = [\"x\"]\n[preferences.fallback]\n{FILE} = [\"$HOME/.omp/agent/b.yml\"]"), "is a preferences file of its own"),
+            ("file", format!("{files}\n[preferences.fallback]\n{FILE} = [\"$HOME/.omp/agent/config.yaml\"]"), "a fallback is read only where a link replaces the file"),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "omp.toml",
+                &format!(
+                    "name = \"omp\"\nbin = \"omp\"\ninstall = \"true\"\ncreds = [\"$HOME/.omp/agent/\"]\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
+                     [preferences]\nmount = \"{mount}\"\n\n{body}\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "omp").unwrap_err().to_string();
+            assert!(err.contains(names), "{mount} {body}: {err}");
+        }
+    }
+
     /// A `file` preferences file is mounted where the harness reads it, so it
     /// may be one of `creds`' files as well as inside one of its directories
     /// — never somewhere a link mount or a mask already claims, never with
@@ -2468,7 +2739,7 @@ render = "concat"
             ("file", CREDS, file("\"disableAllHooks\""), "`disableAllHooks` is never a preference"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"projects\"]".to_string(), "`projects` is never a preference"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"mcpServers\"]".to_string(), "`mcpServers` is never a preference"),
-            ("file", CREDS, "[preferences.files]\n\"$HOME/.claude/x.yaml\" = [\"model\"]".to_string(), "only TOML and JSON"),
+            ("file", CREDS, "[preferences.files]\n\"$HOME/.claude/x.ini\" = [\"model\"]".to_string(), "only TOML, JSON and YAML"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/elsewhere.json\" = [\"model\"]".to_string(), "must be one of this adapter's credential files, or inside one of its directories"),
             ("file", CREDS, format!("{}\n\"$HOME/.claude/x/settings.json\" = [\"theme\"]", file("\"model\"")), "two preferences files are named `settings.json`"),
             ("link", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"theme\"]".to_string(), "strictly inside one of this adapter's credential directories"),
@@ -2507,7 +2778,7 @@ render = "concat"
             (CREDS, format!("[preferences.files]\n{FILE} = [\"model\"]\n[preferences.quiet]\n\"$HOME/.codex/other.toml\" = [\"x\"]"), "quiet file \"$HOME/.codex/other.toml\" is not one of"),
             (CREDS, "[preferences.files]\n\"$HOME/elsewhere.toml\" = [\"model\"]".to_string(), "strictly inside one of this adapter's credential directories"),
             (CREDS, "[preferences.files]\n\"$HOME/.codex/x/../../y.toml\" = [\"model\"]".to_string(), "has a `..`"),
-            (CREDS, "[preferences.files]\n\"$HOME/.codex/config.yml\" = [\"model\"]".to_string(), "only TOML and JSON"),
+            (CREDS, "[preferences.files]\n\"$HOME/.codex/config.ini\" = [\"model\"]".to_string(), "only TOML, JSON and YAML"),
             (CREDS, format!("[preferences.files]\n{FILE} = []"), "declares no keys"),
         ] {
             let d = tempfile::tempdir().unwrap();

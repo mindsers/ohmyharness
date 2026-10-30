@@ -16718,6 +16718,74 @@ fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
     );
 }
 
+/// An omp account whose settings are in the `config.yaml` omp reads where
+/// `config.yml` is absent: a preview names the migration and changes
+/// nothing; the launch keeps the preferences as YAML, drops the rest by name,
+/// takes `config.yaml` out of the account, links `config.yml`, and mounts
+/// the session's own copy at `/omh/prefs`.
+#[test]
+fn an_omp_accounts_settings_are_migrated_from_the_file_omp_reads_in_their_place() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let agent = sb.home.join(".omh/creds/omp/default/.omp/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    std::fs::write(agent.join("agent.db"), "logins").unwrap();
+    let yaml = agent.join("config.yaml");
+    std::fs::write(
+        &yaml,
+        "modelRoles:\n  default: corp/m\ncolorBlindMode: true\nauth:\n  broker:\n    token: sk-planted\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["new", "omp", "--dry-run"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("config.yaml")
+            && printed(&out).contains("dropping auth, colorBlindMode"),
+        "a preview names the migration: {}",
+        printed(&out)
+    );
+    assert!(yaml.is_file(), "a preview changed the account");
+
+    std::fs::write(&log, "").unwrap();
+    let out = sb.omh(&["new", "omp"]);
+    let said = printed(&out);
+    assert!(
+        said.contains("from the config.yaml omp read in its place")
+            && said.contains("dropped auth, colorBlindMode"),
+        "{said}"
+    );
+    assert!(!said.contains("sk-planted"), "a value was printed: {said}");
+    assert!(
+        !yaml.exists(),
+        "config.yaml is still in the account: {said}"
+    );
+    assert_eq!(
+        std::fs::read_link(agent.join("config.yml")).ok(),
+        Some(PathBuf::from("/omh/prefs/config.yml")),
+        "{said}"
+    );
+    let account = sb.home.join(".omh/creds/omp/default");
+    assert_eq!(
+        std::fs::read_to_string(account.join("preferences/config.yml")).unwrap(),
+        "modelRoles:\n  default: corp/m\n"
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let live = mounted_at(&seen, "/omh/prefs")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("nothing at /omh/prefs: {said}"));
+    assert!(
+        live.ends_with(".preferences/omp/live"),
+        "{}",
+        live.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(live.join("config.yml")).unwrap(),
+        "modelRoles:\n  default: corp/m\n"
+    );
+}
+
 /// `omh auth omp --import` keeps the host's own providers even though omp's
 /// login is nothing omh can copy: the account holds its providers, and that is
 /// the capture — said as one, not as a login waiting to be confirmed.

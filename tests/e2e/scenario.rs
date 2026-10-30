@@ -110,6 +110,10 @@ const SCENARIOS: &[Scenario] = &[
         run: own_config,
     },
     Scenario {
+        name: "the session's ~/.omp/agent/config.yml is its own, migrated from the account's",
+        run: omp_config,
+    },
+    Scenario {
         name: "a provider or a command a session writes for omp's next start never reaches it",
         run: omp_models,
     },
@@ -817,6 +821,63 @@ fn own_config(s: &Session) {
     );
 }
 
+/// The account's shared `config.yml` held the model omp runs on beside a
+/// setting that is not a preference (`driver::omp_account`), and the launch
+/// migrated it: the turn runs on the model the account kept — the driver
+/// names none — read through the link from the session's own copy, and omp
+/// reads the other setting as never set. omp's own writer (`omp config set`)
+/// saves into that copy and leaves the link a link; the account keeps the
+/// model, and neither the other setting nor what was saved.
+///
+/// Only for a driver whose account holds a `.omp/agent/config.yml`.
+fn omp_config(s: &Session) {
+    let planted = s
+        .harness
+        .account
+        .is_some_and(|a| a().iter().any(|(file, _)| *file == ".omp/agent/config.yml"));
+    if !planted {
+        return;
+    }
+    let turn = s.turn("Say hello.", &[]);
+    ran(&turn);
+    assert_eq!(
+        turn.asks()[0]["body"]["model"],
+        "fake-model",
+        "the turn did not run on the model the account kept"
+    );
+    let get = |key: &str| {
+        let get = format!("omp config get {key}");
+        ok(&s.sh(&get), &get).trim().to_string()
+    };
+    assert_eq!(get("todo.enabled"), "true", "omp read the dropped setting");
+    let link = || {
+        ok(&s.sh("readlink ~/.omp/agent/config.yml"), "readlink")
+            .trim()
+            .to_string()
+    };
+    assert_eq!(link(), "/omh/prefs/config.yml");
+    let set = "omp config set showHardwareCursor false";
+    ok(&s.sh(set), set);
+    assert_eq!(
+        link(),
+        "/omh/prefs/config.yml",
+        "omp's save replaced the link"
+    );
+    let live = std::fs::read_to_string(s.preferences("config.yml")).unwrap_or_default();
+    assert!(
+        live.contains("showHardwareCursor") && live.contains("fake/fake-model"),
+        "omp's save missed the session's copy: {live}"
+    );
+    let kept =
+        std::fs::read_to_string(s.account().join("preferences/config.yml")).unwrap_or_default();
+    assert!(
+        kept.contains("fake/fake-model")
+            && !kept.contains("todo")
+            && !kept.contains("showHardwareCursor"),
+        "the account kept: {kept}"
+    );
+}
+
 /// The account this session launched with carries what earlier sessions could
 /// leave in a shared `~/.claude.json` (see `driver::claude_account`): a server
 /// with omh-memory's command and arguments and a `PATH` of its own, the same
@@ -1048,8 +1109,9 @@ fn own_preferences(s: &Session) {
     assert!(!kept.contains("e2e-local"), "the account kept it: {kept}");
 }
 
-/// A preference a driver's session changes in its own copy, by hand: its
-/// key, the command that writes it, and the one that reads it back. `None`
+/// A preference a driver's session changes in its own copy — by hand, or
+/// through the harness's own writer where it has one: its key, the command
+/// that writes it, and the one that reads it back. `None`
 /// for a harness whose preferences are not kept per session yet.
 fn a_preference(s: &Session) -> Option<(&'static str, &'static str, &'static str)> {
     match s.harness.name {
@@ -1062,6 +1124,11 @@ fn a_preference(s: &Session) -> Option<(&'static str, &'static str, &'static str
             "model_reasoning_effort",
             r#"{ printf 'model_reasoning_effort = "high"\n'; cat /omh/prefs/config.toml; } > /tmp/e2e-p && cat /tmp/e2e-p > /omh/prefs/config.toml"#,
             r#"sed -n 's/^model_reasoning_effort = "\(.*\)"$/\1/p' /omh/prefs/config.toml"#,
+        )),
+        "omp" => Some((
+            "defaultThinkingLevel",
+            "omp config set defaultThinkingLevel low",
+            "omp config get defaultThinkingLevel",
         )),
         _ => None,
     }
@@ -1297,7 +1364,7 @@ fn lifecycle_down_resume(s: &Session) {
         );
         let value = ok(&s.sh(read), read);
         assert!(
-            ["vim", "high"].contains(&value.trim()),
+            ["vim", "high", "low"].contains(&value.trim()),
             "the resumed session lost its own {key}: {value}"
         );
     }
