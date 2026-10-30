@@ -12709,6 +12709,29 @@ fn omh_account_lists_each_accounts_kept_preferences_and_the_one_selected_here() 
         assert!(said.contains(line), "`{line}` in:\n{said}");
     }
     assert!(!said.contains('\u{1b}'), "a value was drawn: {said:?}");
+
+    // The setting is committed, so another machine has it with no such login:
+    // named, and selected nowhere.
+    std::fs::remove_dir_all(sb.home.join(".omh/creds/claude/work")).unwrap();
+    let out = sb.omh(&["account"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains(
+            "set to `work`, which no login answers to — omh account login claude --name work"
+        ),
+        "{}",
+        printed(&out)
+    );
+    let out = sb.omh(&["--json", "account"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let claude = doc["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["harness"] == "claude")
+        .unwrap();
+    assert_eq!(claude["configured"], "work", "{doc}");
+    assert_eq!(claude["selected"], serde_json::Value::Null, "{doc}");
 }
 
 /// An account whose kept preferences omh cannot read is an error naming
