@@ -3957,8 +3957,13 @@ impl Report for Upgraded {
 
         let mut t = Table::new();
         for (harness, outcome) in &self.harnesses {
+            // A preview built nothing, so it says what it would build.
+            let mark = match (outcome, self.dry_run) {
+                (Outcome::Rebuilt, true) => "would rebuild",
+                _ => outcome.mark(),
+            };
             t = t.row(vec![
-                Cell::styled(outcome.mark(), outcome.style()),
+                Cell::styled(mark, outcome.style()),
                 Cell::plain(harness),
             ]);
         }

@@ -2508,6 +2508,34 @@ fn what_omh_would_not_take_is_named_and_not_merely_absent() {
     );
 }
 
+/// A preview builds nothing, so it says what it would build. It said
+/// `rebuilt` under its own `--dry-run: nothing built` line.
+#[test]
+fn a_previewed_upgrade_says_would_rebuild() {
+    use super::{Outcome, Upgraded};
+    let report = Upgraded {
+        harnesses: vec![
+            ("claude".into(), Outcome::Rebuilt),
+            ("opencode".into(), Outcome::AlreadyCurrent),
+        ],
+        refreshed: Vec::new(),
+        taken_out: Vec::new(),
+        stale_sessions: Vec::new(),
+        sessions_unchecked: None,
+        provision: None,
+        dry_run: true,
+    };
+    let human = report.human(&out::Palette::plain());
+    let claude = human
+        .lines()
+        .find(|l| l.contains("claude"))
+        .expect("a row for claude");
+    assert!(
+        claude.contains("would rebuild"),
+        "a preview says what it would build: {human}"
+    );
+}
+
 /// `omh upgrade` reports one word per harness — the word carries the meaning
 /// on its own, for a reader in a pipe or without colour — and names a session
 /// left on an old image, distinguishing a known old tag from one it could not
