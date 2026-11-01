@@ -546,12 +546,14 @@ pub fn ui_container(repo: &str) -> String {
 /// Derived, like the ssh port: a browser tab you left open must keep working
 /// across a restart.
 pub fn ui_port(container: &str) -> u16 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    container.hash(&mut h);
-    "graph-ui".hash(&mut h);
+    // FNV of `container\0graph-ui`, as `ssh::port` derives its own. It was
+    // `DefaultHasher`, which Rust does not keep stable across releases, so a
+    // toolchain bump moved the port under a tab left open on it.
+    let mut bytes = container.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(b"graph-ui");
     const LOW: u32 = 49152;
-    (LOW + (h.finish() % (65535 - LOW) as u64) as u32) as u16
+    (LOW + (crate::hash::fnv1a_64(&bytes) % u64::from(65535 - LOW)) as u32) as u16
 }
 
 /// Install the **UI variant** from GitHub Releases, checksum-verified.
@@ -1190,6 +1192,18 @@ pub fn index_args(
 
 #[cfg(test)]
 mod tests {
+
+    /// The graph UI's port is the same on every toolchain: FNV-1a of
+    /// `container\0graph-ui`, these values worked from the specification,
+    /// not read off a run. It was `DefaultHasher`, which Rust does not keep
+    /// stable across releases — `ssh::port` was moved off it for the same
+    /// reason, and this one was left.
+    #[test]
+    fn the_graph_ui_port_is_stable_across_toolchains() {
+        assert_eq!(ui_port("omh-graph-repo-1a2b3c4d"), 54683);
+        assert_eq!(ui_port("omh-graph-api-deadbeef"), 50245);
+    }
+
     use super::*;
     use std::collections::BTreeSet;
     use std::path::Path;
