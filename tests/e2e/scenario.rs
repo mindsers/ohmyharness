@@ -1424,6 +1424,15 @@ fn lifecycle_down_resume(s: &Session) {
     let before = lines(s, "/tmp/e2e-start-run");
     let turn = s.turn("Read it.", &[(s.harness.read)("lifecycle.txt")]);
     ran(&turn);
+    // **The worktree carried over**, read back by the agent: the file it wrote
+    // and committed before `down`. A read that failed — the file gone, or the
+    // worktree not mounted — still plays the turn, so `ran` alone said nothing
+    // about what this scenario's doc promises.
+    assert!(
+        turn.results().iter().any(|r| r.contains("from the agent")),
+        "the resumed session could not read what the agent wrote before down: {:?}",
+        turn.results()
+    );
     if !s.harness.drops.contains(&"e2e-start-run") {
         assert!(
             lines(s, "/tmp/e2e-start-run") > before,
