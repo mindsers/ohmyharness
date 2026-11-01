@@ -116,13 +116,16 @@ pub fn recipe_digest(recipe: &str) -> Result<String> {
         .stdout(Stdio::piped())
         .spawn()
         .context("running git hash-object")?;
-    child
+    // git reads to EOF, so a write that breaks means git has already gone:
+    // its exit status says why, and speaks first.
+    let wrote = child
         .stdin
         .take()
         .context("no stdin")?
-        .write_all(recipe.as_bytes())?;
+        .write_all(recipe.as_bytes());
     let out = child.wait_with_output()?;
     anyhow::ensure!(out.status.success(), "git hash-object failed");
+    wrote.context("sending the recipe to git hash-object")?;
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
@@ -1428,10 +1431,21 @@ fn build(
     // so docker reads stdin until EOF. `Child::wait` closes stdin for you, but
     // the tee below runs *before* the wait — leaving it open here deadlocks
     // the build against a reader that will never see the end of its recipe.
-    {
+    //
+    // **A builder that stops reading is news about the build, not a failure of
+    // omh's.** One that exits before it has the whole recipe — a daemon that is
+    // down, a flag it refuses — closes the pipe, and the write fails. What it
+    // said and how it exited, below, are the reason; the broken write only says
+    // a recipe did not arrive whole, which a build that then succeeded would
+    // have to answer for.
+    let unread = {
         let mut stdin = child.stdin.take().context("build stdin")?;
-        stdin.write_all(dockerfile.as_bytes())?;
-    }
+        match stdin.write_all(dockerfile.as_bytes()) {
+            Ok(()) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => true,
+            Err(e) => return Err(e).context(format!("sending the recipe to {program} build")),
+        }
+    };
 
     let log = match child.stderr.take() {
         Some(err) => relay(err),
@@ -1439,6 +1453,10 @@ fn build(
     };
 
     let status = child.wait()?;
+    anyhow::ensure!(
+        !(status.success() && unread),
+        "{program} build of {tag} exited before reading its whole recipe"
+    );
     if !status.success() {
         // **Carried, not sniffed.** This read
         // `dockerfile.contains("update-ca-certificates")`, which is true only

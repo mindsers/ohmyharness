@@ -484,6 +484,52 @@ impl Asides {
     }
 }
 
+/// Where a write goes.
+#[derive(Debug, Clone, Copy)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// Write `text` to `stream`, all of it, now.
+///
+/// **A reader that has gone ends omh as it always has: by SIGPIPE, quietly.**
+/// `omh info | head` closes the pipe after ten lines, and the next write
+/// fails. `main` used to get that by resetting SIGPIPE to its default for the
+/// whole process — which also made every write to a *child's* stdin fatal: a
+/// `docker build` that exited before reading its recipe killed omh mid-write,
+/// with nothing said on either stream. So SIGPIPE stays ignored, a broken
+/// pipe is an error wherever omh writes to a child, and only here, where the
+/// reader is the user's, does it become the signal again.
+///
+/// Any other failure is what `print!` made it: a panic naming the stream.
+pub fn put(stream: Stream, text: &str) {
+    use std::io::Write;
+    let written = match stream {
+        Stream::Stdout => {
+            let mut out = std::io::stdout().lock();
+            out.write_all(text.as_bytes()).and_then(|()| out.flush())
+        }
+        Stream::Stderr => std::io::stderr().lock().write_all(text.as_bytes()),
+    };
+    match written {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => reader_gone(),
+        Err(e) => panic!("failed writing to {stream:?}: {e}"),
+    }
+}
+
+/// End the process the way a closed pipe ended it before SIGPIPE was ignored,
+/// so a shell sees the same status (`141`) it always did.
+fn reader_gone() -> ! {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::raise(libc::SIGPIPE);
+    }
+    std::process::exit(141)
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     #[default]
@@ -513,13 +559,12 @@ impl Ctx {
     /// facts as fields — `next`, `leftovers` — and a second copy as prose on
     /// stderr is noise in whatever is parsing the first.
     pub fn say<R: Report + ?Sized>(&self, report: &R) {
-        print!("{}", emit(report, self.format, &self.palette));
-
-        // Flushed before the asides rather than left to the runtime. When both
-        // streams are the same terminal the user reads them as one transcript,
-        // and stdout is block-buffered the moment it is anything else, so
-        // without this the advice can overtake the answer it is about.
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        // Flushed before the asides rather than left to the runtime — `put`
+        // flushes stdout. When both streams are the same terminal the user
+        // reads them as one transcript, and stdout is block-buffered the moment
+        // it is anything else, so without it the advice can overtake the answer
+        // it is about.
+        put(Stream::Stdout, &emit(report, self.format, &self.palette));
 
         if self.format == Format::Json {
             return;
@@ -535,7 +580,7 @@ impl Ctx {
 
     /// Something is wrong but the command carried on. **stderr.**
     pub fn warn(&self, msg: &str) {
-        eprint!("{}", warning(&self.palette, msg));
+        put(Stream::Stderr, &warning(&self.palette, msg));
     }
 
     /// omh speaking about itself, in its own voice. **stderr**, human only.
@@ -548,7 +593,10 @@ impl Ctx {
     /// anything of omh's on it lands in whatever the harness is piped into.
     pub fn announce(&self, msg: &str) {
         if self.format == Format::Human {
-            eprintln!("{}: {msg}", self.palette.paint(HEAD, ME));
+            put(
+                Stream::Stderr,
+                &format!("{}: {msg}\n", self.palette.paint(HEAD, ME)),
+            );
         }
     }
 
@@ -560,7 +608,10 @@ impl Ctx {
     /// container start — and the same facts reach `--json` as fields.
     pub fn progress(&self, msg: &str) {
         if self.format == Format::Human {
-            eprintln!("{}", self.palette.paint(DIM, msg));
+            put(
+                Stream::Stderr,
+                &format!("{}\n", self.palette.paint(DIM, msg)),
+            );
         }
     }
 
@@ -570,7 +621,7 @@ impl Ctx {
     /// reading stderr for real diagnostics does not want prose mixed into them.
     pub fn hint(&self, msg: &str) {
         if self.format == Format::Human {
-            eprint!("{}", hint(&self.palette, msg));
+            put(Stream::Stderr, &hint(&self.palette, msg));
         }
     }
 

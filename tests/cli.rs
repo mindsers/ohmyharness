@@ -496,12 +496,11 @@ exit 0
                  \"image rm\") echo \"Untagged: $3\"; echo 'Deleted: sha256:00'; exit 0 ;;\n\
                  esac\n\
                  # omh sends the Dockerfile on stdin (`-f -`) so nothing is\n\
-                 # written to disk. A shim that exits without reading it leaves\n\
-                 # omh writing into a pipe with no reader, and omh sets SIGPIPE\n\
-                 # to SIG_DFL on purpose — so it dies of signal 13, silently,\n\
-                 # whenever the Dockerfile loses the race with this exit. That\n\
-                 # is what failed this test on the linux runner three times\n\
-                 # across three branches, each time saying only `init failed`.\n\
+                 # written to disk, and this keeps it. A shim that exited\n\
+                 # without reading once killed omh by SIGPIPE, silently — that\n\
+                 # failed this test on the linux runner three times before omh\n\
+                 # stopped dying of it: see a_builder_that_never_reads_its_\n\
+                 # recipe_is_a_failed_build_not_a_silent_exit.\n\
                  if [ \"$1\" = build ]; then cat >> {recipes}; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers}; fi\n\
@@ -14970,6 +14969,93 @@ fn init_refuses_a_ca_cert_it_cannot_read_and_names_the_file() {
     assert!(
         said.contains("no-such-corp.pem"),
         "and the file it could not read: {said}"
+    );
+}
+
+/// **A reader that has gone ends omh as it always has: by SIGPIPE, with
+/// nothing said.** `omh info | head` closes the pipe early, and the next write
+/// fails. `main` once reset SIGPIPE to its default for the whole process to get
+/// this, which also killed omh at any write to a child that had exited; the
+/// output layer raises it itself now, at the user's reader only. This holds
+/// the half that must not change: no panic, no message, the shell's 141.
+///
+/// The read end is closed before omh starts, so the first write fails — no
+/// race with how fast omh prints.
+#[cfg(unix)]
+#[test]
+fn a_reader_that_closes_the_pipe_ends_omh_by_sigpipe_and_says_nothing() {
+    use std::os::unix::process::ExitStatusExt;
+    let sb = sandbox();
+    sb.git_init();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = sb
+        .command(&sb.repo, &["info"])
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.signal(),
+        Some(13),
+        "a closed stdout ends omh by SIGPIPE: {} — {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "and says nothing about it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// **A builder that fails before reading its recipe is a failed build, said
+/// with the builder's reason — not an omh that vanishes.** omh writes the
+/// recipe to `docker build -f -` on a pipe, and `main` reset SIGPIPE to its
+/// default so `omh info | head` would end quietly. So a builder that exited
+/// before reading — a daemon that is down, a flag it refuses — killed omh
+/// outright, mid-write, with nothing on either stream. In the suite that was
+/// `doctor_json_is_one_document` going red on Linux now and then: the
+/// stand-in `docker` refuses `build` without reading, and only sometimes did
+/// it exit before the write landed in the pipe's buffer.
+///
+/// A recipe bigger than any pipe buffer takes the race out: the write can only
+/// complete if the builder reads, and the stand-in never does.
+#[test]
+fn a_builder_that_never_reads_its_recipe_is_a_failed_build_not_a_silent_exit() {
+    let sb = sandbox();
+    let pem = sb.repo.join("corp.pem");
+    let body = "A".repeat(64);
+    let lines: Vec<&str> = std::iter::repeat_n(body.as_str(), 4096).collect();
+    std::fs::write(
+        &pem,
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            lines.join("\n")
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        format!("runtime = \"docker\"\nca_cert = \"{}\"\n", pem.display()),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["init"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.code().is_some(),
+        "omh was killed ({}) rather than reporting the build that failed:\n{stderr}",
+        out.status
+    );
+    assert!(
+        !out.status.success(),
+        "the build failed, so init did: {stderr}"
+    );
+    assert!(
+        stderr.contains("failed to build") && stderr.contains("the suite's stand-in holds nothing"),
+        "the failure names the build and passes the builder's own reason: {stderr}"
     );
 }
 
