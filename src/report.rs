@@ -2125,16 +2125,18 @@ impl Report for Doctor {
                 p.paint(
                     out::OK,
                     &format!(
-                        // A host-only report has verified no adapter path — it
-                        // never reached a sandbox. Saying so anyway is the kind
-                        // of claim `doctor` exists to stop making, and it is a
-                        // `match` on a state rather than a string compare so a
-                        // reworded literal cannot quietly restore it.
-                        "all {} checks passed — {}",
+                        // What ran, and where — never more. A host-only report
+                        // reached no sandbox, and saying it verified anything
+                        // there is the kind of claim `doctor` exists to stop
+                        // making. Nor does a sandbox run verify every adapter
+                        // path: omp's and opencode's name some no doctor run
+                        // can settle. A `match` on a state rather than a string
+                        // compare, so a reworded literal cannot restore either.
+                        "all {} checks passed{}",
                         self.outcomes.len(),
                         match &self.sandbox {
-                            Some(s) => format!("{}'s adapter paths are verified", s.harness),
-                            None => "the host answered; nothing was run in a sandbox".into(),
+                            Some(s) => format!(" in {}'s sandbox", s.harness),
+                            None => " — the host answered; nothing was run in a sandbox".into(),
                         }
                     )
                 )
@@ -3957,8 +3959,13 @@ impl Report for Upgraded {
 
         let mut t = Table::new();
         for (harness, outcome) in &self.harnesses {
+            // A preview built nothing, so it says what it would build.
+            let mark = match (outcome, self.dry_run) {
+                (Outcome::Rebuilt, true) => "would rebuild",
+                _ => outcome.mark(),
+            };
             t = t.row(vec![
-                Cell::styled(outcome.mark(), outcome.style()),
+                Cell::styled(mark, outcome.style()),
                 Cell::plain(harness),
             ]);
         }

@@ -1356,15 +1356,17 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
         // + the omh upgrade command in the list, + `omh account` beside its
-        // `login` there
-        ("README.md", 58),
+        // `login` there, + `omh account forget` and `omh prune`, which the list
+        // left out
+        ("README.md", 60),
         ("docs/src/content/docs/concepts/sessions.md", 11),
         ("docs/src/content/docs/concepts/trust.md", 3), // + `omh use` in the commands table
         // Getting started was one page until it became two, and all fifteen
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
         ("docs/src/content/docs/guides/accounts.md", 14), // + `omh account forget`
-        ("docs/src/content/docs/guides/code-graph.md", 1),
+        // + `omh graph --stop`, the next step `omh graph` really prints
+        ("docs/src/content/docs/guides/code-graph.md", 2),
         ("docs/src/content/docs/guides/editors.md", 4),
         ("docs/src/content/docs/guides/troubleshooting.md", 17),
         ("docs/src/content/docs/project/decisions.md", 1),
@@ -1377,8 +1379,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // the server's own `rm`. + the header of the settings screen's drawing,
         // + the command its status line names. + `omh settings set <feature>`,
         // `use`, `unuse` and `use --all` in the synopsis. + `omh account forget`'s
-        // console example.
-        ("docs/src/content/docs/reference/commands.md", 153),
+        // console example. + `omh graph --stop`, the next step `omh graph`
+        // really prints.
+        ("docs/src/content/docs/reference/commands.md", 154),
         // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
         // the `--anyway` line it prints, and the run with it. + the same two for
         // a key nothing reads: the `--anyway` line it prints, and the run.
@@ -1942,13 +1945,15 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // route — which was `omh settings rm mcp <server>` until omh's own
         // servers could no longer be removed.
         ("base/2026.08.toml", 27),
-        // `omh eject`, where a document handed by a flag names no `eject`.
-        ("src/adapter.rs", 1),
+        // `omh eject`, where a document handed by a flag names no `eject`. +
+        // `omh init`, for a machine with no harness installed
+        ("src/adapter.rs", 2),
         ("src/auth.rs", 8),
-        ("src/base.rs", 3),
+        ("src/base.rs", 4), // + `omh init`, for a machine with no base set
         // + the retired --force, --file and server-rm sentences, + the retired
-        // `auth`'s three
-        ("src/cli.rs", 28),
+        // `auth`'s three, + `omh new` and `omh new <harness>` in each of the
+        // four bare-name launches' sentences
+        ("src/cli.rs", 36),
         // + `omh account`, where `forget` names an account no login answers to
         ("src/cmd/account.rs", 4),
         // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as
@@ -5210,8 +5215,8 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
         &out::Ctx::plain(),
     );
 
-    // **The build went to the shim, not to the host's docker.** It is the
-    // one runner that spawns a `Child` instead of going through `output`,
+    // **The build went to the shim, not to the host's docker.** It spawns a
+    // `Child` instead of going through `output`,
     // and a shim that covered only `output` sent this test's `docker build`
     // to whatever `docker` was on PATH — a real image build on any machine
     // that ran the default suite.
@@ -8743,5 +8748,222 @@ fn the_hidden_commands_are_the_ones_clap_hides() {
     assert_eq!(
         listed, hidden,
         "tests/cli.rs's HIDDEN is not what clap hides"
+    );
+}
+
+/// `omh import --help` names what import takes: every capability but MCP,
+/// which is `omh settings mcp import`. It offered `mcp`, which import refuses,
+/// and left out `commands` and `subagents`, which it takes.
+#[test]
+fn import_help_names_what_import_takes() {
+    use clap::CommandFactory;
+    let cli = Cli::command();
+    let import = cli.find_subcommand("import").expect("omh import");
+    let help = import
+        .get_arguments()
+        .find(|a| a.get_id() == "capability")
+        .and_then(|a| a.get_help())
+        .expect("the capability argument has help")
+        .to_string();
+    for cap in adapter::Capability::ALL {
+        let named = help.contains(&format!("`{}`", cap.key()));
+        match cap {
+            adapter::Capability::Mcp => assert!(
+                !named || help.contains("omh settings mcp import"),
+                "`mcp` is offered, and import refuses it: {help}"
+            ),
+            _ => assert!(named, "`{}` is not named: {help}", cap.key()),
+        }
+    }
+}
+
+/// `--help` says what a command does now. Which release renamed a flag, or that
+/// one "was its own command until 0.7.0", is history: it belongs in a `//`
+/// comment beside the code, where the doc comment would otherwise put it in
+/// front of every user who asks for help — along with the name of an internal
+/// table they cannot see.
+#[test]
+fn help_text_carries_no_release_history() {
+    use clap::CommandFactory;
+    fn texts(cmd: &clap::Command, path: &str, out: &mut Vec<(String, String)>) {
+        for t in [cmd.get_about(), cmd.get_long_about()]
+            .into_iter()
+            .flatten()
+        {
+            out.push((path.to_string(), t.to_string()));
+        }
+        for arg in cmd.get_arguments() {
+            for t in [arg.get_help(), arg.get_long_help()].into_iter().flatten() {
+                out.push((format!("{path} {}", arg.get_id()), t.to_string()));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            texts(sub, &format!("{path} {}", sub.get_name()), out);
+        }
+    }
+    let mut all = Vec::new();
+    texts(&Cli::command(), "omh", &mut all);
+    let history = |t: &str| {
+        t.contains("RETIRED")
+            || t.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .any(|w| {
+                    w.starts_with("0.")
+                        && w.len() > 2
+                        && w[2..].starts_with(|c: char| c.is_ascii_digit())
+                })
+    };
+    let found: Vec<String> = all
+        .iter()
+        .filter(|(_, t)| history(t))
+        .map(|(at, t)| format!("{at}: {t}"))
+        .collect();
+    assert!(all.len() > 100, "read only {} help texts", all.len());
+    assert!(
+        found.is_empty(),
+        "release history in --help:\n{}",
+        found.join("\n")
+    );
+}
+
+/// An ordinary string literal that runs onto the next source line without a
+/// `\` keeps that line's indentation in the text: four of omh's messages
+/// printed eighteen spaces mid-sentence — "the                  binary and the
+/// manifest disagree". A `\` at the end of the line is what drops it; a raw
+/// string means its newlines and is left alone.
+#[test]
+fn no_message_breaks_a_line_without_a_backslash() {
+    fn unjoined(body: &str) -> Vec<usize> {
+        let c: Vec<char> = body.chars().collect();
+        let mut out = Vec::new();
+        let (mut i, mut line) = (0, 1);
+        while i < c.len() {
+            let at = |k: usize| c.get(k).copied();
+            match c[i] {
+                '\n' => line += 1,
+                '/' if at(i + 1) == Some('/') => {
+                    while i < c.len() && c[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '/' if at(i + 1) == Some('*') => {
+                    while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') {
+                        line += usize::from(c[i] == '\n');
+                        i += 1;
+                    }
+                }
+                'r' if (at(i + 1) == Some('"') || at(i + 1) == Some('#'))
+                    && (i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '_')) =>
+                {
+                    let hashes = (i + 1..c.len()).take_while(|&h| c[h] == '#').count();
+                    if at(i + 1 + hashes) == Some('"') {
+                        let close: Vec<char> = std::iter::once('"')
+                            .chain(std::iter::repeat_n('#', hashes))
+                            .collect();
+                        let mut k = i + 2 + hashes;
+                        while k < c.len() && !c[k..].starts_with(&close) {
+                            line += usize::from(c[k] == '\n');
+                            k += 1;
+                        }
+                        i = k + close.len();
+                        continue;
+                    }
+                }
+                '\'' if at(i + 1) == Some('\\') => {
+                    while i + 1 < c.len() && c[i + 1] != '\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                '\'' if at(i + 2) == Some('\'') => i += 2,
+                '"' => {
+                    let mut k = i + 1;
+                    while k < c.len() && c[k] != '"' {
+                        if c[k] == '\\' {
+                            if at(k + 1) == Some('\n') {
+                                line += 1;
+                            }
+                            k += 2;
+                            continue;
+                        }
+                        // A newline the text means is written at column
+                        // zero — a certificate, a TOML template. One followed
+                        // by indentation is the source's layout leaking in.
+                        if c[k] == '\n' {
+                            if matches!(at(k + 1), Some(' ' | '\t')) {
+                                out.push(line);
+                            }
+                            line += 1;
+                        }
+                        k += 1;
+                    }
+                    i = k;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out
+    }
+    assert_eq!(unjoined("let s = \"a \\\n    b\";\n"), Vec::<usize>::new());
+    assert_eq!(unjoined("let s = \"a\n    b\";\n"), vec![1]);
+    assert_eq!(unjoined("let s = r\"a\n    b\";\n"), Vec::<usize>::new());
+    assert_eq!(unjoined("let s = \"a\nb\";\n"), Vec::<usize>::new());
+
+    // The same damage, already on one line: a `\` continuation joined with
+    // its indentation kept. A run of spaces mid-prose, in a line of text that
+    // does not itself start indented — an aligned row (`\n  omh s   lists
+    // them`) starts with two spaces, and its gaps are meant.
+    fn gaps(line: &str) -> bool {
+        let mut rest = line;
+        while let Some(open) = rest.find('"') {
+            let body = &rest[open + 1..];
+            let mut end = None;
+            let mut escaped = false;
+            for (k, ch) in body.char_indices() {
+                match (escaped, ch) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => {
+                        end = Some(k);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { return false };
+            for row in body[..end].split("\\n") {
+                if row.starts_with("  ") {
+                    continue;
+                }
+                let t = row.trim_start();
+                if t.contains(&" ".repeat(8)) && !t.trim_end().ends_with(' ') {
+                    return true;
+                }
+            }
+            rest = &body[end + 1..];
+        }
+        false
+    }
+    assert!(gaps("bail!(\"the                  binary and\")"));
+    assert!(!gaps(
+        "said: \"x:\\n  omh s                     lists them\""
+    ));
+
+    let mut found = Vec::new();
+    for (path, body) in crate::testsrc::production() {
+        for line in unjoined(&body) {
+            found.push(format!("{}:{line}", path.display()));
+        }
+        for (n, line) in crate::testsrc::production_of(&body).lines().enumerate() {
+            if gaps(line) {
+                found.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "string literals broken without a `\\`:\n{}",
+        found.join("\n")
     );
 }

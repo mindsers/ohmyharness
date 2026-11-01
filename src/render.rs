@@ -1142,7 +1142,10 @@ fn omp_plugin(
         };
         let Some(moment) = Moment::of(wired.event) else {
             anyhow::bail!(
-                "adapter maps `{}` to `{}`, which is not a moment oh-my-pi has —                  omh would report every hook there as a capability the harness                  lacks. Expected one of: {OMP_SESSION_START}, {OMP_TURN_END},                  {OMP_TOOL_CALL}, {OMP_TOOL_RESULT}.",
+                "adapter maps `{}` to `{}`, which is not a moment oh-my-pi has — \
+                  omh would report every hook there as a capability the harness \
+                  lacks. Expected one of: {OMP_SESSION_START}, {OMP_TURN_END}, \
+                  {OMP_TOOL_CALL}, {OMP_TOOL_RESULT}.",
                 hook.on,
                 wired.event,
             )

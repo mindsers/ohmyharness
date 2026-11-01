@@ -179,14 +179,13 @@ pub trait Runtime: std::fmt::Debug {
             .collect()
     }
 
-    /// Run something inside the session that must outlive the caller.
+    /// Detached exec into a running session: something that must outlive the
+    /// caller.
     ///
     /// A process started by a `docker exec` we spawn and abandon dies with the
     /// client — verified: the backgrounded server survived and the foreground
-    /// bridge did not.
-    /// Detached exec into a running session. Both backends implement it and
-    /// the launcher does not yet call it — harnesses go through `dtach`, which
-    /// owns detachment today.
+    /// bridge did not. Every backend implements it, and the launcher does not
+    /// call it yet — harnesses go through `dtach`, which owns detachment today.
     #[allow(dead_code)]
     fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String>;
 }

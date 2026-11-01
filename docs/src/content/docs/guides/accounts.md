@@ -264,12 +264,14 @@ one harness with `<harness>:<name>`:
 ```console
 $ omh set account mine
 omh: `mine` is captured for claude
+wrote → /Users/you/proj/.omh/settings.toml (committed)
 $ omh new codex
 omh: no account `mine` for codex
   captured: work
   omh set account codex:<name>   one for codex alone
 $ omh set account codex:work
 omh: `work` is captured for codex
+wrote → /Users/you/proj/.omh/settings.toml (committed)
 $ omh info --repo
 settings
   account  mine        ← shared

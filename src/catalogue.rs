@@ -466,9 +466,8 @@ impl Paths {
     /// session, so an `s01.git` beside `s01` would show up in `omh s` as a
     /// session you could resume.
     ///
-    /// `next_id` would *not* be fooled — it parses the name after `s` as a
-    /// number and `01.git` does not parse — but that is one enumerator getting
-    /// lucky, not a reason to put them together.
+    /// `next_id` reads this tree as well, on purpose: an id whose sandbox
+    /// repository survives is not free to hand to a new session.
     pub fn shadows(&self) -> PathBuf {
         self.root.join("shadow").join(self.repo_id())
     }
@@ -800,7 +799,8 @@ pub fn migrate(paths: &Paths, is_running: &dyn Fn(&str) -> bool) -> Result<Migra
                 match moved.is_empty() {
                     true => String::new(),
                     false => format!(
-                        " — this checkout's {} did move, and are on the new key;                          its state is split across both until this is resolved",
+                        " — this checkout's {} did move, and are on the new key; \
+                          its state is split across both until this is resolved",
                         moved.join(", ")
                     ),
                 }

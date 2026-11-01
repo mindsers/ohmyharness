@@ -1392,9 +1392,10 @@ fn build(
     use std::io::Write;
     use std::process::Stdio;
 
-    // The one runner that does not go through `Backend::output`: the
-    // Dockerfile goes in on stdin and the log is relayed as it happens, and
-    // both need a `Child`, not an `Output`.
+    // Not through `Backend::output`, like every spawn that needs a `Child`
+    // rather than an `Output`: the Dockerfile goes in on stdin and the log is
+    // relayed as it happens. `Backend::command` keeps a test's stand-in in
+    // charge of it all the same.
     let program = backend.program();
 
     // Empty context: everything the image needs comes from the Dockerfile.

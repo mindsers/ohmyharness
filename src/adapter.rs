@@ -1004,13 +1004,17 @@ impl Adapter {
                 .into_iter()
                 .map(|a| a.name.to_string())
                 .collect();
+            // None at all is a machine `omh init` has not run on, and the way
+            // out is that, not writing an adapter by hand.
+            if known.is_empty() {
+                anyhow::bail!(
+                    "unknown harness `{name}`: no harness is installed in {} — run `omh init`",
+                    dir.display()
+                );
+            }
             anyhow::bail!(
                 "unknown harness `{name}`\nknown: {}\nadd one by dropping {}",
-                if known.is_empty() {
-                    "(none)".into()
-                } else {
-                    known.join(", ")
-                },
+                known.join(", "),
                 path.display()
             );
         }
@@ -1599,6 +1603,18 @@ pub fn expand_host(template: &str, home: &Path, repo: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no adapter installed at all — a machine `omh init` has not run on
+    /// — the way out is `omh init`, not hand-writing an adapter file at the
+    /// path it would have put one.
+    #[test]
+    fn an_unknown_harness_with_none_installed_names_omh_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Adapter::find(&dir.path().join("adapters"), "claude").unwrap_err();
+        let said = format!("{err:#}");
+        assert!(said.contains("run `omh init`"), "{said}");
+        assert!(!said.contains("add one by dropping"), "{said}");
+    }
 
     const REAL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
 

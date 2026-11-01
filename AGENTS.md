@@ -31,7 +31,7 @@ binary what omh accepts and fails when anything in that answer has no run
 behind it. Declare a flag and it fails by name:
 
 ```
-1 of omh's N commands and flags have no run behind them:
+1 of omh's N commands, flags and arguments have no run behind them:
   omh graph --loudly
 ```
 

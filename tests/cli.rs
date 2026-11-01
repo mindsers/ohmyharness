@@ -19572,3 +19572,23 @@ fn the_surface_reads_commands_flags_and_positionals() {
         "the globals are the root's, or this table is mostly four flags"
     );
 }
+
+/// `omh <harness>` started a session before `omh new <harness>` did, and it is
+/// the spelling people still have in their fingers. clap's *unrecognized
+/// subcommand* pointed nowhere; the refusal names the line that does it now,
+/// and runs nothing.
+#[test]
+fn a_harness_name_as_the_verb_names_omh_new() {
+    let sb = sandbox();
+    sb.git_init();
+    for harness in ["claude", "codex", "omp", "opencode"] {
+        let out = sb.omh(&[harness]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "`omh {harness}` ran: {said}");
+        assert!(out.stdout.is_empty(), "`omh {harness}` printed an answer");
+        assert!(
+            said.contains(&format!("omh new {harness}")),
+            "`omh {harness}` does not name `omh new {harness}`: {said}"
+        );
+    }
+}

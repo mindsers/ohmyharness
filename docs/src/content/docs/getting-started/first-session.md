@@ -22,7 +22,8 @@ git repository, and access to Claude Code.
    ```
 
    `init` reads your manifests, README and git history, decides, and prints what
-   it decided. It asks nothing. The first run builds the sandbox image, which
+   it decided. It asks only what it cannot work out — a toolchain it does not
+   know, a test command it cannot find. The first run builds the sandbox image, which
    takes a while; later runs use the cache.
 
    ```text title="omh init"

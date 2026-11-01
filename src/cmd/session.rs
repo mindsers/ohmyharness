@@ -2870,10 +2870,9 @@ pub(crate) fn rm(
         }
     }
 
-    // The third thing a session owns. Staging is re-rendered on every launch so
-    // leaving it costs nothing that breaks — but the `last-used` marker beside
-    // it is what says a session ran here, and a marker with no session behind it
-    // is how `omh s` learns to report a leftover that is not there any more.
+    // The session's preferences, before the run directory that holds them
+    // goes: reviewed, dropped, or — with nobody to ask — left, which stops
+    // the removal here.
     let how = match consent {
         crate::cmd::harvest::Consent::Given => Review::DropAll,
         crate::cmd::harvest::Consent::MayAsk => Review::Ask,
@@ -2889,6 +2888,10 @@ pub(crate) fn rm(
          drops them",
         out::untrusted(&left.join(", "))
     );
+    // The third thing a session owns. Staging is re-rendered on every launch so
+    // leaving it costs nothing that breaks — but the `last-used` marker beside
+    // it is what says a session ran here, and a marker with no session behind it
+    // is how `omh s` learns to report a leftover that is not there any more.
     match std::fs::remove_dir_all(paths.runs().join(id)) {
         Ok(()) => went.push("the run directory".to_string()),
         // Never made, or already gone: not a removal that failed.

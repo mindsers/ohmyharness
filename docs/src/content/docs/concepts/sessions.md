@@ -275,7 +275,7 @@ harness is reported instead:
 
 ```console
 $ omh s01 resume claude
-Error: session s01 is running opencode and cannot be reused for this launch (image (…))
+omh: session s01 is running opencode and cannot be reused for this launch (image (…))
   stop it with        omh s01 down
   or start a fresh one  omh new claude
 ```

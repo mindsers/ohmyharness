@@ -11,7 +11,7 @@ yours in the table, then follow it to its entry.
 | Command | What it does |
 |---|---|
 | **Set up** | |
-| [`omh init`](#omh-init) | Set this repo up, once. Decides everything, asks nothing. |
+| [`omh init`](#omh-init) | Set this repo up, once. Decides what it can; asks, at a terminal, only what it cannot. |
 | [`omh upgrade`](#omh-upgrade) | Apply a newer omh: refresh the catalogue, check again which provides apply, rebuild the images whose recipe moved. |
 | [`omh account`](#omh-account) | Your accounts, the one this repo uses, and the preferences each keeps. |
 | [`omh account login <harness>`](#omh-account-login-harness---name-account---import---provider-file) | Log a harness in once; repeat with `--name` for several accounts. |
@@ -62,7 +62,7 @@ file is left alone.
 
 | Previews | Refuses `--dry-run` |
 |---|---|
-| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `rm` and `mcp` verbs, `memory rm`, `account forget` | `init`, `account` and `account login`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
+| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `use`, `unuse`, `rm` and `mcp` verbs, `memory rm`, `account forget` | `init`, `account` and `account login`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
 
 <details>
 <summary>Why a command refuses the flag rather than guessing, or ignoring it</summary>
@@ -245,8 +245,10 @@ which are prose for a person.
 
 ## `omh init`
 
-Sets up the current repo, once. Decides everything, asks nothing, reports all of
-it.
+Sets up the current repo, once. Decides what it can and reports all of it. At a
+terminal it asks only what it cannot detect — a toolchain marker no stack it
+knows claims, or a repo with no test command — and off a terminal it asks
+nothing.
 
 ```
 omh init
@@ -588,7 +590,7 @@ ambiguous:
 
 ```console
 $ omh --dry-run new claude       # omh's
-$ omh new claude --json          # omh's, reported as JSON
+$ omh new claude --json          # omh's, and refused: new prints nothing to parse
 $ omh new claude -- --resume x   # claude's
 $ omh new claude -- --json       # claude's, even though omh has one too
 $ omh new claude -- -s work      # claude's, short flags included
@@ -1864,9 +1866,9 @@ $ omh graph
 ```
 
 ```text title="omh graph"
-omh: graph at http://127.0.0.1:56286
-  every session's graph for this repo, in one place
-  stop with: omh graph --stop
+graph at http://127.0.0.1:59328
+  omh graph --stop
+every session's graph for this repo, in one place
 ```
 
 **One service per repo, not per session**, and it needs no session to exist.
@@ -2268,20 +2270,26 @@ omh also reads
   ca_cert         A CA certificate the sandbox must trust, as a path to a PEM — for a network that inspects TLS and signs it with its own root.
   persistence     How a session's terminal survives detaching. Unset means `dtach`.
 
+omh's features, for new repos
+  codegraph   on (default)
+  git-notice  on (default)
+  memory      on (default)
+
 your catalogue
   rules        0
-  skills       1  new repos get all
+  skills       0
   servers      0
   commands     0
   subagents    0
-  hooks        0
+  hooks        8  new repos get all but the guards, by stack
 ```
 
 **The second list is the useful half**: every key omh reads, which no settings
-file can show. Then your catalogue, page by page, as the screen has it: how
-many, what new repos get, and every entry that is wrong — a link to nothing, a
-skill no harness loads — and, beside a key nothing reads, the one it probably
-meant. `--json` carries the same.
+file can show. Then which of omh's own features a new repo starts with, and
+your catalogue, page by page, as the screen has it: how many, what new repos
+get, and every entry that is wrong — a link to nothing, a skill no harness
+loads — and, beside a key nothing reads, the one it probably meant. `--json`
+carries the same.
 
 **At a terminal, `omh settings` is a screen** over the same `~/.omh`: your
 defaults, then one page per kind of catalogue entry — rules, skills, servers,
@@ -2445,7 +2453,7 @@ is committed. It already has a home — `omh settings mcp add <name> <command>
 live in your catalogue; a repo overrides a server's environment without
 redeclaring it. See [Configuration](/reference/configuration/).
 
-**Your defaults and your catalogue.** The five verbs above all act on `~/.omh`;
+**Your defaults and your catalogue.** The verbs above all act on `~/.omh`;
 the screen is that catalogue listed for changing it. `omh info` is where the
 machine is described, and what you have in `~/.omh` is part of what it means
 by *what you have here*.

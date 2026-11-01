@@ -227,7 +227,7 @@ pub(crate) fn the_one_session(
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
-    /// Set this repo up. Decides everything; asks nothing.
+    /// Set this repo up. Decides what it can; asks, at a terminal, only what it cannot.
     Init,
     /// Remove what omh has left behind and nothing claims any more.
     ///
@@ -302,7 +302,8 @@ pub(crate) enum Cmd {
         ///
         /// A flag rather than a command because it is the same question at a
         /// different scope — `omh info` is the machine, `omh info --repo` is
-        /// the checkout. It was its own command until 0.7.0.
+        /// the checkout.
+        // It was its own command until 0.7.0.
         #[arg(long)]
         repo: bool,
     },
@@ -413,7 +414,8 @@ pub(crate) enum Cmd {
 
     /// Bring a setup you already have into omh.
     Import {
-        /// What to bring over: `hooks`, `skills`, `mcp`, `rules`.
+        /// What to bring over: `rules`, `skills`, `commands`, `subagents` or
+        /// `hooks`. MCP servers are `omh settings mcp import`.
         capability: String,
         /// Which installed harness to read it out of.
         harness: String,
@@ -475,14 +477,14 @@ pub(crate) enum McpCmd {
         /// Which installed harness to read servers out of.
         harness: String,
         /// Read this file instead of where the adapter says the harness keeps
-        /// its servers. The same flag `omh import` takes; `--file` was its
-        /// name here until 0.10, an alias through it, and is refused by name
-        /// from 0.11 — see `RETIRED`.
+        /// its servers. The same flag `omh import` takes.
+        // `--file` was its name here until 0.10, an alias through it, and is
+        // refused by name from 0.11 — see `RETIRED`.
         #[arg(long = "from")]
         file: Option<std::path::PathBuf>,
         /// Overwrite a catalogue entry of the same name that differs. Without
-        /// it yours is kept and the difference reported. `--force` was its
-        /// name until 0.10, and is refused by name from 0.11.
+        /// it yours is kept and the difference reported.
+        // `--force` was its name until 0.10, and is refused by name from 0.11.
         #[arg(long = "replace")]
         force: bool,
     },
@@ -495,8 +497,9 @@ pub(crate) enum McpCmd {
 /// `sessions_ls` learning a scope; retiring the verb is a separate and
 /// smaller call, so that one thing has one spelling rather than two.
 ///
-/// It survives below as a hidden tombstone rather than being deleted
-/// outright, though not for the reason first recorded here. That reason was
+/// It survives as an entry in `RETIRED`, scoped to `sessions`, rather than
+/// being forgotten outright — once as a hidden variant here, and not for the
+/// reason first recorded. That reason was
 /// that deleting it left the line *unrefusable*: the sessions reading failed,
 /// the as-written reading was a live top-level `ls`, and `session_prefix`
 /// handed the launch to a command that never reads `cli.session` — so the
@@ -506,7 +509,7 @@ pub(crate) enum McpCmd {
 /// as-written reading no longer parses either and the `(Err, Err)` arm keeps
 /// the sessions grammar.
 ///
-/// What is left is smaller and still worth the variant: clap would say
+/// What is left is smaller and still worth the entry: clap would say
 /// *unrecognized subcommand*, and this says which word replaced it. A better
 /// sentence, not a prevented harm — and the spelling everyone still has
 /// in their fingers gets somewhere to point.
@@ -612,8 +615,8 @@ pub(crate) enum SessionsCmd {
         edit: bool,
         /// Commit even with conflict markers still in the files. Named for
         /// what it does rather than `--force`, which on `rm` means *I have
-        /// read the warning* — a different thing to be sure of. `--force`
-        /// was an alias through 0.10, and is refused by name from 0.11.
+        /// read the warning* — a different thing to be sure of.
+        // `--force` was an alias through 0.10, and is refused by name from 0.11.
         #[arg(long = "allow-conflicts")]
         force: bool,
         /// Land the work without running this repo's turn-end checks first.
@@ -652,8 +655,9 @@ pub(crate) enum SessionsCmd {
         /// script, a CI job, a closed pipe. On a terminal omh asks instead of
         /// refusing. Named `--yes` for that reason; the old `--force` read as
         /// "force the removal" and did no such thing (`git worktree remove
-        /// --force` is passed either way). `--force` was a hidden alias
-        /// through 0.10, and is refused by name from 0.11.
+        /// --force` is passed either way).
+        // `--force` was a hidden alias through 0.10, and is refused by name
+        // from 0.11.
         #[arg(long = "yes", short = 'y')]
         yes: bool,
     },
@@ -668,9 +672,9 @@ pub(crate) enum SessionsCmd {
 /// env and must not be committable by accident. Two commands, so neither has
 /// to be told which it meant.
 ///
-/// The five verbs are the ones that act on `~/.omh`: two that write a default,
-/// one that opens the file or an entry, one that removes an entry, and the MCP
-/// catalogue. With no verb it is the report, or at a terminal a screen over
+/// The verbs act on `~/.omh`: two that write a default, two that choose what
+/// new repos get from your catalogue, one that opens the file or an entry, one
+/// that removes an entry, and the MCP catalogue. With no verb it is the report, or at a terminal a screen over
 /// your defaults and every catalogue entry — which is the catalogue listed
 /// for changing, while `omh info` is where the machine is described.
 #[derive(Subcommand)]
@@ -765,11 +769,13 @@ pub(crate) enum AccountCmd {
         account: String,
         /// Copy the login this machine already has instead of logging in
         /// again — for a harness whose login cannot finish inside a sandbox.
-        /// Codex's own model provider comes along, from `~/.codex/config.toml`.
+        /// The harness's own model provider comes along: Codex's from
+        /// `~/.codex/config.toml`, omp's from `~/.omp/agent/models.yml`.
         #[arg(long)]
         import: bool,
         /// Take the account's model provider from this file — a Codex
-        /// `config.toml` or a provider file — and log nothing in. Kept where no
+        /// `config.toml`, an omp `models.yml`, or a provider file — and log
+        /// nothing in. Kept where no
         /// session can write it; an environment variable it reads is read now,
         /// once, and a command it runs is refused.
         #[arg(long, value_name = "FILE")]
@@ -906,6 +912,29 @@ pub(crate) const RETIRED: &[Retired] = &[
         spellings: &["config", "c"], // types the retired verb on purpose
         at: At::Verb,
         said: "`config` is gone — it is `omh settings` now:\n  omh settings              your defaults\n  omh settings set <key> <value>\n  omh settings edit         $EDITOR on them\n  omh settings mcp ls       your MCP servers",
+    },
+    // The bare-name launch: `omh <harness>` started a session before
+    // `omh new <harness>` did. One entry a harness, so the sentence names the
+    // line to type rather than a placeholder.
+    Retired {
+        spellings: &["claude"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new claude   start one and run claude in it",
+    },
+    Retired {
+        spellings: &["codex"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new codex   start one and run codex in it",
+    },
+    Retired {
+        spellings: &["omp"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new omp   start one and run omp in it",
+    },
+    Retired {
+        spellings: &["opencode"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new opencode   start one and run opencode in it",
     },
     Retired {
         spellings: &["auth"], // types the retired verb on purpose

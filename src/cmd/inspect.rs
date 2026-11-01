@@ -16,11 +16,8 @@ use crate::{
 use anyhow::{Context, Result};
 use std::process::Command;
 
-/// Serve the graph UI from the session and open it.
-///
-/// Started on demand rather than always: the port is reserved when the session
-/// is created (it has to be), but a process nobody looks at is waste.
-/// The graph UI, once per repo.
+/// The graph UI, once per repo, started on demand and opened in the browser —
+/// a server nobody looks at is waste.
 ///
 /// Not per session: every session's graph lives in one volume, so a per-session
 /// server showed every other session's graph anyway. Matching the server's
