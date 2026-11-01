@@ -166,6 +166,7 @@ fn uses_on(
         let mut segments: Vec<String> = Vec::new();
         let mut j = i;
         let mut group_at: Option<usize> = None;
+        let mut glob = false;
         loop {
             let start = j;
             while j < chars.len() && ident(chars[j]) {
@@ -181,6 +182,10 @@ fn uses_on(
             j = chars.len() - after_ws.chars().count();
             if after_ws.starts_with('{') {
                 group_at = Some(j);
+                break;
+            }
+            if after_ws.starts_with('*') {
+                glob = true;
                 break;
             }
             if !after_ws.starts_with(|c: char| ident(c)) {
@@ -210,6 +215,12 @@ fn uses_on(
                 out.push(name.clone());
             } else if let Some(at) = group_at {
                 out.extend(group_members(code, n, at));
+            } else if glob {
+                // `use crate::*` names no module and takes everything the root
+                // has. That is an edge to the root, which `main` stands for;
+                // read as no edge, a module could reach the root through a
+                // glob and the cycle it made would not exist here.
+                out.push("main".to_string());
             }
         }
         i = next;
@@ -757,7 +768,9 @@ impl Ctx {
                 "pub struct Exported;\n\
                  pub fn line() -> String { format!(\"  // {}\\n\", crate::h::NAME) }\n",
             ),
-            ("g.rs", "pub fn g() {}\n"),
+            // A glob of the root names nothing, and takes everything the root
+            // has: that is an edge to it.
+            ("g.rs", "use crate::*;\npub fn g() {}\n"),
             ("h.rs", "pub const NAME: &str = \"h\";\n"),
         ]);
         let graph = module_graph(dir.path());
@@ -773,6 +786,7 @@ impl Ctx {
                 pair("d", "e"),
                 pair("e", "g"),
                 pair("f", "h"),
+                pair("g", "main"),
                 pair("main", "a"),
                 pair("main", "b"),
             ],
@@ -890,6 +904,31 @@ impl Ctx {
             "the cycles between modules changed. A new one is a dependency to \
              invert; a broken one is progress — strike it from KNOWN_CYCLES.\
              \nNow:{report}"
+        );
+
+        // **Inside a cycle, the edges are the ratchet.** A cycle that gained an
+        // edge has the same members, so the list above cannot see it: #197
+        // added six inside the big one with this test green. Counted rather
+        // than listed — a refactor moves dozens — and printed whole when the
+        // count moves, so a diff of two runs names the edge.
+        const KNOWN_EDGES_INSIDE: usize = 136;
+        let inside: Vec<String> = found
+            .iter()
+            .flat_map(|cycle| {
+                cycle.iter().flat_map(|from| {
+                    graph[from]
+                        .keys()
+                        .filter(|to| cycle.contains(to))
+                        .map(move |to| format!("{from} → {to}"))
+                })
+            })
+            .collect();
+        assert_eq!(
+            inside.len(),
+            KNOWN_EDGES_INSIDE,
+            "the edges inside the known cycles changed. One more is a dependency \
+             to invert; one fewer is progress — lower KNOWN_EDGES_INSIDE.\nNow:\n  {}",
+            inside.join("\n  ")
         );
     }
 
