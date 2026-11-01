@@ -527,7 +527,7 @@ mod tests {
             kind: crate::memory::Kind::Surprise,
             source: "session s01, claude".into(),
             recorded: "2026-08-07".into(),
-            invalidated_by: trigger.map(|t| t.into()),
+            invalidated_by: trigger.map(std::convert::Into::into),
             body: String::new(),
             path: std::path::PathBuf::from("k.md"),
         }

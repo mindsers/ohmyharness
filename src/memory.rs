@@ -151,7 +151,10 @@ impl std::str::FromStr for Kind {
             // Never a default arm: a typo that parsed into a kind would take
             // the wrong required sections with it and stop being validated.
             .ok_or_else(|| {
-                let known: Vec<String> = Kind::ALL.iter().map(|k| k.to_string()).collect();
+                let known: Vec<String> = Kind::ALL
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 anyhow!("unknown note type `{s}` ({})", known.join(", "))
             })
     }
@@ -241,7 +244,7 @@ pub fn parse(raw: &str, path: &Path) -> Result<Note> {
         invalidated_by: fields
             .get("invalidated_by")
             .filter(|v| !v.is_empty())
-            .map(|v| v.to_string()),
+            .map(std::string::ToString::to_string),
         body: body.to_string(),
         path: path.to_path_buf(),
     })
@@ -510,7 +513,7 @@ pub fn check(note: &Note) -> Vec<Violation> {
             key: note.key.clone(),
             rule,
             detail,
-        })
+        });
     };
 
     // The closed set of triggers, asked here rather than at load: a note that
@@ -547,7 +550,7 @@ pub fn check(note: &Note) -> Vec<Violation> {
             // A heading with nothing under it is the obvious evasion, and it
             // costs nothing to close.
             Some(lines) if lines.iter().all(|l| l.trim().is_empty()) => {
-                fire(Rule::MissingSection, format!("`## {name}` is empty"))
+                fire(Rule::MissingSection, format!("`## {name}` is empty"));
             }
             Some(_) => {}
         }
@@ -2978,7 +2981,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             .unwrap_err()
             .to_string();
         assert!(
-            ambiguous.contains("2"),
+            ambiguous.contains('2'),
             "an ambiguous --at must say so: {ambiguous}"
         );
 

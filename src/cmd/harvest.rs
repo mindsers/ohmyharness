@@ -1324,7 +1324,7 @@ pub(crate) fn warn_uncounted(held: &Settling, ctx: &out::Ctx, base: &str) {
         // `null` — a commit reported as done with no tally and no warning,
         // over a branch omh never found.
         Settling::Settled(Holding::NoBranch) => {
-            ctx.warn("omh found no branch to count this against")
+            ctx.warn("omh found no branch to count this against");
         }
         _ => {}
     }
@@ -1340,8 +1340,9 @@ pub(crate) fn counted(held: &Settling) -> Option<usize> {
         Settling::NeedsPatchProof { commits } => Some(*commits),
         Settling::Settled(Holding::NoBranch) => None,
         Settling::Settled(Holding::Nothing) => Some(0),
-        Settling::Settled(Holding::Landed { commits, .. })
-        | Settling::Settled(Holding::Unreviewed { commits }) => Some(*commits),
+        Settling::Settled(Holding::Landed { commits, .. } | Holding::Unreviewed { commits }) => {
+            Some(*commits)
+        }
         Settling::Settled(Holding::Unsettled { commits, .. }) => *commits,
     }
 }
@@ -1379,11 +1380,13 @@ pub(crate) fn branch_tally(held: &Settling) -> String {
     let plural = |n: &usize| if *n == 1 { "commit" } else { "commits" };
     match held {
         Settling::NeedsPatchProof { commits }
-        | Settling::Settled(Holding::Unreviewed { commits })
-        | Settling::Settled(Holding::Unsettled {
-            commits: Some(commits),
-            ..
-        }) => format!(" ({commits} {} on the branch)", plural(commits)),
+        | Settling::Settled(
+            Holding::Unreviewed { commits }
+            | Holding::Unsettled {
+                commits: Some(commits),
+                ..
+            },
+        ) => format!(" ({commits} {} on the branch)", plural(commits)),
         Settling::Settled(Holding::Nothing) => " (0 commits on the branch)".to_string(),
         // Vanishingly rare here — `commit` has just moved both the tip tree and
         // the branch's whole patch, so nothing on trunk matches either any
@@ -1394,8 +1397,9 @@ pub(crate) fn branch_tally(held: &Settling) -> String {
             plural(commits),
             crate::report::short(by.at())
         ),
-        Settling::Settled(Holding::Unsettled { commits: None, .. })
-        | Settling::Settled(Holding::NoBranch) => String::new(),
+        Settling::Settled(Holding::Unsettled { commits: None, .. } | Holding::NoBranch) => {
+            String::new()
+        }
     }
 }
 

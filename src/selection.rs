@@ -335,7 +335,12 @@ mod tests {
         let mut s = Selection::owning(owned());
         let table = pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.iter().map(|n| n.to_string()).collect()))
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    v.iter().map(std::string::ToString::to_string).collect(),
+                )
+            })
             .collect();
         s.apply(&table, Path::new("settings.toml")).unwrap();
         s
@@ -345,7 +350,12 @@ mod tests {
         let mut s = Selection::owning(owned());
         let table = pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.iter().map(|n| n.to_string()).collect()))
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    v.iter().map(std::string::ToString::to_string).collect(),
+                )
+            })
             .collect();
         format!(
             "{:#}",
@@ -392,7 +402,12 @@ mod tests {
         let layer = |pairs: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
             pairs
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.iter().map(|n| n.to_string()).collect()))
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        v.iter().map(std::string::ToString::to_string).collect(),
+                    )
+                })
                 .collect()
         };
         s.apply(

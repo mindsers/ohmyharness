@@ -1482,7 +1482,7 @@ fn a_command_list_is_scannable_and_none_of_it_is_markdown() {
             for text in [sub.get_about(), sub.get_long_about()]
                 .into_iter()
                 .flatten()
-                .map(|t| t.to_string())
+                .map(std::string::ToString::to_string)
             {
                 if text.contains("**") || text.contains("*`") {
                     marked.push(format!("{here}: {text}"));
@@ -6849,7 +6849,10 @@ fn the_globals_stepped_over_with_a_value_are_the_ones_clap_declares() {
         })
         .collect();
     declared.sort();
-    let mut listed: Vec<String> = cli::TAKES_A_VALUE.iter().map(|s| s.to_string()).collect();
+    let mut listed: Vec<String> = cli::TAKES_A_VALUE
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     listed.sort();
     assert_eq!(listed, declared);
 }
@@ -7372,7 +7375,7 @@ fn the_global_flags_describe_what_every_command_does_with_them() {
         cmd.get_arguments()
             .find(|a| a.get_id().as_str() == id)
             .and_then(|a| a.get_help())
-            .map(|h| h.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_else(|| panic!("--{id} has no help"))
     };
     for (flag, stale) in [

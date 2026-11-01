@@ -89,7 +89,11 @@ impl Plan {
             parts.push(format!("dropped {} (unsupported)", caps.join(", ")));
         }
         if !self.dropped_hooks.is_empty() {
-            let hooks: Vec<_> = self.dropped_hooks.iter().map(|d| d.to_string()).collect();
+            let hooks: Vec<_> = self
+                .dropped_hooks
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
             parts.push(format!("dropped hooks: {}", hooks.join(", ")));
         }
         (!parts.is_empty()).then(|| parts.join("; "))

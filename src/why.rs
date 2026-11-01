@@ -370,7 +370,7 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
                 yours
                     .shadows
                     .iter()
-                    .map(|l| l.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
             };

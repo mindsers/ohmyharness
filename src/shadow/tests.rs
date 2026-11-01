@@ -1513,7 +1513,10 @@ fn a_carried_path_is_excluded_as_itself() {
         std::fs::write(wt.join(name), "SECRET=1\n").unwrap();
     }
     let s = Shadow::new(&shadow_dir, "s01");
-    let excluded: Vec<String> = carried.iter().map(|n| n.to_string()).collect();
+    let excluded: Vec<String> = carried
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     s.ensure(&wt, &excluded).unwrap();
     let tracked = git(&s.gitdir, &wt, &["ls-files"]).unwrap();
     let status = git(

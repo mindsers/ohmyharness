@@ -116,7 +116,7 @@ pub fn how_is_it_installed(
         marker = (marker.file.clone())
         [[provide]]
         name = "toolchain"
-        needs = (programs.iter().map(|p| p.to_string()).collect::<Vec<_>>())
+        needs = (programs.iter().map(std::string::ToString::to_string).collect::<Vec<_>>())
         install = (install.clone())
         because = (format!("{} is what this project is written in", marker.stack))
     })
@@ -202,7 +202,7 @@ pub fn confirm(question: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> 
     let said = prompt(&format!("{question} (y/N)"), input, out)?;
     Ok(matches!(
         said.as_deref().map(str::trim),
-        Some("y") | Some("Y") | Some("yes")
+        Some("y" | "Y" | "yes")
     ))
 }
 

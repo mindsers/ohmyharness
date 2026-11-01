@@ -174,7 +174,12 @@ fn read_record(value: &serde_json::Value, s: &mut Summary) {
             .unwrap_or("unknown")
             .to_string();
         let entry = s.usage.entry(model).or_default();
-        let tok = |name: &str| usage.get(name).and_then(|t| t.as_u64()).unwrap_or(0);
+        let tok = |name: &str| {
+            usage
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
         // Saturating: the agent writes the transcript, so it writes these
         // numbers too, and `+=` panicked a debug build and wrapped a release
         // one to a small, believable total.
@@ -246,7 +251,11 @@ fn read_codex_record(
                 return;
             };
             s.turns += 1;
-            let tok = |name: &str| last.get(name).and_then(|t| t.as_u64()).unwrap_or(0);
+            let tok = |name: &str| {
+                last.get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
             let entry = s
                 .usage
                 .entry(model.clone().unwrap_or_else(|| "unknown".into()))

@@ -3625,7 +3625,8 @@ mod tests {
                 )
                 .unwrap();
                 selects(&fx, table);
-                let decided = decided_with(off.iter().map(|f| f.to_string()).collect());
+                let decided =
+                    decided_with(off.iter().map(std::string::ToString::to_string).collect());
                 let p = plan_with(&fx, adapter, decided);
 
                 let mut want: Vec<(Option<String>, Vec<String>)> = handed(&p, adapter)
@@ -4437,7 +4438,7 @@ mod tests {
     fn the_use_list_is_the_rules_order() {
         let fx = fixture();
         let write = |name: &str, body: &str| {
-            std::fs::write(fx.paths.root.join("rules").join(name), body).unwrap()
+            std::fs::write(fx.paths.root.join("rules").join(name), body).unwrap();
         };
         write("apple.md", "APPLE RULE");
         write("zebra.md", "ZEBRA RULE");

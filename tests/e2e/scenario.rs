@@ -238,7 +238,10 @@ pub fn all(harness: &'static Driver) {
 fn message(e: &Box<dyn std::any::Any + Send>) -> String {
     e.downcast_ref::<String>()
         .cloned()
-        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+        .or_else(|| {
+            e.downcast_ref::<&str>()
+                .map(std::string::ToString::to_string)
+        })
         .unwrap_or_else(|| "a panic with no message".into())
 }
 
@@ -445,8 +448,12 @@ fn worked_or_named(s: &Session, hook: &str, worked: bool) {
 /// omh drops exactly the hooks the driver expects for this harness, and no
 /// others.
 fn drops(s: &Session) {
-    let want: std::collections::BTreeSet<String> =
-        s.harness.drops.iter().map(|h| h.to_string()).collect();
+    let want: std::collections::BTreeSet<String> = s
+        .harness
+        .drops
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     assert_eq!(
         s.dropped_all(),
         want,

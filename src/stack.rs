@@ -1116,7 +1116,7 @@ because = "cargo is how a rust project is built and tested"
     }
 
     fn fired(keys: &[&str]) -> std::collections::BTreeSet<String> {
-        keys.iter().map(|k| k.to_string()).collect()
+        keys.iter().map(std::string::ToString::to_string).collect()
     }
 
     /// The one spelling, asserted literally — because it is a **committed file

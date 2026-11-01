@@ -1956,7 +1956,7 @@ mod tests {
     /// worktree lands owned by root and the agent cannot write it.
     #[test]
     fn rootless_podman_maps_the_worktree_to_the_agent() {
-        let want = format!("--userns=keep-id:uid={0},gid={0}", AGENT_UID);
+        let want = format!("--userns=keep-id:uid={AGENT_UID},gid={AGENT_UID}");
         for argv in [
             Podman.up_args(&sample_plan(), "n", 1, "k"),
             Podman.args(&sample_plan()),

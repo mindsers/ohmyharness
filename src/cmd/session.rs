@@ -730,7 +730,7 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
                 }
                 ctx.progress(&format!(
                     "stopped {id} — idle over {raw} (worktree and branch survive)"
-                ))
+                ));
             }
             Err(e) => ctx.warn(&format!("could not stop idle session {id}: {e}")),
         }
@@ -841,7 +841,7 @@ pub(crate) fn down(
                     ctx.warn(&format!("{i}'s network was left behind: {e:#}"));
                 }
                 down.push(i.clone());
-                sessions.push((i.clone(), report::Stopped::Yes))
+                sessions.push((i.clone(), report::Stopped::Yes));
             }
             // Reported and carried on rather than returned: one container that
             // will not go must not hide the ones that did. It still decides
@@ -1205,7 +1205,7 @@ fn read_check(paths: &Paths, id: &str) -> Option<report::CheckState> {
         "passed" => Some(report::CheckState::Passed(
             detail
                 .and_then(|d| d.get("count"))
-                .and_then(|c| c.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as usize,
         )),
         "failed" => Some(report::CheckState::Failed(
@@ -1740,7 +1740,7 @@ pub(crate) fn chosen_by_the_repository(
 /// something to say — a line printed every launch is a line nobody reads.
 pub(crate) fn say_rules(plan: &crate::plan::Plan, ctx: &out::Ctx) {
     for notice in plan.rules.notices() {
-        ctx.warn(&notice.to_string());
+        ctx.warn(&notice.clone());
     }
 }
 
@@ -1832,7 +1832,7 @@ pub(crate) fn say_hooks(paths: &Paths, ctx: &out::Ctx) -> Option<notice::Record>
     match notice::hooks(paths, &detected, &declared) {
         Ok((notices, record)) => {
             for notice in notices {
-                ctx.warn(&notice.to_string());
+                ctx.warn(&notice.clone());
             }
             Some(record)
         }
@@ -1875,7 +1875,7 @@ pub(crate) fn say_selection(
     match notice::selection(catalogue, &repo.selection, &applicable) {
         Ok(notices) => {
             for notice in notices {
-                ctx.warn(&notice.to_string());
+                ctx.warn(&notice.clone());
             }
         }
         Err(e) => ctx.warn(&format!("could not check what this repo uses — {e:#}")),

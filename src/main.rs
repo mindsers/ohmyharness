@@ -262,7 +262,7 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
             }
         }
         Ok(paths::Migration::Stranded { from, kinds }) => {
-            ctx.warn(&say_what_was_stranded(&paths, &from, &kinds))
+            ctx.warn(&say_what_was_stranded(&paths, &from, &kinds));
         }
         Ok(paths::Migration::Refused(why)) => ctx.warn(&why),
         Err(e) => ctx.warn(&format!(

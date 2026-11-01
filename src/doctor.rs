@@ -338,7 +338,7 @@ pub fn free_space(at: &std::path::Path) -> Result<u64, String> {
     // asks about an empty `ps` and answers the other way, for the other
     // reason: there, nothing is a legitimate listing; here, nothing is a
     // filesystem declining to say.
-    match stat.f_bavail as u64 * stat.f_frsize as u64 {
+    match u64::from(stat.f_bavail) * stat.f_frsize as u64 {
         0 => Err(format!(
             "the filesystem holding {} does not report free space",
             at.display()
@@ -2920,8 +2920,11 @@ mod tests {
     /// `Leftovers` for a test, in the order the fields read.
     fn seen(found: &[&str], unchecked: &[&str]) -> crate::leftovers::Leftovers {
         crate::leftovers::Leftovers {
-            found: found.iter().map(|s| s.to_string()).collect(),
-            unchecked: unchecked.iter().map(|s| s.to_string()).collect(),
+            found: found.iter().map(std::string::ToString::to_string).collect(),
+            unchecked: unchecked
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 
@@ -2937,7 +2940,7 @@ mod tests {
         use crate::paths::Attribution;
         let names: Vec<String> = ["omh-cache-a", "omh-cache-b", "omh-cache-c", "omh-cache-d"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let split = attributed(&names, &|n| match n {
             "omh-cache-a" => Attribution::Gone("/gone/api".into()),
@@ -4396,7 +4399,7 @@ mod tests {
             guest: stub.path().to_path_buf(),
             expect: Expect::Loaded {
                 command: "harness list".into(),
-                names: names.iter().map(|n| n.to_string()).collect(),
+                names: names.iter().map(std::string::ToString::to_string).collect(),
                 ready: "Connected".into(),
             },
             dir: true,
@@ -4612,7 +4615,7 @@ mod tests {
             let adapter = Adapter::find(Path::new(ADAPTERS), name).unwrap();
             match start_check(&adapter).expect {
                 Expect::Starts { command } => {
-                    assert_eq!(command, format!("{} --version", adapter.bin))
+                    assert_eq!(command, format!("{} --version", adapter.bin));
                 }
                 other => panic!("{name}: {other:?}"),
             }

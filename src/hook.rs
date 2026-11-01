@@ -314,7 +314,7 @@ fn mentions(body: &str, var: &str) -> bool {
 fn check_interpolation(text: &str, whence: &str, capture: bool) -> Result<()> {
     let known: Vec<&str> = Field::ALL
         .iter()
-        .map(|f| f.var())
+        .map(super::vocab::Field::var)
         .chain(SANDBOX_VARS)
         .chain(capture.then_some(CAPTURE_VAR))
         .collect();

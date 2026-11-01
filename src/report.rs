@@ -1413,7 +1413,12 @@ impl Report for Sessions {
                 .warn(format!(
                     "omh could not measure {} against {} — {} may be working against code that \
                      moved, and `sync` is not offered over a count that failed",
-                    spoken(&unmeasured.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+                    spoken(
+                        &unmeasured
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>()
+                    ),
                     self.base,
                     if unmeasured.len() == 1 { "it" } else { "they" }
                 ))

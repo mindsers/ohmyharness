@@ -3748,7 +3748,7 @@ mod tests {
         let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
         let e = format!("{:#}", ca_for(&paths).unwrap_err());
         assert!(
-            e.contains("1") || e.to_lowercase().contains("line"),
+            e.contains('1') || e.to_lowercase().contains("line"),
             "the refusal must point at the line: {e}"
         );
 

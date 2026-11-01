@@ -1000,7 +1000,7 @@ impl App {
         match section.page {
             Page::Defaults => self.note("every key omh reads is listed — enter sets one"),
             Page::Servers if section.problem.is_some() => {
-                self.note("omh could not read your servers — e opens the file to fix it")
+                self.note("omh could not read your servers — e opens the file to fix it");
             }
             Page::Servers => {
                 self.modal = Some(Modal::Form(Form {
@@ -1124,7 +1124,7 @@ impl App {
             Modal::Help { mut scroll } => {
                 let end = self.hit.borrow().help_end;
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => return Next::Stay,
+                    KeyCode::Esc | KeyCode::Char('q' | '?') => return Next::Stay,
                     KeyCode::Down | KeyCode::Char('j') => scroll = (scroll + 1).min(end),
                     KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
                     KeyCode::Home | KeyCode::Char('g') => scroll = 0,
@@ -1137,7 +1137,7 @@ impl App {
                 Next::Stay
             }
             Modal::Confirm { act, .. } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') if plain(key) => Next::Run(act),
+                KeyCode::Char('y' | 'Y') if plain(key) => Next::Run(act),
                 // Anything else keeps it, the rule `ask::confirm` follows: one
                 // way to say yes, and everything else is not it.
                 _ => {
@@ -1176,7 +1176,7 @@ impl App {
                             match c {
                                 'j' => {
                                     pick.at =
-                                        (pick.at + 1).min(pick.options.len().saturating_sub(1))
+                                        (pick.at + 1).min(pick.options.len().saturating_sub(1));
                                 }
                                 'k' => pick.at = pick.at.saturating_sub(1),
                                 'g' => pick.at = 0,
@@ -2135,7 +2135,7 @@ impl App {
                     last = Some(Line::from(Span::styled(
                         format!("   {said}"),
                         self.look.dim(),
-                    )))
+                    )));
                 }
             }
         }
@@ -2217,7 +2217,7 @@ impl App {
             }
         };
         // Where a line is typed into, `?` and `q` are letters, not keys.
-        let typing = matches!(self.modal, Some(Modal::Input(_)) | Some(Modal::Form(_)));
+        let typing = matches!(self.modal, Some(Modal::Input(_) | Modal::Form(_)));
         let right = match typing {
             true => Line::default(),
             false => self.chips(&[("?", "help"), ("q", "quit")]),
@@ -2756,7 +2756,7 @@ pub fn words(line: &str) -> Result<Vec<String>, String> {
     while let Some(c) = chars.next() {
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
-            (Some('"'), '\\') | (None, '\\') => match chars.next() {
+            (Some('"') | None, '\\') => match chars.next() {
                 Some(next) => word.get_or_insert_default().push(next),
                 None => return Err("a `\\` with nothing after it".into()),
             },
@@ -2870,7 +2870,7 @@ fn masked_env(text: &[char]) -> String {
                 draw(&mut out, c, &mut value, false);
                 quote = None;
             }
-            (Some('"'), '\\') | (None, '\\') => {
+            (Some('"') | None, '\\') => {
                 draw(&mut out, c, &mut value, false);
                 if let Some(next) = chars.next() {
                     draw(&mut out, next, &mut value, true);

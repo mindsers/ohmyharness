@@ -1198,7 +1198,7 @@ mod tests {
         .unwrap();
         match super::attribution_of(&root, stale, super::Backfill::Record) {
             super::Attribution::Unknown(why) => {
-                assert!(why.contains("moved") || why.contains("api-"), "{why}")
+                assert!(why.contains("moved") || why.contains("api-"), "{why}");
             }
             other => panic!("a moved checkout is not this id's owner: {other:?}"),
         }
@@ -1308,7 +1308,7 @@ mod tests {
                 assert!(
                     why.contains("/mnt/api") && why.contains("host is down"),
                     "{why}"
-                )
+                );
             }
             other => panic!("could not tell is not gone: {other:?}"),
         }
