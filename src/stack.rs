@@ -447,6 +447,25 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
             "{at}: provide name `{}` contains `/`",
             p.name
         );
+        // The other half of the probe's `stack\tprovide` line: a tab or line
+        // break here forged one, and with it a `[provision]` key no provide
+        // has, written into the repo's committed settings.
+        anyhow::ensure!(
+            !p.name.chars().any(char::is_control),
+            "{at}: provide name {:?} holds a control character",
+            p.name
+        );
+        // One `RUN`: each line after the first was a Dockerfile instruction
+        // of its own.
+        anyhow::ensure!(
+            !p.install
+                .as_deref()
+                .is_some_and(|i| i.contains(['\n', '\r'])),
+            "{at}: provide `{}`'s install spans lines, and each line after the \
+             first would be a Dockerfile instruction of its own — write it on one \
+             line, joined with `&&`",
+            p.name
+        );
         // Two provides of one name are one `[provision]` key and two installs,
         // and they destroy the attribution the `needs`/`install` pairing exists
         // for: "the `linker` provide ran and `cc` still does not resolve".
@@ -529,6 +548,12 @@ fn ecosystem_name(name: &str, at: &str) -> Result<()> {
         !name.starts_with('.'),
         "{at}: ecosystem name `{name}` starts with `.`, so it is a path rather \
          than a name"
+    );
+    // Half a line the predicate probe prints, `stack\tprovide`, read back by
+    // splitting on the tab: a tab or line break here forged one.
+    anyhow::ensure!(
+        !name.chars().any(char::is_control),
+        "{at}: ecosystem name {name:?} holds a control character"
     );
     Ok(())
 }
@@ -1605,6 +1630,36 @@ because = "cargo is how a rust project is built and tested"
                 load_dir(d.path()).is_err(),
                 "accepted a stack name that cannot key a provide: {value}"
             );
+        }
+    }
+
+    /// A name is half a line the predicate probe prints, `stack\tprovide`, read
+    /// back by splitting on the tab: a tab or a line break inside one forged a
+    /// line, and with it a `[provision]` key no provide has, written into the
+    /// repo's committed settings. And an `install` is one `RUN`: each line
+    /// after its first was a Dockerfile instruction of its own.
+    #[test]
+    fn a_name_or_an_install_that_would_forge_a_line_is_refused() {
+        let provide = |name: &str, install: &str| {
+            format!(
+                "{MINIMAL}\n[[provide]]\nname    = \"{name}\"\nneeds   = [\"rustc\"]\n\
+                 because = \"x\"\ninstall = \"{install}\"\n"
+            )
+        };
+        for (what, body) in [
+            ("a tab in a provide name", provide("a\\tb", "true")),
+            ("a line break in a provide name", provide("a\\nb", "true")),
+            (
+                "a line break in an install",
+                provide("tool", "true\\nUSER root"),
+            ),
+            (
+                "a tab in a stack name",
+                MINIMAL.replacen("name   = \"rust\"", "name   = \"ru\\tst\"", 1),
+            ),
+        ] {
+            let d = dir_with(&[("rust.toml", &body)]);
+            assert!(load_dir(d.path()).is_err(), "accepted {what}");
         }
     }
 

@@ -368,6 +368,7 @@ omh enforces each of these, with an error naming the adapter:
 - a `name` that is anything but letters, digits, `-` and `_`
 - a `version` that `install` never interpolates, or a `{{version}}` with no `version` to fill it
 - an `install` that runs `sha256sum -c` while declaring no `checksums`, or a declared sum `install` never checks
+- an `install` that spans lines: it is one `RUN`, and each line after the first would be a Dockerfile instruction of its own
 - `token` and `token-probe` together
 - no capabilities at all — it would launch a harness that can see none of your catalogue
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`

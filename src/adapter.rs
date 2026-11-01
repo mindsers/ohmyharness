@@ -951,6 +951,15 @@ impl Adapter {
             "adapter {}: the install verifies a checksum but declares none",
             path.display()
         );
+        // One `RUN`: each line after the first was a Dockerfile instruction of
+        // its own, `USER root` and all.
+        anyhow::ensure!(
+            !adapter.install.contains(['\n', '\r']),
+            "adapter {}: `install` spans lines, and each line after the first would \
+             be a Dockerfile instruction of its own — write it on one line, joined \
+             with `&&`",
+            path.display()
+        );
         // And the other way: a sum declared and never checked vouches for
         // nothing. The map was read by nobody — three texts said `omh doctor`
         // read it — so the two could disagree with no one to notice.
@@ -1793,6 +1802,22 @@ mod tests {
         }
         // And the two arches carry different sums, so a match is not accidental.
         assert_ne!(omp.checksums["x86_64"], omp.checksums["aarch64"]);
+    }
+
+    /// An install is one `RUN`: each line after its first was a Dockerfile
+    /// instruction of its own, `USER root` and all.
+    #[test]
+    fn an_install_that_spans_lines_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "odd.toml",
+            "name = \"odd\"\nbin = \"odd\"\n\
+             install = \"\"\"true\nUSER root\nRUN id\"\"\"\n\
+             [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n",
+        );
+        let err = format!("{:#}", Adapter::find(d.path(), "odd").unwrap_err());
+        assert!(err.contains("spans lines"), "{err}");
     }
 
     /// A declared sum the install never checks is a claim about nothing: the
