@@ -17,6 +17,12 @@
 
 set -eu
 
+# Everything that acts is inside `main`, called on the file's last line. `curl
+# | sh` runs whatever has arrived so far, so a connection dropped halfway would
+# otherwise run the first half of this script; cut short, the function is never
+# closed, and sh refuses the whole file before running any of it. The body is
+# left unindented so that change touched no line of it.
+
 REPO="mindsers/ohmyharness"
 VERSION="${OMH_VERSION:-}"
 BIN_DIR="${OMH_BIN_DIR:-$HOME/.local/bin}"
@@ -46,6 +52,13 @@ EOF
   exit 0
 }
 
+# Every fetch: https only, and only https after a redirect — over plain http
+# anyone on the path chooses the tarball and the SHA256SUMS that vouches for it.
+# `file` is for OMH_BASE_URL pointed at a local mirror, and for this file's
+# tests; a redirect never reaches it.
+fetch() { curl --proto '=https,file' --proto-redir '=https' -fsSL "$@"; }
+
+main() {
 case "${1:-}" in
   -h|--help) usage ;;
   "") ;;
@@ -83,7 +96,7 @@ esac
 # limited per IP and fails in exactly the shared environments — CI, corporate
 # NAT — where the error is hardest to read.
 if [ -z "$VERSION" ]; then
-  latest="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+  latest="$(fetch -I -o /dev/null -w '%{url_effective}' \
     "https://github.com/$REPO/releases/latest" 2>/dev/null)" \
     || die "could not reach github to find the latest release"
   VERSION="${latest##*/}"
@@ -108,6 +121,13 @@ esac
 base="${OMH_BASE_URL:-https://github.com/$REPO/releases/download}/$VERSION"
 tarball="omh-$target.tar.gz"
 
+# Said before anything is fetched, rather than surfacing as a download that
+# happened to fail with curl's own reason.
+case "$base" in
+  https://*|file://*) ;;
+  *) die "$base is not an https:// URL — refusing to fetch a release over a connection anyone on the path can rewrite" ;;
+esac
+
 # Both are cleaned on any exit. The staged binary matters as much as the temp
 # directory: it lands in $BIN_DIR, so an interrupt between staging and the move
 # would otherwise leave an executable named .omh.incoming.NNN there forever.
@@ -124,9 +144,9 @@ tmp="$(mktemp -d)"
 
 say "omh $VERSION — $target"
 
-curl -fsSL "$base/$tarball" -o "$tmp/$tarball" \
+fetch "$base/$tarball" -o "$tmp/$tarball" \
   || die "no $tarball in $VERSION — that platform may not be published"
-curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" \
+fetch "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" \
   || die "release $VERSION publishes no SHA256SUMS; refusing to install unverified"
 
 # Match the exact file name, so a checksum for a different platform cannot
@@ -170,12 +190,13 @@ fi
 
 # The tag names a version; so does the binary. A release whose tarball holds
 # the previous build passes every check above, and the installer would announce
-# the version it meant to install rather than the one it did.
+# the version it meant to install rather than the one it did. Compared whole:
+# `omh --version` prints `omh X.Y.Z`, and a substring check took `0.14.1` for a
+# binary reporting `0.14.10`.
 want="${VERSION#v}"
-case "$probe" in
-  *"$want"*) ;;
-  *) die "$tarball reports '$probe', which does not match the tag $VERSION" ;;
-esac
+if [ "${probe##* }" != "$want" ]; then
+  die "$tarball reports '$probe', which does not match the tag $VERSION"
+fi
 
 mv -f "$staged" "$BIN_DIR/omh" || die "could not install into $BIN_DIR"
 staged=""
@@ -207,3 +228,6 @@ fi
 
 say ""
 say "next: cd into a repo and run \`omh init\`"
+}
+
+main "$@"
