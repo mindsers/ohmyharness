@@ -302,7 +302,8 @@ pub(crate) enum Cmd {
         ///
         /// A flag rather than a command because it is the same question at a
         /// different scope — `omh info` is the machine, `omh info --repo` is
-        /// the checkout. It was its own command until 0.7.0.
+        /// the checkout.
+        // It was its own command until 0.7.0.
         #[arg(long)]
         repo: bool,
     },
@@ -476,14 +477,14 @@ pub(crate) enum McpCmd {
         /// Which installed harness to read servers out of.
         harness: String,
         /// Read this file instead of where the adapter says the harness keeps
-        /// its servers. The same flag `omh import` takes; `--file` was its
-        /// name here until 0.10, an alias through it, and is refused by name
-        /// from 0.11 — see `RETIRED`.
+        /// its servers. The same flag `omh import` takes.
+        // `--file` was its name here until 0.10, an alias through it, and is
+        // refused by name from 0.11 — see `RETIRED`.
         #[arg(long = "from")]
         file: Option<std::path::PathBuf>,
         /// Overwrite a catalogue entry of the same name that differs. Without
-        /// it yours is kept and the difference reported. `--force` was its
-        /// name until 0.10, and is refused by name from 0.11.
+        /// it yours is kept and the difference reported.
+        // `--force` was its name until 0.10, and is refused by name from 0.11.
         #[arg(long = "replace")]
         force: bool,
     },
@@ -614,8 +615,8 @@ pub(crate) enum SessionsCmd {
         edit: bool,
         /// Commit even with conflict markers still in the files. Named for
         /// what it does rather than `--force`, which on `rm` means *I have
-        /// read the warning* — a different thing to be sure of. `--force`
-        /// was an alias through 0.10, and is refused by name from 0.11.
+        /// read the warning* — a different thing to be sure of.
+        // `--force` was an alias through 0.10, and is refused by name from 0.11.
         #[arg(long = "allow-conflicts")]
         force: bool,
         /// Land the work without running this repo's turn-end checks first.
@@ -654,8 +655,9 @@ pub(crate) enum SessionsCmd {
         /// script, a CI job, a closed pipe. On a terminal omh asks instead of
         /// refusing. Named `--yes` for that reason; the old `--force` read as
         /// "force the removal" and did no such thing (`git worktree remove
-        /// --force` is passed either way). `--force` was a hidden alias
-        /// through 0.10, and is refused by name from 0.11.
+        /// --force` is passed either way).
+        // `--force` was a hidden alias through 0.10, and is refused by name
+        // from 0.11.
         #[arg(long = "yes", short = 'y')]
         yes: bool,
     },

@@ -8774,3 +8774,51 @@ fn import_help_names_what_import_takes() {
         }
     }
 }
+
+/// `--help` says what a command does now. Which release renamed a flag, or that
+/// one "was its own command until 0.7.0", is history: it belongs in a `//`
+/// comment beside the code, where the doc comment would otherwise put it in
+/// front of every user who asks for help — along with the name of an internal
+/// table they cannot see.
+#[test]
+fn help_text_carries_no_release_history() {
+    use clap::CommandFactory;
+    fn texts(cmd: &clap::Command, path: &str, out: &mut Vec<(String, String)>) {
+        for t in [cmd.get_about(), cmd.get_long_about()]
+            .into_iter()
+            .flatten()
+        {
+            out.push((path.to_string(), t.to_string()));
+        }
+        for arg in cmd.get_arguments() {
+            for t in [arg.get_help(), arg.get_long_help()].into_iter().flatten() {
+                out.push((format!("{path} {}", arg.get_id()), t.to_string()));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            texts(sub, &format!("{path} {}", sub.get_name()), out);
+        }
+    }
+    let mut all = Vec::new();
+    texts(&Cli::command(), "omh", &mut all);
+    let history = |t: &str| {
+        t.contains("RETIRED")
+            || t.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .any(|w| {
+                    w.starts_with("0.")
+                        && w.len() > 2
+                        && w[2..].starts_with(|c: char| c.is_ascii_digit())
+                })
+    };
+    let found: Vec<String> = all
+        .iter()
+        .filter(|(_, t)| history(t))
+        .map(|(at, t)| format!("{at}: {t}"))
+        .collect();
+    assert!(all.len() > 100, "read only {} help texts", all.len());
+    assert!(
+        found.is_empty(),
+        "release history in --help:\n{}",
+        found.join("\n")
+    );
+}
