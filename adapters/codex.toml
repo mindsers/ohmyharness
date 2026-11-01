@@ -32,6 +32,20 @@ token = ["$HOME/.codex/auth.json"]
 # on this machine can be copied instead, with `omh account login codex --import`.
 login = "choose `Sign in with Device Code` in Codex, then exit — or run `omh account login codex --import` to copy this machine's login"
 
+# What Codex reads from the account as the user's own, at every start — shared
+# by every repo using the account, so a session could leave instructions there
+# for all of them (risk 1b): `AGENTS.md`, the user-scope instructions,
+# `AGENTS.override.md`, read instead of it when there, and `skills/`. Measured
+# in `tests/e2e`: a phrase planted in the override and in a skill reached the
+# model, and with only the override masked Codex fell back to `AGENTS.md`; one
+# planted in `prompts/` did not. `rules/` decides which commands need approval
+# and reaches no model, so nothing here measures it, and it is not masked.
+mask = [
+  "$HOME/.codex/AGENTS.md",
+  "$HOME/.codex/AGENTS.override.md",
+  "$HOME/.codex/skills/",
+]
+
 # How this harness names the things an agent does, as its hooks see them —
 # measured in the 0.154.0 image with a stub model making real calls. The shell
 # tool is `exec_command` to the model and `Bash` to a hook; an edit is
@@ -214,16 +228,7 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 [policy]
 path   = "/etc/codex/requirements.toml"
 format = "codex-requirements"
-# `~/.codex/AGENTS.md` is Codex's user-scope instructions, and
-# `AGENTS.override.md` beside it is read instead when it is there — both in the
-# account every repo using it shares, so a session could leave instructions
-# there for all of them (risk 1b). Measured in `tests/e2e`: a phrase planted in
-# the override reached the model.
-mask   = [
-  "$HOME/.codex/cloud-config-bundle-cache.json",
-  "$HOME/.codex/AGENTS.md",
-  "$HOME/.codex/AGENTS.override.md",
-]
+mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
 
 # The account's model provider — `model_provider` and `[model_providers.*]` —
 # kept in `provider.toml` at the account root, which no mount reaches, and

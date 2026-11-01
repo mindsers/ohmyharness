@@ -93,15 +93,19 @@ pub struct Adapter {
     /// not `env` (risk 1b). Absent where a harness has none omh fills yet.
     #[serde(default)]
     pub policy: Option<Policy>,
-    /// Directories inside the account a session can write and the harness
-    /// loads code from on its next start — omp's hook, tool and extension
-    /// modules. Each is hidden behind an empty read-only directory holding
-    /// only what omh mounts into it, so what one session leaves there runs in
-    /// no later one, on any repo using the account (risk 1b). Each ends in `/`
-    /// and sits strictly inside one of `creds`' directories; `$HOME` is
+    /// Paths inside the account a session can write and the harness reads at
+    /// its next start as its own — user-scope instructions, rules, skills,
+    /// code modules — so what one session leaves there would reach every
+    /// later one, on any repo using the account (risk 1b). A file is hidden
+    /// behind an empty read-only file; a directory, which ends in `/`, behind
+    /// an empty read-only directory holding only what omh mounts into it.
+    /// Each sits strictly inside one of `creds`' directories; `$HOME` is
     /// expanded per image.
-    #[serde(default, rename = "mask-dirs")]
-    pub mask_dirs: Vec<String>,
+    ///
+    /// Not `[policy] mask`, which hides what would undo the harness's policy
+    /// and is said about in the policy's own words (`notice::policy`).
+    #[serde(default)]
+    pub mask: Vec<String>,
     /// The keys of the harness's own config that are the user's preferences,
     /// kept per account and copied into each session (`prefs`) — so nothing
     /// else a session writes there reaches the next one.
@@ -1064,7 +1068,7 @@ impl Adapter {
         adapter.check_login(&path)?;
         adapter.check_hook_maps(&path)?;
         adapter.check_policy(&path)?;
-        adapter.check_mask_dirs(&path)?;
+        adapter.check_mask(&path)?;
         adapter.check_preferences(&path)?;
         adapter.check_provider(&path)?;
         adapter.check_flags(&path)?;
@@ -1144,10 +1148,11 @@ impl Adapter {
         Ok(())
     }
 
-    /// `mask-dirs`: each a directory (`/`-ended) strictly inside one of `creds`'
-    /// directories, with no `..` — `auth::prepare` joins it into the account
-    /// directory on the host — and none holding another.
-    fn check_mask_dirs(&self, path: &Path) -> Result<()> {
+    /// `mask`: each strictly inside one of `creds`' directories, with no `..`
+    /// — `auth::prepare` joins it into the account directory on the host —
+    /// never a capability's own path or a `[policy]` mask's, and none inside a
+    /// masked directory.
+    fn check_mask(&self, path: &Path) -> Result<()> {
         let shown = path.display();
         let dirs: Vec<&str> = self
             .creds
@@ -1155,29 +1160,38 @@ impl Adapter {
             .filter(|c| c.ends_with('/'))
             .map(String::as_str)
             .collect();
-        for mask in &self.mask_dirs {
-            anyhow::ensure!(
-                mask.ends_with('/'),
-                "adapter {shown}: `mask-dirs` entry {mask:?} is a directory and ends in `/`"
-            );
+        let policy: &[String] = self.policy.as_ref().map_or(&[], |p| &p.mask);
+        for mask in &self.mask {
             anyhow::ensure!(
                 dirs.iter()
                     .any(|d| mask.strip_prefix(d).is_some_and(|rest| !rest.is_empty())),
-                "adapter {shown}: `mask-dirs` entry {mask:?} must be strictly inside one of \
+                "adapter {shown}: `mask` entry {mask:?} must be strictly inside one of \
                  this adapter's credential directories ({})",
                 dirs.join(", ")
             );
             anyhow::ensure!(
                 !mask.split('/').any(|part| part == ".."),
-                "adapter {shown}: `mask-dirs` entry {mask:?} has a `..` — it is joined into \
+                "adapter {shown}: `mask` entry {mask:?} has a `..` — it is joined into \
                  the account directory on the host"
             );
             anyhow::ensure!(
+                !self.mask.iter().any(|other| other != mask
+                    && other.ends_with('/')
+                    && mask.starts_with(other.as_str())),
+                "adapter {shown}: `mask` entry {mask:?} is inside a masked directory"
+            );
+            anyhow::ensure!(
+                !policy.contains(mask),
+                "adapter {shown}: `mask` entry {mask:?} is a `[policy]` mask too"
+            );
+            let bare = mask.trim_end_matches('/');
+            anyhow::ensure!(
                 !self
-                    .mask_dirs
-                    .iter()
-                    .any(|other| other != mask && mask.starts_with(other.as_str())),
-                "adapter {shown}: `mask-dirs` entry {mask:?} is inside another entry"
+                    .capabilities
+                    .values()
+                    .any(|b| b.path == bare || b.also.iter().any(|a| a == bare)),
+                "adapter {shown}: `mask` entry {mask:?} is a capability's path too — two \
+                 mounts at one path"
             );
         }
         Ok(())
@@ -1362,6 +1376,14 @@ impl Adapter {
             anyhow::ensure!(
                 !masked.contains(file),
                 "adapter {shown}: preferences file {file:?} is masked by `[policy]` — the \
+                 session's own copy goes there"
+            );
+            anyhow::ensure!(
+                !self
+                    .mask
+                    .iter()
+                    .any(|m| m == file || (m.ends_with('/') && file.starts_with(m.as_str()))),
+                "adapter {shown}: preferences file {file:?} is masked by `mask` — the \
                  session's own copy goes there"
             );
             let name = file.rsplit('/').next().unwrap_or_default();
@@ -2476,26 +2498,27 @@ render = "concat"
         }
     }
 
-    /// A masked directory hides one the account keeps: strictly inside a
-    /// `creds` directory, a directory, never walking with `..` — it is joined
-    /// into the account on the host — and never inside another.
+    /// An account mask hides what the account keeps: strictly inside a
+    /// `creds` directory, never walking with `..` — it is joined into the
+    /// account on the host — never inside a masked directory, and never a path
+    /// something else already mounts.
     #[test]
-    fn a_masked_directory_omh_could_not_mount_safely_is_refused() {
+    fn an_account_mask_omh_could_not_mount_safely_is_refused() {
         // Each rule refuses in words no other rule uses.
-        for (dirs, names) in [
+        for (mask, extra, names) in [
+            ("[\"/tmp/x/\"]", "", "strictly inside one of this adapter's credential directories"),
+            ("[\"$HOME/.p/\"]", "", "strictly inside one of this adapter's credential directories"),
+            ("[\"$HOME/.p/../x/\"]", "", "has a `..`"),
+            ("[\"$HOME/.p/a/\", \"$HOME/.p/a/b.md\"]", "", "is inside a masked directory"),
             (
-                "[\"/tmp/x/\"]",
-                "strictly inside one of this adapter's credential directories",
+                "[\"$HOME/.p/x.json\"]",
+                "[policy]\nformat = \"claude-managed\"\npath = \"/etc/x.json\"\nmask = [\"$HOME/.p/x.json\"]\n",
+                "is a `[policy]` mask too",
             ),
             (
-                "[\"$HOME/.p/\"]",
-                "strictly inside one of this adapter's credential directories",
-            ),
-            ("[\"$HOME/.p/hooks\"]", "is a directory and ends in `/`"),
-            ("[\"$HOME/.p/../x/\"]", "has a `..`"),
-            (
-                "[\"$HOME/.p/a/\", \"$HOME/.p/a/b/\"]",
-                "is inside another entry",
+                "[\"$HOME/.p/skills/\"]",
+                "[capabilities.skills]\npath = \"$HOME/.p/skills\"\nrender = \"dir\"\n",
+                "is a capability's path too",
             ),
         ] {
             let d = tempfile::tempdir().unwrap();
@@ -2504,13 +2527,23 @@ render = "concat"
                 "p.toml",
                 &format!(
                     "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\ncreds = [\"$HOME/.p/\"]\n\
-                     mask-dirs = {dirs}\n\n\
-                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n"
+                     mask = {mask}\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n{extra}"
                 ),
             );
             let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
-            assert!(err.contains(names), "{dirs}: {err}");
+            assert!(err.contains(names), "{mask}: {err}");
         }
+        // A sibling name is not inside: `a/` holds `a/b.md`, not `ab.md`.
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "p.toml",
+            "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\ncreds = [\"$HOME/.p/\"]\n\
+             mask = [\"$HOME/.p/a/\", \"$HOME/.p/ab.md\"]\n\n\
+             [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n",
+        );
+        Adapter::find(d.path(), "p").unwrap();
     }
 
     /// A provider render hides a file the account keeps, so it lands strictly

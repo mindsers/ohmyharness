@@ -42,14 +42,19 @@ creds = ["$HOME/.omp/agent/"]
 # question is asked of the harness instead — see `[token-probe]` below.
 login = "run `/login` inside omp, then exit"
 
-# omp imports every module it finds in these, under `~/.omp/agent` — the
-# account, which every repo using it shares — so a module one session left
-# there ran in every later one (risk 1b). Read in omp's binary (18.10.4: hooks
-# from `hooks/pre/` and `hooks/post/`, tools from `tools/`, and `extensions/`);
-# measured in `tests/e2e`, where a module planted in each left its marker. Each
-# is hidden behind an empty read-only directory, holding only omh's own
-# `hooks/pre/omh.ts`.
-mask-dirs = [
+# What omp reads from `~/.omp/agent` — the account, which every repo using it
+# shares — as the user's own at every start, so what one session left there
+# reached every later one (risk 1b). Read in omp's binary (18.10.4): it imports
+# every module in `hooks/pre/`, `hooks/post/`, `tools/` and `extensions/`, and
+# reads `AGENTS.md`, `RULES.md` and `SYSTEM.md` into the prompt. Measured in
+# `tests/e2e`: a module planted in each directory left its marker, and a
+# phrase planted in each file reached the model; one planted in `skills/`,
+# `agents/`, `commands/` and `prompts/` did not. `hooks/pre/` holds only omh's
+# own `omh.ts`.
+mask = [
+  "$HOME/.omp/agent/AGENTS.md",
+  "$HOME/.omp/agent/RULES.md",
+  "$HOME/.omp/agent/SYSTEM.md",
   "$HOME/.omp/agent/hooks/pre/",
   "$HOME/.omp/agent/hooks/post/",
   "$HOME/.omp/agent/tools/",

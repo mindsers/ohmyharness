@@ -773,22 +773,31 @@ fn planted_server(s: &Session) {
 
 /// What one session could leave in the account for every later one, on every
 /// repo that uses it, reaches no session (10-18 §5.1). The driver's account
-/// holds each as a session would have left it: Claude's personal
-/// `~/.claude/CLAUDE.md`, Codex's `~/.codex/AGENTS.md` and its
-/// `AGENTS.override.md`, and omp modules under `hooks/pre/`, `hooks/post/`,
-/// `tools/` and `extensions/` that leave a marker when loaded.
+/// holds each, as a session would have left it:
+/// - instructions, rules and skills, each carrying an `E2E-PLANTED-<what>`
+///   phrase: Claude's `CLAUDE.md`, `rules/`, and the places it does not read
+///   them from (`skills/`, `agents/`, `commands/`, `output-styles/`); Codex's
+///   `AGENTS.md`, `AGENTS.override.md`, `skills/` and `prompts/`; omp's
+///   `AGENTS.md`, `RULES.md`, `SYSTEM.md` and its `skills/`, `agents/`,
+///   `commands/` and `prompts/`;
+/// - omp modules under `hooks/pre/`, `hooks/post/`, `tools/` and
+///   `extensions/`, which leave a marker when loaded.
+///
+/// No planted phrase, of any name, reaches the model.
 fn account_plants(s: &Session) {
     // A tool call, so a hook keyed to a tool has its moment.
     let turn = s.turn("Run it.", &[(s.harness.shell)("true")]);
     ran(&turn);
     for ask in turn.asks() {
         let seen = Turn::seen(ask);
-        for planted in PLANTED_INSTRUCTIONS {
-            assert!(
-                !seen.contains(planted),
-                "{planted}, left in the account, reached the model"
-            );
-        }
+        let reached: std::collections::BTreeSet<&str> = seen
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|w| w.starts_with("E2E-PLANTED-"))
+            .collect();
+        assert!(
+            reached.is_empty(),
+            "left in the account, these reached the model: {reached:?}"
+        );
     }
     let marks = ok(
         &s.sh("ls /tmp/e2e-planted-module-* 2>/dev/null; true"),
@@ -799,13 +808,6 @@ fn account_plants(s: &Session) {
         "a module left in the account was loaded: {marks}"
     );
 }
-
-/// The phrases `driver`'s accounts plant as instructions.
-pub const PLANTED_INSTRUCTIONS: [&str; 3] = [
-    "E2E-PLANTED-MEMORY",
-    "E2E-PLANTED-AGENTS",
-    "E2E-PLANTED-OVERRIDE",
-];
 
 /// The account's shared `config.toml` held the model beside a planted
 /// `developer_instructions` (`driver::codex_account`), and the launch

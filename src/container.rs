@@ -897,12 +897,12 @@ pub fn plan(
         policy_notes = crate::notice::policy(policy, work, opts.account_dir.as_deref());
     }
 
-    // The directories in the account the harness loads code from, each hidden
-    // behind an empty read-only one. After the credentials, because each lands
-    // inside the account's directory, and after everything else omh mounts
-    // inside one, which it holds a placeholder for.
+    // What the harness reads from the account as its own, each hidden behind
+    // an empty read-only file or directory. After the credentials, because
+    // each lands inside the account's directory, and after everything else
+    // omh mounts inside a masked directory, which it holds a placeholder for.
     if opts.account_dir.is_some() {
-        stage_masked_dirs(adapter, &stage, staging, &mut mounts)?;
+        stage_masks(adapter, &stage, staging, &mut mounts)?;
     }
 
     // The account's model providers, for a harness that reads them from a
@@ -1065,23 +1065,51 @@ fn stage_policy(
     Ok(())
 }
 
-/// Stage an empty directory for each of the adapter's `mask-dirs` and mount it
-/// read-only over the account's, so a module one session left there loads in
-/// no later one.
+/// Mount each of the adapter's account masks read-only over the account's: a
+/// file behind an empty one, a directory behind an empty one, so nothing one
+/// session left there reaches a later one.
 ///
-/// Whatever omh already mounts inside one — omp's own hook module, in
-/// `hooks/pre/` — gets an empty placeholder in the staged directory: a
-/// runtime mounts a parent before its children, and cannot make a
-/// mountpoint inside a read-only mount. Created and never removed, so a
-/// running session's mount is never pulled from under it.
-fn stage_masked_dirs(
+/// Whatever omh already mounts inside a masked directory — omp's own hook
+/// module, in `hooks/pre/` — gets an empty placeholder in the staged one: a
+/// runtime mounts a parent before its children, and cannot make a mountpoint
+/// inside a read-only mount. Created and never removed, so a running
+/// session's mount is never pulled from under it.
+fn stage_masks(
     adapter: &Adapter,
     stage: &Path,
     staging: Staging,
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
-    for (n, dir) in adapter.mask_dirs.iter().enumerate() {
-        let guest = expand(dir.trim_end_matches('/'), GUEST_HOME);
+    // Empty and without a write bit, for the reason `stage_policy` gives.
+    let empty = stage.join("masked-account");
+    if staging == Staging::Apply && adapter.mask.iter().any(|m| !m.ends_with('/')) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(stage)?;
+        match std::fs::metadata(&empty) {
+            Ok(m) if m.is_file() && m.len() == 0 => {}
+            Ok(_) => {
+                std::fs::remove_file(&empty)
+                    .with_context(|| format!("replacing {}", empty.display()))?;
+                std::fs::write(&empty, "")
+                    .with_context(|| format!("staging {}", empty.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::write(&empty, "")
+                .with_context(|| format!("staging {}", empty.display()))?,
+            Err(e) => return Err(e).with_context(|| format!("staging {}", empty.display())),
+        }
+        std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o444))?;
+    }
+    for (n, mask) in adapter.mask.iter().enumerate() {
+        let guest = expand(mask.trim_end_matches('/'), GUEST_HOME);
+        if !mask.ends_with('/') {
+            mounts.push(Mount {
+                host: empty.clone(),
+                guest,
+                read_only: true,
+                file: true,
+            });
+            continue;
+        }
         let host = stage.join("masked-dirs").join(n.to_string());
         if staging == Staging::Apply {
             std::fs::create_dir_all(&host)
@@ -4053,58 +4081,66 @@ mod tests {
         try_plan_account(&fx, "omp", Some(account)).unwrap();
     }
 
-    /// A directory the harness loads code from is hidden behind an empty one
-    /// the session cannot write: mounted after the account it sits in,
-    /// read-only, holding a placeholder for exactly what omh mounts inside it
-    /// — omp's own hook module — and nothing else.
+    /// What the harness reads from the account as its own is hidden behind
+    /// an empty read-only file or directory, mounted after the account it
+    /// sits in. A masked directory holds a placeholder for exactly what omh
+    /// mounts inside it — omp's own hook module — and nothing else.
     #[test]
-    fn a_masked_directory_is_empty_but_for_what_omh_mounts_in_it() {
+    fn an_account_mask_is_empty_but_for_what_omh_mounts_in_it() {
         let fx = fixture();
-        let account = fx.paths.root.join("creds/omp/default");
-        let adapter = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
-        assert!(
-            !adapter.mask_dirs.is_empty(),
-            "omp masks its module directories"
-        );
-
-        let p = plan_account(&fx, "omp", Some(account));
         let mut held_one = false;
-        for dir in &adapter.mask_dirs {
-            let guest = expand(dir.trim_end_matches('/'), GUEST_HOME);
-            let at = p
-                .mounts
-                .iter()
-                .position(|m| m.guest == guest)
-                .unwrap_or_else(|| panic!("{} is not masked", guest.display()));
-            let m = &p.mounts[at];
-            assert!(m.read_only && !m.file, "{m:?}");
-            let holder = p
-                .mounts
-                .iter()
-                .position(|c| !c.file && guest.starts_with(&c.guest) && c.guest != guest)
-                .expect("the account directory holding it is mounted");
-            assert!(
-                holder < at,
-                "the mask must come after {:?}",
-                p.mounts[holder]
-            );
+        for name in ["claude", "codex", "omp"] {
+            let account = fx.paths.root.join(format!("creds/{name}/default"));
+            let adapter = Adapter::find(Path::new(ADAPTERS), name).unwrap();
+            assert!(!adapter.mask.is_empty(), "{name} masks nothing");
 
-            let mut inside: Vec<PathBuf> = p
-                .mounts
-                .iter()
-                .filter(|o| o.guest != guest)
-                .filter_map(|o| o.guest.strip_prefix(&guest).ok().map(Path::to_path_buf))
-                .collect();
-            inside.sort();
-            let mut staged: Vec<PathBuf> = std::fs::read_dir(&m.host)
-                .unwrap()
-                .map(|e| PathBuf::from(e.unwrap().file_name()))
-                .collect();
-            staged.sort();
-            assert_eq!(staged, inside, "{}", guest.display());
-            for rel in &inside {
-                assert_eq!(std::fs::read(m.host.join(rel)).unwrap(), b"", "{rel:?}");
-                held_one = true;
+            let p = plan_account(&fx, name, Some(account));
+            for mask in &adapter.mask {
+                let guest = expand(mask.trim_end_matches('/'), GUEST_HOME);
+                let at = p
+                    .mounts
+                    .iter()
+                    .position(|m| m.guest == guest)
+                    .unwrap_or_else(|| panic!("{} is not masked", guest.display()));
+                let m = &p.mounts[at];
+                assert!(m.read_only, "{m:?}");
+                let holder = p
+                    .mounts
+                    .iter()
+                    .position(|c| !c.file && guest.starts_with(&c.guest) && c.guest != guest)
+                    .expect("the account directory holding it is mounted");
+                assert!(
+                    holder < at,
+                    "the mask must come after {:?}",
+                    p.mounts[holder]
+                );
+
+                if !mask.ends_with('/') {
+                    assert!(m.file, "{m:?}");
+                    assert_eq!(std::fs::read(&m.host).unwrap(), b"", "{m:?}");
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(&m.host).unwrap().permissions().mode();
+                    assert_eq!(mode & 0o222, 0, "{m:?} is {mode:o}");
+                    continue;
+                }
+                assert!(!m.file, "{m:?}");
+                let mut inside: Vec<PathBuf> = p
+                    .mounts
+                    .iter()
+                    .filter(|o| o.guest != guest)
+                    .filter_map(|o| o.guest.strip_prefix(&guest).ok().map(Path::to_path_buf))
+                    .collect();
+                inside.sort();
+                let mut staged: Vec<PathBuf> = std::fs::read_dir(&m.host)
+                    .unwrap()
+                    .map(|e| PathBuf::from(e.unwrap().file_name()))
+                    .collect();
+                staged.sort();
+                assert_eq!(staged, inside, "{}", guest.display());
+                for rel in &inside {
+                    assert_eq!(std::fs::read(m.host.join(rel)).unwrap(), b"", "{rel:?}");
+                    held_one = true;
+                }
             }
         }
         assert!(held_one, "omp's own hook module sits in a masked directory");
