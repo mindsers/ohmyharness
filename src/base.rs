@@ -598,6 +598,8 @@ pub fn ui_run_args(image: &str, container: &str, cache_volume: &str, port: u16) 
     vec![
         "run".into(),
         "-d".into(),
+        // A tag reaped from under this run fails; it is never fetched.
+        "--pull=never".into(),
         "--name".into(),
         container.into(),
         "-p".into(),
@@ -1159,6 +1161,9 @@ pub fn index_args(
     vec![
         "run".into(),
         "--rm".into(),
+        // A tag reaped from under this run fails; fetched, a squatted `omh/*`
+        // would run with the checkout mounted.
+        "--pull=never".into(),
         "-v".into(),
         // Read-only: indexing reads code, and an indexer that can write into
         // the checkout is a sandbox hole for no benefit.

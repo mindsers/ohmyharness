@@ -9181,3 +9181,28 @@ fn a_gitignore_that_is_a_link_is_never_written_through() {
     assert!(got.is_err(), "a .omh that is a link was written through");
     assert!(!elsewhere.join(".gitignore").exists());
 }
+
+/// No `docker run` omh builds can fetch the image it names. The launch and
+/// the probe carried `--pull=never`; the graph indexer, the stack predicates
+/// and the graph UI did not — and the first two mount the checkout, untracked
+/// secrets and all. A tag reaped from under them, with a squatted `omh/*` on a
+/// registry, would be pulled and run against it.
+#[test]
+fn no_docker_run_omh_builds_can_pull_its_image() {
+    let image = "omh/base:tag";
+    let repo = std::path::Path::new("/r");
+    for args in [
+        crate::base::index_args(image, "omh-cache", repo, "r"),
+        crate::stack::predicate_args(image, repo, "true"),
+        crate::base::ui_run_args(image, "omh-graph-r", "omh-cache", 50000),
+    ] {
+        let tag_at = args
+            .iter()
+            .position(|a| a == image)
+            .unwrap_or_else(|| panic!("no image in {args:?}"));
+        assert!(
+            args[1..tag_at].iter().any(|a| a == "--pull=never"),
+            "{args:?}"
+        );
+    }
+}

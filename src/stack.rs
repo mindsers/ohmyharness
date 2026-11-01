@@ -383,6 +383,9 @@ pub fn predicate_args(tag: &str, repo: &Path, script: &str) -> Vec<String> {
     vec![
         "run".into(),
         "--rm".into(),
+        // As `base::index_args`: the checkout is mounted, so a missing tag
+        // fails rather than fetching one.
+        "--pull=never".into(),
         "-v".into(),
         format!("{}:{workdir}:ro", repo.display()),
         "-w".into(),
