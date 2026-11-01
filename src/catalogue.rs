@@ -277,10 +277,7 @@ mod tests {
 
     fn fixture(layers: &[(&str, &str, &str)]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         for (layer, name, body) in layers {
             let base = match *layer {
                 "catalogue" => paths.root.clone(),

@@ -3388,10 +3388,7 @@ mod tests {
 
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -3601,10 +3598,7 @@ mod tests {
     #[test]
     fn a_source_omh_could_not_read_is_an_error_not_a_check_that_demands_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -3650,10 +3644,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -3700,10 +3691,7 @@ mod tests {
     #[test]
     fn a_hooks_layer_omh_could_not_render_is_an_error_too() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -4812,10 +4800,7 @@ mod tests {
     /// from the one `settings::resolve` actually reads in production.
     fn audit_fixture() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         for kind in ["base", "adapters", "hooks", "stacks"] {
             let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(kind);
             let dst = paths.root.join(kind);
@@ -4845,10 +4830,7 @@ mod tests {
     #[test]
     fn this_repos_shipped_catalogue_audits_clean() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         std::fs::create_dir_all(paths.repo.join(".git")).unwrap();
         let shipped = Path::new(env!("CARGO_MANIFEST_DIR"));
         for kind in ["base", "adapters", "hooks", "stacks"] {

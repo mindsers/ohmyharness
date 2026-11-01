@@ -2864,10 +2864,7 @@ mod tests {
     #[test]
     fn a_session_omh_could_not_mark_in_use_is_said() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         std::fs::create_dir_all(paths.runs()).unwrap();
         // A file where the session's run directory belongs.
         std::fs::write(paths.runs().join("s01"), "").unwrap();
@@ -2955,10 +2952,7 @@ mod tests {
 
     fn fixture_paths() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         std::fs::create_dir_all(&paths.repo).unwrap();
         (dir, paths)
     }

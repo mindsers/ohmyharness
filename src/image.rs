@@ -3622,10 +3622,7 @@ mod tests {
     /// A repo whose settings say what this fixture wants them to say.
     fn ca_fixture(setting: Option<&str>) -> (tempfile::TempDir, crate::paths::Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::paths::Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = crate::paths::Paths::at(dir.path());
         std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
         if let Some(at) = setting {
             std::fs::write(

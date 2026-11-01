@@ -978,10 +978,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::paths::Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = crate::paths::Paths::at(dir.path());
         let fetch = |_: &Urls, _: &Path| bail!("could not resolve github.com");
         let err = ensure(
             "docker",
@@ -1012,10 +1009,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::paths::Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = crate::paths::Paths::at(dir.path());
         let arch = target_arch(std::env::consts::ARCH).unwrap();
         let fetch = move |urls: &Urls, dest: &Path| {
             std::fs::write(dest.join(&urls.name), b"not the real binary")?;
@@ -1053,10 +1047,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::paths::Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = crate::paths::Paths::at(dir.path());
         let arch = target_arch(std::env::consts::ARCH).unwrap();
         // A stale unversioned cache from an older omh, which must be cleared.
         let stale = paths.root.join("bin").join(format!("omh-linux-{arch}"));

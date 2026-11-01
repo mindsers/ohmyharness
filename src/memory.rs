@@ -1488,10 +1488,7 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         (dir, paths)
     }
 
