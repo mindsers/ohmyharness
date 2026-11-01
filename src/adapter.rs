@@ -915,6 +915,44 @@ pub enum Render {
     CodexHooks,
 }
 
+/// What a format's document does beyond its capability, asked of the format:
+/// each answer is a `match` naming every format, so a new one is a decision
+/// here and never a silent `false`.
+impl Render {
+    /// Whether the harness reads more than hooks from the document, so it is
+    /// rendered with no hook in it: Claude Code's settings carry the approval
+    /// without which omh's MCP document is listed and never loaded, and Codex's
+    /// System layer the trust without which `/work` is prompted about.
+    pub fn carries_trust(self) -> bool {
+        match self {
+            Render::ClaudeSettings | Render::CodexHooks => true,
+            Render::Dir
+            | Render::Concat
+            | Render::McpJson
+            | Render::CodexToml
+            | Render::OpencodeJson
+            | Render::OpencodePlugin
+            | Render::OmpPlugin => false,
+        }
+    }
+
+    /// Whether the document can carry the account's model provider, and with
+    /// it the provider's token: Codex's System layer alone.
+    pub fn carries_provider(self) -> bool {
+        match self {
+            Render::CodexHooks => true,
+            Render::Dir
+            | Render::Concat
+            | Render::McpJson
+            | Render::CodexToml
+            | Render::OpencodeJson
+            | Render::ClaudeSettings
+            | Render::OpencodePlugin
+            | Render::OmpPlugin => false,
+        }
+    }
+}
+
 /// A harness or editor name, checked to be a name rather than a path.
 ///
 /// `Adapter::find` and `Editor::find` resolve a word by joining it into
