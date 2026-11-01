@@ -18618,6 +18618,11 @@ enum Expect {
     /// because some of what a refusal prints is the runtime's own words and
     /// those differ by platform.
     Refuses(&'static [&'static str]),
+    /// clap's own refusal: its usage text, exit 2, naming each of these. For
+    /// the rows where that is the contract — `omh` alone, a group with no
+    /// default verb — and only there: `Refuses` holds a refusal to omh's own
+    /// voice.
+    Usage(&'static [&'static str]),
 }
 
 /// One real invocation.
@@ -18651,7 +18656,7 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &[],
         needs: Needs::Repo,
-        expect: Expect::Refuses(&["Usage: omh"]),
+        expect: Expect::Usage(&["Commands:"]),
         runtime: false,
     },
     Exercise {
@@ -18798,7 +18803,7 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &["settings", "mcp"],
         needs: Needs::Repo,
-        expect: Expect::Refuses(&["MCP servers", "Commands:", "import"]),
+        expect: Expect::Usage(&["MCP servers", "Commands:", "import"]),
         runtime: false,
     },
     Exercise {
@@ -19305,10 +19310,33 @@ fn exercise(sb: &Sandbox, e: &Exercise) {
             "`omh {}` failed:\n{said}",
             e.argv.join(" ")
         ),
+        Expect::Usage(words) => {
+            assert!(
+                out.status.code() == Some(2) && said.contains("Usage: omh"),
+                "`omh {}` was supposed to be clap's usage, exit 2:\n{said}",
+                e.argv.join(" ")
+            );
+            for word in words {
+                assert!(
+                    said.contains(word),
+                    "`omh {}` printed its usage without `{word}`:\n{said}",
+                    e.argv.join(" ")
+                );
+            }
+        }
         Expect::Refuses(words) => {
             assert!(
                 !out.status.success(),
                 "`omh {}` was supposed to refuse:\n{said}",
+                e.argv.join(" ")
+            );
+            // omh's refusal, not clap's. A line clap could not parse also
+            // exits non-zero, and its usage text names the flags and
+            // commands a needle is likely to — so a run that never reached
+            // omh could pass for one omh refused.
+            assert!(
+                !said.contains("\nUsage: ") && !said.starts_with("error: "),
+                "`omh {}` was refused by the argument parser, not by omh:\n{said}",
                 e.argv.join(" ")
             );
             let lowered = said.to_lowercase();
