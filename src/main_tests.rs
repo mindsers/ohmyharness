@@ -2906,10 +2906,9 @@ fn a_sync_that_refuses_has_changed_nothing() {
     // The remedy, run as written.
     let remedy = said
         .split('`')
-        .find(|part| part.starts_with("git -C ") && part.contains(" rebase "))
+        .find(|part| part.starts_with("git ") && part.contains(" rebase "))
         .unwrap_or_else(|| panic!("the refusal names a command: {said}"));
-    let words: Vec<&str> = remedy.split_whitespace().collect();
-    let ran = Command::new(words[0]).args(&words[1..]).output().unwrap();
+    let ran = Command::new("sh").arg("-c").arg(remedy).output().unwrap();
     let stderr = String::from_utf8_lossy(&ran.stderr);
     assert!(
         !stderr.contains("already used by worktree") && !stderr.contains("already checked out"),
@@ -9397,4 +9396,46 @@ fn no_git_starts_outside_the_git_module() {
         "{} git spawns outside git.rs: {found:#?}",
         found.len()
     );
+}
+
+/// "Run no hooks" has one spelling. The agent's repositories said it with the
+/// empty value and a session's worktree with `/dev/null`: both run nothing,
+/// but `rev-parse --git-path hooks` reads the empty one back as `./`, a
+/// directory the agent writes.
+#[test]
+fn every_git_omh_keeps_hooks_off_says_so_one_way() {
+    let hooks: Vec<&str> = crate::git::NEUTRALISED
+        .iter()
+        .copied()
+        .filter(|kv| kv.starts_with("core.hooksPath="))
+        .collect();
+    assert_eq!(hooks, [crate::git::NO_HOOKS[1]]);
+}
+
+/// A git command omh prints for a session's worktree comes from
+/// `git::typed_in_worktree`. Typed bare there, `git` runs hooks from a relative
+/// `core.hooksPath` among the agent's files: the sync refusal's `rebase` ran
+/// `pre-rebase`, and the off-branch refusal's `checkout` ran `post-checkout`.
+#[test]
+fn no_message_spells_a_worktree_git_by_hand() {
+    let sources = crate::testsrc::production();
+    assert!(
+        sources
+            .iter()
+            .any(|(path, body)| path.ends_with("src/session.rs") && !body.is_empty()),
+        "the scan no longer reads src/session.rs, which carried both"
+    );
+    let found: Vec<String> = sources
+        .iter()
+        .filter(|(path, _)| !path.ends_with("src/git.rs"))
+        .flat_map(|(path, body)| {
+            body.lines()
+                .enumerate()
+                // Prose about a command is not a command printed.
+                .filter(|(_, line)| !line.trim_start().starts_with("//"))
+                .filter(|(_, line)| line.contains("`git -C "))
+                .map(move |(n, line)| format!("{}:{}: {}", path.display(), n + 1, line.trim()))
+        })
+        .collect();
+    assert!(found.is_empty(), "{found:#?}");
 }

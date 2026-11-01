@@ -1049,12 +1049,18 @@ noticed. A test pins it so nobody fixes the visible half.
 a `git checkout` to look at something, or an abandoned bisect. Put it back:
 
 ```console
-$ git -C ~/.omh/worktrees/<repo>/<session> checkout -q omh/<session>
+$ git -c core.hooksPath=/dev/null -C ~/.omh/worktrees/<repo>/<session> checkout -q omh/<session>
 ```
 
 Keep the `-q`. Without it `checkout` finishes by reporting what is still
 changed, and for a directory the agent turned into a repository of its own that
 report is git run inside it.
+
+Keep the `-c core.hooksPath=/dev/null` too. A relative `core.hooksPath` — the
+`.husky/_` husky writes — is looked up in the tree git runs in, and that tree
+holds the agent's files: without it `checkout` runs a `post-checkout` the agent
+could have written, as you. A sync that cannot replay your commits prints its
+`rebase` the same way.
 
 <details>
 <summary>Related refusals from the same command</summary>

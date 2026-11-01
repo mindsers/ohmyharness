@@ -968,10 +968,13 @@ impl Session {
                         format!(
                             "{branch} carries {mine} commit{} of your own and they do not \
                              replay onto the new base cleanly. Nothing was changed — rebase \
-                             them yourself where {branch} is checked out, with \
-                             `git -C {} rebase --onto {onto} {old_baseline}`, then sync again",
+                             them yourself where {branch} is checked out, with `{}`, then \
+                             sync again",
                             if mine == 1 { "" } else { "s" },
-                            self.worktree.display()
+                            crate::git::typed_in_worktree(
+                                &self.worktree,
+                                &format!("rebase --onto {onto} {old_baseline}")
+                            )
                         )
                     });
                 let _ = git(
@@ -1097,11 +1100,10 @@ impl Session {
         anyhow::ensure!(
             head.trim() == branch,
             "{} is on {} rather than {branch}; omh will not report a diff from a worktree that \
-             left its branch — the session's commits are not in it. Put it back with `git -C {} \
-             checkout -q {branch}`",
+             left its branch — the session's commits are not in it. Put it back with `{}`",
             self.id,
             head.trim(),
-            self.worktree.display()
+            crate::git::typed_in_worktree(&self.worktree, &format!("checkout -q {branch}"))
         );
 
         let merge_base = git_in(&self.worktree, &["merge-base", base, branch])?;
@@ -6012,7 +6014,7 @@ mod tests {
             .split('`')
             .nth(1)
             .unwrap_or_else(|| panic!("the refusal prints a command: {refused}"));
-        assert!(printed.starts_with("git -C "), "and it is git: {printed}");
+        assert!(printed.starts_with("git "), "and it is git: {printed}");
 
         let ran = Command::new("sh")
             .arg("-c")
@@ -6269,6 +6271,108 @@ mod tests {
             head_of(&root, "omh/s01").unwrap(),
             tip,
             "and the branch did move"
+        );
+    }
+
+    /// The command a refused sync hands over runs no hook the worktree
+    /// supplied. A refusal that prints a command is omh running it by other
+    /// means: typed in the session's worktree, `git rebase` runs `pre-rebase`
+    /// from a relative `core.hooksPath`, which the replay omh refused had kept
+    /// off.
+    ///
+    /// Run rather than read: the assertion is on what the printed line does.
+    #[cfg(unix)]
+    #[test]
+    fn the_command_a_refused_sync_prints_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        std::fs::write(root.join("both.txt"), "base\n").unwrap();
+        git(&root, &["add", "both.txt"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "base"]).unwrap();
+        let (s, ran) = husky_session(d.path(), &root);
+        std::fs::write(s.worktree.join("both.txt"), "the session's\n").unwrap();
+        git(
+            &s.worktree,
+            &["-c", "core.hooksPath=/dev/null", "add", "both.txt"],
+        )
+        .unwrap();
+        git(
+            &s.worktree,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-q",
+                "-m",
+                "mine",
+            ],
+        )
+        .unwrap();
+        std::fs::write(root.join("both.txt"), "trunk's\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "trunk moved"]).unwrap();
+        let old_baseline = s.merge_base("main").unwrap();
+        let onto = head_of(&root, "main").unwrap();
+
+        let refused = s
+            .replayed_onto(&root, &onto, &old_baseline)
+            .expect_err("the two edits conflict");
+        let refused = format!("{refused:#}");
+        let printed = refused
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("the refusal prints a command: {refused}"));
+        assert!(
+            printed.contains(" rebase "),
+            "and it is the rebase: {printed}"
+        );
+        let _ = std::fs::remove_file(&ran);
+        Command::new("sh").arg("-c").arg(printed).output().unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "the command omh told the user to run ran hooks the agent wrote: {printed}"
+        );
+    }
+
+    /// The same for the command a worktree off its branch is refused with:
+    /// `git checkout` runs `post-checkout`.
+    #[cfg(unix)]
+    #[test]
+    fn the_command_printed_for_a_worktree_off_its_branch_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        let (s, ran) = husky_session(d.path(), &root);
+        git(
+            &s.worktree,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "checkout",
+                "-q",
+                "--detach",
+            ],
+        )
+        .unwrap();
+
+        let refused = s
+            .diff("main", What::Summary)
+            .expect_err("a worktree off its branch is not reviewed");
+        let refused = format!("{refused:#}");
+        let printed = refused
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("the refusal prints a command: {refused}"));
+        let _ = std::fs::remove_file(&ran);
+        let typed = Command::new("sh").arg("-c").arg(printed).output().unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "the command omh told the user to run ran hooks the agent wrote: {printed}"
+        );
+        assert!(
+            typed.status.success(),
+            "and it does what it was printed for: {}",
+            String::from_utf8_lossy(&typed.stderr)
         );
     }
 

@@ -22,13 +22,16 @@
 use std::process::Command;
 
 /// What a host-side git in a tree the agent writes is told about hooks: run
-/// none.
+/// none. [`NO_HOOKS`] passes it alone and [`NEUTRALISED`] among the rest.
 ///
-/// `/dev/null` rather than the empty value [`NEUTRALISED`] passes. Both
-/// run nothing — measured against git 2.56.0 — but this one names a place that
-/// cannot hold a hook, where `rev-parse --git-path hooks` reads the empty value
-/// back as `./`.
-pub(crate) const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
+/// `/dev/null` rather than the empty value, which the agent's repositories
+/// were once given. Both run nothing — measured against git 2.56.0 — but this
+/// one names a place that cannot hold a hook, where `rev-parse --git-path
+/// hooks` reads the empty value back as `./`.
+const HOOKS_OFF: &str = "core.hooksPath=/dev/null";
+
+/// [`HOOKS_OFF`], as arguments.
+pub(crate) const NO_HOOKS: [&str; 2] = ["-c", HOOKS_OFF];
 
 /// Config keys that turn `git` into "run whatever this repository says".
 ///
@@ -64,7 +67,7 @@ pub(crate) const NEUTRALISED: [&str; 8] = [
     // checkpoint, the replant and the stamp all died for anyone who signs by
     // default. `--no-verify` covers hooks and nothing of signing.
     "commit.gpgsign=false",
-    "core.hooksPath=",
+    HOOKS_OFF,
     "core.pager=cat",
     "core.fsmonitor=",
     "core.sshCommand=",
@@ -97,6 +100,18 @@ pub(crate) fn in_worktree() -> Command {
     let mut git = Command::new("git");
     git.args(NO_HOOKS);
     git
+}
+
+/// [`in_worktree`] as a line for the user to type: what a refusal prints when
+/// it hands a step in a session's worktree back to them. Printing a command is
+/// running it by other means, and typed bare in that worktree `git` runs hooks
+/// from a relative `core.hooksPath` among the agent's files. `rest` is the verb
+/// and its arguments, as shell words.
+pub(crate) fn typed_in_worktree(tree: &std::path::Path, rest: &str) -> String {
+    format!(
+        "git -c {HOOKS_OFF} -C {} {rest}",
+        crate::quote::sh(&tree.to_string_lossy())
+    )
 }
 
 /// A repository the agent writes, or a scratch checkout of one: every key in
