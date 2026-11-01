@@ -3332,6 +3332,50 @@ fn a_previewed_doctor_does_not_cross_build_anything() {
     );
 }
 
+/// `omh --dry-run doctor` builds nothing, runs nothing and writes nothing —
+/// what the reference and the troubleshooting guide say. It topped the image
+/// up and asked a container what it has, made the probe's scratch worktree
+/// and the sandbox's host key, and filled the account's placeholders, all
+/// before it reached the line that returns on a preview.
+#[test]
+fn a_previewed_doctor_builds_runs_and_writes_nothing() {
+    fn every_path(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() && !path.is_symlink() {
+                every_path(&path, out);
+            }
+            out.push(path);
+        }
+    }
+    let sb = sandbox();
+    sb.git_init();
+    let log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    // An account, so the placeholders a real run lays in it are in reach.
+    sb.account("claude", "default");
+    let mut before = Vec::new();
+    every_path(&sb.home, &mut before);
+
+    let out = sb.omh(&["--dry-run", "doctor", "--harness", "claude"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("printf 'ok"),
+        "the preview is the probe script: {}",
+        printed(&out)
+    );
+    let ran: Vec<String> = sb
+        .docker_calls(&log)
+        .into_iter()
+        .filter(|c| c.starts_with("build") || c.starts_with("run") || c.starts_with("buildx"))
+        .collect();
+    assert!(ran.is_empty(), "a preview built or ran: {ran:?}");
+    let mut after = Vec::new();
+    every_path(&sb.home, &mut after);
+    let made: Vec<_> = after.iter().filter(|p| !before.contains(p)).collect();
+    assert!(made.is_empty(), "a preview wrote: {made:?}");
+}
+
 /// A launched session answers ssh, which is the whole of `omh sNN attach`.
 ///
 /// Every editor `attach` offers is an ssh URL, so a container that cannot
