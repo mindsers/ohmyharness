@@ -193,7 +193,7 @@ pub fn mounts(
 /// Create the files a bind mount needs to land as files.
 ///
 /// Also lays down mountpoints for any capability nested inside a credential
-/// directory, and for any path `[policy] mask` hides there: Docker refuses to
+/// directory, and for any path `[policy] mask` or `mask-dirs` hides there: Docker refuses to
 /// create one inside a bind-mounted host directory ("is outside of rootfs")
 /// and the whole launch fails.
 ///
@@ -231,7 +231,18 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         crate::adapter::Render::Dir => (&b.path, Point::Dir),
         _ => (&b.path, Point::File),
     });
-    for (path, point) in bound.chain(masked).chain(provided).chain(preferred) {
+    // An account mask likewise: a file, or a directory mount, which on Linux
+    // docker would otherwise create as root's.
+    let masked_dirs = adapter.mask.iter().map(|path| match path.ends_with('/') {
+        true => (path, Point::Dir),
+        false => (path, Point::Empty),
+    });
+    for (path, point) in bound
+        .chain(masked)
+        .chain(masked_dirs)
+        .chain(provided)
+        .chain(preferred)
+    {
         let guest = crate::adapter::expand(path, guest_home);
         let Some(cred) = creds
             .iter()
@@ -2039,6 +2050,27 @@ mod tests {
             d.path().join(".claude/settings.json").is_file(),
             "the mountpoint of the session's own settings.json"
         );
+    }
+
+    /// An account mask needs its mountpoint in the account too, a file or a
+    /// directory as it is declared: one docker had to make inside the
+    /// account's mount would be root's on Linux, and a directory where a file
+    /// mount lands fails the launch.
+    #[test]
+    fn an_account_mask_gets_a_mountpoint_in_the_account() {
+        for a in [omp(), codex()] {
+            assert!(a.mask.iter().any(|m| m.ends_with('/')), "{}", a.name);
+            assert!(a.mask.iter().any(|m| !m.ends_with('/')), "{}", a.name);
+            let d = tempfile::tempdir().unwrap();
+            prepare(&a, d.path(), "/home/agent").unwrap();
+            for mask in &a.mask {
+                let at = d.path().join(mask.trim_start_matches("$HOME/"));
+                match mask.ends_with('/') {
+                    true => assert!(at.is_dir(), "{mask} has no mountpoint"),
+                    false => assert!(at.is_file(), "{mask} has no mountpoint"),
+                }
+            }
+        }
     }
 
     /// A path the policy masks inside the account needs its mountpoint for the

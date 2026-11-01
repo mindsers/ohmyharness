@@ -127,6 +127,7 @@ ready  = "Connected"           # what that answer calls a server it loaded
 | `token` | the file(s) whose contents prove a login — see [below](#token-or-token-probe-never-both) | none |
 | `[token-probe]` | `run` and `ready`: ask the harness whether it is logged in, where no file can say | none |
 | `login` | what you have to do once the harness opens, to log in | none |
+| `mask` | paths strictly inside one of `creds`' directories, with no `..`, that a session could write and the harness reads at its next start as the user's own — instructions, rules, skills, code modules — so one session could leave them for every repo on the account. A file is hidden behind an empty read-only file; a directory, ending in `/`, behind an empty read-only directory holding only what omh mounts into it. Never a capability's path, a `[policy]` mask, or inside a masked directory. A capability whose path is in the account is masked the same way when the catalogue carries nothing for it. Claude Code's `CLAUDE.md` and `rules/`; Codex's `AGENTS.md`, `AGENTS.override.md` and `skills/`; omp's `AGENTS.md`, `RULES.md`, `SYSTEM.md`, `hooks/pre/`, `hooks/post/`, `tools/` and `extensions/` — each measured in `tests/e2e` | none |
 | `transcripts` | where the harness writes its transcripts. omh mounts a per-session directory over it, so `omh sNN` can read what the agent did and what it cost | none, and omh says *not recorded* rather than showing an empty session |
 | `[tools]` | how the harness names `edit`, `read`, `shell` and `search` — see [Hooks](#hooks-three-maps-and-a-template) | none |
 | `[capabilities.<class>]` | one binding per capability the harness can express | none |
@@ -374,6 +375,7 @@ omh enforces each of these, with an error naming the adapter:
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
 - a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
 - a `[policy]` `mask` entry that is a capability's own path — two mounts at one path
+- a `mask` entry not strictly inside a `creds` directory, with a `..`, inside a masked directory, a `[policy]` mask too, or a capability's own path
 - a `[preferences]` file outside where its `mount` puts it, in a format other than TOML, JSON or YAML, with a `..`, masked, or named like another; a key that is not a dotted key, declared twice, inside another, or at, inside or around one the harness's never-list names; a `fallback` for a file that is not declared, for a `file` mount, outside a credential directory, not beside its file, in another format, or that is a preferences file itself; a `dir` mount with no `root`, a `root` for any other mount, outside the home, with a `..`, or inside or around a credential path, and a `dir` file that is not a name
 - a `flag` that is not a long option (`--` and letters, digits, dashes), on anything but a `claude-settings` render, with a `path` not under `/etc/`, or with no `eject`; an `eject` outside `$HOME`, with a `..`, or without a `flag`
 

@@ -23,6 +23,16 @@ token   = ["$HOME/.claude/.credentials.json"]
 
 login   = "run `/login` inside Claude Code, then exit"
 
+# What Claude Code reads from the account as the user's own, at every start —
+# shared by every repo using the account, so a session could leave
+# instructions there for all of them (risk 1b): `CLAUDE.md`, the personal
+# memory, and `rules/`. Measured in `tests/e2e`: a phrase planted in each
+# reached the model; one planted in `skills/`, `agents/`, `commands/` and
+# `output-styles/` did not. Nothing omh does puts the user's own there:
+# `--import` copies the token alone, and the host's personal memory reaches a
+# session as a rule imported into the catalogue, never through the account.
+mask    = ["$HOME/.claude/CLAUDE.md", "$HOME/.claude/rules/"]
+
 # How this harness names the things an agent does. Adapter-level rather than
 # per-capability: hooks match on these, the Agent Skills standard carries them
 # in `allowed-tools`, and subagent frontmatter carries them in `tools`. One

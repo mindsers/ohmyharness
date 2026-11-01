@@ -3819,7 +3819,8 @@ mod tests {
                 .policy
                 .iter()
                 .flat_map(|p| p.mask.iter())
-                .map(|m| expand(m, GUEST_HOME))
+                .chain(&a.mask)
+                .map(|m| expand(m.trim_end_matches('/'), GUEST_HOME))
                 .collect();
             let checks = checks(
                 &fx.catalogue,

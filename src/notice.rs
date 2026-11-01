@@ -554,6 +554,25 @@ mod tests {
         );
     }
 
+    /// Only the cloud bundle cache is said as one. The words are the cache's
+    /// own, so an instruction file the account holds — hidden too, by the
+    /// adapter's account `mask` — is never announced as an enterprise bundle.
+    #[test]
+    fn an_account_holding_instructions_is_not_said_to_cache_a_cloud_bundle() {
+        let policy = codex_policy();
+        let work = tempfile::tempdir().unwrap();
+        let account = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(account.path().join(".codex")).unwrap();
+        for file in ["AGENTS.md", "AGENTS.override.md"] {
+            std::fs::write(account.path().join(".codex").join(file), "Be brief.\n").unwrap();
+        }
+        let said = super::policy(&policy, Work::Worktree(work.path()), Some(account.path()));
+        assert!(
+            !said.iter().any(|s| s.contains("cloud bundle")),
+            "{said:#?}"
+        );
+    }
+
     struct Fx {
         _dir: tempfile::TempDir,
         paths: Paths,
