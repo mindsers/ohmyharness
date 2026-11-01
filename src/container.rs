@@ -921,7 +921,9 @@ pub fn plan(
         // nothing — but the mount itself is part of the plan in either mode,
         // so `Staging::Skip` and `Staging::Apply` describe the same container.
         if staging == Staging::Apply {
-            std::fs::create_dir_all(&host).ok();
+            std::fs::create_dir_all(&host).with_context(|| {
+                format!("creating the transcripts directory {}", host.display())
+            })?;
         }
         mounts.push(Mount {
             host,
@@ -4111,6 +4113,21 @@ mod tests {
             "",
             "a relaunch must not inherit the previous launch's observations"
         );
+    }
+
+    /// A transcripts directory omh could not make is a failed launch, named
+    /// here — not a `.ok()` and then a mount the runtime refuses to make, in
+    /// its own words, about a path nobody chose.
+    #[test]
+    fn a_transcripts_directory_omh_could_not_make_fails_the_launch() {
+        let fx = fixture();
+        let run = fx.paths.runs().join(&fx.session.id);
+        std::fs::create_dir_all(&run).unwrap();
+        // A file where the directory belongs.
+        std::fs::write(run.join("transcripts"), "").unwrap();
+        let err = try_plan_for(&fx, "claude")
+            .expect_err("a launch with no transcripts directory went ahead");
+        assert!(format!("{err:#}").contains("transcripts"), "{err:#}");
     }
 
     /// **A launch that could not start its observed half empty says so.** Its

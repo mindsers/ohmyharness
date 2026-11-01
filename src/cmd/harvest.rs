@@ -1485,7 +1485,14 @@ pub(crate) fn push(
 /// commit, only facts the report carries.
 fn run_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::Ctx) -> Result<()> {
     let outcome = decide_checks(paths, session, no_verify, ctx);
-    record_check(paths, &session.id, &outcome);
+    // Best-effort still — a record is not a reason to hold a commit — but
+    // said, never dropped.
+    if let Err(e) = record_check(paths, &session.id, &outcome) {
+        ctx.warn(&format!(
+            "{e:#} — `omh {}` will not show this run",
+            session.id
+        ));
+    }
     match &outcome {
         Checked::Passed(n) => ctx.progress(&format!("checks passed ({n})")),
         Checked::NotRun(why) => ctx.warn(&format!("checks not run — {why}")),
@@ -1568,7 +1575,7 @@ fn checks_for(paths: &Paths, ctx: &out::Ctx) -> std::result::Result<Vec<(String,
 }
 
 /// Write the check outcome where `omh sNN` reads it, best-effort.
-fn record_check(paths: &Paths, id: &str, outcome: &Checked) {
+fn record_check(paths: &Paths, id: &str, outcome: &Checked) -> Result<()> {
     let (state, detail): (&str, serde_json::Value) = match outcome {
         Checked::Passed(n) => ("passed", serde_json::json!({ "count": n })),
         Checked::Failed { name, .. } => ("failed", serde_json::json!({ "check": name })),
@@ -1582,13 +1589,11 @@ fn record_check(paths: &Paths, id: &str, outcome: &Checked) {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     });
-    let dir = paths.runs().join(id);
-    if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(
-            dir.join("check.json"),
-            serde_json::to_string(&record).unwrap_or_default(),
-        );
-    }
+    // Replaced whole or not at all, and a failure said: it was `let _ =`, so
+    // a write that failed left the last run's `passed` for `omh sNN` to show.
+    let at = paths.runs().join(id).join("check.json");
+    crate::shadow::replace_record(&at, serde_json::to_string(&record)?)
+        .with_context(|| format!("recording the checks' outcome at {}", at.display()))
 }
 
 /// The turn-end commands this repo's hooks declare, in name order.
@@ -1683,6 +1688,22 @@ fn check_tail(stdout: &[u8], stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A checks outcome omh could not record is an error its caller says, not
+    /// a `let _ =` that leaves the last run's `passed` for `omh sNN` to show.
+    #[test]
+    fn an_outcome_omh_could_not_record_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        // A file where the session's run directory belongs.
+        std::fs::create_dir_all(paths.runs()).unwrap();
+        std::fs::write(paths.runs().join("s01"), "").unwrap();
+        let got = record_check(&paths, "s01", &Checked::Passed(1));
+        assert!(got.is_err(), "an outcome that was not recorded answered Ok");
+    }
     use crate::hook::{Action, Event, Hook};
     use crate::runtime::{answered, Backend, Docker};
     use std::collections::BTreeMap;

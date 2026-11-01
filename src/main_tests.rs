@@ -1961,7 +1961,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // off` with its `omh init` for a name omh owns. + `omh settings rm`
         // where `use` refuses a link to nothing.
         ("src/cmd/catalogue.rs", 18),
-        ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
+        // + the --no-verify pointer, + `omh s` in the name-a-session refusal,
+        // + `omh <id>` where a checks outcome could not be recorded
+        ("src/cmd/harvest.rs", 22),
         // + the `omh upgrade` redirect when a repo is already set up, + `omh
         // set` in the header of the gitignored file `init` seeds, + `omh set
         // carry_in` teaching the key in the committed file's header, + `omh
