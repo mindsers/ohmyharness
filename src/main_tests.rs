@@ -3440,6 +3440,38 @@ fn a_missing_shadow_does_not_hide_uncommitted_worktree_files() {
     );
 }
 
+/// With no sandbox, what `rm` counts in the worktree is what a review and
+/// `omh s` count: `Session::changed`. A `status` of its own counted a rename
+/// twice and omh's rules written over a tracked `CLAUDE.md` as work.
+#[test]
+fn with_no_sandbox_rm_counts_the_worktree_as_a_review_does() {
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::remove_dir_all(&shadow.gitdir).unwrap();
+    std::fs::remove_file(&shadow.seed_record).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&session.worktree)
+            .args(["-c", "core.hooksPath=/dev/null"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::write(session.worktree.join("old.rs"), "fn old() {}\n").unwrap();
+    std::fs::write(session.worktree.join("CLAUDE.md"), "the project's\n").unwrap();
+    git(&["add", "old.rs", "CLAUDE.md"]);
+    git(&["commit", "-q", "-m", "tracked"]);
+    git(&["mv", "old.rs", "new.rs"]);
+    std::fs::write(session.worktree.join("CLAUDE.md"), "omh's rules\n").unwrap();
+
+    let changed = session.changed().unwrap();
+    assert_eq!(changed.len(), 3, "one.rs, two.rs and new.rs: {changed:?}");
+    assert_eq!(
+        cmd::harvest::at_stake(&paths, &session),
+        cmd::harvest::AtStake::Work("3 uncommitted paths in the worktree".to_string())
+    );
+}
+
 /// Asking what a removal would lose does not run git inside a repository
 /// nested in the worktree.
 ///

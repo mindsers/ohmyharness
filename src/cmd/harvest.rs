@@ -1031,50 +1031,19 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
         );
         return match (answer, asked) {
             (AtStake::Nothing, Err(unknown)) => unknown,
-            (AtStake::Nothing, Ok(true)) => {
-                // A `status` can write the index, which runs
-                // `post-index-change`. See `session::Hooks`.
-                let out = crate::git::in_worktree()
-                    .current_dir(&session.worktree)
-                    // The worktree's files are the agent's, and a `status`
-                    // asked about a repository nested among them answers by
-                    // running git inside it. See `shadow::out_of_nested`.
-                    .args(shadow::out_of_nested(&[
-                        "status",
-                        "--porcelain=v1",
-                        "-z",
-                        "--untracked-files=all",
-                    ]))
-                    .output();
-                match out {
-                    Ok(out) if !out.status.success() => AtStake::Unknown(format!(
-                        "the worktree at {} could not be inspected: {}",
-                        session.worktree.display(),
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    )),
-                    Ok(out) => {
-                        let files = out
-                            .stdout
-                            .split(|b| *b == 0)
-                            .filter(|p| !p.is_empty())
-                            .filter(|p| {
-                                !crate::session::is_placeholder(&String::from_utf8_lossy(p))
-                            })
-                            .count();
-                        match files {
-                            0 => AtStake::Nothing,
-                            n => AtStake::Work(format!(
-                                "{n} uncommitted path{} in the worktree",
-                                plural(n)
-                            )),
-                        }
-                    }
-                    Err(e) => AtStake::Unknown(format!(
-                        "the worktree at {} could not be inspected: {e}",
-                        session.worktree.display()
-                    )),
-                }
-            }
+            // What a review and `omh s` count, through the same reader.
+            (AtStake::Nothing, Ok(true)) => match session.changed() {
+                Ok(changed) if changed.is_empty() => AtStake::Nothing,
+                Ok(changed) => AtStake::Work(format!(
+                    "{} uncommitted path{} in the worktree",
+                    changed.len(),
+                    plural(changed.len())
+                )),
+                Err(e) => AtStake::Unknown(format!(
+                    "the worktree at {} could not be inspected: {e:#}",
+                    session.worktree.display()
+                )),
+            },
             (other, _) => other,
         };
     }
