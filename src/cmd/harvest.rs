@@ -1031,51 +1031,19 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
         );
         return match (answer, asked) {
             (AtStake::Nothing, Err(unknown)) => unknown,
-            (AtStake::Nothing, Ok(true)) => {
-                let out = std::process::Command::new("git")
-                    .current_dir(&session.worktree)
-                    // A `status` can write the index, which runs
-                    // `post-index-change`. See `session::Hooks`.
-                    .args(session::NO_HOOKS)
-                    // The worktree's files are the agent's, and a `status`
-                    // asked about a repository nested among them answers by
-                    // running git inside it. See `shadow::out_of_nested`.
-                    .args(shadow::out_of_nested(&[
-                        "status",
-                        "--porcelain=v1",
-                        "-z",
-                        "--untracked-files=all",
-                    ]))
-                    .output();
-                match out {
-                    Ok(out) if !out.status.success() => AtStake::Unknown(format!(
-                        "the worktree at {} could not be inspected: {}",
-                        session.worktree.display(),
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    )),
-                    Ok(out) => {
-                        let files = out
-                            .stdout
-                            .split(|b| *b == 0)
-                            .filter(|p| !p.is_empty())
-                            .filter(|p| {
-                                !crate::session::is_placeholder(&String::from_utf8_lossy(p))
-                            })
-                            .count();
-                        match files {
-                            0 => AtStake::Nothing,
-                            n => AtStake::Work(format!(
-                                "{n} uncommitted path{} in the worktree",
-                                plural(n)
-                            )),
-                        }
-                    }
-                    Err(e) => AtStake::Unknown(format!(
-                        "the worktree at {} could not be inspected: {e}",
-                        session.worktree.display()
-                    )),
-                }
-            }
+            // What a review and `omh s` count, through the same reader.
+            (AtStake::Nothing, Ok(true)) => match session.changed() {
+                Ok(changed) if changed.is_empty() => AtStake::Nothing,
+                Ok(changed) => AtStake::Work(format!(
+                    "{} uncommitted path{} in the worktree",
+                    changed.len(),
+                    plural(changed.len())
+                )),
+                Err(e) => AtStake::Unknown(format!(
+                    "the worktree at {} could not be inspected: {e:#}",
+                    session.worktree.display()
+                )),
+            },
             (other, _) => other,
         };
     }
@@ -1322,13 +1290,10 @@ pub(crate) fn commit(
     let base = session::default_branch(&paths.repo);
     let held = session.glance(&paths.repo, &base);
     warn_uncounted(&held, ctx, &base);
-    ctx.say(
-        &with_hooks_said(
-            report::Action::new(
-                "committed",
-                format!("committed to {}{}", session.label(), branch_tally(&held)),
-            ),
-            &hooks,
+    ctx.say(&with_hooks_said(
+        report::Action::new(
+            "committed",
+            format!("committed to {}{}", session.label(), branch_tally(&held)),
         )
         .data(serde_json::json!({
             "session": session.id,
@@ -1338,7 +1303,8 @@ pub(crate) fn commit(
             "landed_unknown": landed_unknown(&held),
             "base": base,
         })),
-    );
+        &hooks,
+    ));
     Ok(())
 }
 
@@ -1439,16 +1405,14 @@ pub(crate) fn branch_tally(held: &Settling) -> String {
     }
 }
 
-/// A landing that ran none of the user's hooks says so: a `pre-commit` that
-/// silently stopped running would be found out later, from whatever it was
-/// there to catch.
-fn with_hooks_said(action: report::Action, hooks: &session::Hooks) -> report::Action {
-    match hooks {
-        session::Hooks::Yours => action,
-        session::Hooks::SetAside(path) => action.note(format!(
-            "hooks not run: core.hooksPath ({path}) is inside the session's worktree, \
-             which the agent writes"
-        )),
+/// A landing that ran none of the user's hooks says so ([`session::Hooks::said`]),
+/// and its `--json` names the path as `hooks_set_aside`. After `data`, which
+/// replaces the object this adds to.
+fn with_hooks_said(mut action: report::Action, hooks: &session::Hooks) -> report::Action {
+    action.data["hooks_set_aside"] = serde_json::json!(hooks.set_aside());
+    match hooks.said() {
+        Some(said) => action.note(said),
+        None => action,
     }
 }
 
@@ -1462,17 +1426,16 @@ pub(crate) fn push(
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
     let session::Pushed { target, hooks } = session.push(name)?;
-    ctx.say(
-        &with_hooks_said(
-            report::Action::new("pushed", format!("{} → origin/{target}", session.label())),
-            &hooks,
-        )
-        .data(serde_json::json!({
-            "session": session.id,
-            "branch": session.label(),
-            "target": target,
-        })),
-    );
+    ctx.say(&with_hooks_said(
+        report::Action::new("pushed", format!("{} → origin/{target}", session.label())).data(
+            serde_json::json!({
+                "session": session.id,
+                "branch": session.label(),
+                "target": target,
+            }),
+        ),
+        &hooks,
+    ));
 
     if !pr {
         return Ok(());

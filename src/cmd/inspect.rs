@@ -267,7 +267,7 @@ pub(crate) fn doctor_cmd(
         // Absent on a healthy repo: a row saying "you have a commit" on every
         // run is a line nobody reads.
         .chain(doctor::commit_from(
-            std::process::Command::new("git")
+            crate::git::users()
                 .arg("-C")
                 .arg(&paths.repo)
                 .args(["rev-parse", "--verify", "--quiet", "HEAD"])

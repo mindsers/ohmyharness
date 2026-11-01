@@ -477,7 +477,12 @@ pub(crate) fn attach(
     // of the group it moved into. `existing_session` is that discipline, and
     // is resolved above so the harness this session ran is known before its
     // image is built.
-    session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
+    if let Some(said) = session
+        .ensure(&paths.repo, &session::default_branch(&paths.repo))?
+        .said()
+    {
+        ctx.warn(&said);
+    }
     carry_in(&paths, &session, ctx)?;
     if let Some(why) = mark_in_use(&paths, &session.id) {
         ctx.warn(&why);
@@ -2523,7 +2528,9 @@ pub(crate) fn run(
     // Before `ensure` makes it: whether this launch is the one that does.
     let created = !session.worktree.exists();
     if opts.staging == container::Staging::Apply {
-        session.ensure(&paths.repo, &base)?;
+        if let Some(said) = session.ensure(&paths.repo, &base)?.said() {
+            ctx.warn(&said);
+        }
         carry_in(&paths, &session, ctx)?;
         // Reap before starting another container, and record that this one is
         // in use so it is not reaped by the next launch.

@@ -22,6 +22,7 @@ mod detect;
 mod doctor;
 mod editor;
 mod facts;
+mod git;
 mod guard;
 mod hash;
 mod held;

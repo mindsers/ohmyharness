@@ -1296,6 +1296,12 @@ omh: omh/s01 is a session id, not a branch name
 command when it is not. It is never a dependency: a repo on a non-GitHub remote
 is a normal repo.
 
+**Neither runs a hook the agent could have written.** When `core.hooksPath`
+points inside the session's worktree — husky's `.husky/_` — `commit` and `push`
+run none of your hooks and say so, and under `--json` name the path as
+`hooks_set_aside`, `null` when your hooks ran. See
+[Risks](/concepts/risks/#2d-host-side-git-in-a-sessions-worktree-ran-the-agents-hooks).
+
 <details>
 <summary>Why <code>commit</code> refuses a tracked carried file, and why <code>push</code> wants a name</summary>
 

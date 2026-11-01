@@ -242,7 +242,7 @@ pub struct Staged {
 /// Asked of the checkout rather than the worktree, because that is where the
 /// `carry_in` entry is aimed and where the user can see the answer.
 fn tracked(repo: &Path, rel: &str) -> bool {
-    std::process::Command::new("git")
+    crate::git::users()
         .current_dir(repo)
         .args(["ls-files", "--error-unmatch", "--", rel])
         .output()
@@ -351,7 +351,7 @@ fn copy_dir(root: &Path, src: &Path, dst: &Path) -> Result<Action> {
 /// created in your checkout was invisible to git; the host reads in
 /// `session.rs` leave those out themselves now.
 pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
+    let out = crate::git::in_worktree()
         .current_dir(worktree)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()

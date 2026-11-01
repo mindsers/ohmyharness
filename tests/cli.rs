@@ -2549,6 +2549,73 @@ fn a_commit_says_it_set_aside_hooks_the_agent_could_write() {
     );
 }
 
+/// The same answer reaches `--json`, as a field rather than only as prose: a
+/// script reading `omh sNN commit --json` can tell a landing that ran your
+/// hooks from one that ran none. `null` when nothing was set aside.
+#[test]
+fn a_landing_names_the_hooks_it_set_aside_in_its_json() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    let json = |argv: &[&str]| -> serde_json::Value {
+        let out = sb.omh(argv);
+        assert!(
+            out.status.success(),
+            "omh {argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document")
+    };
+    std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
+    let plain = json(&["s01", "commit", "-m", "Add a", "--json"]);
+    assert_eq!(
+        plain["hooks_set_aside"],
+        serde_json::Value::Null,
+        "{plain:#}"
+    );
+
+    let config = Command::new("git")
+        .arg("-C")
+        .arg(&sb.repo)
+        .args(["config", "core.hooksPath", ".husky/_"])
+        .output()
+        .unwrap();
+    assert!(config.status.success(), "{config:?}");
+    std::fs::write(worktree.join("b.rs"), "fn b() {}").unwrap();
+    let committed = json(&["s01", "commit", "-m", "Add b", "--json"]);
+    let pushed = json(&["s01", "push", "feat/b", "--json"]);
+
+    for doc in [committed, pushed] {
+        assert_eq!(doc["hooks_set_aside"], ".husky/_", "{doc:#}");
+    }
+}
+
+/// A launch that checks a session out under a `core.hooksPath` inside the
+/// worktree runs no `post-checkout`, and says so as landing does. A checkout
+/// of a branch `rm` kept carries whatever the agent committed.
+#[test]
+fn a_launch_says_it_set_aside_hooks_the_agent_could_write() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    // A repository with a commit to branch from; the launch makes the next one.
+    sb.session("s01");
+    let config = Command::new("git")
+        .arg("-C")
+        .arg(&sb.repo)
+        .args(["config", "core.hooksPath", ".husky/_"])
+        .output()
+        .unwrap();
+    assert!(config.status.success(), "{config:?}");
+
+    let out = sb.omh(&["new", "claude"]);
+
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("hooks not run: core.hooksPath (.husky/_) is inside the session's worktree"),
+        "the user is not told the checkout set their hooks aside: {said}"
+    );
+}
+
 /// The refusal is wired to the command, not just to a function that could
 /// refuse.
 ///

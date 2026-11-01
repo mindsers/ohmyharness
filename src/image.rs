@@ -98,7 +98,7 @@ pub const GUEST_HOME: &str = "/home/agent";
 /// about the code's shape; running this command inside a `--object-format=sha256`
 /// repository and getting 40 hex back is a claim about what it does.
 fn digest_command() -> std::process::Command {
-    let mut c = std::process::Command::new("git");
+    let mut c = crate::git::users();
     // A directory that cannot exist, so no ambient repository decides the hash
     // algorithm. See the note on `recipe_digest`.
     c.env("GIT_DIR", "/omh-recipe-digest-has-no-repository")

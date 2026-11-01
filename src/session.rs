@@ -344,7 +344,7 @@ pub struct Merged {
 /// `-z` for the paths, for the reason `Session::changed` gives: git quotes a
 /// path that needs it, and a name omh cannot open is a name it must not print.
 pub fn merge_three(repo: &Path, base: &str, theirs: &str, ours: &str) -> Result<Merged> {
-    let out = Command::new("git")
+    let out = crate::git::users()
         .current_dir(repo)
         .args([
             "merge-tree",
@@ -436,7 +436,11 @@ impl Session {
 
     /// Create the worktree if it does not exist yet. Idempotent, so relaunching
     /// into an existing session resumes it.
-    pub fn ensure(&self, repo: &Path, base: &str) -> Result<()> {
+    ///
+    /// The answer is what the checkout did with the user's hooks, for the
+    /// caller to say ([`Hooks::said`]): [`Hooks::Yours`] when nothing was
+    /// checked out.
+    pub fn ensure(&self, repo: &Path, base: &str) -> Result<Hooks> {
         if self.worktree.exists() {
             let worktree_is_valid = git_in(&self.worktree, &["status", "--porcelain"]).is_ok();
             if self.branch.is_some() && !worktree_is_valid {
@@ -446,7 +450,7 @@ impl Session {
                 git_in(&self.worktree, &["rev-parse", "--is-inside-work-tree"])
                     .with_context(|| format!("opening worktree for session {}", self.id))?;
             }
-            return Ok(());
+            return Ok(Hooks::Yours);
         }
         std::fs::create_dir_all(self.worktree.parent().unwrap())?;
         let path = self.worktree.to_string_lossy().into_owned();
@@ -454,7 +458,7 @@ impl Session {
         // No branch means no git involvement at all — just a writable directory.
         let Some(branch) = self.branch.clone() else {
             std::fs::create_dir_all(&self.worktree)?;
-            return Ok(());
+            return Ok(Hooks::Yours);
         };
 
         // A directory removed outside git leaves its registration behind, and
@@ -507,7 +511,7 @@ impl Session {
         // `core.hooksPath` finds its hooks among them.
         let hooks = hooks_for(repo, &self.worktree)?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        git_hooked(repo, hooks.args(), &borrowed)
+        git_hooked(crate::git::landing(hooks.args()), repo, &borrowed)
             .with_context(|| format!("creating worktree for session {}", self.id))?;
 
         // Asked rather than assumed. Every review path already refuses a
@@ -540,7 +544,7 @@ impl Session {
                 head.trim()
             );
         }
-        Ok(())
+        Ok(hooks)
     }
 
     /// Whether `omh/<id>` is there — with "git could not answer" kept apart
@@ -950,8 +954,8 @@ impl Session {
                 // files, so neither the checkout nor the replay in it runs a
                 // hook: nobody asked for one here.
                 git_hooked(
+                    crate::git::in_worktree(),
                     repo,
-                    &NO_HOOKS,
                     &[
                         "worktree",
                         "add",
@@ -968,10 +972,13 @@ impl Session {
                         format!(
                             "{branch} carries {mine} commit{} of your own and they do not \
                              replay onto the new base cleanly. Nothing was changed — rebase \
-                             them yourself where {branch} is checked out, with \
-                             `git -C {} rebase --onto {onto} {old_baseline}`, then sync again",
+                             them yourself where {branch} is checked out, with `{}`, then \
+                             sync again",
                             if mine == 1 { "" } else { "s" },
-                            self.worktree.display()
+                            crate::git::typed_in_worktree(
+                                &self.worktree,
+                                &format!("rebase --onto {onto} {old_baseline}")
+                            )
                         )
                     });
                 let _ = git(
@@ -1031,10 +1038,9 @@ impl Session {
     /// unlike every other diff the user reads.
     pub fn stream_diff(&self, base: &str, colour: &str) -> Result<()> {
         self.reviewing(base, |worktree, index, merge_base| {
-            let status = Command::new("git")
+            let status = crate::git::in_worktree()
                 .current_dir(worktree)
                 .env("GIT_INDEX_FILE", index)
-                .args(NO_HOOKS)
                 .args([
                     "diff",
                     "--cached",
@@ -1098,11 +1104,10 @@ impl Session {
         anyhow::ensure!(
             head.trim() == branch,
             "{} is on {} rather than {branch}; omh will not report a diff from a worktree that \
-             left its branch — the session's commits are not in it. Put it back with `git -C {} \
-             checkout -q {branch}`",
+             left its branch — the session's commits are not in it. Put it back with `{}`",
             self.id,
             head.trim(),
-            self.worktree.display()
+            crate::git::typed_in_worktree(&self.worktree, &format!("checkout -q {branch}"))
         );
 
         let merge_base = git_in(&self.worktree, &["merge-base", base, branch])?;
@@ -1286,8 +1291,8 @@ impl Session {
         match message {
             Some(message) => {
                 git_hooked(
+                    crate::git::landing(hooks.args()),
                     &self.worktree,
-                    hooks.args(),
                     &["commit", "-q", "-m", message],
                 )?;
             }
@@ -1297,9 +1302,8 @@ impl Session {
             // slightly wrong. Inherited stdio, because `git()` captures output
             // and an editor with nowhere to draw hangs.
             None => {
-                let status = Command::new("git")
+                let status = crate::git::landing(hooks.args())
                     .current_dir(&self.worktree)
-                    .args(hooks.args())
                     .arg("commit")
                     .status()
                     .context("running git commit")?;
@@ -1456,8 +1460,8 @@ impl Session {
         // The user's own `pre-push`, where the agent cannot have written it.
         let hooks = hooks_for(&self.worktree, &self.worktree)?;
         git_hooked(
+            crate::git::landing(hooks.args()),
             &self.worktree,
-            hooks.args(),
             &["push", "origin", &format!("{branch}:refs/heads/{target}")],
         )?;
 
@@ -1979,10 +1983,9 @@ impl Session {
     /// review.
     pub fn unresolved(&self, base: &str) -> Result<Vec<String>> {
         let out = self.reviewing(base, |worktree, index, _| {
-            Command::new("git")
+            crate::git::in_worktree()
                 .current_dir(worktree)
                 .env("GIT_INDEX_FILE", index)
-                .args(NO_HOOKS)
                 .args(["-c", NO_WHITESPACE_CHECKS])
                 // The worktree holds agent-authored files and an
                 // agent-authored `.gitattributes`; a diff is a thing git can be
@@ -2026,9 +2029,8 @@ fn git_owned_in(tree: &Path, args: &[String]) -> Result<String> {
 /// subject to exclude rules — so a file the project ships is never mistaken
 /// for a carried one, whatever `.gitignore` says about its name.
 fn ignored_here(worktree: &Path, path: &str) -> Result<bool> {
-    let out = Command::new("git")
+    let out = crate::git::in_worktree()
         .current_dir(worktree)
-        .args(NO_HOOKS)
         .args(["check-ignore", "-q", "--", path])
         .output()
         .context("running git check-ignore")?;
@@ -2046,11 +2048,10 @@ fn ignored_here(worktree: &Path, path: &str) -> Result<bool> {
 /// `git` against an index of our own, so a read-only command can stage the
 /// worktree without disturbing the one the user's git shares.
 fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    // Always a worktree, and an index written is a `post-index-change`.
+    let out = crate::git::in_worktree()
         .current_dir(cwd)
         .env("GIT_INDEX_FILE", index)
-        // Always a worktree, and an index written is a `post-index-change`.
-        .args(NO_HOOKS)
         // See `git`, below: the same two, for the same reason.
         .args(crate::shadow::before_the_verb(args))
         .args(crate::shadow::out_of_nested(args))
@@ -2433,7 +2434,7 @@ const DIFF_FLAGS: &[&str] = &[
 /// `from_utf8_lossy` — which is what `git` one function down does — would map
 /// two different patches onto one string of replacement characters.
 fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new("git")
+    let out = crate::git::users()
         .current_dir(cwd)
         .args(args)
         .output()
@@ -2465,7 +2466,7 @@ fn patch_ids(repo: &Path, patch: &[u8]) -> Result<Vec<(String, String)>> {
     use std::io::Write;
     use std::process::Stdio;
 
-    let mut child = Command::new("git")
+    let mut child = crate::git::users()
         .current_dir(repo)
         .args(["patch-id", "--stable"])
         .stdin(Stdio::piped())
@@ -2515,21 +2516,21 @@ fn patch_ids(repo: &Path, patch: &[u8]) -> Result<Vec<(String, String)>> {
 /// `everything_but_pointers`; this is what makes a call that forgot to use it
 /// fail instead of run.
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
-    git_hooked(cwd, &[], args)
+    git_hooked(crate::git::users(), cwd, args)
 }
 
 /// [`git`] in a tree the agent writes — a session's worktree, or a scratch
 /// checkout of its branch — with no hooks at all. See [`Hooks`] for why, and
 /// for the two places the user's own still run.
 fn git_in(tree: &Path, args: &[&str]) -> Result<String> {
-    git_hooked(tree, &NO_HOOKS, args)
+    git_hooked(crate::git::in_worktree(), tree, args)
 }
 
-/// [`git`] with `hooks` in front of everything: [`NO_HOOKS`], or nothing.
-fn git_hooked(cwd: &Path, hooks: &[&str], args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+/// [`git`] from the builder `git` that says whose tree `cwd` is
+/// (`crate::git`), with the by-verb halves after it.
+fn git_hooked(mut git: Command, cwd: &Path, args: &[&str]) -> Result<String> {
+    let out = git
         .current_dir(cwd)
-        .args(hooks)
         .args(crate::shadow::before_the_verb(args))
         .args(crate::shadow::out_of_nested(args))
         .output()
@@ -2543,15 +2544,6 @@ fn git_hooked(cwd: &Path, hooks: &[&str], args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
-
-/// What a host-side git in a tree the agent writes is told about hooks: run
-/// none.
-///
-/// `/dev/null` rather than the empty value `shadow::NEUTRALISED` passes. Both
-/// run nothing — measured against git 2.56.0 — but this one names a place that
-/// cannot hold a hook, where `rev-parse --git-path hooks` reads the empty value
-/// back as `./`.
-pub(crate) const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
 
 /// Whose hooks a git in a session's worktree would run.
 ///
@@ -2580,11 +2572,31 @@ pub enum Hooks {
 }
 
 impl Hooks {
+    /// The `core.hooksPath` that was set aside, as configured.
+    pub fn set_aside(&self) -> Option<&str> {
+        match self {
+            Hooks::Yours => None,
+            Hooks::SetAside(path) => Some(path),
+        }
+    }
+
+    /// The sentence the caller says when hooks were set aside. A `pre-commit`
+    /// that silently stopped running would be found out later, from whatever
+    /// it was there to catch.
+    pub fn said(&self) -> Option<String> {
+        self.set_aside().map(|path| {
+            format!(
+                "hooks not run: core.hooksPath ({path}) is inside the session's worktree, \
+                 which the agent writes"
+            )
+        })
+    }
+
     /// What a git is told so that it honours this answer.
     fn args(&self) -> &'static [&'static str] {
         match self {
             Hooks::Yours => &[],
-            Hooks::SetAside(_) => &NO_HOOKS,
+            Hooks::SetAside(_) => &crate::git::NO_HOOKS,
         }
     }
 }
@@ -2602,7 +2614,7 @@ impl Hooks {
 /// tree itself is taken as written and as settled, so either spelling of it in
 /// the config is recognised.
 fn hooks_for(cwd: &Path, tree: &Path) -> Result<Hooks> {
-    let out = Command::new("git")
+    let out = crate::git::users()
         .current_dir(cwd)
         .args(["config", "--path", "--get", "core.hooksPath"])
         .output()
@@ -6026,7 +6038,7 @@ mod tests {
             .split('`')
             .nth(1)
             .unwrap_or_else(|| panic!("the refusal prints a command: {refused}"));
-        assert!(printed.starts_with("git -C "), "and it is git: {printed}");
+        assert!(printed.starts_with("git "), "and it is git: {printed}");
 
         let ran = Command::new("sh")
             .arg("-c")
@@ -6283,6 +6295,108 @@ mod tests {
             head_of(&root, "omh/s01").unwrap(),
             tip,
             "and the branch did move"
+        );
+    }
+
+    /// The command a refused sync hands over runs no hook the worktree
+    /// supplied. A refusal that prints a command is omh running it by other
+    /// means: typed in the session's worktree, `git rebase` runs `pre-rebase`
+    /// from a relative `core.hooksPath`, which the replay omh refused had kept
+    /// off.
+    ///
+    /// Run rather than read: the assertion is on what the printed line does.
+    #[cfg(unix)]
+    #[test]
+    fn the_command_a_refused_sync_prints_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        std::fs::write(root.join("both.txt"), "base\n").unwrap();
+        git(&root, &["add", "both.txt"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "base"]).unwrap();
+        let (s, ran) = husky_session(d.path(), &root);
+        std::fs::write(s.worktree.join("both.txt"), "the session's\n").unwrap();
+        git(
+            &s.worktree,
+            &["-c", "core.hooksPath=/dev/null", "add", "both.txt"],
+        )
+        .unwrap();
+        git(
+            &s.worktree,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-q",
+                "-m",
+                "mine",
+            ],
+        )
+        .unwrap();
+        std::fs::write(root.join("both.txt"), "trunk's\n").unwrap();
+        git(&root, &["commit", "-q", "-am", "trunk moved"]).unwrap();
+        let old_baseline = s.merge_base("main").unwrap();
+        let onto = head_of(&root, "main").unwrap();
+
+        let refused = s
+            .replayed_onto(&root, &onto, &old_baseline)
+            .expect_err("the two edits conflict");
+        let refused = format!("{refused:#}");
+        let printed = refused
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("the refusal prints a command: {refused}"));
+        assert!(
+            printed.contains(" rebase "),
+            "and it is the rebase: {printed}"
+        );
+        let _ = std::fs::remove_file(&ran);
+        Command::new("sh").arg("-c").arg(printed).output().unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "the command omh told the user to run ran hooks the agent wrote: {printed}"
+        );
+    }
+
+    /// The same for the command a worktree off its branch is refused with:
+    /// `git checkout` runs `post-checkout`.
+    #[cfg(unix)]
+    #[test]
+    fn the_command_printed_for_a_worktree_off_its_branch_runs_no_hook_the_worktree_supplied() {
+        let (d, root) = repo();
+        let (s, ran) = husky_session(d.path(), &root);
+        git(
+            &s.worktree,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "checkout",
+                "-q",
+                "--detach",
+            ],
+        )
+        .unwrap();
+
+        let refused = s
+            .diff("main", What::Summary)
+            .expect_err("a worktree off its branch is not reviewed");
+        let refused = format!("{refused:#}");
+        let printed = refused
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("the refusal prints a command: {refused}"));
+        let _ = std::fs::remove_file(&ran);
+        let typed = Command::new("sh").arg("-c").arg(printed).output().unwrap();
+
+        assert_eq!(
+            fired(&ran),
+            "",
+            "the command omh told the user to run ran hooks the agent wrote: {printed}"
+        );
+        assert!(
+            typed.status.success(),
+            "and it does what it was printed for: {}",
+            String::from_utf8_lossy(&typed.stderr)
         );
     }
 

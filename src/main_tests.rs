@@ -2906,10 +2906,9 @@ fn a_sync_that_refuses_has_changed_nothing() {
     // The remedy, run as written.
     let remedy = said
         .split('`')
-        .find(|part| part.starts_with("git -C ") && part.contains(" rebase "))
+        .find(|part| part.starts_with("git ") && part.contains(" rebase "))
         .unwrap_or_else(|| panic!("the refusal names a command: {said}"));
-    let words: Vec<&str> = remedy.split_whitespace().collect();
-    let ran = Command::new(words[0]).args(&words[1..]).output().unwrap();
+    let ran = Command::new("sh").arg("-c").arg(remedy).output().unwrap();
     let stderr = String::from_utf8_lossy(&ran.stderr);
     assert!(
         !stderr.contains("already used by worktree") && !stderr.contains("already checked out"),
@@ -3438,6 +3437,38 @@ fn a_missing_shadow_does_not_hide_uncommitted_worktree_files() {
             cmd::harvest::AtStake::Work(_)
         ),
         "the worktree itself still contains work"
+    );
+}
+
+/// With no sandbox, what `rm` counts in the worktree is what a review and
+/// `omh s` count: `Session::changed`. A `status` of its own counted a rename
+/// twice and omh's rules written over a tracked `CLAUDE.md` as work.
+#[test]
+fn with_no_sandbox_rm_counts_the_worktree_as_a_review_does() {
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
+    std::fs::remove_dir_all(&shadow.gitdir).unwrap();
+    std::fs::remove_file(&shadow.seed_record).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&session.worktree)
+            .args(["-c", "core.hooksPath=/dev/null"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::write(session.worktree.join("old.rs"), "fn old() {}\n").unwrap();
+    std::fs::write(session.worktree.join("CLAUDE.md"), "the project's\n").unwrap();
+    git(&["add", "old.rs", "CLAUDE.md"]);
+    git(&["commit", "-q", "-m", "tracked"]);
+    git(&["mv", "old.rs", "new.rs"]);
+    std::fs::write(session.worktree.join("CLAUDE.md"), "omh's rules\n").unwrap();
+
+    let changed = session.changed().unwrap();
+    assert_eq!(changed.len(), 3, "one.rs, two.rs and new.rs: {changed:?}");
+    assert_eq!(
+        cmd::harvest::at_stake(&paths, &session),
+        cmd::harvest::AtStake::Work("3 uncommitted paths in the worktree".to_string())
     );
 }
 
@@ -9366,4 +9397,88 @@ fn no_docker_run_omh_builds_can_pull_its_image() {
             "{args:?}"
         );
     }
+}
+
+/// Every git omh starts is started from `git.rs`, by a builder that says whose
+/// tree it runs in. The rule — no hooks, no setting believed, where the agent
+/// writes — was held by naming: two runner families, `NO_HOOKS` in one module
+/// and `NEUTRALISED` in another, and twenty-nine `Command::new("git")` that
+/// each chose between them, or forgot to, where they stood.
+#[test]
+fn no_git_starts_outside_the_git_module() {
+    let mut found = Vec::new();
+    let mut files = 0;
+    for (path, body) in crate::testsrc::production() {
+        files += 1;
+        if path.ends_with("src/git.rs") {
+            continue;
+        }
+        for (n, line) in body.lines().enumerate() {
+            if line.contains("Command::new(\"git\")") {
+                found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        files > 40,
+        "the walk read {files} files — it is not reading src/"
+    );
+    // By name, not only by count: the two files that carried the constants and
+    // most of the spawns.
+    let sources = crate::testsrc::production();
+    for carried in ["src/session.rs", "src/shadow.rs"] {
+        assert!(
+            sources
+                .iter()
+                .any(|(path, body)| path.ends_with(carried) && !body.is_empty()),
+            "the scan no longer reads {carried}"
+        );
+    }
+    assert!(
+        found.is_empty(),
+        "{} git spawns outside git.rs: {found:#?}",
+        found.len()
+    );
+}
+
+/// "Run no hooks" has one spelling. The agent's repositories said it with the
+/// empty value and a session's worktree with `/dev/null`: both run nothing,
+/// but `rev-parse --git-path hooks` reads the empty one back as `./`, a
+/// directory the agent writes.
+#[test]
+fn every_git_omh_keeps_hooks_off_says_so_one_way() {
+    let hooks: Vec<&str> = crate::git::NEUTRALISED
+        .iter()
+        .copied()
+        .filter(|kv| kv.starts_with("core.hooksPath="))
+        .collect();
+    assert_eq!(hooks, [crate::git::NO_HOOKS[1]]);
+}
+
+/// A git command omh prints for a session's worktree comes from
+/// `git::typed_in_worktree`. Typed bare there, `git` runs hooks from a relative
+/// `core.hooksPath` among the agent's files: the sync refusal's `rebase` ran
+/// `pre-rebase`, and the off-branch refusal's `checkout` ran `post-checkout`.
+#[test]
+fn no_message_spells_a_worktree_git_by_hand() {
+    let sources = crate::testsrc::production();
+    assert!(
+        sources
+            .iter()
+            .any(|(path, body)| path.ends_with("src/session.rs") && !body.is_empty()),
+        "the scan no longer reads src/session.rs, which carried both"
+    );
+    let found: Vec<String> = sources
+        .iter()
+        .filter(|(path, _)| !path.ends_with("src/git.rs"))
+        .flat_map(|(path, body)| {
+            body.lines()
+                .enumerate()
+                // Prose about a command is not a command printed.
+                .filter(|(_, line)| !line.trim_start().starts_with("//"))
+                .filter(|(_, line)| line.contains("`git -C "))
+                .map(move |(n, line)| format!("{}:{}: {}", path.display(), n + 1, line.trim()))
+        })
+        .collect();
+    assert!(found.is_empty(), "{found:#?}");
 }
