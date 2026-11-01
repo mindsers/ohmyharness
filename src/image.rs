@@ -4,7 +4,8 @@
 //! runs the adapter's install command. The base deliberately satisfies the
 //! `sbx` kit contract — non-root `agent` at UID 1000, passwordless sudo,
 //! `/home/agent`, proxy env forwarding — so the same image works on either
-//! backend and an sbx kit becomes a two-line file rather than a port.
+//! backend and an sbx kit becomes a two-line file rather than a port. On
+//! docker and podman the session's entrypoint takes the sudo away again.
 
 use crate::adapter::Adapter;
 use crate::base::GRAPH_CACHE;
@@ -565,37 +566,46 @@ RUN git config --system --add safe.directory {workdir}
 # The host key is omh's, mounted in and installed here as root — a bind-mounted
 # key carries host ownership and sshd refuses it — so the client can pin it.
 # `ssh-keygen -A` is the fallback for a container run without the mount.
+#
+# Docker and podman run this as root (`--user=0`, the session's PID 1 only), so
+# it needs no sudo, and the first thing it does is take away the grant the
+# image keeps for sbx's kit contract: nothing the agent runs becomes root.
+# `no-new-privileges` makes the grant inert as well. Run as anyone else — sbx,
+# whose launch is not wired yet — `$SUDO` is the sudo it used before. The key
+# is written under agent's home, not `$HOME`, which as root is `/root`.
 RUN printf '%s\n' \
   '#!/bin/sh' \
   'set -e' \
-  'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"' \
+  'if [ "$(id -u)" = 0 ]; then rm -f /etc/sudoers.d/agent; SUDO=; else SUDO=sudo; fi' \
+  'mkdir -p {GUEST_HOME}/.ssh && chmod 700 {GUEST_HOME}/.ssh' \
   'if [ -n "$OMH_PUBKEY" ]; then' \
-  '  printf "%s\\n" "$OMH_PUBKEY" > "$HOME/.ssh/authorized_keys"' \
-  '  chmod 600 "$HOME/.ssh/authorized_keys"' \
+  '  printf "%s\\n" "$OMH_PUBKEY" > {GUEST_HOME}/.ssh/authorized_keys' \
+  '  chmod 600 {GUEST_HOME}/.ssh/authorized_keys' \
   'fi' \
+  'chown -R agent:agent {GUEST_HOME}/.ssh' \
   '# sbx mounts each workspace at its host path and cannot mount a guest' \
   '# path, so every guest path the profile needs is reached by a symlink' \
   '# named here in OMH_LINKS (one "guest host" per line, guest first). Docker' \
   '# leaves OMH_LINKS empty and this is a no-op. rmdir clears the empty' \
-  '# placeholder omh created (never a populated dir); sudo is the fallback' \
+  '# placeholder omh created (never a populated dir); $SUDO is the fallback' \
   '# for a guest path under a root-owned parent.' \
   'if [ -n "$OMH_LINKS" ]; then' \
   '  printf "%s\\n" "$OMH_LINKS" | while read -r guest host; do' \
   '    [ -n "$guest" ] || continue' \
   '    dir=$(dirname "$guest")' \
-  '    mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir"' \
-  '    if [ -d "$guest" ] && [ ! -L "$guest" ]; then rmdir "$guest" 2>/dev/null || sudo rmdir "$guest" 2>/dev/null || true; fi' \
-  '    ln -sfn "$host" "$guest" 2>/dev/null || sudo ln -sfn "$host" "$guest"' \
+  '    mkdir -p "$dir" 2>/dev/null || $SUDO mkdir -p "$dir"' \
+  '    if [ -d "$guest" ] && [ ! -L "$guest" ]; then rmdir "$guest" 2>/dev/null || $SUDO rmdir "$guest" 2>/dev/null || true; fi' \
+  '    ln -sfn "$host" "$guest" 2>/dev/null || $SUDO ln -sfn "$host" "$guest"' \
   '  done' \
   'fi' \
   'if [ -f {hostkeys}/ssh_host_ed25519_key ]; then' \
-  '  sudo install -o root -g root -m 600 {hostkeys}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key' \
-  '  sudo install -o root -g root -m 644 {hostkeys}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub' \
+  '  $SUDO install -o root -g root -m 600 {hostkeys}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key' \
+  '  $SUDO install -o root -g root -m 644 {hostkeys}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub' \
   'else' \
-  '  sudo ssh-keygen -A >/dev/null 2>&1 || true' \
+  '  $SUDO ssh-keygen -A >/dev/null 2>&1 || true' \
   'fi' \
-  'sudo mkdir -p /run/sshd' \
-  'sudo /usr/sbin/sshd -E /omh/sshd.log -o HostKey=/etc/ssh/ssh_host_ed25519_key -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes -o AllowAgentForwarding=no -o X11Forwarding=no' \
+  '$SUDO mkdir -p /run/sshd' \
+  '$SUDO /usr/sbin/sshd -E /omh/sshd.log -o HostKey=/etc/ssh/ssh_host_ed25519_key -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes -o AllowAgentForwarding=no -o X11Forwarding=no' \
   'exec sleep infinity' \
   > /usr/local/bin/omh-session \
  && chmod 0755 /usr/local/bin/omh-session
@@ -4523,7 +4533,48 @@ mod tests {
         );
         assert!(df.contains("agent"), "agent user");
         assert!(df.contains(GUEST_HOME), "home directory");
+        // sbx's contract only: docker's and podman's entrypoint takes it away
+        // (`the_entrypoint_takes_the_agents_sudo_away`).
         assert!(df.contains("NOPASSWD"), "passwordless sudo");
+    }
+
+    /// The entrypoint, root under docker and podman, takes the agent's sudo
+    /// away before anything else and calls no sudo itself. The grant stays in
+    /// the image for sbx's kit contract; `no-new-privileges` makes it inert
+    /// anyway, and this is the second line.
+    #[test]
+    fn the_entrypoint_takes_the_agents_sudo_away() {
+        let df = base_dockerfile(None);
+        let entrypoint: Vec<&str> = df.lines().filter(|l| l.starts_with("  '")).collect();
+        let first = entrypoint
+            .iter()
+            .position(|l| l.contains("rm -f /etc/sudoers.d/agent"))
+            .unwrap_or_else(|| panic!("the grant is never taken away: {entrypoint:#?}"));
+        assert!(
+            first <= 3,
+            "taken away first, before anything that could fail: {entrypoint:#?}"
+        );
+        assert!(
+            !entrypoint
+                .iter()
+                .any(|l| l.contains("'sudo ") || l.contains("  sudo ")),
+            "root needs no sudo: {entrypoint:#?}"
+        );
+    }
+
+    /// Run as root, `$HOME` is `/root`, and the key sshd reads for `agent` is
+    /// under `agent`'s home, owned by `agent` — sshd refuses one owned by
+    /// anyone else.
+    #[test]
+    fn the_entrypoint_writes_the_agents_key_where_sshd_reads_it() {
+        let df = base_dockerfile(None);
+        let keys = format!("{GUEST_HOME}/.ssh/authorized_keys");
+        assert!(df.contains(&keys), "{df}");
+        assert!(!df.contains("$HOME/.ssh"), "{df}");
+        assert!(
+            df.contains(&format!("chown -R agent:agent {GUEST_HOME}/.ssh")),
+            "{df}"
+        );
     }
 
     /// The session's sshd takes the key omh hands it and nothing else.
@@ -4581,13 +4632,13 @@ mod tests {
         let key = format!("{}/ssh_host_ed25519_key", crate::ssh::GUEST_HOST_KEYS);
         assert!(
             df.contains(&format!(
-                "sudo install -o root -g root -m 600 {key} /etc/ssh/ssh_host_ed25519_key"
+                "$SUDO install -o root -g root -m 600 {key} /etc/ssh/ssh_host_ed25519_key"
             )),
             "the private half is root's, mode 600: {df}"
         );
         assert!(
             df.contains(&format!(
-                "sudo install -o root -g root -m 644 {key}.pub /etc/ssh/ssh_host_ed25519_key.pub"
+                "$SUDO install -o root -g root -m 644 {key}.pub /etc/ssh/ssh_host_ed25519_key.pub"
             )),
             "and the public half beside it: {df}"
         );
@@ -4934,7 +4985,7 @@ mod tests {
     /// `runtime::encode_links` fills). The docker backend leaves `OMH_LINKS`
     /// unset and the loop is a no-op, so the one entrypoint serves both. A
     /// guest path under a root-owned directory needs `sudo` to link, so the
-    /// loop must fall back to it.
+    /// loop falls back to it when the entrypoint is not root (`$SUDO`).
     #[test]
     fn the_session_entrypoint_symlinks_the_guest_paths_sbx_cannot_mount() {
         let df = base_dockerfile(None);
@@ -4947,8 +4998,8 @@ mod tests {
             "the entrypoint must make the symlinks: {df}"
         );
         assert!(
-            df.contains("sudo ln -s"),
-            "a root-owned guest path needs sudo to link: {df}"
+            df.contains("$SUDO ln -s"),
+            "a root-owned guest path needs sudo to link, when not root: {df}"
         );
     }
 

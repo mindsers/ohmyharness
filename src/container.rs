@@ -1618,7 +1618,7 @@ impl Plan {
             // running container kept the old ones.
             (
                 "omh.confinement".into(),
-                crate::runtime::confinement(self).join("\n"),
+                crate::runtime::session_confinement(self).join("\n"),
             ),
         ]
     }

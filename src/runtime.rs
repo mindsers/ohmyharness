@@ -208,8 +208,8 @@ pub trait Runtime: std::fmt::Debug {
 /// attach to any session, on either Debian base, and omh reported it as the
 /// editor failing to open.
 pub const SESSION_CAPS: &[&str] = &[
-    // `sudo` in the entrypoint: becoming root to start sshd, and sshd itself
-    // dropping to `agent` for the session.
+    // sshd dropping to `agent` for a login, and to its own privilege-separation
+    // user before authentication.
     "SETUID",
     "SETGID",
     // The entrypoint's `chmod`/`chown` on files the bind mounts land with host
@@ -239,13 +239,19 @@ pub const SESSION_CAPS: &[&str] = &[
 /// day it is wrong the fix is one line with a reason next to it.
 pub const PIDS_LIMIT: u32 = 2048;
 
-/// The confinement every Docker `run` carries: the capability set, the process
-/// ceiling, and whatever `sandbox_memory`/`sandbox_cpus` ask for.
+/// The confinement every Docker `run` carries: the capability set, no process
+/// gaining privilege, the process ceiling, and whatever
+/// `sandbox_memory`/`sandbox_cpus` ask for.
 ///
-/// Not `--security-opt=no-new-privileges`: the entrypoint's `sudo` needs to
-/// gain privilege, and the decision was to keep sudo. A test pins that reason.
+/// `no-new-privileges` holds for every process in the container, `exec` and
+/// ssh logins included: a setuid binary — `sudo` above all — runs without the
+/// privilege it would grant. The entrypoint needs none, because it runs as root
+/// ([`session_confinement`]).
 pub(crate) fn confinement(plan: &Plan) -> Vec<String> {
-    let mut a: Vec<String> = vec!["--cap-drop=ALL".into()];
+    let mut a: Vec<String> = vec![
+        "--cap-drop=ALL".into(),
+        "--security-opt=no-new-privileges".into(),
+    ];
     a.extend(SESSION_CAPS.iter().map(|c| format!("--cap-add={c}")));
     a.extend(["--pids-limit".into(), PIDS_LIMIT.to_string()]);
     if let Some(memory) = &plan.limits.memory {
@@ -254,6 +260,17 @@ pub(crate) fn confinement(plan: &Plan) -> Vec<String> {
     if let Some(cpus) = &plan.limits.cpus {
         a.extend(["--cpus".into(), cpus.clone()]);
     }
+    a
+}
+
+/// [`confinement`], plus what only the long-lived session container runs
+/// with: PID 1 as root, so the entrypoint installs the host key and starts
+/// sshd without sudo. A one-shot run executes its argv directly and stays the
+/// image's `agent`, and every way into a session is `-u agent`. In the stamp
+/// (`Plan::labels`), so a container started the old way restarts.
+pub(crate) fn session_confinement(plan: &Plan) -> Vec<String> {
+    let mut a = confinement(plan);
+    a.push("--user=0".into());
     a
 }
 
@@ -376,7 +393,7 @@ impl Runtime for Docker {
             "--name".into(),
             name.into(),
         ];
-        a.extend(confinement(plan));
+        a.extend(session_confinement(plan));
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
         // to the local network.
         a.push("-p".into());
@@ -428,8 +445,8 @@ impl Runtime for Docker {
         if tty {
             a.push("-it".into());
         }
-        // Never root: the session's PID 1 needs privilege to run sshd, the
-        // agent does not.
+        // Never root: the session's PID 1 runs as root to start sshd, so an
+        // `exec` that named nobody would be root too.
         a.extend([
             "-u".into(),
             "agent".into(),
@@ -1721,29 +1738,48 @@ mod tests {
         }
     }
 
-    /// Why `no-new-privileges` is not on by default, pinned to the reason.
+    /// Nothing in a session can gain privilege (10-19 S1).
     ///
-    /// The entrypoint runs sshd through `sudo`, and `no-new-privileges` is
-    /// exactly the flag that makes a setuid binary not gain privilege. The two
-    /// cannot both be true, and the decision was to keep sudo. This test goes
-    /// red the day sudo leaves the entrypoint — at which point the flag should
-    /// go on and this test should go.
+    /// This test pinned the opposite until S1: "`no-new-privileges` is not on,
+    /// because the entrypoint runs sshd through `sudo`", written to go red the
+    /// day sudo left the entrypoint. The agent had passwordless sudo, and on
+    /// rootful Linux Docker root in the container owns what it writes into the
+    /// bind mounts. The entrypoint now runs as root and needs no sudo, so the
+    /// flag is on, for the session and for a one-shot run alike.
     #[test]
-    fn sudo_in_the_entrypoint_is_why_no_new_privileges_cannot_be_default() {
-        let df = crate::image::base_dockerfile(None);
-        let entrypoint: Vec<&str> = df.lines().filter(|l| l.starts_with("  '")).collect();
-        assert!(
-            entrypoint.iter().any(|l| l.contains("sudo ")),
-            "sudo has left the entrypoint: add `--security-opt=no-new-privileges` to \
-             `up_args` and `args`, and delete this test"
-        );
+    fn no_session_process_can_gain_privilege() {
         for args in [
             Docker.up_args(&sample_plan(), "n", 1, "k"),
             Docker.args(&sample_plan()),
         ] {
             assert!(
-                !args.iter().any(|a| a.contains("no-new-privileges")),
-                "sudo needs to gain privilege, so the flag would break the entrypoint: {args:?}"
+                args.iter().any(|a| a == "--security-opt=no-new-privileges"),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// Only the session's PID 1 runs as root, to install the host key and
+    /// start sshd without sudo. A one-shot run executes its argv directly, so
+    /// it stays the image's `agent`, and every way into a running session is
+    /// `-u agent`: with root as the container's user, an `exec` that named
+    /// nobody would be root.
+    #[test]
+    fn only_the_sessions_entrypoint_runs_as_root() {
+        let up = Docker.up_args(&sample_plan(), "n", 1, "k");
+        assert!(up.iter().any(|a| a == "--user=0"), "{up:?}");
+        let once = Docker.args(&sample_plan());
+        assert!(
+            !once.iter().any(|a| a.starts_with("--user") || a == "-u"),
+            "{once:?}"
+        );
+        for args in [
+            Docker.exec_args("n", &["sh".into()], true),
+            Docker.exec_detached_args("n", &["sh".into()]),
+        ] {
+            assert!(
+                args.windows(2).any(|w| w[0] == "-u" && w[1] == "agent"),
+                "{args:?}"
             );
         }
     }
@@ -2035,7 +2071,7 @@ mod tests {
             .into_iter()
             .map(|(k, v)| format!("{k}={v}\n"))
             .collect();
-        for flag in confinement(&plan) {
+        for flag in session_confinement(&plan) {
             assert!(
                 stamp.contains(&flag),
                 "`{flag}` is not in the stamp:\n{stamp}"

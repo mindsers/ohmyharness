@@ -373,6 +373,32 @@ sshd refuses both — the half that holds, since an `ssh -A` on the command line
 outranks any config file. A test on a real container asks for the agent with
 `-A` and checks the session never sees it.
 
+### 3b. ~~The agent could become root in its container~~
+
+**Closed on Docker and podman.** The image gave `agent` passwordless sudo, so
+that the entrypoint, running as `agent`, could install the host key and start
+sshd. Anything the agent ran could do the same. On rootful Linux Docker, root
+in the container owns what it writes into the bind mounts — the worktree, the
+account directory, the note store — setuid bits included. Docker Desktop maps
+those writes to your user, so macOS was not exposed the same way.
+
+**What changed.** The session container's PID 1 runs as root and does that
+work itself, then takes the grant away before anything else; every way into a
+session — `docker exec`, an ssh login — is `agent`. Every container runs with
+`--security-opt=no-new-privileges`, so a setuid binary, `sudo` included, gains
+nothing even if the grant came back. A test on a real container asks for root
+through `sudo` over an ssh login with a terminal and over `docker exec`, and
+reads `NoNewPrivs` from both.
+
+**What it costs.** `sudo` inside a session no longer works, so an agent cannot
+`apt-get install` a package. What a session needs belongs in its image: a
+[stack](/reference/stacks/)'s `install`, or the adapter's.
+
+**What remains.** The image keeps the grant for the `sbx` kit contract, whose
+launch is not wired yet. The capabilities sshd needs as root — `SETUID`,
+`SETGID`, `CHOWN`, `FOWNER`, `DAC_OVERRIDE` among them — stay in the session's
+set, so a compromised sshd is still root with them.
+
 ### 4. `carry_in` is read from a committed layer
 
 **It is the only path by which a secret reaches the agent**, so patterns are
