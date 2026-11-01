@@ -28,9 +28,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: run every test, including the ones that need Docker
         run: cargo test --locked -- --include-ignored
 
@@ -48,7 +48,7 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: install rust 1.88
         run: rustup toolchain install 1.88 --profile minimal
       - name: install omh as cargo install would, with no lockfile
@@ -69,9 +69,9 @@ jobs:
         harness: [claude, codex, omp, opencode]
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # `--exact` with a name no test carries runs nothing and passes:
       # `0 passed; 4 filtered out`, exit 0. A harness renamed in `adapters/`
       # and not here would go green every night having run nothing, so the

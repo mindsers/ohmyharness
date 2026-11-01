@@ -1,0 +1,18 @@
+Third-party software in omh
+===========================
+
+omh is MIT-licensed (see LICENSE). Its binary links the crates below, each
+under the licence named, whose full text follows its list.
+{{#each licenses}}
+
+------------------------------------------------------------------------------
+{{{name}}} ({{id}})
+------------------------------------------------------------------------------
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}} <{{crate.repository}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}
