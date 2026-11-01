@@ -182,20 +182,8 @@ impl Sandbox {
     /// and the one a guard has to refuse.
     fn omh_with_stdin(&self, args: &[&str], input: &str) -> Output {
         use std::io::Write;
-        let path = match std::env::var("PATH") {
-            Ok(rest) => format!("{}:{rest}", self.bin.display()),
-            Err(_) => self.bin.display().to_string(),
-        };
-        let mut child = Command::new(env!("CARGO_BIN_EXE_omh"))
-            .args(args)
-            .current_dir(&self.repo)
-            .env("HOME", &self.home)
-            .env("PATH", path)
-            .env("EDITOR", self.bin.join("fake-editor"))
-            // Read before `$EDITOR`, so one in the environment running the
-            // suite would open a real editor: taken out, and set where a test
-            // means it.
-            .env_remove("VISUAL")
+        let mut child = self
+            .command(&self.repo, args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -213,21 +201,7 @@ impl Sandbox {
     /// Run with these variables set over the sandbox's own — an `$EDITOR`
     /// that writes, say, where the default one only records.
     fn omh_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        let path = match std::env::var("PATH") {
-            Ok(rest) => format!("{}:{rest}", self.bin.display()),
-            Err(_) => self.bin.display().to_string(),
-        };
-        let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
-        command
-            .args(args)
-            .current_dir(&self.repo)
-            .env("HOME", &self.home)
-            .env("PATH", path)
-            .env("EDITOR", self.bin.join("fake-editor"))
-            // Read before `$EDITOR`, so one in the environment running the
-            // suite would open a real editor: taken out, and set where a test
-            // means it.
-            .env_remove("VISUAL");
+        let mut command = self.command(&self.repo, args);
         for (k, v) in env {
             command.env(k, v);
         }
@@ -254,11 +228,21 @@ impl Sandbox {
     /// Run somewhere other than the sandbox repo — outside one, for the
     /// commands whose subject is a file that does not live in a repository.
     fn omh_in(&self, cwd: &Path, args: &[&str]) -> Output {
+        self.command(cwd, args)
+            .output()
+            .expect("the binary under test must run")
+    }
+
+    /// The one place a run's environment is made, so every way of running omh
+    /// here sees the same one — whatever the environment running the suite
+    /// holds.
+    fn command(&self, cwd: &Path, args: &[&str]) -> Command {
         let path = match std::env::var("PATH") {
             Ok(rest) => format!("{}:{rest}", self.bin.display()),
             Err(_) => self.bin.display().to_string(),
         };
-        Command::new(env!("CARGO_BIN_EXE_omh"))
+        let mut command = omh_binary();
+        command
             .args(args)
             .current_dir(cwd)
             .env("HOME", &self.home)
@@ -267,9 +251,8 @@ impl Sandbox {
             // Read before `$EDITOR`, so one in the environment running the
             // suite would open a real editor: taken out, and set where a test
             // means it.
-            .env_remove("VISUAL")
-            .output()
-            .expect("the binary under test must run")
+            .env_remove("VISUAL");
+        command
     }
 
     /// An editor on the sandbox's PATH that records the argv it was given.
@@ -8294,7 +8277,7 @@ impl Sandbox {
             Err(_) => self.bin.display().to_string(),
         };
         let child = {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
+            let mut command = omh_binary();
             command
                 .args(args)
                 .current_dir(&self.repo)
@@ -8625,7 +8608,7 @@ fn settings_typed_at_a_terminal_into_a_pipe_is_the_report() {
     let sb = sandbox();
     sb.seed_base();
     let (_keys, slave) = pty();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let mut child = omh_binary()
         .arg("settings")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -10181,7 +10164,7 @@ fn init_installs_every_directory_this_repo_ships() {
     let sb = sandbox();
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("init")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -10244,7 +10227,7 @@ fn a_missing_container_runtime_records_no_resolution() {
     let sb = sandbox();
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("init")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -10285,7 +10268,7 @@ fn a_missing_container_runtime_still_leaves_the_repo_configured() {
 
     // Nothing on PATH, so `runtime::select` can find no backend. Whether init
     // reports failure is not what is asserted — what it left behind is.
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("init")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -11410,7 +11393,7 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
     sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("doctor")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -16865,7 +16848,7 @@ fn a_provider_authored_for_an_account_reaches_its_launches() {
     let kept = sb.home.join(".omh/creds/codex/default/provider.toml");
     assert!(!kept.exists(), "a refused provider was kept");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .args([
             "account",
             "login",
@@ -16954,7 +16937,7 @@ fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
     let kept = account.join("provider.yml");
     assert!(!kept.exists(), "a refused provider was kept");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .args([
             "account",
             "login",
@@ -17209,7 +17192,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
         ("omp", &omp, "provider.yml"),
         ("codex", &codex, "provider.toml"),
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        let out = omh_binary()
             .args([
                 "account",
                 "login",
@@ -17255,7 +17238,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     // latter and refuses a link there before this rule is ever asked.
     let link = omp.with_extension("yaml");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .args([
             "account",
             "login",
@@ -18219,6 +18202,37 @@ struct Surface {
 /// output layer, so there is nothing per command to classify.
 const GLOBAL_FLAGS: [&str; 4] = ["--json", "--dry-run", "--session", "--color"];
 
+/// The binary under test, run with none of the caller's colour settings.
+///
+/// Colour is decided from these, and a developer who exports
+/// `CLICOLOR_FORCE=1` failed three tests that compare plain text: the suite
+/// asserts what omh prints, not what one shell asks of it. Every run here goes
+/// through this, and `every_run_goes_through_omh_binary` holds that.
+fn omh_binary() -> Command {
+    plain(Command::new(env!("CARGO_BIN_EXE_omh")))
+}
+
+/// `command`, with the colour variables taken out.
+fn plain(mut command: Command) -> Command {
+    for colour in ["CLICOLOR_FORCE", "CLICOLOR", "NO_COLOR", "FORCE_COLOR"] {
+        command.env_remove(colour);
+    }
+    command
+}
+
+#[test]
+fn every_run_goes_through_omh_binary() {
+    let me = std::fs::read_to_string(file!()).unwrap();
+    let direct = me
+        .lines()
+        .filter(|l| l.contains(concat!("Command::new(env!(", "\"CARGO_BIN_EXE_omh\"))")))
+        .count();
+    assert_eq!(
+        direct, 1,
+        "a run that builds its own Command inherits the caller's colour settings"
+    );
+}
+
 /// Everything omh accepts, asked of the binary — a map from `omh <path>` to
 /// what that path takes.
 ///
@@ -18226,7 +18240,7 @@ const GLOBAL_FLAGS: [&str; 4] = ["--json", "--dry-run", "--session", "--color"];
 /// drives the real binary and a list maintained by hand would be a second
 /// place to forget, which is the defect this exists to catch.
 fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
-    let help = Command::new(bin)
+    let help = plain(Command::new(bin))
         .args(path)
         .arg("--help")
         .output()
