@@ -3668,9 +3668,12 @@ fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
         "a .gitignore the agent wrote hid sub/morning.rs from rm: {stake:?}"
     );
 
-    // Nor an excludes file the agent names in the sandbox repository's own
-    // config: its source is an absolute path, and every absolute source was
-    // believed as the user's own `core.excludesFile`.
+    // Nor an excludes file named in the sandbox repository's own config: its
+    // source is an absolute path, and every absolute source was believed as
+    // the user's own `core.excludesFile`. A second line, and these cases with
+    // it: that config is mounted read-only into the sandbox and rewritten to
+    // an allowlist at every launch (#52), so the agent cannot set the key the
+    // fixtures write here directly.
     let (tmp, paths, session, shadow) = a_session_with_nothing_unkept();
     let planted = tmp.path().join("agents-ignore");
     std::fs::write(&planted, "*\n").unwrap();

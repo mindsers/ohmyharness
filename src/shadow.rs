@@ -1217,10 +1217,12 @@ impl Shadow {
         let fields: Vec<&str> = answer.split('\0').collect();
         let users = users_excludes_file();
         // Every excludes file a config other than the user's own names — the
-        // repository's, its `config.worktree`, anything they include — is the
-        // agent's, whatever it points at. `--show-scope` says whose each value
-        // is: `--local` alone reads neither `config.worktree` nor an
-        // `include`.
+        // repository's, its `config.worktree`, anything they include — is not
+        // the user's, whatever it points at. A second line: that config is
+        // mounted read-only into the sandbox and rewritten to an allowlist at
+        // every launch (#52), so none of those keys survives to be read here
+        // today. `--show-scope` says whose each value is: `--local` alone
+        // reads neither `config.worktree` nor an `include`.
         //
         // `-z`, read as `scope NUL value NUL` pairs and never trimmed: a value
         // is the agent's to write, newlines and all, and `check-ignore` names
