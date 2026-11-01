@@ -916,7 +916,7 @@ impl Ctx {
             ("cmd/settings_tui.rs", "defaults", 212),
             ("cmd/upgrade.rs", "upgrade_cmd", 203),
             ("container.rs", "plan", 277),
-            ("main.rs", "dispatch", 498),
+            ("main.rs", "dispatch", 212),
             ("prefs/review.rs", "review", 283),
             ("report.rs", "human", 201),
             ("shadow.rs", "harvest", 287),
