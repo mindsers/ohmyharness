@@ -442,8 +442,17 @@ pub(crate) fn diff_report(
     // a never-launched session the same way. Without it, `omh sNN log` said
     // *no checkpoints* and exited 0 while `omh sNN diff 1` quoted the path of
     // a seed record at a user who has never heard of one.
+    //
+    // Asked of the disk properly: `exists()` answers `false` for a path omh
+    // could not stat, and that told the user the agent had committed nothing,
+    // about a repository omh could not look at.
+    let there = |at: &std::path::Path| {
+        session::still_there(at).map_err(|e| {
+            anyhow::anyhow!("omh could not tell whether {} is there: {e}", at.display())
+        })
+    };
     anyhow::ensure!(
-        shadow.seed_record.exists() || shadow.gitdir.exists(),
+        there(&shadow.seed_record)? || there(&shadow.gitdir)?,
         "there is no checkpoint {number} in this session. The agent has not committed \
          anything here yet — its sandbox has never run"
     );
@@ -1688,6 +1697,34 @@ fn check_tail(stdout: &[u8], stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sandbox omh could not stat is not one that never ran: `exists()`
+    /// answered `false` for both, and the user was told the agent had
+    /// committed nothing, about a repository omh could not look at.
+    #[cfg(unix)]
+    #[test]
+    fn a_sandbox_omh_could_not_stat_is_not_one_that_never_ran() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root stats through 0o000: nothing would be tested
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let shadows = paths.shadows();
+        std::fs::create_dir_all(&shadows).unwrap();
+        let session = Session::new(&paths.worktrees(), "s01".into());
+        std::fs::set_permissions(&shadows, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let got = diff_report(&paths, &session, Some(1), None, false, &out::Ctx::plain());
+        std::fs::set_permissions(&shadows, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let said = format!(
+            "{:#}",
+            got.expect_err("it could not look, so it cannot answer")
+        );
+        assert!(!said.contains("never run"), "{said}");
+    }
 
     /// A checks outcome omh could not record is an error its caller says, not
     /// a `let _ =` that leaves the last run's `passed` for `omh sNN` to show.
