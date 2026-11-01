@@ -42,7 +42,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: run every test
         run: cargo test --locked -- --include-ignored
 
@@ -59,7 +59,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: run every test that does not need a container runtime
         run: cargo test --locked
       # Ignored for the network it needs, not for Docker, and its real arm is
@@ -76,7 +76,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: check formatting
         run: cargo fmt --check
       # `--features e2e`: tests/e2e is `required-features`, so `--all-targets`
@@ -98,7 +98,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: shellcheck it
         run: shellcheck install.sh scripts/test-install.sh scripts/check.sh scripts/test-check.sh
       - name: exercise check.sh's toolchain guard
@@ -126,7 +126,7 @@ jobs:
         with:
           fetch-depth: 0 # each page shows when it last changed, read from git
       - name: install node and pnpm, at the versions docs/mise.toml pins
-        uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
           working_directory: docs
       - name: install the site's dependencies, exactly as locked
@@ -160,7 +160,7 @@ jobs:
       - name: install rust 1.88
         run: rustup toolchain install 1.88 --profile minimal
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: build on the floor omh declares
         run: cargo build --locked --all-targets --features e2e
 

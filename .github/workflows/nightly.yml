@@ -30,7 +30,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: run every test, including the ones that need Docker
         run: cargo test --locked -- --include-ignored
 
@@ -71,7 +71,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # `--exact` with a name no test carries runs nothing and passes:
       # `0 passed; 4 filtered out`, exit 0. A harness renamed in `adapters/`
       # and not here would go green every night having run nothing, so the
