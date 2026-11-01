@@ -797,7 +797,7 @@ pub fn plan(
         // mounted below — a credential file among them too, except in a login,
         // which writes the account's identity into the account's own.
         let own: Vec<(PathBuf, String)> = match &adapter.preferences {
-            Some(prefs) if prefs.mount == crate::adapter::PrefMount::File => prefs
+            Some(prefs) if prefs.mount.mounts_each_file() => prefs
                 .declared()
                 .into_iter()
                 .filter(|d| opts.launch == Launch::Session || !adapter.creds.contains(&d.path))

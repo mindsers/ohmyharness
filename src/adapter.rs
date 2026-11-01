@@ -276,6 +276,53 @@ pub enum PrefMount {
     Dir,
 }
 
+/// What each mode means, asked here rather than compared against a mode
+/// where it matters: every answer is a `match` naming all three, so a fourth
+/// is a decision at each of them and never a silent `false`.
+impl PrefMount {
+    /// Whether the session's copy is written readable by the user alone:
+    /// only a `file` adapter's copy is mounted where the harness reads the
+    /// account's file, and Claude Code's `~/.claude.json` holds the account's
+    /// identity.
+    pub fn private(self) -> bool {
+        match self {
+            Self::File => true,
+            Self::Link | Self::Dir => false,
+        }
+    }
+
+    /// Whether each declared file is mounted on its own, over the account's
+    /// file where the harness reads it: the account then needs a mountpoint
+    /// for it, a session never sees the account's own, and the import keeps
+    /// its declared keys once, with no link to lay.
+    pub fn mounts_each_file(self) -> bool {
+        match self {
+            Self::File => true,
+            Self::Link | Self::Dir => false,
+        }
+    }
+
+    /// Whether the account's file becomes a link into the session's
+    /// directory: the only mode where a harness reads a fallback in the
+    /// file's place, and where a session from before the link can still be
+    /// reading the shared file.
+    pub fn links(self) -> bool {
+        match self {
+            Self::Link => true,
+            Self::File | Self::Dir => false,
+        }
+    }
+
+    /// Whether the session's copy is a whole directory of the harness's own
+    /// state, which a relaunch keeps beyond the declared keys.
+    pub fn whole_directory(self) -> bool {
+        match self {
+            Self::Dir => true,
+            Self::Link | Self::File => false,
+        }
+    }
+}
+
 /// A key inside a preferences file, one segment per table.
 pub type KeyPath = Vec<String>;
 
@@ -349,6 +396,12 @@ impl Preferences {
                 fallback: self.fallback.get(path).cloned().unwrap_or_default(),
             })
             .collect()
+    }
+
+    /// The files mounted on their own, as `creds` paths: none unless the mode
+    /// [`PrefMount::mounts_each_file`].
+    pub fn mounted_files(&self) -> impl Iterator<Item = &String> {
+        self.files.keys().filter(|_| self.mount.mounts_each_file())
     }
 }
 
@@ -1410,12 +1463,12 @@ impl Adapter {
                 "adapter {shown}: preferences file {file:?} declares no keys"
             );
         }
-        match (prefs.mount, prefs.root.as_deref()) {
-            (PrefMount::Dir, None) => anyhow::bail!(
+        match (prefs.mount.whole_directory(), prefs.root.as_deref()) {
+            (true, None) => anyhow::bail!(
                 "adapter {shown}: `mount = \"dir\"` needs a `root`, the directory the session's \
                  copy is mounted at"
             ),
-            (PrefMount::Dir, Some(root)) => {
+            (true, Some(root)) => {
                 anyhow::ensure!(
                     root.strip_prefix("$HOME/").is_some_and(|r| !r.is_empty()),
                     "adapter {shown}: preferences root {root:?} must be under $HOME"
@@ -1438,8 +1491,10 @@ impl Adapter {
                     );
                 }
             }
-            (_, Some(_)) => anyhow::bail!("adapter {shown}: `root` is for `mount = \"dir\"` alone"),
-            (_, None) => {}
+            (false, Some(_)) => {
+                anyhow::bail!("adapter {shown}: `root` is for `mount = \"dir\"` alone")
+            }
+            (false, None) => {}
         }
         for file in prefs.quiet.keys() {
             anyhow::ensure!(
@@ -1453,7 +1508,7 @@ impl Adapter {
                 "adapter {shown}: fallback for {file:?} is not one of `[preferences.files]`"
             );
             anyhow::ensure!(
-                prefs.mount == PrefMount::Link,
+                prefs.mount.links(),
                 "adapter {shown}: {file:?} has a fallback, and a fallback is read only where a \
                  link replaces the file — `mount = \"link\"`"
             );

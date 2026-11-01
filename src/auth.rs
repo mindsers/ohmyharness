@@ -224,8 +224,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     let preferred = adapter
         .preferences
         .iter()
-        .filter(|p| p.mount == crate::adapter::PrefMount::File)
-        .flat_map(|p| p.files.keys())
+        .flat_map(|p| p.mounted_files())
         .map(|path| (path, Point::File));
     let bound = adapter.capabilities.values().map(|b| match b.render {
         crate::adapter::Render::Dir => (&b.path, Point::Dir),

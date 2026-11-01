@@ -654,10 +654,9 @@ fn refuse_a_lost_provider(
 /// a `file` adapter, whose copy of `~/.claude.json` holds the account's
 /// identity, and as they always were for `link` and `dir`.
 fn place(dir: &crate::held::Dir, name: &OsStr, body: &[u8], mount: PrefMount) -> Result<()> {
-    match mount {
-        PrefMount::File => dir.replace_private(name, body)?,
-        PrefMount::Link => dir.replace(name, body)?,
-        PrefMount::Dir => dir.replace(name, body)?,
+    match mount.private() {
+        true => dir.replace_private(name, body)?,
+        false => dir.replace(name, body)?,
     }
     Ok(())
 }
@@ -668,7 +667,7 @@ impl Account {
     /// rename over the link, or keep on reading as the shared file.
     pub fn needs_quiet(&self) -> bool {
         !self.marked
-            && self.mount == PrefMount::Link
+            && self.mount.links()
             && self
                 .files
                 .iter()
@@ -679,13 +678,13 @@ impl Account {
     /// its preferences file — relative to the home — so that the copy is
     /// written here, around the session's own values, and nowhere else.
     pub fn copies(&self) -> Vec<String> {
-        match self.mount {
-            PrefMount::File => self
+        match self.mount.mounts_each_file() {
+            true => self
                 .files
                 .iter()
                 .map(|f| account_rel(&f.declared).to_string())
                 .collect(),
-            PrefMount::Link | PrefMount::Dir => Vec::new(),
+            false => Vec::new(),
         }
     }
 
@@ -754,7 +753,7 @@ impl Account {
             return Ok(Vec::new());
         }
         let (kept_dir, _lock) = lock_kept(&self.dir)?;
-        if self.mount == PrefMount::File {
+        if self.mount.mounts_each_file() {
             let mut notes = Vec::new();
             for f in &self.files {
                 let name = OsStr::new(&f.declared.name);
@@ -990,7 +989,7 @@ impl Account {
         // the record is a seed's last write, so a home without one holds a
         // seed that stopped partway, which no review has seen.
         let keep_state = matches!(home, Home::Kept(_))
-            && self.mount == PrefMount::Dir
+            && self.mount.whole_directory()
             && !created
             && recorded.is_some();
         for part in ["base", "reviewed", "live", REST] {
