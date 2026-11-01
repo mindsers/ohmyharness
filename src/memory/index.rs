@@ -92,7 +92,7 @@ pub fn describe(index: &Index) -> String {
          {}. Most exist because an assumption turned out wrong, so query before \
          assuming how something here behaves.",
         index.total,
-        if index.total == 1 { "" } else { "s" },
+        crate::out::plural(index.total),
         breakdown.join(", "),
     )
 }

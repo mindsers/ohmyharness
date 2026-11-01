@@ -333,7 +333,7 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
                 crate::out::untrusted(&sessions.join(" and ")),
                 items.len(),
                 adapter.name,
-                if items.len() == 1 { "" } else { "s" },
+                crate::out::plural(items.len()),
                 crate::out::untrusted(&shown_account)
             )?;
             for item in &items {
@@ -418,7 +418,7 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
                 "{what} {} {} preference{}{}: {}",
                 keys.len(),
                 adapter.name,
-                if keys.len() == 1 { "" } else { "s" },
+                crate::out::plural(keys.len()),
                 match which {
                     Decision::Keep => format!(" on account `{shown_account}`"),
                     _ => String::new(),

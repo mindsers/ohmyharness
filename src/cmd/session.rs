@@ -875,7 +875,7 @@ pub(crate) fn down(
         ]
         .iter()
         .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{n} session{} {what}", if *n == 1 { "" } else { "s" }))
+        .map(|(n, what)| format!("{n} session{} {what}", crate::out::plural(*n)))
         .collect::<Vec<_>>()
         .join("; ")
     );
@@ -922,7 +922,7 @@ fn to_review(id: &str, harness: &str, keys: &[String], rm: bool) -> String {
         "{id}: {} {harness} preference{} to review — {}. {reviews} at a terminal reviews them; \
          `omh {id} rm --yes` drops them",
         keys.len(),
-        if keys.len() == 1 { "" } else { "s" },
+        crate::out::plural(keys.len()),
         keys.join(", ")
     ))
 }

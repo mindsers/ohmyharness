@@ -102,7 +102,7 @@ pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
     }
     Ok(format!(
         "{written} note{} written, {skipped} already there",
-        if written == 1 { "" } else { "s" }
+        crate::out::plural(written)
     ))
 }
 

@@ -1173,7 +1173,7 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
                 "kept {} {} preference{} on account `{shown_account}`: {}",
                 changes.len(),
                 adapter.name,
-                if changes.len() == 1 { "" } else { "s" },
+                crate::out::plural(changes.len()),
                 kept_keys.join(", ")
             )));
         }

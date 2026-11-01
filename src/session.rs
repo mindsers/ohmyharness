@@ -946,7 +946,7 @@ impl Session {
                              replay onto the new base cleanly. Nothing was changed — rebase \
                              them yourself where {branch} is checked out, with `{}`, then \
                              sync again",
-                            if mine == 1 { "" } else { "s" },
+                            crate::out::plural(mine),
                             crate::git::typed_in_worktree(
                                 &self.worktree,
                                 &format!("rebase --onto {onto} {old_baseline}")

@@ -67,7 +67,7 @@ pub(crate) fn list(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     anyhow::ensure!(
         unread == 0,
         "omh could not read what {unread} account{} keep{} — named above",
-        if unread == 1 { "" } else { "s" },
+        crate::out::plural(unread),
         if unread == 1 { "s" } else { "" }
     );
     Ok(())

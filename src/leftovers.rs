@@ -444,7 +444,7 @@ pub(crate) fn leftovers(
              `omh <id> rm` on a live session takes the worktree and the sandbox \
              repository with it",
             found.len(),
-            if found.len() == 1 { "" } else { "s" }
+            crate::out::plural(found.len())
         ));
         found.clear();
     }

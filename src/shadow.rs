@@ -1388,7 +1388,7 @@ impl Shadow {
             n => format!(
                 "base moved to {onto}\n\n{n} file{} need resolving; `git status` names them.\n\
                  `git checkout -- <path>` takes back the version from before this.",
-                if n == 1 { "" } else { "s" }
+                crate::out::plural(n)
             ),
         };
         // `--allow-empty`, because trunk moving without touching anything this
@@ -2646,7 +2646,7 @@ pub fn note_for(base: &str, moved: usize, conflicted: usize) -> String {
         format!(
             "{base} moved {moved} commit{} under you while this session was stopped. \
              `git show HEAD` is exactly what arrived.",
-            if moved == 1 { "" } else { "s" }
+            crate::out::plural(moved)
         )
     };
     match conflicted {
@@ -2654,7 +2654,7 @@ pub fn note_for(base: &str, moved: usize, conflicted: usize) -> String {
         n => format!(
             "{arrived} {n} file{} still need{} resolving: `git status` names them, and \
              `git checkout -- <path>` takes back the version from before the merge.",
-            if n == 1 { "" } else { "s" },
+            crate::out::plural(n),
             if n == 1 { "s" } else { "" }
         ),
     }

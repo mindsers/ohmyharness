@@ -1500,7 +1500,7 @@ pub fn render_list(notes: &[Note]) -> String {
             note.key,
             note.recorded,
             refs,
-            if refs == 1 { "" } else { "s" },
+            crate::out::plural(refs),
         ));
     }
     out
@@ -1530,7 +1530,7 @@ pub fn session_nudge(notes: &[Note], session: &str) -> Option<String> {
     (n > 0).then(|| {
         format!(
             "{n} note{} recorded during this session — `omh memory` to review",
-            if n == 1 { "" } else { "s" }
+            crate::out::plural(n)
         )
     })
 }

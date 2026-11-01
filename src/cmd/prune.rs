@@ -509,7 +509,7 @@ fn what_it_holds(
         said.push(format!(
             "holds {} thing{} omh cannot vouch for ({})",
             held.len(),
-            if held.len() == 1 { "" } else { "s" },
+            crate::out::plural(held.len()),
             held.join(", ")
         ));
     }
@@ -756,19 +756,11 @@ fn say_grouped(out: &mut String, items: &[(Item, String)], home: &std::path::Pat
 }
 
 fn count(items: &[Item]) -> String {
-    format!(
-        "{} thing{}",
-        items.len(),
-        if items.len() == 1 { "" } else { "s" }
-    )
+    format!("{} thing{}", items.len(), crate::out::plural(items.len()))
 }
 
 fn count_ref(items: &[&Item]) -> String {
-    format!(
-        "{} thing{}",
-        items.len(),
-        if items.len() == 1 { "" } else { "s" }
-    )
+    format!("{} thing{}", items.len(), crate::out::plural(items.len()))
 }
 
 /// Remove one thing, and for a directory **ask whether it went**.

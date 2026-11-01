@@ -652,6 +652,16 @@ pub fn emit<R: Report + ?Sized>(report: &R, format: Format, p: &Palette) -> Stri
     }
 }
 
+/// The `s` on a count, in the one place that decides what that looks like:
+/// none for one, `s` for every other number, nought included.
+pub fn plural<N: PartialEq + From<u8>>(n: N) -> &'static str {
+    if n == N::from(1) {
+        ""
+    } else {
+        "s"
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

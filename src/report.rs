@@ -156,7 +156,7 @@ impl Report for Synced {
                 "{} · {} commit{} from {}",
                 self.id,
                 self.moved,
-                if self.moved == 1 { "" } else { "s" },
+                crate::out::plural(self.moved),
                 self.base
             ),
         );
@@ -269,7 +269,7 @@ impl Report for SyncedAll {
             &format!(
                 "synced {} session{}",
                 self.done.len(),
-                if self.done.len() == 1 { "" } else { "s" }
+                crate::out::plural(self.done.len())
             ),
         );
         s.push('\n');
@@ -455,7 +455,7 @@ impl Log {
                 "{} · {} turn{}",
                 self.id,
                 turns.len(),
-                if turns.len() == 1 { "" } else { "s" }
+                crate::out::plural(turns.len())
             ),
         );
         s.push('\n');
@@ -471,7 +471,7 @@ impl Log {
             let (files, churn) = match &t.touched {
                 None => ("merge".to_string(), String::new()),
                 Some(c) => (
-                    format!("{} file{}", c.files, if c.files == 1 { "" } else { "s" }),
+                    format!("{} file{}", c.files, crate::out::plural(c.files)),
                     churn(c),
                 ),
             };
@@ -504,7 +504,7 @@ impl Report for Log {
         let mut head = format!(
             "{} · {total} checkpoint{}",
             self.id,
-            if total == 1 { "" } else { "s" }
+            crate::out::plural(total)
         );
         if pending > 0 {
             head.push_str(&format!(", {pending} not yours yet"));
@@ -540,7 +540,7 @@ impl Report for Log {
                     // A merge is not measured, and *0 files* is a measurement.
                     None => ("merge".to_string(), String::new()),
                     Some(t) => (
-                        format!("{} file{}", t.files, if t.files == 1 { "" } else { "s" }),
+                        format!("{} file{}", t.files, crate::out::plural(t.files)),
                         churn(t),
                     ),
                 };
@@ -592,7 +592,7 @@ impl Report for Log {
                 &format!(
                     "uncommitted in the sandbox: {} file{}",
                     self.read.uncommitted,
-                    if self.read.uncommitted == 1 { "" } else { "s" }
+                    crate::out::plural(self.read.uncommitted)
                 )
             )
         ));
@@ -720,7 +720,7 @@ impl Report for Log {
                 format!(
                     "bring the {} new one{} onto the branch",
                     self.pending(),
-                    if self.pending() == 1 { "" } else { "s" }
+                    crate::out::plural(self.pending())
                 ),
             ));
         }
@@ -1097,7 +1097,7 @@ fn unreviewed_cell(unreviewed: &Option<Unreviewed>) -> Cell {
             format!(
                 "{} preference{} to review",
                 keys.len(),
-                if keys.len() == 1 { "" } else { "s" }
+                crate::out::plural(keys.len())
             ),
             out::WARN,
         ),
@@ -1517,11 +1517,11 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
                     &format!(
                         "{} turn{}, {} tool call{}, {} file{} touched · {cost}",
                         summary.turns,
-                        if summary.turns == 1 { "" } else { "s" },
+                        crate::out::plural(summary.turns),
                         tools,
-                        if tools == 1 { "" } else { "s" },
+                        crate::out::plural(tools),
                         summary.files.len(),
-                        if summary.files.len() == 1 { "" } else { "s" },
+                        crate::out::plural(summary.files.len()),
                     )
                 )
             ));
@@ -1536,7 +1536,7 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
                         &format!(
                             "{} transcript line{} could not be read — the totals above are a floor",
                             summary.unreadable,
-                            if summary.unreadable == 1 { "" } else { "s" }
+                            crate::out::plural(summary.unreadable)
                         )
                     )
                 ));
@@ -1677,7 +1677,7 @@ fn hooks_lines(p: &out::Palette, hooks: &HooksState) -> String {
                         &format!(
                             "{} event line{} could not be read",
                             summary.unreadable,
-                            if summary.unreadable == 1 { "" } else { "s" }
+                            crate::out::plural(summary.unreadable)
                         )
                     )
                 ));

@@ -720,7 +720,7 @@ pub(crate) fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
         out.push(format!(
             "import     {name} has {} hook{} omh can read{} — omh import hooks {name}",
             found.len(),
-            if found.len() == 1 { "" } else { "s" },
+            crate::out::plural(found.len()),
             if residue.is_empty() {
                 String::new()
             } else {

@@ -155,7 +155,7 @@ pub fn leftovers_from(
             let mut parts = vec![format!(
                 "{} omh volume{} on this machine",
                 v.len(),
-                if v.len() == 1 { "" } else { "s" }
+                crate::out::plural(v.len())
             )];
             if !split.gone.is_empty() {
                 let mut whose: Vec<String> = split
