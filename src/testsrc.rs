@@ -471,7 +471,7 @@ fn resolve(file: &Path, name: &str, path_attr: Option<&str>) -> Vec<PathBuf> {
 /// `body` with every item under a column-zero `#[cfg(test)]` blanked.
 ///
 /// An item is the attribute, whatever attributes and doc comments follow it,
-/// and then either one line ending in `;` with no block opened, or everything
+/// and then either one line ending in `;` that closes every brace it opens, or everything
 /// up to the next column-zero `}`. rustfmt puts both at column zero, which is
 /// what makes a textual rule sound here without parsing Rust.
 pub(crate) fn production_of(body: &str) -> String {
@@ -491,7 +491,11 @@ pub(crate) fn production_of(body: &str) -> String {
         }
         if i < lines.len() {
             let head = lines[i];
-            let one_liner = head.trim_end().ends_with(';') && !head.contains('{');
+            // One line, ending in `;`, that closes every brace it opens: a
+            // grouped `use crate::{a, b};` is one item, not the start of a
+            // block, and read as one it cut everything after it.
+            let one_liner = head.trim_end().ends_with(';')
+                && head.matches('{').count() == head.matches('}').count();
             if one_liner {
                 i += 1;
             } else {
@@ -594,6 +598,27 @@ mod tests {
             role_of(&sources, dir.path(), "stray.rs"),
             Role::Undeclared,
             "a file no `mod` line reaches is not part of the program"
+        );
+    }
+
+    /// A grouped `use` closes on its own line. Read as a block because it holds
+    /// a `{`, it cut everything after it down to the next column-zero `}` —
+    /// production code the scans then never saw.
+    #[test]
+    fn a_grouped_test_only_use_hides_nothing_after_it() {
+        let body = "\
+#[cfg(test)]
+use crate::{a, b};
+
+pub fn shipped() {
+    println!(\"production\");
+}
+";
+        let kept = production_of(body);
+        assert!(!kept.contains("use crate"), "the gated use is cut: {kept}");
+        assert!(
+            kept.contains("pub fn shipped") && kept.contains("println!"),
+            "and what follows it is production: {kept}"
         );
     }
 
