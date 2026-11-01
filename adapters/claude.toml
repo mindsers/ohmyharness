@@ -198,7 +198,15 @@ copy   = ["$HOME/.claude.json"]
 # account's shared, writable `~/.claude/`. Measured in `tests/e2e`: a server
 # planted there loaded in a session despite its own copy. Masked behind an
 # empty file, Claude falls through to the copy.
-mask   = ["$HOME/.claude/.config.json"]
+#
+# `~/.claude/CLAUDE.md` is Claude Code's personal memory, read into every
+# session — and the account's is shared by every repo using it, so a session
+# could leave instructions there for all of them (risk 1b). Measured in
+# `tests/e2e`: a phrase planted there reached the model. Nothing omh does puts
+# the user's own there: `--import` copies the token alone, and the host's
+# personal memory reaches a session as a rule imported into the catalogue
+# (`[capabilities.rules] import`), never through the account.
+mask   = ["$HOME/.claude/.config.json", "$HOME/.claude/CLAUDE.md"]
 
 # A preference set in a session — `/model`, `/config` — lasts into the next
 # one on the account, and nothing else the session wrote does (`prefs`).

@@ -110,6 +110,10 @@ const SCENARIOS: &[Scenario] = &[
         run: own_config,
     },
     Scenario {
+        name: "instructions and hook modules left in the account reach no session",
+        run: account_plants,
+    },
+    Scenario {
         name: "the session's ~/.omp/agent/config.yml is its own, migrated from the account's",
         run: omp_config,
     },
@@ -766,6 +770,42 @@ fn planted_server(s: &Session) {
         }
     }
 }
+
+/// What one session could leave in the account for every later one, on every
+/// repo that uses it, reaches no session (10-18 §5.1). The driver's account
+/// holds each as a session would have left it: Claude's personal
+/// `~/.claude/CLAUDE.md`, Codex's `~/.codex/AGENTS.md` and its
+/// `AGENTS.override.md`, and omp modules under `hooks/pre/`, `hooks/post/`,
+/// `tools/` and `extensions/` that leave a marker when loaded.
+fn account_plants(s: &Session) {
+    // A tool call, so a hook keyed to a tool has its moment.
+    let turn = s.turn("Run it.", &[(s.harness.shell)("true")]);
+    ran(&turn);
+    for ask in turn.asks() {
+        let seen = Turn::seen(ask);
+        for planted in PLANTED_INSTRUCTIONS {
+            assert!(
+                !seen.contains(planted),
+                "{planted}, left in the account, reached the model"
+            );
+        }
+    }
+    let marks = ok(
+        &s.sh("ls /tmp/e2e-planted-module-* 2>/dev/null; true"),
+        "ls",
+    );
+    assert!(
+        marks.trim().is_empty(),
+        "a module left in the account was loaded: {marks}"
+    );
+}
+
+/// The phrases `driver`'s accounts plant as instructions.
+pub const PLANTED_INSTRUCTIONS: [&str; 3] = [
+    "E2E-PLANTED-MEMORY",
+    "E2E-PLANTED-AGENTS",
+    "E2E-PLANTED-OVERRIDE",
+];
 
 /// The account's shared `config.toml` held the model beside a planted
 /// `developer_instructions` (`driver::codex_account`), and the launch

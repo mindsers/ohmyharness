@@ -93,6 +93,15 @@ pub struct Adapter {
     /// not `env` (risk 1b). Absent where a harness has none omh fills yet.
     #[serde(default)]
     pub policy: Option<Policy>,
+    /// Directories inside the account a session can write and the harness
+    /// loads code from on its next start — omp's hook, tool and extension
+    /// modules. Each is hidden behind an empty read-only directory holding
+    /// only what omh mounts into it, so what one session leaves there runs in
+    /// no later one, on any repo using the account (risk 1b). Each ends in `/`
+    /// and sits strictly inside one of `creds`' directories; `$HOME` is
+    /// expanded per image.
+    #[serde(default, rename = "mask-dirs")]
+    pub mask_dirs: Vec<String>,
     /// The keys of the harness's own config that are the user's preferences,
     /// kept per account and copied into each session (`prefs`) — so nothing
     /// else a session writes there reaches the next one.
@@ -1055,6 +1064,7 @@ impl Adapter {
         adapter.check_login(&path)?;
         adapter.check_hook_maps(&path)?;
         adapter.check_policy(&path)?;
+        adapter.check_mask_dirs(&path)?;
         adapter.check_preferences(&path)?;
         adapter.check_provider(&path)?;
         adapter.check_flags(&path)?;
@@ -1129,6 +1139,45 @@ impl Adapter {
                 !walks(drop),
                 "adapter {shown}: `[provider]` drop entry {drop:?} has a `..` — it is joined \
                  into the account directory on the host"
+            );
+        }
+        Ok(())
+    }
+
+    /// `mask-dirs`: each a directory (`/`-ended) strictly inside one of `creds`'
+    /// directories, with no `..` — `auth::prepare` joins it into the account
+    /// directory on the host — and none holding another.
+    fn check_mask_dirs(&self, path: &Path) -> Result<()> {
+        let shown = path.display();
+        let dirs: Vec<&str> = self
+            .creds
+            .iter()
+            .filter(|c| c.ends_with('/'))
+            .map(String::as_str)
+            .collect();
+        for mask in &self.mask_dirs {
+            anyhow::ensure!(
+                mask.ends_with('/'),
+                "adapter {shown}: `mask-dirs` entry {mask:?} is a directory and ends in `/`"
+            );
+            anyhow::ensure!(
+                dirs.iter()
+                    .any(|d| mask.strip_prefix(d).is_some_and(|rest| !rest.is_empty())),
+                "adapter {shown}: `mask-dirs` entry {mask:?} must be strictly inside one of \
+                 this adapter's credential directories ({})",
+                dirs.join(", ")
+            );
+            anyhow::ensure!(
+                !mask.split('/').any(|part| part == ".."),
+                "adapter {shown}: `mask-dirs` entry {mask:?} has a `..` — it is joined into \
+                 the account directory on the host"
+            );
+            anyhow::ensure!(
+                !self
+                    .mask_dirs
+                    .iter()
+                    .any(|other| other != mask && mask.starts_with(other.as_str())),
+                "adapter {shown}: `mask-dirs` entry {mask:?} is inside another entry"
             );
         }
         Ok(())
@@ -2424,6 +2473,43 @@ render = "concat"
             );
             let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
             assert!(err.contains(names), "{top} / {policy}: {err}");
+        }
+    }
+
+    /// A masked directory hides one the account keeps: strictly inside a
+    /// `creds` directory, a directory, never walking with `..` — it is joined
+    /// into the account on the host — and never inside another.
+    #[test]
+    fn a_masked_directory_omh_could_not_mount_safely_is_refused() {
+        // Each rule refuses in words no other rule uses.
+        for (dirs, names) in [
+            (
+                "[\"/tmp/x/\"]",
+                "strictly inside one of this adapter's credential directories",
+            ),
+            (
+                "[\"$HOME/.p/\"]",
+                "strictly inside one of this adapter's credential directories",
+            ),
+            ("[\"$HOME/.p/hooks\"]", "is a directory and ends in `/`"),
+            ("[\"$HOME/.p/../x/\"]", "has a `..`"),
+            (
+                "[\"$HOME/.p/a/\", \"$HOME/.p/a/b/\"]",
+                "is inside another entry",
+            ),
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "p.toml",
+                &format!(
+                    "name = \"p\"\nbin = \"p\"\ninstall = \"true\"\ncreds = [\"$HOME/.p/\"]\n\
+                     mask-dirs = {dirs}\n\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n"
+                ),
+            );
+            let err = Adapter::find(d.path(), "p").unwrap_err().to_string();
+            assert!(err.contains(names), "{dirs}: {err}");
         }
     }
 

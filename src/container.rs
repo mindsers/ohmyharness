@@ -897,6 +897,14 @@ pub fn plan(
         policy_notes = crate::notice::policy(policy, work, opts.account_dir.as_deref());
     }
 
+    // The directories in the account the harness loads code from, each hidden
+    // behind an empty read-only one. After the credentials, because each lands
+    // inside the account's directory, and after everything else omh mounts
+    // inside one, which it holds a placeholder for.
+    if opts.account_dir.is_some() {
+        stage_masked_dirs(adapter, &stage, staging, &mut mounts)?;
+    }
+
     // The account's model providers, for a harness that reads them from a
     // file of its own: rendered from the account's provider file over that
     // file, read-only. After the credentials, because it lands inside the
@@ -1052,6 +1060,65 @@ fn stage_policy(
             guest: expand(path, GUEST_HOME),
             read_only: true,
             file: true,
+        });
+    }
+    Ok(())
+}
+
+/// Stage an empty directory for each of the adapter's `mask-dirs` and mount it
+/// read-only over the account's, so a module one session left there loads in
+/// no later one.
+///
+/// Whatever omh already mounts inside one — omp's own hook module, in
+/// `hooks/pre/` — gets an empty placeholder in the staged directory: a
+/// runtime mounts a parent before its children, and cannot make a
+/// mountpoint inside a read-only mount. Created and never removed, so a
+/// running session's mount is never pulled from under it.
+fn stage_masked_dirs(
+    adapter: &Adapter,
+    stage: &Path,
+    staging: Staging,
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    for (n, dir) in adapter.mask_dirs.iter().enumerate() {
+        let guest = expand(dir.trim_end_matches('/'), GUEST_HOME);
+        let host = stage.join("masked-dirs").join(n.to_string());
+        if staging == Staging::Apply {
+            std::fs::create_dir_all(&host)
+                .with_context(|| format!("staging {}", host.display()))?;
+            for m in mounts.iter() {
+                let Ok(rel) = m.guest.strip_prefix(&guest) else {
+                    continue;
+                };
+                if rel.as_os_str().is_empty() {
+                    continue;
+                }
+                let at = host.join(rel);
+                if !m.file {
+                    std::fs::create_dir_all(&at)
+                        .with_context(|| format!("staging {}", at.display()))?;
+                    continue;
+                }
+                if let Some(parent) = at.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("staging {}", parent.display()))?;
+                }
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&at)
+                {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e).with_context(|| format!("staging {}", at.display())),
+                }
+            }
+        }
+        mounts.push(Mount {
+            host,
+            guest,
+            read_only: true,
+            file: false,
         });
     }
     Ok(())
@@ -3984,6 +4051,63 @@ mod tests {
 
         std::fs::write(account.join(crate::provider::omp::FILE), "providers: {}\n").unwrap();
         try_plan_account(&fx, "omp", Some(account)).unwrap();
+    }
+
+    /// A directory the harness loads code from is hidden behind an empty one
+    /// the session cannot write: mounted after the account it sits in,
+    /// read-only, holding a placeholder for exactly what omh mounts inside it
+    /// — omp's own hook module — and nothing else.
+    #[test]
+    fn a_masked_directory_is_empty_but_for_what_omh_mounts_in_it() {
+        let fx = fixture();
+        let account = fx.paths.root.join("creds/omp/default");
+        let adapter = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
+        assert!(
+            !adapter.mask_dirs.is_empty(),
+            "omp masks its module directories"
+        );
+
+        let p = plan_account(&fx, "omp", Some(account));
+        let mut held_one = false;
+        for dir in &adapter.mask_dirs {
+            let guest = expand(dir.trim_end_matches('/'), GUEST_HOME);
+            let at = p
+                .mounts
+                .iter()
+                .position(|m| m.guest == guest)
+                .unwrap_or_else(|| panic!("{} is not masked", guest.display()));
+            let m = &p.mounts[at];
+            assert!(m.read_only && !m.file, "{m:?}");
+            let holder = p
+                .mounts
+                .iter()
+                .position(|c| !c.file && guest.starts_with(&c.guest) && c.guest != guest)
+                .expect("the account directory holding it is mounted");
+            assert!(
+                holder < at,
+                "the mask must come after {:?}",
+                p.mounts[holder]
+            );
+
+            let mut inside: Vec<PathBuf> = p
+                .mounts
+                .iter()
+                .filter(|o| o.guest != guest)
+                .filter_map(|o| o.guest.strip_prefix(&guest).ok().map(Path::to_path_buf))
+                .collect();
+            inside.sort();
+            let mut staged: Vec<PathBuf> = std::fs::read_dir(&m.host)
+                .unwrap()
+                .map(|e| PathBuf::from(e.unwrap().file_name()))
+                .collect();
+            staged.sort();
+            assert_eq!(staged, inside, "{}", guest.display());
+            for rel in &inside {
+                assert_eq!(std::fs::read(m.host.join(rel)).unwrap(), b"", "{rel:?}");
+                held_one = true;
+            }
+        }
+        assert!(held_one, "omp's own hook module sits in a masked directory");
     }
 
     /// A file a session could write and the harness trusts on its next start

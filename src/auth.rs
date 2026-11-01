@@ -193,7 +193,7 @@ pub fn mounts(
 /// Create the files a bind mount needs to land as files.
 ///
 /// Also lays down mountpoints for any capability nested inside a credential
-/// directory, and for any path `[policy] mask` hides there: Docker refuses to
+/// directory, and for any path `[policy] mask` or `mask-dirs` hides there: Docker refuses to
 /// create one inside a bind-mounted host directory ("is outside of rootfs")
 /// and the whole launch fails.
 ///
@@ -231,7 +231,15 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         crate::adapter::Render::Dir => (&b.path, Point::Dir),
         _ => (&b.path, Point::File),
     });
-    for (path, point) in bound.chain(masked).chain(provided).chain(preferred) {
+    // A masked directory is a directory mount, and on Linux one docker had to
+    // create would be root's.
+    let masked_dirs = adapter.mask_dirs.iter().map(|path| (path, Point::Dir));
+    for (path, point) in bound
+        .chain(masked)
+        .chain(masked_dirs)
+        .chain(provided)
+        .chain(preferred)
+    {
         let guest = crate::adapter::expand(path, guest_home);
         let Some(cred) = creds
             .iter()
@@ -2039,6 +2047,20 @@ mod tests {
             d.path().join(".claude/settings.json").is_file(),
             "the mountpoint of the session's own settings.json"
         );
+    }
+
+    /// A masked directory needs its mountpoint in the account too: one docker
+    /// had to make inside the account's mount would be root's on Linux.
+    #[test]
+    fn a_masked_directory_gets_a_mountpoint_in_the_account() {
+        let a = omp();
+        assert!(!a.mask_dirs.is_empty());
+        let d = tempfile::tempdir().unwrap();
+        prepare(&a, d.path(), "/home/agent").unwrap();
+        for dir in &a.mask_dirs {
+            let rel = dir.trim_start_matches("$HOME/");
+            assert!(d.path().join(rel).is_dir(), "{dir} has no mountpoint");
+        }
     }
 
     /// A path the policy masks inside the account needs its mountpoint for the

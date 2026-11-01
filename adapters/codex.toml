@@ -214,7 +214,16 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 [policy]
 path   = "/etc/codex/requirements.toml"
 format = "codex-requirements"
-mask   = ["$HOME/.codex/cloud-config-bundle-cache.json"]
+# `~/.codex/AGENTS.md` is Codex's user-scope instructions, and
+# `AGENTS.override.md` beside it is read instead when it is there — both in the
+# account every repo using it shares, so a session could leave instructions
+# there for all of them (risk 1b). Measured in `tests/e2e`: a phrase planted in
+# the override reached the model.
+mask   = [
+  "$HOME/.codex/cloud-config-bundle-cache.json",
+  "$HOME/.codex/AGENTS.md",
+  "$HOME/.codex/AGENTS.override.md",
+]
 
 # The account's model provider — `model_provider` and `[model_providers.*]` —
 # kept in `provider.toml` at the account root, which no mount reaches, and
