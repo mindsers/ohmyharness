@@ -29,6 +29,21 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
             env,
             replace,
         } => {
+            // Everything after the command is the server's, so omh's own flag
+            // there went to it: `mcp add foo npx a --env K=V` ran `npx a --env
+            // K=V` with no variable set, and said it wrote it.
+            if let Some(flag) = args.iter().find_map(|a| {
+                ["--env", "--replace"]
+                    .into_iter()
+                    .find(|f| a == f || a.starts_with(&format!("{f}=")))
+            }) {
+                anyhow::bail!(
+                    "`{flag}` after `{command}` would be one of its arguments, not omh's: it goes \
+                     before the name\n  \
+                     omh settings mcp add {flag}{} {name} {command} [args…]",
+                    if flag == "--env" { " KEY=VALUE" } else { "" }
+                );
+            }
             // omh's own, or a name one of its servers had: either is omh's,
             // and `omh upgrade` takes a server under one out of your catalogue.
             // `rm` and `import` refuse them too.

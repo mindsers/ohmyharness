@@ -1986,7 +1986,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `mcp add`'s refusals: `omh set <feature> off` and `omh upgrade` for
         // a server omh ships, and the `--replace` line for one of yours. +
         // `omh settings set <feature> off` and its `omh init`, for new repos.
-        ("src/cmd/mcp.rs", 5),
+        // + the line with omh's flag before the name, when one came after the
+        // command.
+        ("src/cmd/mcp.rs", 6),
         ("src/cmd/memory.rs", 1),
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names

@@ -2807,6 +2807,30 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
     );
 }
 
+/// `--env` or `--replace` after the command is the server's, so a server
+/// added as `mcp add foo npx a --env K=V` ran `npx a --env K=V` with no
+/// variable set, and omh said it wrote it. Refused, naming the order omh
+/// reads them in, and nothing written.
+#[test]
+fn an_omh_flag_after_the_command_is_refused_not_passed_on() {
+    let sb = sandbox();
+    sb.git_init();
+    for flag in [&["--env", "K=V"][..], &["--env=K=V"], &["--replace"]] {
+        let mut argv = vec!["settings", "mcp", "add", "foo", "npx", "a"];
+        argv.extend_from_slice(flag);
+        let out = sb.omh(&argv);
+        assert!(!out.status.success(), "{argv:?}: {}", printed(&out));
+        assert!(
+            printed(&out).contains("goes before the name"),
+            "{argv:?}: {}",
+            printed(&out)
+        );
+        assert!(!sb.home.join(".omh/mcp.json").exists(), "{argv:?} wrote");
+    }
+    let out = sb.omh(&["settings", "mcp", "add", "--env", "K=V", "foo", "npx", "a"]);
+    assert!(out.status.success(), "{}", printed(&out));
+}
+
 /// A first `omh init` that fails at the image runs again. The stamp that
 /// says a checkout is set up was written before the image was built, so
 /// after a build that failed, every `omh init` said "this project already
