@@ -14377,6 +14377,43 @@ fn omhs_servers_are_never_counted_as_your_catalogue() {
     }
 }
 
+/// One server omh cannot run — a remote one, an `url` and no `command` —
+/// is left and said, and the rest of the file imports. It failed the whole
+/// import with "missing field `command`", for the server nobody asked about.
+#[test]
+fn a_remote_server_is_left_and_the_rest_imports() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.home.join("theirs.mcp.json");
+    std::fs::write(
+        &theirs,
+        r#"{"mcpServers":{"linear":{"command":"npx","args":["-y","mcp-remote"]},
+                          "docs":{"type":"http","url":"https://mcp.example.invalid/mcp"}}}"#,
+    )
+    .unwrap();
+    let out = fx.omh(&[
+        "settings",
+        "mcp",
+        "import",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.lines()
+            .any(|l| l.contains("docs") && l.contains("left") && l.contains("remote")),
+        "the remote server is named as left, and why: {said}"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fx.home.join(".omh/mcp.json")).unwrap())
+            .unwrap();
+    let held: Vec<&String> = doc["mcpServers"].as_object().unwrap().keys().collect();
+    assert_eq!(held, ["linear"], "{doc}");
+}
+
 /// The names omh's servers had before they were named `omh-…` stay omh's, and
 /// every door agrees. `import` was the one that did not: a `memory` server —
 /// the name the reference memory server is usually installed under — landed

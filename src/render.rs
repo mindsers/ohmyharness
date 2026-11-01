@@ -609,6 +609,121 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
     }
 }
 
+/// What an import found in a harness's file: the servers omh can run, and
+/// each one it cannot, with why.
+#[derive(Debug, Default)]
+pub struct Foreign {
+    pub servers: BTreeMap<String, Server>,
+    pub left: BTreeMap<String, String>,
+}
+
+/// [`parse`], for `omh settings mcp import`: each server read on its own, so
+/// one omh cannot take is left — named, with why — and never fails the rest.
+/// A remote server, an `url` and no `command`, failed the whole import with
+/// "missing field `command`"; and one the harness has switched off was
+/// imported on, into every session.
+pub fn parse_foreign(format: Render, raw: &str) -> Result<Foreign> {
+    const REMOTE: &str = "a remote server — omh's catalogue holds programs it runs";
+    const NO_COMMAND: &str = "no command to run";
+    let off = |harness: &str| format!("switched off in {harness} — `enabled = false`");
+    let mut out = Foreign::default();
+    match format {
+        Render::McpJson => {
+            let doc: serde_json::Value = serde_json::from_str(raw).context("parsing MCP JSON")?;
+            if doc.get("mcpServers").is_none() && doc.get("projects").is_some() {
+                // `parse`'s refusal, for the same reason.
+                parse(format, raw)?;
+            }
+            let empty = serde_json::Map::new();
+            let entries = doc
+                .get("mcpServers")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or(&empty);
+            for (name, entry) in entries {
+                if entry.get("command").is_none() {
+                    let remote = entry.get("url").is_some()
+                        || matches!(
+                            entry.get("type").and_then(serde_json::Value::as_str),
+                            Some("http" | "sse")
+                        );
+                    out.left.insert(
+                        name.clone(),
+                        (if remote { REMOTE } else { NO_COMMAND }).into(),
+                    );
+                    continue;
+                }
+                let server: Server = serde_json::from_value(entry.clone())
+                    .with_context(|| format!("reading server `{name}`"))?;
+                out.servers.insert(name.clone(), server);
+            }
+        }
+        Render::CodexToml => {
+            let doc: toml::Table = toml::from_str(raw).context("parsing codex config.toml")?;
+            let empty = toml::Table::new();
+            let entries = doc
+                .get("mcp_servers")
+                .and_then(toml::Value::as_table)
+                .unwrap_or(&empty);
+            for (name, entry) in entries {
+                if entry.get("enabled").and_then(toml::Value::as_bool) == Some(false) {
+                    out.left.insert(name.clone(), off("codex"));
+                    continue;
+                }
+                if entry.get("command").is_none() {
+                    let remote = entry.get("url").is_some();
+                    out.left.insert(
+                        name.clone(),
+                        (if remote { REMOTE } else { NO_COMMAND }).into(),
+                    );
+                    continue;
+                }
+                let server: Server = entry
+                    .clone()
+                    .try_into()
+                    .with_context(|| format!("reading server `{name}`"))?;
+                out.servers.insert(name.clone(), server);
+            }
+        }
+        Render::OpencodeJson => {
+            let doc: serde_json::Value =
+                serde_json::from_str(raw).context("parsing opencode.json")?;
+            let empty = serde_json::Map::new();
+            let entries = doc
+                .get("mcp")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or(&empty);
+            for (name, entry) in entries {
+                if entry.get("enabled").and_then(serde_json::Value::as_bool) == Some(false) {
+                    out.left.insert(name.clone(), off("opencode"));
+                    continue;
+                }
+                if entry.get("type").and_then(serde_json::Value::as_str) == Some("remote") {
+                    out.left.insert(name.clone(), REMOTE.into());
+                    continue;
+                }
+                let one = serde_json::json!({ "mcp": { name: entry } }).to_string();
+                match parse(format, &one) {
+                    Ok(mut parsed) => out
+                        .servers
+                        .extend(parsed.remove(name).map(|s| (name.clone(), s))),
+                    // An empty command is the one shape `parse` refuses here.
+                    Err(_)
+                        if entry
+                            .get("command")
+                            .and_then(serde_json::Value::as_array)
+                            .is_none_or(|c| c.is_empty()) =>
+                    {
+                        out.left.insert(name.clone(), NO_COMMAND.into());
+                    }
+                    Err(e) => return Err(e).with_context(|| format!("reading server `{name}`")),
+                }
+            }
+        }
+        other => anyhow::bail!("`{other:?}` is not an MCP format and cannot be imported"),
+    }
+    Ok(out)
+}
+
 // ── Hooks ───────────────────────────────────────────────────────────────────
 
 /// Remove the hooks the image has been **measured** unable to run, and name
@@ -5767,6 +5882,51 @@ try {{
 
     /// The property that makes import safe: anything omh can write, omh can read
     /// back without loss. A renderer that gains a field must gain a parser too.
+    /// What omh cannot run is left, by name and with why, and never fails the
+    /// rest: a remote server in any harness's file, and one opencode or codex
+    /// has switched off — imported, it ran in every session.
+    #[test]
+    fn a_server_omh_cannot_take_is_left_with_why() {
+        let opencode = parse_foreign(
+            Render::OpencodeJson,
+            r#"{"mcp":{"on":{"type":"local","command":["npx","x"]},
+                       "off":{"type":"local","command":["npx","y"],"enabled":false},
+                       "far":{"type":"remote","url":"https://mcp.example.invalid"},
+                       "none":{"type":"local","command":[]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(opencode.servers.keys().collect::<Vec<_>>(), ["on"]);
+        assert!(
+            opencode.left["off"].contains("switched off"),
+            "{:?}",
+            opencode.left
+        );
+        assert!(
+            opencode.left["far"].contains("remote"),
+            "{:?}",
+            opencode.left
+        );
+        assert!(
+            opencode.left["none"].contains("no command"),
+            "{:?}",
+            opencode.left
+        );
+        let codex = parse_foreign(
+            Render::CodexToml,
+            "[mcp_servers.on]\ncommand = \"npx\"\n\n\
+             [mcp_servers.far]\nurl = \"https://mcp.example.invalid\"\n\n\
+             [mcp_servers.off]\ncommand = \"npx\"\nenabled = false\n",
+        )
+        .unwrap();
+        assert_eq!(codex.servers.keys().collect::<Vec<_>>(), ["on"]);
+        assert!(codex.left["far"].contains("remote"), "{:?}", codex.left);
+        assert!(
+            codex.left["off"].contains("switched off"),
+            "{:?}",
+            codex.left
+        );
+    }
+
     #[test]
     fn every_mcp_format_round_trips() {
         let original = canonical();

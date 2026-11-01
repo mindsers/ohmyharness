@@ -132,7 +132,10 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                     source.display()
                 )
             })?;
-            let incoming = render::parse(binding.render, &raw)?;
+            let render::Foreign {
+                servers: incoming,
+                left,
+            } = render::parse_foreign(binding.render, &raw)?;
             // omh's names are not yours to import, under `--replace` or not —
             // `mcp add` refuses them for the same reason. `memory` above all:
             // the name a third-party memory server is usually installed under,
@@ -174,6 +177,11 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                         "the name is omh's — the {} feature's; import it under another",
                         shipped[name]
                     ),
+                }))
+                .chain(left.iter().map(|(name, why)| report::Considered {
+                    name: name.clone(),
+                    verdict: report::Verdict::Left,
+                    detail: why.clone(),
                 }))
                 .collect();
 
