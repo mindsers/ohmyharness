@@ -1290,13 +1290,10 @@ pub(crate) fn commit(
     let base = session::default_branch(&paths.repo);
     let held = session.glance(&paths.repo, &base);
     warn_uncounted(&held, ctx, &base);
-    ctx.say(
-        &with_hooks_said(
-            report::Action::new(
-                "committed",
-                format!("committed to {}{}", session.label(), branch_tally(&held)),
-            ),
-            &hooks,
+    ctx.say(&with_hooks_said(
+        report::Action::new(
+            "committed",
+            format!("committed to {}{}", session.label(), branch_tally(&held)),
         )
         .data(serde_json::json!({
             "session": session.id,
@@ -1306,7 +1303,8 @@ pub(crate) fn commit(
             "landed_unknown": landed_unknown(&held),
             "base": base,
         })),
-    );
+        &hooks,
+    ));
     Ok(())
 }
 
@@ -1407,16 +1405,14 @@ pub(crate) fn branch_tally(held: &Settling) -> String {
     }
 }
 
-/// A landing that ran none of the user's hooks says so: a `pre-commit` that
-/// silently stopped running would be found out later, from whatever it was
-/// there to catch.
-fn with_hooks_said(action: report::Action, hooks: &session::Hooks) -> report::Action {
-    match hooks {
-        session::Hooks::Yours => action,
-        session::Hooks::SetAside(path) => action.note(format!(
-            "hooks not run: core.hooksPath ({path}) is inside the session's worktree, \
-             which the agent writes"
-        )),
+/// A landing that ran none of the user's hooks says so ([`session::Hooks::said`]),
+/// and its `--json` names the path as `hooks_set_aside`. After `data`, which
+/// replaces the object this adds to.
+fn with_hooks_said(mut action: report::Action, hooks: &session::Hooks) -> report::Action {
+    action.data["hooks_set_aside"] = serde_json::json!(hooks.set_aside());
+    match hooks.said() {
+        Some(said) => action.note(said),
+        None => action,
     }
 }
 
@@ -1430,17 +1426,16 @@ pub(crate) fn push(
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
     let session::Pushed { target, hooks } = session.push(name)?;
-    ctx.say(
-        &with_hooks_said(
-            report::Action::new("pushed", format!("{} → origin/{target}", session.label())),
-            &hooks,
-        )
-        .data(serde_json::json!({
-            "session": session.id,
-            "branch": session.label(),
-            "target": target,
-        })),
-    );
+    ctx.say(&with_hooks_said(
+        report::Action::new("pushed", format!("{} → origin/{target}", session.label())).data(
+            serde_json::json!({
+                "session": session.id,
+                "branch": session.label(),
+                "target": target,
+            }),
+        ),
+        &hooks,
+    ));
 
     if !pr {
         return Ok(());

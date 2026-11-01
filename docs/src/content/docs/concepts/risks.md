@@ -343,6 +343,10 @@ committed to omh/s01 (1 commit on the branch)
   hooks not run: core.hooksPath (.husky/_) is inside the session's worktree, which the agent writes
 ```
 
+The launch that checks a session out says the same on stderr, and under
+`--json` a commit or push names the path as `hooks_set_aside` — `null` when
+your hooks ran.
+
 **What remains open.** A hook in `.git/hooks` is yours, but what it runs need
 not be: a `pre-commit` that calls `lint-staged`, `make` or `npm test` reads its
 configuration — `package.json`, a `Makefile` — from the worktree, and the agent

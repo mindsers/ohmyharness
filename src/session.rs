@@ -436,7 +436,11 @@ impl Session {
 
     /// Create the worktree if it does not exist yet. Idempotent, so relaunching
     /// into an existing session resumes it.
-    pub fn ensure(&self, repo: &Path, base: &str) -> Result<()> {
+    ///
+    /// The answer is what the checkout did with the user's hooks, for the
+    /// caller to say ([`Hooks::said`]): [`Hooks::Yours`] when nothing was
+    /// checked out.
+    pub fn ensure(&self, repo: &Path, base: &str) -> Result<Hooks> {
         if self.worktree.exists() {
             let worktree_is_valid = git_in(&self.worktree, &["status", "--porcelain"]).is_ok();
             if self.branch.is_some() && !worktree_is_valid {
@@ -446,7 +450,7 @@ impl Session {
                 git_in(&self.worktree, &["rev-parse", "--is-inside-work-tree"])
                     .with_context(|| format!("opening worktree for session {}", self.id))?;
             }
-            return Ok(());
+            return Ok(Hooks::Yours);
         }
         std::fs::create_dir_all(self.worktree.parent().unwrap())?;
         let path = self.worktree.to_string_lossy().into_owned();
@@ -454,7 +458,7 @@ impl Session {
         // No branch means no git involvement at all — just a writable directory.
         let Some(branch) = self.branch.clone() else {
             std::fs::create_dir_all(&self.worktree)?;
-            return Ok(());
+            return Ok(Hooks::Yours);
         };
 
         // A directory removed outside git leaves its registration behind, and
@@ -540,7 +544,7 @@ impl Session {
                 head.trim()
             );
         }
-        Ok(())
+        Ok(hooks)
     }
 
     /// Whether `omh/<id>` is there — with "git could not answer" kept apart
@@ -2568,6 +2572,26 @@ pub enum Hooks {
 }
 
 impl Hooks {
+    /// The `core.hooksPath` that was set aside, as configured.
+    pub fn set_aside(&self) -> Option<&str> {
+        match self {
+            Hooks::Yours => None,
+            Hooks::SetAside(path) => Some(path),
+        }
+    }
+
+    /// The sentence the caller says when hooks were set aside. A `pre-commit`
+    /// that silently stopped running would be found out later, from whatever
+    /// it was there to catch.
+    pub fn said(&self) -> Option<String> {
+        self.set_aside().map(|path| {
+            format!(
+                "hooks not run: core.hooksPath ({path}) is inside the session's worktree, \
+                 which the agent writes"
+            )
+        })
+    }
+
     /// What a git is told so that it honours this answer.
     fn args(&self) -> &'static [&'static str] {
         match self {
