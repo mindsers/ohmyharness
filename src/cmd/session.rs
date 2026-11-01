@@ -479,7 +479,9 @@ pub(crate) fn attach(
     // image is built.
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
     carry_in(&paths, &session, ctx)?;
-    let _ = idle::touch(&paths.runs(), &session.id);
+    if let Some(why) = mark_in_use(&paths, &session.id) {
+        ctx.warn(&why);
+    }
 
     let configured = auth::configured(&paths, &adapter)?;
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
@@ -622,6 +624,21 @@ pub(crate) fn attach(
         editors,
     });
     Ok(())
+}
+
+/// Record that `id` is in use, or say why it could not be.
+///
+/// The record is what keeps the idle reaper off a session somebody is working
+/// in. It was `let _ =`, so a launch that could not write it went on in
+/// silence, and with `idle_timeout` set the next launch could stop the session
+/// out from under its user.
+fn mark_in_use(paths: &Paths, id: &str) -> Option<String> {
+    idle::touch(&paths.runs(), id).err().map(|e| {
+        format!(
+            "could not record that {id} is in use ({e}) — with idle_timeout set, a later \
+             launch may stop it as idle"
+        )
+    })
 }
 
 /// Stop sessions nobody has used for longer than `policy.idle_timeout`.
@@ -2495,7 +2512,9 @@ pub(crate) fn run(
         // Reap before starting another container, and record that this one is
         // in use so it is not reaped by the next launch.
         reap_idle(&paths, &session.id, ctx);
-        let _ = idle::touch(&paths.runs(), &session.id);
+        if let Some(why) = mark_in_use(&paths, &session.id) {
+            ctx.warn(&why);
+        }
     }
 
     let plan = container::plan(
@@ -3163,6 +3182,21 @@ pub(crate) fn rm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_omh_could_not_mark_in_use_is_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.runs()).unwrap();
+        // A file where the session's run directory belongs.
+        std::fs::write(paths.runs().join("s01"), "").unwrap();
+        let said = mark_in_use(&paths, "s01").expect("a record that failed was not said");
+        assert!(said.contains("idle"), "{said}");
+        assert_eq!(mark_in_use(&paths, "s02"), None);
+    }
 
     /// dtach's exit told from a detach (#197 §4): only an exit is reviewed.
     /// Under `persistence = none` the terminal coming back is the exit, and
