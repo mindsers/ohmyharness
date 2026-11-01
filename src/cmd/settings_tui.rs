@@ -846,18 +846,33 @@ fn names_nothing(paths: &Paths, table: &str) -> Option<String> {
 
 /// How your defaults switch omh's features for new repos: `[omh]` in
 /// `default.toml`, by name. A feature not there is on.
-fn feature_switches(paths: &Paths) -> std::collections::BTreeMap<String, bool> {
-    let Ok(doc) = config::read_doc(&config::Layer::Personal.file(paths)) else {
-        return Default::default();
-    };
-    doc.get(config::OMH)
+///
+/// **Read the way `omh init` reads it.** A file that would not parse answered
+/// nothing switched, so every feature was drawn on, and a value that is not
+/// true or false was dropped — both in the file `init` refuses. The file's
+/// error, and each value that is not a switch, come back to be said.
+type Switches = Result<std::collections::BTreeMap<String, Result<bool, String>>, String>;
+
+fn feature_switches(paths: &Paths) -> Switches {
+    let doc =
+        config::read_doc(&config::Layer::Personal.file(paths)).map_err(|e| format!("{e:#}"))?;
+    Ok(doc
+        .get(config::OMH)
         .and_then(|t| t.as_table_like())
         .map(|t| {
             t.iter()
-                .filter_map(|(k, v)| v.as_bool().map(|b| (k.to_string(), b)))
+                .map(|(k, v)| {
+                    let switch = v.as_bool().ok_or_else(|| {
+                        format!(
+                            "is `{}`, not true or false — `omh init` refuses this file",
+                            v.to_string().trim()
+                        )
+                    });
+                    (k.to_string(), switch)
+                })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// Where an import reads, as the pick says it: the adapter's path on this
@@ -1108,10 +1123,17 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             }
             Err(e) => about.push(format!("could not read what it brings: {e:#}")),
         }
+        let (value, warning) = match &switched {
+            Err(why) => (None, Some(format!("could not read your defaults — {why}"))),
+            Ok(by_name) => match by_name.get(&feature) {
+                None => (None, None),
+                Some(Ok(on)) => (Some(if *on { "on" } else { "off" }.to_string()), None),
+                Some(Err(why)) => (None, Some(format!("[{}] {feature} {why}", config::OMH))),
+            },
+        };
         out.rows.push(Row {
-            value: switched
-                .get(&feature)
-                .map(|on| if *on { "on" } else { "off" }.to_string()),
+            value,
+            warning,
             fallback: Some("on".into()),
             about,
             edit: Edit::Choice(vec!["on".into(), "off".into()]),
@@ -1561,6 +1583,48 @@ mod tests {
                 "`omh {}` is not a line omh accepts: {e}",
                 line[1..].join(" ")
             ),
+        }
+    }
+
+    /// **The screen reads `[omh]` the way `omh init` does.** It read leniently:
+    /// a value that is not true or false was dropped, and a `default.toml` that
+    /// would not parse showed every feature on — the same file `omh init`
+    /// refuses. Each is a warning on the row now, never a quiet `on`.
+    #[test]
+    fn a_feature_switch_init_would_refuse_is_never_drawn_on() {
+        let (_dir, paths) = paths();
+        let file = config::Layer::Personal.file(&paths);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, format!("[{}]\ncodegraph = \"off\"\n", config::OMH)).unwrap();
+        let drawn = model(&paths);
+        let row = page(&drawn, "defaults")
+            .rows
+            .iter()
+            .find(|r| r.name == "codegraph")
+            .expect("a codegraph row");
+        assert!(
+            row.warning.is_some(),
+            "a string switch was drawn as {:?}",
+            row.value
+        );
+        assert_eq!(row.value, None);
+
+        // A file that will not parse: whatever the page shows instead, no
+        // feature is drawn as on.
+        std::fs::write(&file, "[omh\n").unwrap();
+        let drawn = model(&paths);
+        let defaults = page(&drawn, "defaults");
+        for row in defaults
+            .rows
+            .iter()
+            .filter(|r| r.group.as_deref() == Some("features"))
+        {
+            assert!(
+                row.warning.is_some(),
+                "{} was drawn as {:?} from a file that does not parse",
+                row.name,
+                row.value
+            );
         }
     }
 
