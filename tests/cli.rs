@@ -208,6 +208,42 @@ impl Sandbox {
         child.wait_with_output().expect("wait")
     }
 
+    /// Run with a **terminal** on stdin, `input` already typed into it, and
+    /// stdout and stderr captured: the shape `omh_with_stdin` cannot give. A
+    /// question omh asks only at a terminal — the review at a session's exit —
+    /// is reachable from a test no other way. Typed before omh starts, the
+    /// input waits in the terminal's line buffer until it is read.
+    #[cfg(unix)]
+    fn omh_at_a_terminal(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: two out-pointers to live locals; the rest may be null.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: `openpty` just returned both, and nothing else holds them.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        std::fs::File::from(master.try_clone().unwrap())
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = self
+            .command(&self.repo, args)
+            .stdin(slave)
+            .output()
+            .expect("the binary under test must run");
+        drop(master);
+        out
+    }
+
     /// Run with these variables set over the sandbox's own — an `$EDITOR`
     /// that writes, say, where the default one only records.
     fn omh_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -17653,6 +17689,56 @@ fn a_codex_sessions_config_is_its_own_and_only_preferences_come_back() {
     assert_eq!(
         std::fs::read_to_string(&kept).unwrap(),
         "model = \"gpt-5.5\"\n"
+    );
+}
+
+/// **The review at a session's exit asks at a terminal, and only there.** An
+/// exit is when a session's changed preferences are reviewed, and only
+/// somebody at a keyboard can answer. From a pipe, a `k` waiting to be read is
+/// never taken for one, and the change is left to review. At a terminal, the
+/// question is asked and the answer reaches the account. Untested until a
+/// terminal could be put on stdin here: a known limitation of #207.
+#[cfg(unix)]
+#[test]
+fn the_review_at_a_sessions_exit_asks_at_a_terminal_and_only_there() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = codex_account_with_a_shared_config(&sb, "model = \"gpt-5.5\"\n");
+    let kept = account.join("preferences/config.toml");
+    let out = sb.omh(&["new", "codex"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let live = mounted_at(&seen, "/omh/prefs")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("nothing at /omh/prefs: {seen}"));
+    std::fs::write(live.join("config.toml"), "model = \"gpt-5.5-mini\"\n").unwrap();
+
+    let out = sb.omh_with_stdin(&["s01", "resume"], "k\n");
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        !printed(&out).contains("[k]eep all"),
+        "asked with nobody at a terminal: {}",
+        printed(&out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "model = \"gpt-5.5\"\n",
+        "an answer was read from a pipe"
+    );
+
+    let out = sb.omh_at_a_terminal(&["s01", "resume"], "k\n");
+    let said = printed(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("s01 changed 1 codex preference on account `default`:")
+            && said.contains("[k]eep all"),
+        "not asked at a terminal: {said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "model = \"gpt-5.5-mini\"\n",
+        "{said}"
     );
 }
 
