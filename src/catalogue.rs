@@ -1138,13 +1138,17 @@ pub fn listed(source: &Path, cap: Capability) -> Result<Vec<(String, PathBuf)>> 
         // is the one that actually happens: Finder creates it in any
         // directory somebody opens, and it bricked the repo.
         //
-        // Skipped rather than reported, because it is not an entry that
-        // went missing — it is a file that was never a catalogue entry,
-        // and a launch that named it would be telling the user about
-        // their operating system.
-        if crate::selection::validate_entry_name(&name, cap, source).is_err() {
+        // A dotfile is skipped rather than reported, because it is not an
+        // entry that went missing — it is a file that was never a catalogue
+        // entry, and a launch that named it would be telling the user about
+        // their operating system. Any other name the rule refuses — a line
+        // break, a control character — is an entry somebody made, and every
+        // launch refuses over it: skipped here, the listing never showed the
+        // one thing stopping them.
+        if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
+        crate::selection::validate_entry_name(&name, cap, source)?;
         out.push((name, entry.path()));
     }
     out.sort();
@@ -1453,6 +1457,30 @@ mod tests {
         }
     }
     use super::*;
+
+    /// **Skipped is for litter, not for an entry.** The listing dropped every
+    /// name a `[use]` list cannot hold, which is right for `.DS_Store` and
+    /// wrong for `lint<TAB>check.json`: the listing never showed it while every
+    /// launch refused over it, and `omh doctor` called it broken. A dotfile is
+    /// skipped; any other name the rule refuses is refused here too.
+    #[test]
+    fn a_listing_refuses_the_entry_a_launch_refuses_and_skips_only_litter() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".DS_Store"), "").unwrap();
+        std::fs::write(dir.path().join("fmt.json"), "{}").unwrap();
+        let found = listed(dir.path(), Capability::Hooks).unwrap();
+        assert_eq!(
+            found.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["fmt"]
+        );
+        std::fs::write(dir.path().join("lint\tcheck.json"), "{}").unwrap();
+        let err = format!(
+            "{:#}",
+            listed(dir.path(), Capability::Hooks)
+                .expect_err("an entry a launch refuses was skipped")
+        );
+        assert!(err.contains("lint\\tcheck"), "{err}");
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,
