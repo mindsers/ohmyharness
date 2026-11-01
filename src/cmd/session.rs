@@ -730,7 +730,9 @@ pub(crate) fn down(
         runtime::installed(p)
     })?;
     let ids = match id {
-        Some(i) => vec![i.to_string()],
+        // A session that does not exist is refused, as every verb that names
+        // one refuses it: this said "was not running" and exited 0.
+        Some(i) => vec![crate::cmd::harvest::existing_session(&paths, Some(i))?.id],
         // No session named means every session. A wide stop asks first when
         // there is a terminal to ask at — the blast radius grows with how much
         // is in flight — and proceeds without asking when there is not: it is
@@ -2792,6 +2794,9 @@ pub(crate) fn rm(
             Ok(Some(n)) => crate::cmd::harvest::Snapshots::Kept(n),
             Err(e) => crate::cmd::harvest::Snapshots::Unreadable(format!("{e:#}")),
         };
+    // What is at stake, as it stood when it was asked about: counted again
+    // once the agent is down, below, before anything of it goes.
+    let counted = crate::cmd::harvest::at_stake(&paths, &session);
     if let Some(note) = crate::cmd::harvest::may_remove(
         &paths,
         &session,
@@ -2896,6 +2901,19 @@ pub(crate) fn rm(
         }
     }
 
+    // Counted again, now that nothing is writing. The count was taken, and
+    // asked about, with the agent still running, so what it wrote meanwhile
+    // went with the worktree uncounted. `--yes` removes whatever it holds.
+    if consent != crate::cmd::harvest::Consent::Given {
+        let now = crate::cmd::harvest::at_stake(&paths, &session);
+        anyhow::ensure!(
+            now == counted,
+            "{id}'s agent wrote more while omh decided — {}. Its container is down; its \
+             worktree, branch and run directory are kept: `omh {id} rm` asks about it as it \
+             is now",
+            out::untrusted(&now.said())
+        );
+    }
     // The session's preferences, before the run directory that holds them
     // goes: reviewed, dropped, or — with nobody to ask — left, which stops
     // the removal here.

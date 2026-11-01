@@ -86,6 +86,12 @@ fn what_ran(ran: &[(String, bool)]) -> Option<crate::report::Action> {
 fn refusal(name: &str, value: &str) -> Option<String> {
     match key::describes(name) {
         Some(k) => key::quarrel(k, value),
+        // A feature switch is `set`'s too, on or off. Read as a key, an undo
+        // of one ran as `set --anyway`.
+        None if settings::shipped_features().is_ok_and(|f| f.contains(name)) => {
+            (!matches!(value, "on" | "off"))
+                .then(|| format!("`{name}` is one of omh's features, so it is on or off"))
+        }
         None => Some(format!("nothing in omh reads `{name}`")),
     }
 }
@@ -790,6 +796,28 @@ fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
     section.seeds = (total > 0).then_some(said);
 }
 
+/// Why `omh init` refuses your defaults over this one table, if it does: its
+/// own check, run on the table alone, so the reason is the one init gives.
+/// A table it refuses was drawn as "a table in …", like any other, while
+/// every `omh init` stopped on the whole file.
+fn init_refuses(
+    doc: &Result<toml_edit::DocumentMut>,
+    table: &str,
+    file: &std::path::Path,
+) -> Option<String> {
+    let key = table.trim_matches(['[', ']']);
+    let item = doc.as_ref().ok()?.get(key)?;
+    let mut alone = toml_edit::DocumentMut::new();
+    alone.insert(key, item.clone());
+    let why = crate::cmd::init::refuse_what_cannot_be_seeded(&alone, file).err()?;
+    let why = why.to_string();
+    let why = why.lines().next().unwrap_or_default();
+    let why = why
+        .strip_prefix(&format!("{}: ", file.display()))
+        .unwrap_or(why);
+    Some(format!("`omh init` refuses this file: {why}"))
+}
+
 /// What one of your defaults' lists — `[use]` or `[unuse]` — names that it
 /// cannot mean, each with what `omh init` does about it: a kind that is not one
 /// is refused, a name `[use]` lists that your catalogue does not have is warned
@@ -1153,11 +1181,13 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             true => Row {
                 name: name.clone(),
                 value: Some(table_summary(&doc, name)),
-                warning: [config::USE, config::UNUSE]
+                warning: match [config::USE, config::UNUSE]
                     .iter()
                     .any(|t| *name == format!("[{t}]"))
-                    .then(|| names_nothing(paths, name.trim_matches(['[', ']'])))
-                    .flatten(),
+                {
+                    true => names_nothing(paths, name.trim_matches(['[', ']'])),
+                    false => init_refuses(&doc, name, &file),
+                },
                 about: match name.trim_matches(['[', ']']) {
                     config::USE => vec![
                         "what `omh init` gives a new repo from your catalogue, where a kind \
@@ -1296,19 +1326,38 @@ fn unset_account(held: &[(String, Vec<String>)]) -> (String, Option<String>) {
 }
 
 /// A table of the defaults file on one line: `skills = ["tdd"] · hooks = []`.
+///
+/// However it is written — inline, or holding only tables, as
+/// `[mcp.linear.env]` does — each value under its dotted key: read as a
+/// standard table only, an inline one was "a table" and a nested one
+/// "linear = ". `[mcp]`'s values are held back: a server's environment can
+/// be a token, and the servers page does not show one either.
 fn table_summary(doc: &Result<toml_edit::DocumentMut>, name: &str) -> String {
+    fn flat(prefix: &str, table: &dyn toml_edit::TableLike, shown: bool, out: &mut Vec<String>) {
+        for (k, v) in table.iter() {
+            let at = match prefix {
+                "" => k.to_string(),
+                _ => format!("{prefix}.{k}"),
+            };
+            match v.as_table_like() {
+                Some(inner) => flat(&at, inner, shown, out),
+                None if shown => out.push(format!("{at} = {}", v.to_string().trim())),
+                None => out.push(format!("{at} = …")),
+            }
+        }
+    }
     let key = name.trim_start_matches('[').trim_end_matches(']');
     let Ok(doc) = doc else {
         return "a table".into();
     };
-    match doc.get(key).and_then(|item| item.as_table()) {
-        Some(table) if table.is_empty() => "empty".into(),
-        Some(table) => table
-            .iter()
-            .map(|(k, v)| format!("{k} = {}", v.to_string().trim()))
-            .collect::<Vec<_>>()
-            .join(" · "),
-        None => "a table".into(),
+    let Some(table) = doc.get(key).and_then(|item| item.as_table_like()) else {
+        return "a table".into();
+    };
+    let mut held = Vec::new();
+    flat("", table, key != "mcp", &mut held);
+    match held.is_empty() {
+        true => "empty".into(),
+        false => held.join(" · "),
     }
 }
 
@@ -2561,6 +2610,81 @@ mod tests {
             "{:?}",
             row.about
         );
+    }
+
+    /// A feature switch is something `set` takes, on or off. The check the
+    /// screen puts a value back through — `u`, after a switch — knew only
+    /// keys, so it called every feature "nothing in omh reads", and each undo
+    /// of a switch ran as `omh settings set --anyway codegraph on`.
+    #[test]
+    fn a_feature_switch_is_put_back_without_anyway() {
+        for feature in settings::shipped_features().unwrap() {
+            assert_eq!(refusal(&feature, "on"), None, "{feature}");
+            assert_eq!(refusal(&feature, "off"), None, "{feature}");
+            let said = refusal(&feature, "maybe").unwrap_or_default();
+            assert!(said.contains("on or off"), "{feature}: {said:?}");
+        }
+    }
+
+    /// A table says what it holds however it is written: inline, `use = {…}`,
+    /// was "a table", and one holding only tables, `[mcp.linear.env]`, was
+    /// "linear = " — `config::values` reads both as the tables they are. What
+    /// a server's environment holds can be a token, so `[mcp]`'s values are
+    /// not shown, as the servers page does not show them.
+    #[test]
+    fn a_table_says_what_it_holds_however_it_is_written() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("default.toml"),
+            "use = { skills = [\"tdd\"] }\n\n[mcp.linear.env]\nTOKEN = \"sk-secret\"\n",
+        );
+        let model = model(&paths);
+        let value = |name: &str| {
+            page(&model, "defaults")
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {name} row"))
+                .value
+                .clone()
+                .unwrap_or_default()
+        };
+        assert_eq!(value("[use]"), "skills = [\"tdd\"]");
+        let mcp = value("[mcp]");
+        assert!(mcp.contains("linear.env.TOKEN"), "{mcp}");
+        assert!(
+            !mcp.contains("sk-secret"),
+            "a server's value was shown: {mcp}"
+        );
+    }
+
+    /// A table `omh init` refuses — one omh reads nowhere, or `[mcp]`, which
+    /// would carry a server's token into a committed file — is marked, with
+    /// init's own reason. Both were drawn as "a table in …", like any other,
+    /// while every `omh init` refused the whole file.
+    #[test]
+    fn a_table_init_refuses_is_marked_with_its_reason() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("default.toml"),
+            "[foo]\nx = 1\n\n[mcp.linear.env]\nK = \"v\"\n",
+        );
+        let model = model(&paths);
+        let rows = &page(&model, "defaults").rows;
+        for (name, why) in [
+            ("[foo]", "is read by nobody"),
+            ("[mcp]", "is not seeded into a repo"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {name} row: {rows:?}"));
+            let warning = row.warning.clone().unwrap_or_default();
+            assert!(
+                warning.contains("`omh init` refuses this file") && warning.contains(why),
+                "{name}: {warning:?}"
+            );
+        }
     }
 
     /// Each list says what is wrong with it, and what `omh init` does about

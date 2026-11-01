@@ -474,10 +474,23 @@ pub(crate) fn doctor_cmd(
             }
         }
 
+        // One reading of `--dry-run` for every write below. A preview topped
+        // the image up and asked a container what it has, made the probe's
+        // worktree and the host key, and filled the account's placeholders,
+        // all before the line that returns on one: it builds and writes
+        // nothing, as the reference says. What the image is known to have is
+        // what a preview's script is written from.
+        let staging = match dry_run {
+            true => container::Staging::Skip,
+            false => container::Staging::Apply,
+        };
         let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
-        if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-            runtime::installed(p)
-        }) {
+        if let (true, Ok(backend)) = (
+            staging.is_apply(),
+            runtime::select(&crate::runtime_preference(&paths)?, &|p| {
+                runtime::installed(p)
+            }),
+        ) {
             sandbox.top_up(
                 &paths,
                 &backend,
@@ -549,7 +562,9 @@ pub(crate) fn doctor_cmd(
         }
 
         let session = Session::scratch(paths.scratch("doctor"), "doctor".into());
-        session.ensure(&paths.repo, "")?;
+        if staging.is_apply() {
+            session.ensure(&paths.repo, "")?;
+        }
 
         // The sandbox's host key, made here rather than left to the mount.
         // **On Linux, a directory Docker creates is root's.** Every plan mounts
@@ -558,7 +573,9 @@ pub(crate) fn doctor_cmd(
         // The next `omh new` then cannot write its own client key beside it:
         // `ssh-keygen: Saving key ".../id_ed25519" failed: Permission denied`.
         // Invisible on Docker Desktop, which maps the mount to the calling user.
-        crate::ssh::ensure_host_key(&paths.keys())?;
+        if staging.is_apply() {
+            crate::ssh::ensure_host_key(&paths.keys())?;
+        }
 
         let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
             runtime::installed(p)
@@ -599,7 +616,7 @@ pub(crate) fn doctor_cmd(
         };
 
         let opts = container::Options {
-            staging: container::Staging::Apply,
+            staging,
             // No dtach and no terminal: the probe's output has to be captured.
             persist: persist::Mode::None,
             tty: false,
@@ -620,7 +637,7 @@ pub(crate) fn doctor_cmd(
             resolves: sandbox.resolves.clone(),
             recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
         };
-        if let Some(account_dir) = &account {
+        if let Some(account_dir) = account.as_ref().filter(|_| staging.is_apply()) {
             auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
         }
         // Read and checked before anything runs; written below.

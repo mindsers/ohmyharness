@@ -391,6 +391,9 @@ impl Sandbox {
     /// have shipped a doctor that lists every volume on the machine.
     /// `<bin>/labels-<name>` is what `inspect -f` answers for that container
     /// — its labels as JSON — where the shim otherwise answers `true`.
+    /// `<bin>/on-<verb>` is a script run when the shim is called with that
+    /// verb, before it answers: an agent still writing as its container is
+    /// removed is `on-rm`.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
@@ -399,6 +402,7 @@ impl Sandbox {
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
+                 [ -f {bin}/on-\"$1\" ] && sh {bin}/on-\"$1\"\n\
                  if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
                  cat {exec_refuses} >&2; exit 1; fi\n\
                  if [ \"$1\" = exec ] && [ -f {check_fails} ]; then \
@@ -2154,6 +2158,36 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
     );
 }
 
+/// What `rm` counts is what it removes. It counted the work, asked, and only
+/// then stopped the container — so what a live agent wrote meanwhile went
+/// with the worktree, uncounted. Counted again once the agent is down, a
+/// change is refused, with nothing more removed.
+#[test]
+fn work_written_while_rm_decided_is_counted_before_anything_of_it_goes() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    let _log = sb.fake_docker();
+    std::fs::write(
+        sb.bin.join("on-rm"),
+        format!(
+            "printf 'late\\n' > '{}'\n",
+            worktree.join("late.txt").display()
+        ),
+    )
+    .unwrap();
+    let out = sb.omh(&["s01", "rm"]);
+    let said = printed(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("s01's agent wrote more while omh decided"),
+        "{said}"
+    );
+    assert!(
+        worktree.join("late.txt").is_file(),
+        "the late work went: {said}"
+    );
+}
+
 /// An empty patch is a sentence, not a blank screen.
 ///
 /// `Diff::human` exists partly to say *no changes on … (against …)*, because
@@ -2773,6 +2807,92 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
     );
 }
 
+/// `omh import mcp` is refused whether or not the harness has servers to
+/// read: with no `.mcp.json`, it said "claude has no mcp here" and exited 0,
+/// before the refusal that names `omh settings mcp import`.
+#[test]
+fn import_mcp_is_refused_with_nothing_there_too() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters"]);
+    let out = sb.omh(&["import", "mcp", "claude"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("`omh settings mcp import claude`"),
+        "{}",
+        printed(&out)
+    );
+}
+
+/// `--env` or `--replace` after the command is the server's, so a server
+/// added as `mcp add foo npx a --env K=V` ran `npx a --env K=V` with no
+/// variable set, and omh said it wrote it. Refused, naming the order omh
+/// reads them in, and nothing written.
+#[test]
+fn an_omh_flag_after_the_command_is_refused_not_passed_on() {
+    let sb = sandbox();
+    sb.git_init();
+    for flag in [&["--env", "K=V"][..], &["--env=K=V"], &["--replace"]] {
+        let mut argv = vec!["settings", "mcp", "add", "foo", "npx", "a"];
+        argv.extend_from_slice(flag);
+        let out = sb.omh(&argv);
+        assert!(!out.status.success(), "{argv:?}: {}", printed(&out));
+        assert!(
+            printed(&out).contains("goes before the name"),
+            "{argv:?}: {}",
+            printed(&out)
+        );
+        assert!(!sb.home.join(".omh/mcp.json").exists(), "{argv:?} wrote");
+    }
+    let out = sb.omh(&["settings", "mcp", "add", "--env", "K=V", "foo", "npx", "a"]);
+    assert!(out.status.success(), "{}", printed(&out));
+}
+
+/// A first `omh init` that fails at the image runs again. The stamp that
+/// says a checkout is set up was written before the image was built, so
+/// after a build that failed, every `omh init` said "this project already
+/// uses omh — run `omh upgrade`", and the image was never built.
+#[test]
+fn a_first_init_that_failed_at_the_image_runs_again() {
+    let sb = sandbox();
+    sb.git_init();
+    let _log = sb.fake_docker();
+    std::fs::write(sb.bin.join("docker-refuses"), "").unwrap();
+    let first = sb.omh(&["init"]);
+    assert!(!first.status.success(), "{}", printed(&first));
+    let again = sb.omh(&["init"]);
+    assert!(
+        !printed(&again).contains("already uses omh"),
+        "a failed first run was taken for a finished one: {}",
+        printed(&again)
+    );
+}
+
+/// A value `omh init` seeds that this omh cannot read — one written to your
+/// defaults with `--anyway`, for a newer omh — is named as it is seeded. It
+/// went into the repo's committed file without a word.
+///
+/// `#[ignore]`d: `init` needs a container runtime.
+#[test]
+#[ignore]
+fn init_names_a_seeded_value_this_omh_cannot_read() {
+    let sb = real_sandbox();
+    sb.git_init();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "persistence = \"tmux\"\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["init"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("seeded `persistence = tmux` as your defaults have it"),
+        "{}",
+        printed(&out)
+    );
+}
+
 /// The launcher discloses this repo's hooks, and a dry run leaves no trace.
 ///
 /// `notice::hooks` and `Record::commit` are both well covered by unit tests,
@@ -3271,6 +3391,50 @@ fn a_previewed_doctor_does_not_cross_build_anything() {
         !sb.home.join(".omh/bin").exists(),
         "a preview cross-built the memory server: {said}"
     );
+}
+
+/// `omh --dry-run doctor` builds nothing, runs nothing and writes nothing —
+/// what the reference and the troubleshooting guide say. It topped the image
+/// up and asked a container what it has, made the probe's scratch worktree
+/// and the sandbox's host key, and filled the account's placeholders, all
+/// before it reached the line that returns on a preview.
+#[test]
+fn a_previewed_doctor_builds_runs_and_writes_nothing() {
+    fn every_path(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() && !path.is_symlink() {
+                every_path(&path, out);
+            }
+            out.push(path);
+        }
+    }
+    let sb = sandbox();
+    sb.git_init();
+    let log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    // An account, so the placeholders a real run lays in it are in reach.
+    sb.account("claude", "default");
+    let mut before = Vec::new();
+    every_path(&sb.home, &mut before);
+
+    let out = sb.omh(&["--dry-run", "doctor", "--harness", "claude"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("printf 'ok"),
+        "the preview is the probe script: {}",
+        printed(&out)
+    );
+    let ran: Vec<String> = sb
+        .docker_calls(&log)
+        .into_iter()
+        .filter(|c| c.starts_with("build") || c.starts_with("run") || c.starts_with("buildx"))
+        .collect();
+    assert!(ran.is_empty(), "a preview built or ran: {ran:?}");
+    let mut after = Vec::new();
+    every_path(&sb.home, &mut after);
+    let made: Vec<_> = after.iter().filter(|p| !before.contains(p)).collect();
+    assert!(made.is_empty(), "a preview wrote: {made:?}");
 }
 
 /// A launched session answers ssh, which is the whole of `omh sNN attach`.
@@ -10965,6 +11129,23 @@ fn a_named_down_stops_only_the_named_session() {
     );
 }
 
+/// `omh s99 down` for a session that does not exist is refused, as every
+/// other verb that names one is: it said "was not running" and exited 0, a
+/// stop that reads as done for a typo.
+#[test]
+fn a_down_of_a_session_that_does_not_exist_is_refused() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    let out = sb.omh(&["s99", "down"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("no session s99 — `omh s` lists them"),
+        "{}",
+        printed(&out)
+    );
+}
+
 /// `--all` is gone from `down` — absence already means all.
 #[test]
 fn down_no_longer_takes_all() {
@@ -14132,6 +14313,40 @@ fn use_all_does_not_turn_on_a_guard() {
     assert!(!settings.contains("config-guard"), "got: {settings}");
 }
 
+/// `omh use <capability>` with no name takes everything the catalogue has of
+/// that kind, as its help and the reference say, and leaves every other
+/// list as it was. It refused, asking for a name.
+#[test]
+fn use_with_a_capability_alone_takes_that_kind_whole() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.seed_catalogue(&["hooks", "stacks"]);
+    fx.catalogue(&["skills/tdd/SKILL.md", "skills/review-diff/SKILL.md"]);
+    std::fs::write(fx.repo.join("go.mod"), "module x\n").unwrap();
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(
+        fx.repo.join(".omh/settings.toml"),
+        "[use]\nskills = []\nhooks = []\n",
+    )
+    .unwrap();
+
+    let out = fx.omh(&["use", "skills"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let settings: toml::Table = toml::from_str(&fx.settings()).unwrap();
+    let skills = settings["use"]["skills"].as_array().unwrap();
+    assert!(
+        skills.iter().any(|s| s.as_str() == Some("tdd"))
+            && skills.iter().any(|s| s.as_str() == Some("review-diff")),
+        "{settings}"
+    );
+    assert_eq!(
+        settings["use"]["hooks"].as_array().unwrap().len(),
+        0,
+        "another kind's list moved: {settings}"
+    );
+}
+
 /// A part of omh's features cannot be edited on its own: `settings edit` under
 /// the name of one of omh's hooks or rules sections used to open an editor on a
 /// new catalogue file of that name — one every launch then refuses. It is
@@ -14194,6 +14409,43 @@ fn omhs_servers_are_never_counted_as_your_catalogue() {
             );
         }
     }
+}
+
+/// One server omh cannot run — a remote one, an `url` and no `command` —
+/// is left and said, and the rest of the file imports. It failed the whole
+/// import with "missing field `command`", for the server nobody asked about.
+#[test]
+fn a_remote_server_is_left_and_the_rest_imports() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.home.join("theirs.mcp.json");
+    std::fs::write(
+        &theirs,
+        r#"{"mcpServers":{"linear":{"command":"npx","args":["-y","mcp-remote"]},
+                          "docs":{"type":"http","url":"https://mcp.example.invalid/mcp"}}}"#,
+    )
+    .unwrap();
+    let out = fx.omh(&[
+        "settings",
+        "mcp",
+        "import",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.lines()
+            .any(|l| l.contains("docs") && l.contains("left") && l.contains("remote")),
+        "the remote server is named as left, and why: {said}"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fx.home.join(".omh/mcp.json")).unwrap())
+            .unwrap();
+    let held: Vec<&String> = doc["mcpServers"].as_object().unwrap().keys().collect();
+    assert_eq!(held, ["linear"], "{doc}");
 }
 
 /// The names omh's servers had before they were named `omh-…` stay omh's, and

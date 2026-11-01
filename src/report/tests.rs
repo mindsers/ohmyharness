@@ -2765,3 +2765,65 @@ fn an_empty_list_omh_could_not_fill_does_not_say_no_sessions() {
         "and it says so on the channel the answer is on: {human}"
     );
 }
+
+/// What a feature brings is in `--json` too. Both reports that carry `using`
+/// dropped it there, so a script read `mcp` as nothing in a repo running two
+/// of omh's servers — the reading the human row was fixed to stop.
+#[test]
+fn what_a_feature_brings_reaches_json_too() {
+    let using = vec![Using {
+        capability: "mcp".into(),
+        selected: Some(vec![]),
+        unselected: vec![],
+        from_a_feature: vec!["omh-memory".into()],
+    }];
+    let repo = Repo {
+        repo_id: "repo-deadbeef".into(),
+        dir: "/r/.omh".into(),
+        settings: vec![],
+        features: vec![],
+        using: using.clone(),
+        notices: vec![],
+    };
+    let init = Init {
+        using,
+        ..Init::default()
+    };
+    for json in [repo.json(), init.json()] {
+        assert_eq!(
+            json["using"][0]["from_a_feature"],
+            serde_json::json!(["omh-memory"]),
+            "{json}"
+        );
+    }
+}
+
+/// A document and a directory holding one entry are two shapes, and `--json`
+/// said `"entries": 1` for both — the conflation `Wrote` was made to end, one
+/// renderer over.
+#[test]
+fn an_ejected_document_is_not_a_one_entry_directory_in_json() {
+    let ejected = Ejected {
+        harness: "claude".into(),
+        to: "/x".into(),
+        wrote: vec![
+            EjectedFile {
+                capability: "rules".into(),
+                at: "CLAUDE.md".into(),
+                wrote: Wrote::Document,
+            },
+            EjectedFile {
+                capability: "skills".into(),
+                at: "skills".into(),
+                wrote: Wrote::Entries(std::num::NonZeroUsize::new(1).unwrap()),
+            },
+        ],
+        dropped: vec![],
+        sandboxed: vec![],
+        unreadable: vec![],
+        dry_run: false,
+    };
+    let json = ejected.json();
+    assert_eq!(json["wrote"][0]["shape"], "document", "{json}");
+    assert_eq!(json["wrote"][1]["shape"], "directory", "{json}");
+}

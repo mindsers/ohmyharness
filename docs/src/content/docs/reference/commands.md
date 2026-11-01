@@ -2242,14 +2242,14 @@ omh settings rm <capability> <name> [--yes]
                                       take one entry out of your catalogue
 
 omh settings mcp ls
-omh settings mcp add [--replace] <name> <cmd> [args…] [--env K=V]
+omh settings mcp add [--replace] [--env K=V] <name> <cmd> [args…]
 omh settings mcp import <harness> [--from <path>] [--replace]
 ```
 
 | | |
 |---|---|
 | `--yes` `-y` | remove without asking. Off a terminal there is nobody to ask, so `rm` refuses without it |
-| `--env K=V` | an environment variable the server runs with. Repeat for several |
+| `--env K=V` | an environment variable the server runs with. Repeat for several. Before the name: everything after `<cmd>` is the server's, so `mcp add` refuses `--env` there |
 | `--from <path>` | read this file instead of where the adapter says the harness keeps its servers |
 | `--replace` | overwrite a server of the same name. Without it `mcp add` refuses one, naming what it runs, and `mcp import` keeps yours and reports the difference. omh's own servers are refused either way |
 

@@ -2537,6 +2537,20 @@ pub struct Using {
 }
 
 impl Using {
+    /// One spelling for both reports that carry it — `omh info --repo` and
+    /// `omh init` each wrote their own, and both left `from_a_feature` out.
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "capability": self.capability,
+            // `null` is *follows the catalogue*, and an array is a list.
+            // Collapsing the two into an array of today's names would tell
+            // a script the selection is pinned when it is not.
+            "selected": self.selected,
+            "unselected": self.unselected,
+            "from_a_feature": self.from_a_feature,
+        })
+    }
+
     pub fn summary(&self) -> String {
         // What a feature brings is named beside what you chose, because it is
         // here either way and `[use]` never mentions it. Without this the row
@@ -2693,14 +2707,7 @@ impl Report for Repo {
                 "name": f.name,
                 "on": f.on,
             })).collect::<Vec<_>>(),
-            "using": self.using.iter().map(|u| json!({
-                "capability": u.capability,
-                // `null` is *follows the catalogue*, and an array is a list.
-                // Collapsing the two into an array of today's names would tell
-                // a script the selection is pinned when it is not.
-                "selected": u.selected,
-                "unselected": u.unselected,
-            })).collect::<Vec<_>>(),
+            "using": self.using.iter().map(Using::json).collect::<Vec<_>>(),
             "notices": self.notices,
         })
     }
@@ -3272,11 +3279,7 @@ impl Report for Init {
                 "name": name,
                 "why": why,
             })).collect::<Vec<_>>(),
-            "using": self.using.iter().map(|u| json!({
-                "capability": u.capability,
-                "selected": u.selected,
-                "unselected": u.unselected,
-            })).collect::<Vec<_>>(),
+            "using": self.using.iter().map(Using::json).collect::<Vec<_>>(),
             "notices": self.notices,
             "next": self.next.iter().map(|(line, does)| json!({
                 "run": line,
@@ -4198,6 +4201,12 @@ impl Report for Ejected {
                 "entries": match &f.wrote {
                     Wrote::Document => 1,
                     Wrote::Entries(n) => n.get(),
+                },
+                // `entries` alone said 1 for a document and for a directory
+                // holding one, the conflation `Wrote` was made to end.
+                "shape": match &f.wrote {
+                    Wrote::Document => "document",
+                    Wrote::Entries(_) => "directory",
                 },
             })).collect::<Vec<_>>(),
             "dropped": self.dropped,

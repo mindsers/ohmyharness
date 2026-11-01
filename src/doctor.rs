@@ -757,6 +757,21 @@ fn hooks_row(paths: &crate::catalogue::Paths) -> Outcome {
     // portable, reliable way to provoke on the platforms this ships for —
     // written down here rather than left implied by the comment alone.
     let mut broken = Vec::new();
+    // The hook names omh ships — `Own::reserved`, the other rule
+    // `merge_hooks` refuses a launch on. This row checked spelling and parse
+    // only, and was green above a launch that died on a `graph-refresh.json`.
+    let reserved = match crate::base::Manifest::load_dir(&paths.base()) {
+        Ok(manifest) => manifest
+            .owns()
+            .remove(&Capability::Hooks)
+            .unwrap_or_default(),
+        Err(e) => {
+            broken.push(format!(
+                "could not read the base set to check names against: {e:#}"
+            ));
+            Default::default()
+        }
+    };
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -774,6 +789,13 @@ fn hooks_row(paths: &crate::catalogue::Paths) -> Outcome {
         // not green above a launch that dies on the same file.
         if let Err(e) = crate::selection::validate_entry_name(&name, Capability::Hooks, &path) {
             broken.push(format!("{}: {e:#}", name.escape_debug()));
+            continue;
+        }
+        if let Some(feature) = reserved.get(&*name) {
+            broken.push(format!(
+                "{name}: a name omh ships, the {feature} feature's — the file answers to \
+                 nothing, and every launch refuses over it. Rename it"
+            ));
             continue;
         }
         match std::fs::read_to_string(&path) {
@@ -5341,5 +5363,25 @@ mod tests {
         let hooks = rows.iter().find(|r| r.name == "repo hooks").unwrap();
         assert!(!hooks.ok, "{rows:?}");
         assert!(hooks.detail.contains("line break"), "{}", hooks.detail);
+    }
+
+    /// A repo hook named like one omh ships answers to nothing, and every
+    /// launch refuses over it — so this row is red over it too. It checked
+    /// spelling and parse only, and was green above a launch that died.
+    #[test]
+    fn a_repo_hook_under_a_name_omh_ships_is_a_red_row() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/hooks/graph-refresh.json"),
+            r#"{"on":"turn-end","run":"true"}"#,
+        );
+        let rows = audit(&paths);
+        let hooks = rows.iter().find(|r| r.name == "repo hooks").unwrap();
+        assert!(!hooks.ok, "{rows:?}");
+        assert!(
+            hooks.detail.contains("graph-refresh") && hooks.detail.contains("a name omh ships"),
+            "{}",
+            hooks.detail
+        );
     }
 }

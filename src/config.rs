@@ -1011,6 +1011,22 @@ fn write_table(
     edit: impl FnOnce(&mut toml_edit::Table),
 ) -> Result<Written> {
     edit_layer(paths, layer, |doc| {
+        // A file of comments alone — `init`'s header over empty defaults —
+        // holds them as the document's trailing text, which is written after
+        // every item: the first table went in above the header that says
+        // settings go at the top level, and a key added under it landed in the
+        // table. They go on the new table's front instead.
+        let lead = match doc.as_table().is_empty() {
+            true => doc
+                .trailing()
+                .as_str()
+                .filter(|t| !t.trim().is_empty())
+                .map(String::from),
+            false => None,
+        };
+        if lead.is_some() {
+            doc.set_trailing("");
+        }
         // The entry API, not `doc[name]`: indexing a document with a key it
         // does not have *panics*, and the first `omh use` in a repo is exactly
         // that case.
@@ -1023,6 +1039,9 @@ fn write_table(
         let Some(table) = item.as_table_mut() else {
             anyhow::bail!("`{name}` is not a table — omh will not overwrite it");
         };
+        if let Some(lead) = lead {
+            table.decor_mut().set_prefix(format!("{lead}\n"));
+        }
         edit(table);
         Ok(())
     })
@@ -2190,6 +2209,51 @@ mod tests {
         assert_eq!(w.path, Layer::Local.file(&paths));
         assert!(!w.committed);
         assert_eq!(get(&policy(&paths).unwrap(), "idle_timeout").value, "30m");
+    }
+
+    /// A file of comments alone — what `omh init` writes from empty defaults —
+    /// keeps them above the first table written into it. They were the
+    /// document's trailing text, so `[use]` went in above the header that says
+    /// settings go at the top level, and a key added under that header landed
+    /// in `[use]`: `omh info --repo` then refused the file.
+    #[test]
+    fn a_header_stays_above_the_first_table_written_under_it() {
+        let (_d, paths) = fixture();
+        let file = Layer::Shared.file(&paths);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            "# What this repo decided. Settings at the top level.\n",
+        )
+        .unwrap();
+        write_selection(
+            &paths,
+            Layer::Shared,
+            &BTreeMap::from([(crate::adapter::Capability::Skills, vec![])]),
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            written.starts_with("# What this repo decided"),
+            "the header went below the table: {written}"
+        );
+        // Added where the header says, it is a setting at the top level.
+        let (head, rest) = written.split_once('\n').unwrap();
+        let added = format!("{head}\nsandbox_memory = \"4g\"\n{rest}");
+        let parsed: toml::Table = toml::from_str(&added).unwrap();
+        assert_eq!(parsed["sandbox_memory"].as_str(), Some("4g"), "{added}");
+
+        // A file with nothing in it has no header to keep, and gains no blank
+        // line above its first table.
+        std::fs::write(&file, "").unwrap();
+        write_selection(
+            &paths,
+            Layer::Shared,
+            &BTreeMap::from([(crate::adapter::Capability::Skills, vec![])]),
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.starts_with("[use]"), "{written:?}");
     }
 
     /// A scalar must not land where a table lives.

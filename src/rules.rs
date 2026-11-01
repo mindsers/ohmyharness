@@ -401,7 +401,8 @@ fn neutralise(body: &str) -> String {
 /// order is what a repo that has not written one falls back to: still *some*
 /// order, and a stable one beats whatever `read_dir` happens to return.
 ///
-/// `.md` only, and blank files are dropped for the reason `body` gives: a file
+/// `.md` only, in any case — `catalogue::is_rule_file`, which the listing asks
+/// too — and blank files are dropped for the reason `body` gives: a file
 /// with nothing in it states no rules, and emitting a bare marker with no text
 /// under it attributes silence to somebody.
 fn catalogue(
@@ -424,7 +425,7 @@ fn catalogue(
         let path = entry
             .with_context(|| format!("reading {}", dir.display()))?
             .path();
-        if !path.extension().is_some_and(|e| e == "md") {
+        if !crate::catalogue::is_rule_file(&path) {
             continue;
         }
         let Some(body) = read(&path)?.filter(|b| !b.trim().is_empty()) else {
@@ -526,6 +527,28 @@ mod tests {
             &Default::default(),
         )
         .unwrap()
+    }
+
+    /// What the catalogue lists as a rule is what composes, and the other way
+    /// round. A `.txt` was listed and selectable and never composed, with
+    /// nothing said; a `.MD` was listed and skipped, the extension compared by
+    /// case.
+    #[test]
+    fn a_rule_listed_is_a_rule_composed() {
+        let fx = fixture();
+        write(fx.paths.root.join("rules/upper.MD"), "UPPER RULE");
+        write(fx.paths.root.join("rules/lower.md"), "lower rule");
+        write(fx.paths.root.join("rules/notes.txt"), "NOT A RULE");
+        let listed = crate::catalogue::Catalogue::resolve(&fx.paths)
+            .entries(Capability::Rules)
+            .unwrap();
+        assert_eq!(listed, ["lower", "upper"]);
+        let (doc, _) = composed(&fx);
+        assert!(
+            doc.contains("UPPER RULE") && doc.contains("lower rule"),
+            "{doc}"
+        );
+        assert!(!doc.contains("NOT A RULE"), "{doc}");
     }
 
     /// A rules file answering to a manifest name is an error naming both — the

@@ -1400,6 +1400,27 @@ fn a_filter_narrows_the_page_and_acts_on_what_it_shows() {
     assert!(app.filter.is_some(), "a filter is a search, across pages");
 }
 
+/// A filter typed on one page narrows every page, and a row picked on another
+/// page before it can be past the end of what that page now shows. Enter acts
+/// on the row drawn as selected, never on a page with none: it opened `$EDITOR`
+/// on the whole skills directory, and `d` and space did nothing.
+#[test]
+fn a_filter_never_leaves_a_page_selecting_past_what_it_shows() {
+    let mut app = App::new(model(), true);
+    app.key(code(KeyCode::Tab));
+    app.key(press('j'));
+    app.key(code(KeyCode::BackTab));
+    assert_eq!(typed(&mut app, "/keep"), Next::Stay);
+    app.key(code(KeyCode::Tab));
+    assert_eq!(
+        app.key(code(KeyCode::Enter)),
+        Next::Run(Act::Edit {
+            capability: "skills".into(),
+            name: Some("keep".into())
+        })
+    );
+}
+
 /// The filter searches every page: the rail says how many on each match, so
 /// "which page was that hook on" is answered without going to each — and the
 /// page you go to is already narrowed.

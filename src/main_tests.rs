@@ -1986,7 +1986,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `mcp add`'s refusals: `omh set <feature> off` and `omh upgrade` for
         // a server omh ships, and the `--replace` line for one of yours. +
         // `omh settings set <feature> off` and its `omh init`, for new repos.
-        ("src/cmd/mcp.rs", 5),
+        // + the line with omh's flag before the name, when one came after the
+        // command.
+        ("src/cmd/mcp.rs", 6),
         ("src/cmd/memory.rs", 1),
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
@@ -1997,8 +1999,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // line naming a session's preferences to review, `omh {id} rm` and
         // `omh {id} rm --yes` in `rm`'s refusal once its container is down,
         // and `omh {id} rm --yes` in its refusal when omh could not tell, and
-        // `omh {id} down` after a review that left something undecided.
-        ("src/cmd/session.rs", 22),
+        // `omh {id} down` after a review that left something undecided. +
+        // `omh {id} rm` when the agent wrote more while `rm` decided.
+        ("src/cmd/session.rs", 23),
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         // + `omh settings edit mcp`, in the refusal of a name for a server.
@@ -2031,8 +2034,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // list's warning — a kind that is not one, a value that is not a list.
         // + `omh <line>` for each command the screen ran, said once it closes —
         // twice, a server's line with its values held back. + `omh init`
-        // where a feature switch is not true or false.
-        ("src/cmd/settings_tui.rs", 19),
+        // where a feature switch is not true or false. + `omh init` on a table
+        // in your defaults it refuses.
+        ("src/cmd/settings_tui.rs", 20),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
@@ -5593,6 +5597,36 @@ fn a_seeded_key_lands_where_omh_set_would_put_it() {
     )
     .unwrap();
     assert_eq!(cmd::init::seed_settings(&paths).unwrap().local, None);
+}
+
+/// A value this omh cannot read — written to your defaults with `--anyway`,
+/// for a newer omh — is seeded as it was written, and said: it went into the
+/// repo's committed file without a word.
+#[test]
+fn a_seeded_value_this_omh_cannot_read_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(&paths.root).unwrap();
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "persistence = \"tmux\"\nidle_timeout = \"45m\"\n",
+    )
+    .unwrap();
+    let seed = cmd::init::seed_settings(&paths).unwrap();
+    assert!(
+        seed.shared.contains("tmux"),
+        "seeded as written: {}",
+        seed.shared
+    );
+    assert_eq!(seed.unread.len(), 1, "{:?}", seed.unread);
+    assert!(
+        seed.unread[0].contains("persistence") && seed.unread[0].contains("tmux"),
+        "{:?}",
+        seed.unread
+    );
 }
 
 /// Every account `omh settings set account` writes, a new repo takes — into

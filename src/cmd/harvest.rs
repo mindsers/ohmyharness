@@ -939,7 +939,7 @@ pub(crate) fn non_empty(s: String) -> Option<String> {
 /// first version of this discarded it: `.exists()` and `.ok()` turned a
 /// permissions error, a truncated replay record and a repository with no seed
 /// into "go ahead and delete".
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AtStake {
     /// No sandbox was ever built here.
     Nothing,
@@ -947,6 +947,17 @@ pub(crate) enum AtStake {
     Work(String),
     /// A repository is there and omh could not read it. Why, in git's words.
     Unknown(String),
+}
+
+impl AtStake {
+    /// What it comes to, in a few words.
+    pub(crate) fn said(&self) -> String {
+        match self {
+            AtStake::Nothing => "nothing".into(),
+            AtStake::Work(work) => work.clone(),
+            AtStake::Unknown(why) => format!("omh could not tell what: {why}"),
+        }
+    }
 }
 
 /// What the seed record alone settles, if anything.

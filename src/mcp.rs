@@ -46,6 +46,13 @@ pub struct Request {
 #[derive(Debug, PartialEq)]
 pub enum Framed {
     Message(Request),
+    /// JSON carrying an `id`, and not a request — a `method` that is not a
+    /// string, say. Answered with an error against that id, as JSON-RPC says:
+    /// left unanswered, the client waited out its timeout.
+    Invalid {
+        id: Value,
+        why: String,
+    },
     /// Kept as a value rather than an error: one junk line must not end the
     /// session. A server that exits mid-task is reported to the user as
     /// "MCP server crashed", with no cause attached.
@@ -55,7 +62,17 @@ pub enum Framed {
 pub fn parse_line(line: &str) -> Framed {
     match serde_json::from_str::<Request>(line) {
         Ok(req) => Framed::Message(req),
-        Err(e) => Framed::Malformed(e.to_string()),
+        Err(e) => match serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|v| v.get("id").cloned())
+            .filter(|id| !id.is_null())
+        {
+            Some(id) => Framed::Invalid {
+                id,
+                why: e.to_string(),
+            },
+            None => Framed::Malformed(e.to_string()),
+        },
     }
 }
 
@@ -174,13 +191,23 @@ pub fn dispatch(req: &Request, tools: &mut dyn Tools) -> Option<Value> {
 
 /// The only code here that touches I/O.
 pub fn serve<R: BufRead, W: Write>(input: R, mut output: W, tools: &mut dyn Tools) -> Result<()> {
-    for line in input.lines() {
+    // Split on bytes, not `lines()`: that returns a line that is not UTF-8
+    // as an error, and `?` ended the session on one byte.
+    for line in input.split(b'\n') {
         let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let reply = match parse_line(&line) {
+        let framed = match String::from_utf8(line) {
+            Ok(text) => {
+                let text = text.strip_suffix('\r').unwrap_or(&text);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                parse_line(text)
+            }
+            Err(_) => Framed::Malformed("a line that is not UTF-8".into()),
+        };
+        let reply = match framed {
             Framed::Message(req) => dispatch(&req, tools),
+            Framed::Invalid { id, why } => Some(err(&id, -32600, &format!("not a request: {why}"))),
             // No id to answer against, so there is nobody to tell. Diagnostics
             // go to stderr; stdout carries protocol and nothing else.
             Framed::Malformed(why) => {
@@ -255,7 +282,7 @@ mod tests {
     fn request(raw: &str) -> Request {
         match parse_line(raw) {
             Framed::Message(req) => req,
-            Framed::Malformed(why) => panic!("{why}"),
+            Framed::Invalid { why, .. } | Framed::Malformed(why) => panic!("{why}"),
         }
     }
 
@@ -355,6 +382,32 @@ mod tests {
             json!(7),
             "the request after it still is"
         );
+    }
+
+    /// Nor does a line that is not UTF-8: `lines()` returned it as an error,
+    /// and `?` ended the session on one byte. And a JSON line with an `id`
+    /// that is not a request is answered, as JSON-RPC says, rather than left
+    /// for the client to wait out.
+    #[test]
+    fn a_line_that_is_not_utf8_or_not_a_request_does_not_end_the_session() {
+        let mut out = Vec::new();
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\xff\xfe not text\n");
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":5,"method":42}"#);
+        input.push(b'\n');
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#);
+        input.push(b'\n');
+        serve(&input[..], &mut out, &mut Fake::new()).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        let replies: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 2, "{text}");
+        assert_eq!(replies[0]["id"], json!(5), "{text}");
+        assert_eq!(replies[0]["error"]["code"], json!(-32600), "{text}");
+        assert_eq!(replies[1]["id"], json!(7), "{text}");
     }
 
     /// The adapter rule, inverted on purpose. Clients send `_meta` and

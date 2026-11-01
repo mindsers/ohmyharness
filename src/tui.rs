@@ -1393,7 +1393,11 @@ impl App {
     fn row_in(&self, page: usize) -> Option<&Row> {
         let section = self.model.sections.get(page)?;
         let shown = self.shown(page);
-        section.rows.get(*shown.get(*self.rows.get(page)?)?)
+        // Read as the list is drawn: a filter typed on another page can leave
+        // this page's index past what it now shows, and the row drawn as
+        // selected is then the last one. Unclamped, enter acted on none.
+        let at = (*self.rows.get(page)?).min(shown.len().checked_sub(1)?);
+        section.rows.get(*shown.get(at)?)
     }
 
     // ── Drawing ─────────────────────────────────────────────────────────────

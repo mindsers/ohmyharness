@@ -8,9 +8,9 @@ bin  = "omp"
 # `chmod +x`: a release binary made executable without a checksum is the
 # supply-chain gap a pin exists to close.
 #
-# The sums under `[checksums]` are the source of truth `omh doctor` reads; the
-# install repeats the right one per arch and `sha256sum -c` refuses a download
-# that does not match. Both filled from `SHA256SUMS.txt` published alongside
+# The sums under `[checksums]` are the declaration; the install repeats the
+# right one per arch, `sha256sum -c` refuses a download that does not match,
+# and omh refuses to load this file if a declared sum is not in the install. Both filled from `SHA256SUMS.txt` published alongside
 # this tag's release, cross-checked by downloading `omp-linux-arm64` and
 # `omp-linux-x64` independently and hashing them rather than trusting the sums
 # file alone — the two agreed.
