@@ -107,7 +107,7 @@ impl Catalogue {
                 // omh's servers are part of omh, never of your catalogue.
                 let omhs = crate::base::server_names()?;
                 out.extend(
-                    crate::render::parse_layers(&[source])?
+                    crate::servers::parse_layers(&[source])?
                         .into_keys()
                         .filter(|name| !omhs.contains(name)),
                 );

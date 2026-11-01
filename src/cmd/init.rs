@@ -108,11 +108,11 @@ pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
 
 /// What lives in a repo's `.omh/` and must not be committed.
 ///
-/// `settings::LOCAL` because it holds secrets — that is the whole safety
+/// `config::LOCAL` because it holds secrets — that is the whole safety
 /// argument. `SEEDED_BY` because it records *this checkout's* setup, and
 /// committing it would have two teammates on different omh versions
 /// overwriting each other's line for no gain.
-pub(crate) const IGNORED: &[&str] = &[settings::LOCAL, SEEDED_BY];
+pub(crate) const IGNORED: &[&str] = &[config::LOCAL, SEEDED_BY];
 
 /// The file recording which omh set this checkout up.
 ///
@@ -139,13 +139,13 @@ pub(crate) fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
     // early return, so a `.gitignore` that already had it could never gain a
     // second — and `seeded-by` is per-checkout, so committing it is churn
     // between teammates on different omh versions. The security argument is
-    // unchanged: `settings::LOCAL` is still ensured, and still first.
+    // unchanged: `config::LOCAL` is still ensured, and still first.
     let missing = append_missing(&ignore, IGNORED)?;
     if missing.is_empty() {
         return Ok(());
     }
     // **What was actually added, not the first name in the list.** This
-    // hardcoded `settings::LOCAL` while `missing` is computed per name — so
+    // hardcoded `config::LOCAL` while `missing` is computed per name — so
     // every existing checkout, which already ignores that file and is only
     // gaining `seeded-by`, was told *nothing was ignoring settings.local.toml*.
     // A false alarm about the one file the whole safety argument rests on, and

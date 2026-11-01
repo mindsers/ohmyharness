@@ -14,7 +14,7 @@
 //! and `omh why` explains from it, so they cannot disagree.
 
 use crate::hook::Field;
-use crate::render::Server;
+use crate::servers::Server;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1075,7 +1075,7 @@ pub struct Own {
     /// part of a feature you could edit or delete on its own, and a deleted
     /// one took the hooks and the rules section with it while the rest of the
     /// feature stayed mounted.
-    pub servers: BTreeMap<String, crate::render::Server>,
+    pub servers: BTreeMap<String, crate::servers::Server>,
     /// Every hook name the manifest owns, whether or not its feature is on.
     ///
     /// A file in a layer answering to one of these is never read. With the

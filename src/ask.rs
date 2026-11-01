@@ -99,7 +99,7 @@ pub fn how_is_it_installed(
     let programs: Vec<&str> = needs.split_whitespace().collect();
     if programs
         .iter()
-        .any(|p| crate::detect::program(p) != Some(*p))
+        .any(|p| crate::command::program(p) != Some(*p))
     {
         writeln!(
             out,

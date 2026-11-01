@@ -8,7 +8,7 @@ use crate::adapter::{self, Adapter};
 use crate::cli::McpCmd;
 use crate::out;
 use crate::paths::Paths;
-use crate::{config, render, report, settings};
+use crate::{config, report};
 use anyhow::{Context, Result};
 
 /// Takes the `Paths` its caller resolved rather than resolving its own.
@@ -67,7 +67,7 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                     described(held)
                 );
             }
-            let server = render::Server {
+            let server = crate::servers::Server {
                 command: command.clone(),
                 args: args.clone(),
                 env: env.iter().cloned().collect(),
@@ -98,7 +98,7 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                 action = action.note(format!(
                     "this env applies in every repo. For one repo only, put \
                      [mcp.{name}.env] in .omh/{}",
-                    settings::LOCAL
+                    config::LOCAL
                 ));
             }
             ctx.say(&action);
@@ -132,10 +132,10 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                     source.display()
                 )
             })?;
-            let render::Foreign {
+            let crate::servers::Foreign {
                 servers: incoming,
                 left,
-            } = render::parse_foreign(binding.render, &raw)?;
+            } = crate::servers::parse_foreign(binding.render, &raw)?;
             // omh's names are not yours to import, under `--replace` or not —
             // `mcp add` refuses them for the same reason. `memory` above all:
             // the name a third-party memory server is usually installed under,
@@ -235,7 +235,7 @@ pub(crate) fn show_servers(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
 /// A server in words a screen can carry: what it runs, its arguments counted
 /// and its environment named — never a value of either, which is where a
 /// token goes.
-fn described(server: &render::Server) -> String {
+fn described(server: &crate::servers::Server) -> String {
     let mut out = format!("runs {}", server.command);
     if !server.args.is_empty() {
         out.push_str(&format!(

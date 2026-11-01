@@ -4379,7 +4379,7 @@ fn outcome(name: &str, ok: bool, detail: &str) -> crate::probe::Outcome {
 /// resolution and, on the next launch, the repo would provision nothing.
 ///
 /// Silence is cannot-tell, and cannot-tell writes nothing at all — the same
-/// asymmetry `detect::program` and `facts::Facts` are built on, at the one
+/// asymmetry `command::program` and `facts::Facts` are built on, at the one
 /// point where acting on it would delete somebody's file contents.
 #[test]
 fn a_resolution_nobody_measured_is_never_recorded() {

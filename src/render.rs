@@ -7,10 +7,11 @@
 use crate::adapter::{Binding, Capability, PolicyFormat, Render};
 use crate::hook::{self, Outcome};
 use crate::ledger;
+use crate::servers::Server;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// A rendered capability, and what did not fit in it.
 ///
@@ -165,26 +166,6 @@ pub fn document(
 
 // ── MCP ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Server {
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct CanonicalMcp {
-    #[serde(rename = "mcpServers", default)]
-    servers: BTreeMap<String, Server>,
-}
-
-/// Merge by server name; later layers win.
-pub fn parse_layers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
-    merge_servers(files)
-}
-
 /// Every server a session is handed: yours, as this repo takes them, then
 /// omh's for the features on here.
 ///
@@ -201,7 +182,7 @@ pub fn servers(
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
 ) -> Result<BTreeMap<String, Server>> {
-    let mut servers = merge_servers(sources)?;
+    let mut servers = crate::servers::parse_layers(sources)?;
     // Checked against the catalogue as written, *before* anything is dropped.
     // Checked after, an override for a server this repo did not name reported
     // "not in your catalogue" about a server that is plainly in it — advice
@@ -231,15 +212,6 @@ pub fn servers(
     }
     servers.extend(own.servers.clone());
     Ok(servers)
-}
-
-fn merge_servers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
-    let mut out = BTreeMap::new();
-    for f in files {
-        let parsed: CanonicalMcp = read_json(f)?;
-        out.extend(parsed.servers);
-    }
-    Ok(out)
 }
 
 /// [`mcp_approving`] with nothing approved — how the round-trip tests render.
@@ -539,191 +511,6 @@ const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/";
 /// empty list anyway.
 const NO_PLUGIN: &str = "omh-none";
 
-/// Inverse of `mcp`: read a harness's own config back into canonical form.
-///
-/// `omh settings mcp import` exists because nobody retypes MCP servers they
-/// already have.
-/// Every format that renders must also parse, and the pair must round-trip —
-/// otherwise import silently drops fields the renderer knows how to write.
-pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
-    match format {
-        Render::McpJson => {
-            let doc: serde_json::Value = serde_json::from_str(raw).context("parsing MCP JSON")?;
-            if doc.get("mcpServers").is_none() && doc.get("projects").is_some() {
-                anyhow::bail!(
-                    "this config nests servers under `projects` — importing all of \
-                     them would pull in servers from unrelated repos. Point --from \
-                     at a project-scoped .mcp.json instead."
-                );
-            }
-            let doc: CanonicalMcp = serde_json::from_value(doc).context("reading mcpServers")?;
-            Ok(doc.servers)
-        }
-
-        Render::CodexToml => {
-            #[derive(Deserialize)]
-            struct Doc {
-                #[serde(default, rename = "mcp_servers")]
-                servers: BTreeMap<String, Server>,
-            }
-            let doc: Doc = toml::from_str(raw).context("parsing codex config.toml")?;
-            Ok(doc.servers)
-        }
-
-        Render::OpencodeJson => {
-            #[derive(Deserialize)]
-            struct Doc {
-                #[serde(default)]
-                mcp: BTreeMap<String, Entry>,
-            }
-            #[derive(Deserialize)]
-            struct Entry {
-                #[serde(default)]
-                command: Vec<String>,
-                #[serde(default)]
-                environment: BTreeMap<String, String>,
-            }
-            let doc: Doc = serde_json::from_str(raw).context("parsing opencode.json")?;
-            doc.mcp
-                .into_iter()
-                .map(|(name, e)| {
-                    // opencode folds command and args into one array; split the
-                    // head back off or every arg stays glued to the command.
-                    let (command, args) = e
-                        .command
-                        .split_first()
-                        .with_context(|| format!("server `{name}` has an empty command"))?;
-                    Ok((
-                        name,
-                        Server {
-                            command: command.clone(),
-                            args: args.to_vec(),
-                            env: e.environment,
-                        },
-                    ))
-                })
-                .collect()
-        }
-
-        other => anyhow::bail!("`{other:?}` is not an MCP format and cannot be imported"),
-    }
-}
-
-/// What an import found in a harness's file: the servers omh can run, and
-/// each one it cannot, with why.
-#[derive(Debug, Default)]
-pub struct Foreign {
-    pub servers: BTreeMap<String, Server>,
-    pub left: BTreeMap<String, String>,
-}
-
-/// [`parse`], for `omh settings mcp import`: each server read on its own, so
-/// one omh cannot take is left — named, with why — and never fails the rest.
-/// A remote server, an `url` and no `command`, failed the whole import with
-/// "missing field `command`"; and one the harness has switched off was
-/// imported on, into every session.
-pub fn parse_foreign(format: Render, raw: &str) -> Result<Foreign> {
-    const REMOTE: &str = "a remote server — omh's catalogue holds programs it runs";
-    const NO_COMMAND: &str = "no command to run";
-    let off = |harness: &str| format!("switched off in {harness} — `enabled = false`");
-    let mut out = Foreign::default();
-    match format {
-        Render::McpJson => {
-            let doc: serde_json::Value = serde_json::from_str(raw).context("parsing MCP JSON")?;
-            if doc.get("mcpServers").is_none() && doc.get("projects").is_some() {
-                // `parse`'s refusal, for the same reason.
-                parse(format, raw)?;
-            }
-            let empty = serde_json::Map::new();
-            let entries = doc
-                .get("mcpServers")
-                .and_then(serde_json::Value::as_object)
-                .unwrap_or(&empty);
-            for (name, entry) in entries {
-                if entry.get("command").is_none() {
-                    let remote = entry.get("url").is_some()
-                        || matches!(
-                            entry.get("type").and_then(serde_json::Value::as_str),
-                            Some("http" | "sse")
-                        );
-                    out.left.insert(
-                        name.clone(),
-                        (if remote { REMOTE } else { NO_COMMAND }).into(),
-                    );
-                    continue;
-                }
-                let server: Server = serde_json::from_value(entry.clone())
-                    .with_context(|| format!("reading server `{name}`"))?;
-                out.servers.insert(name.clone(), server);
-            }
-        }
-        Render::CodexToml => {
-            let doc: toml::Table = toml::from_str(raw).context("parsing codex config.toml")?;
-            let empty = toml::Table::new();
-            let entries = doc
-                .get("mcp_servers")
-                .and_then(toml::Value::as_table)
-                .unwrap_or(&empty);
-            for (name, entry) in entries {
-                if entry.get("enabled").and_then(toml::Value::as_bool) == Some(false) {
-                    out.left.insert(name.clone(), off("codex"));
-                    continue;
-                }
-                if entry.get("command").is_none() {
-                    let remote = entry.get("url").is_some();
-                    out.left.insert(
-                        name.clone(),
-                        (if remote { REMOTE } else { NO_COMMAND }).into(),
-                    );
-                    continue;
-                }
-                let server: Server = entry
-                    .clone()
-                    .try_into()
-                    .with_context(|| format!("reading server `{name}`"))?;
-                out.servers.insert(name.clone(), server);
-            }
-        }
-        Render::OpencodeJson => {
-            let doc: serde_json::Value =
-                serde_json::from_str(raw).context("parsing opencode.json")?;
-            let empty = serde_json::Map::new();
-            let entries = doc
-                .get("mcp")
-                .and_then(serde_json::Value::as_object)
-                .unwrap_or(&empty);
-            for (name, entry) in entries {
-                if entry.get("enabled").and_then(serde_json::Value::as_bool) == Some(false) {
-                    out.left.insert(name.clone(), off("opencode"));
-                    continue;
-                }
-                if entry.get("type").and_then(serde_json::Value::as_str) == Some("remote") {
-                    out.left.insert(name.clone(), REMOTE.into());
-                    continue;
-                }
-                let one = serde_json::json!({ "mcp": { name: entry } }).to_string();
-                match parse(format, &one) {
-                    Ok(mut parsed) => out
-                        .servers
-                        .extend(parsed.remove(name).map(|s| (name.clone(), s))),
-                    // An empty command is the one shape `parse` refuses here.
-                    Err(_)
-                        if entry
-                            .get("command")
-                            .and_then(serde_json::Value::as_array)
-                            .is_none_or(|c| c.is_empty()) =>
-                    {
-                        out.left.insert(name.clone(), NO_COMMAND.into());
-                    }
-                    Err(e) => return Err(e).with_context(|| format!("reading server `{name}`")),
-                }
-            }
-        }
-        other => anyhow::bail!("`{other:?}` is not an MCP format and cannot be imported"),
-    }
-    Ok(out)
-}
-
 // ── Hooks ───────────────────────────────────────────────────────────────────
 
 /// Remove the hooks the image has been **measured** unable to run, and name
@@ -817,10 +604,10 @@ fn suppressed_by_probe(
     let mut dropped = Vec::new();
     hooks.retain(|name, hook| {
         // Two cannot-tells, and neither is a licence to switch a hook off:
-        // `detect::program` answers `None` for a command it could not read, and
+        // `command::program` answers `None` for a command it could not read, and
         // a program absent from the map is one nobody has probed.
         let blocked = hook.runs().into_iter().find_map(|cmd| {
-            let p = crate::detect::program(cmd)?;
+            let p = crate::command::program(cmd)?;
             (resolves.get(p) == Some(&false)).then(|| p.to_string())
         });
         match blocked {
@@ -965,7 +752,7 @@ pub fn merge_hooks(
 /// already. A second notion of *which hooks count* is how a probe starts
 /// answering about a hook nobody runs.
 ///
-/// A command `detect::program` cannot read contributes nothing. That is
+/// A command `command::program` cannot read contributes nothing. That is
 /// *cannot tell*, and this is the direction where cannot-tell is cheap: a
 /// missing question costs one confusing hook error, an invented one reports a
 /// gap in a repo whose toolchain is fine.
@@ -977,7 +764,7 @@ pub fn hook_programs(
     Ok(merge_hooks(dirs, own, repo)?
         .values()
         .flat_map(hook::Hook::runs)
-        .filter_map(crate::detect::program)
+        .filter_map(crate::command::program)
         .map(str::to_string)
         .collect())
 }
@@ -2266,10 +2053,10 @@ fn read_handler(handler: &serde_json::Value) -> std::result::Result<String, Stri
 ///
 /// From the moment and the program it runs, because those are what somebody
 /// scanning `.omh/hooks/` needs to recognise it by — `after-tool-prettier`
-/// rather than a number. `detect::program` answers `None` for a command it
+/// rather than a number. `command::program` answers `None` for a command it
 /// cannot read, and a numbered fallback is better than a name built from shell.
 fn name_for(taken: &BTreeMap<String, hook::Hook>, on: hook::Event, command: &str) -> String {
-    let base = match crate::detect::program(command) {
+    let base = match crate::command::program(command) {
         Some(p) => format!("{on}-{}", p.trim_start_matches("./").replace('/', "-")),
         None => format!("{on}-imported"),
     };
@@ -2284,12 +2071,6 @@ fn name_for(taken: &BTreeMap<String, hook::Hook>, on: hook::Event, command: &str
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
-}
-
 fn pretty(v: serde_json::Value) -> Result<String> {
     Ok(serde_json::to_string_pretty(&v)?)
 }
@@ -2297,6 +2078,8 @@ fn pretty(v: serde_json::Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::servers::{parse, parse_foreign};
+    use std::path::Path;
 
     use std::io::Write;
 
@@ -2891,7 +2674,7 @@ mod tests {
     }
 
     /// **Every format that renders must also parse, and the pair must round
-    /// trip.** The rule `render::parse` already follows for MCP, applied to the
+    /// trip.** The rule `crate::servers::parse` already follows for MCP, applied to the
     /// capability that actually needs importing.
     ///
     /// Through the harness document, not through a fixture of one: what is
@@ -3247,7 +3030,7 @@ mod tests {
     #[test]
     fn mcp_merges_across_layers() {
         let (_d, files) = servers(&[("", L1), ("", L2)]);
-        let merged = merge_servers(&files).unwrap();
+        let merged = crate::servers::parse_layers(&files).unwrap();
         assert_eq!(merged.len(), 2);
         assert_eq!(merged["a"].command, "a-cmd");
         assert_eq!(merged["b"].env["K"], "v");
@@ -3256,7 +3039,7 @@ mod tests {
     #[test]
     fn later_layers_shadow_earlier_ones() {
         let (_d, files) = servers(&[("", L1), ("", L2_SHADOW)]);
-        let merged = merge_servers(&files).unwrap();
+        let merged = crate::servers::parse_layers(&files).unwrap();
         assert_eq!(
             merged["a"].command, "overridden",
             "layer 3 must win over layer 1"
@@ -3271,7 +3054,7 @@ mod tests {
     #[test]
     fn opencodes_render_never_sets_a_model() {
         let (_d, files) = servers(&[("", L1)]);
-        let m = merge_servers(&files).unwrap();
+        let m = crate::servers::parse_layers(&files).unwrap();
         let oc = mcp(Render::OpencodeJson, &m).unwrap();
         let v: serde_json::Value = serde_json::from_str(&oc).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
@@ -3283,7 +3066,7 @@ mod tests {
     #[test]
     fn each_format_emits_its_harness_shape() {
         let (_d, files) = servers(&[("", L1)]);
-        let m = merge_servers(&files).unwrap();
+        let m = crate::servers::parse_layers(&files).unwrap();
 
         let claude = mcp(Render::McpJson, &m).unwrap();
         let v: serde_json::Value = serde_json::from_str(&claude).unwrap();
@@ -5935,7 +5718,7 @@ try {{
             "no.json",
             r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
         );
-        // And a command omh cannot read is *cannot tell* — `detect::program`
+        // And a command omh cannot read is *cannot tell* — `command::program`
         // answers `None` rather than guessing `$(which`, and a question about
         // a program nobody named would report a gap omh invented.
         file(
@@ -6026,7 +5809,7 @@ try {{
     fn malformed_json_names_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let bad = file(dir.path(), "broken.json", "{ not json");
-        let err = merge_servers(&[bad]).unwrap_err();
+        let err = crate::servers::parse_layers(&[bad]).unwrap_err();
         assert!(err.to_string().contains("broken.json"), "got: {err}");
     }
 

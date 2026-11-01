@@ -25,7 +25,7 @@
 //! An **unknown** program is [`None`], never `Some(false)`. Suppression acts on
 //! `Some(false)` alone, so a cache that is missing, empty, corrupt or truncated
 //! suppresses nothing and every hook ships — the same direction
-//! `detect::program` and `main::fired_from` already fall in. The other way
+//! `command::program` and `main::fired_from` already fall in. The other way
 //! round, one
 //! unreadable file would silently switch off every hook in every repo, and the
 //! user would see a working session with no automation in it and no reason

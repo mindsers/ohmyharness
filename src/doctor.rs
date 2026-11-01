@@ -1070,7 +1070,7 @@ fn git_checks_from(
 ///
 /// Built from the declared command rather than from a literal, so a manifest
 /// that changes what it launches changes what gets probed.
-pub fn memory_checks(server: &crate::render::Server) -> Vec<Check> {
+pub fn memory_checks(server: &crate::servers::Server) -> Vec<Check> {
     let argv = std::iter::once(server.command.clone())
         .chain(server.args.iter().cloned())
         .collect::<Vec<_>>()
@@ -4343,7 +4343,7 @@ mod tests {
     /// directory, which is circular in the way this module exists to break.
     #[test]
     fn the_memory_probe_asks_the_server_it_was_configured_with() {
-        let server = crate::render::Server {
+        let server = crate::servers::Server {
             command: "omh".into(),
             args: vec![
                 "memory".into(),
@@ -4773,7 +4773,7 @@ mod tests {
     /// makes that visible instead of looking like success.
     #[test]
     fn the_memory_probe_reports_how_many_notes_the_server_found() {
-        let server = crate::render::Server {
+        let server = crate::servers::Server {
             command: "omh".into(),
             args: vec!["memory".into(), "serve".into()],
             env: Default::default(),

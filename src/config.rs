@@ -13,10 +13,19 @@
 
 use crate::adapter::Render;
 use crate::paths::Paths;
-use crate::render::Server;
+use crate::servers::Server;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// The gitignored layer's filename, so `init` ignores exactly the file this
+/// module reads.
+///
+/// It is not covered by the `local/` line `init` already writes — that ignores
+/// the *directory* `.omh/local`, and this is a file beside it. Documenting a
+/// tracked file as gitignored is how a machine-local override gets committed
+/// to somebody's team repo.
+pub const LOCAL: &str = "settings.local.toml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Layer {
@@ -79,7 +88,7 @@ impl Layer {
         match self {
             Self::Personal => paths.root.join(TEMPLATE),
             Self::Shared => paths.repo.join(".omh").join("settings.toml"),
-            Self::Local => paths.repo.join(".omh").join(crate::settings::LOCAL),
+            Self::Local => paths.repo.join(".omh").join(LOCAL),
         }
     }
 
@@ -553,7 +562,7 @@ fn refuse_a_repo_server(paths: &Paths) -> Result<()> {
              nothing reads this file. Add it with `omh settings mcp add`, and put a \
              token for this repo alone under `[mcp.<name>.env]` in .omh/{}.",
             stray.display(),
-            crate::settings::LOCAL
+            LOCAL
         );
     }
     Ok(())
@@ -1324,7 +1333,7 @@ fn read_servers(path: &Path) -> Result<BTreeMap<String, Server>> {
     let Some(raw) = read_layer(path)? else {
         return Ok(BTreeMap::new());
     };
-    crate::render::parse(Render::McpJson, &raw)
+    crate::servers::parse(Render::McpJson, &raw)
         .with_context(|| format!("reading {}", path.display()))
 }
 

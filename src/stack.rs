@@ -481,7 +481,7 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
         );
         // Every entry here is handed to `command -v` by the sandbox probe. A
         // blank one, or one carrying arguments, resolves nowhere — so it reports a gap for a
-        // toolchain the user has, and keeps reporting it. `detect::program`
+        // toolchain the user has, and keeps reporting it. `command::program`
         // returns `None` rather than guess for exactly this reason; a stack
         // file is the other door into the same mistake.
         anyhow::ensure!(
@@ -495,13 +495,13 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
                 "{at}: provide `{}` has a blank `needs` entry",
                 p.name
             );
-            // Through `detect::program` rather than a local re-spelling of the
+            // Through `command::program` rather than a local re-spelling of the
             // rule. That function is the codebase's answer to "is this word a
             // program name", it uses an allowlist for reasons its own tests
             // record, and a second implementation here accepted `$(which`,
             // `cargo|tee` and a leading space — the exact shapes it refuses.
             anyhow::ensure!(
-                crate::detect::program(need) == Some(need.as_str()),
+                crate::command::program(need) == Some(need.as_str()),
                 "{at}: provide `{}` needs `{need}`, which is not a program name \
                  — `needs` is what must resolve on PATH, not a command to run",
                 p.name
@@ -984,7 +984,7 @@ because = "cargo is how a rust project is built and tested"
                 .collect();
 
             for command in hook.runs() {
-                let Some(needed) = crate::detect::program(command) else {
+                let Some(needed) = crate::command::program(command) else {
                     panic!("{}: `{command}` names no program", file.name);
                 };
                 assert!(
@@ -1682,7 +1682,7 @@ because = "cargo is how a rust project is built and tested"
     /// with `command -v`.
     /// A blank one, or one carrying arguments, resolves nowhere — so it reports
     /// a permanent gap for a toolchain the user has, which is the expensive
-    /// failure direction and the one `detect::program` returns `None` to avoid.
+    /// failure direction and the one `command::program` returns `None` to avoid.
     ///
     /// Checked in `load_dir` rather than in the curation test, because the
     /// curation test only ever reads this source tree. Once `~/.omh/stacks`

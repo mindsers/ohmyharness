@@ -1236,7 +1236,7 @@ pub(crate) fn admitted(
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
     adapter: &Adapter,
-) -> Result<BTreeMap<String, crate::render::Server>> {
+) -> Result<BTreeMap<String, crate::servers::Server>> {
     // Both gates the document goes through: a harness with no MCP binding is
     // handed nothing, whatever the catalogue carries.
     if adapter.supports(Capability::Mcp).is_some()
@@ -3640,7 +3640,7 @@ mod tests {
             return BTreeMap::new();
         };
         let body = std::fs::read_to_string(&mount.host).unwrap();
-        crate::render::parse(binding.render, &body)
+        crate::servers::parse(binding.render, &body)
             .unwrap()
             .into_iter()
             .map(|(name, s)| (name, std::iter::once(s.command).chain(s.args).collect()))

@@ -64,15 +64,6 @@ struct ServerOverride {
     env: BTreeMap<String, String>,
 }
 
-/// The gitignored layer's filename, so `init` ignores exactly the file this
-/// module reads.
-///
-/// It is not covered by the `local/` line `init` already writes — that ignores
-/// the *directory* `.omh/local`, and this is a file beside it. Documenting a
-/// tracked file as gitignored is how a machine-local override gets committed
-/// to somebody's team repo.
-pub const LOCAL: &str = "settings.local.toml";
-
 /// This repo's, then this repo's gitignored — later winning.
 ///
 /// `~/.omh/default.toml` is not here and is not a layer. It is the template
@@ -359,7 +350,10 @@ mod tests {
     fn the_gitignored_layer_is_the_file_init_ignores() {
         let (_d, paths, _m) = fixture();
         let last = layers(&paths).last().unwrap().clone();
-        assert_eq!(last.file_name().unwrap().to_string_lossy(), LOCAL);
+        assert_eq!(
+            last.file_name().unwrap().to_string_lossy(),
+            crate::config::LOCAL
+        );
         assert!(last.starts_with(paths.repo.join(".omh")));
     }
 

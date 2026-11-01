@@ -637,7 +637,7 @@ pub fn wire<'a>(
 ///
 /// Directly beneath [`wire`] on purpose — they are one mechanism pointed in two
 /// directions, and a translation that only went one way is how a format ends up
-/// exportable and un-importable. `render::parse` already sets the precedent for
+/// exportable and un-importable. `crate::servers::parse` already sets the precedent for
 /// MCP: *every format that renders must also parse, and the pair must round
 /// trip*.
 ///

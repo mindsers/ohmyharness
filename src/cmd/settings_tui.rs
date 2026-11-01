@@ -1366,7 +1366,7 @@ fn servers(paths: &Paths) -> Section {
     let path = config::mcp_path(paths);
     let held = match path.try_exists() {
         Ok(false) => return out,
-        Ok(true) => crate::render::parse_layers(std::slice::from_ref(&path)),
+        Ok(true) => crate::servers::parse_layers(std::slice::from_ref(&path)),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let held = match held {
