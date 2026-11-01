@@ -306,6 +306,7 @@ pub(crate) fn session_up(
         &sandbox.recipe(),
         sandbox.ca.as_ref().map(crate::image::Root::pem),
         &paths.repo,
+        ctx,
     )?;
     image::ensure_network(backend, &plan.network)?;
 
@@ -448,7 +449,7 @@ pub(crate) fn attach(
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
     let (own, repo) = settings::resolved(&paths)?;
     let ca = crate::image::ca_for(&paths)?;
-    let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca)?;
+    let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca, ctx)?;
     // Selected once, here, and handed down: `session_up` used to select its
     // own, so a launch chose a runtime twice and a test could inject neither.
     let backend = runtime::for_repo(&paths)?;
@@ -540,6 +541,7 @@ pub(crate) fn attach(
                 &sandbox.tag,
                 &sandbox.kind(&adapter, &paths.repo),
                 true,
+                ctx,
             )?,
             resolves: sandbox.resolves.clone(),
             recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
@@ -2034,7 +2036,7 @@ pub(crate) fn run(
     let base = session::default_branch(&paths.repo);
     let (own, repo) = settings::resolved(&paths)?;
     let ca = crate::image::ca_for(&paths)?;
-    let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca)?;
+    let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca, ctx)?;
     // Not on a dry run, which promises to leave no trace: topping up starts a
     // container and writes `~/.omh/facts.json`. What is already cached is used,
     // so the plan it prints is the plan a real launch would build from the same
@@ -2080,6 +2082,7 @@ pub(crate) fn run(
             &sandbox.tag,
             &sandbox.kind(&adapter, &paths.repo),
             staging.is_apply(),
+            ctx,
         )?,
         resolves: sandbox.resolves.clone(),
         recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),

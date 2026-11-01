@@ -4621,9 +4621,15 @@ fn a_repo_that_provisions_runs_a_different_image() {
         for k in keys {
             repo.provision.insert((*k).to_string(), true);
         }
-        provision::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap())
-            .unwrap()
-            .tag
+        provision::sandbox(
+            &paths,
+            &adapter,
+            &repo,
+            image::ca_for(&paths).unwrap(),
+            &out::Ctx::plain(),
+        )
+        .unwrap()
+        .tag
     };
 
     let nothing = with(&[]);
@@ -5468,7 +5474,14 @@ fn the_layer_a_sandbox_names_is_the_layer_its_recipe_builds() {
     assert!(ca.is_some(), "the fixture must actually set one");
 
     let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
-    let sb = provision::sandbox(&paths, &adapter, &fixture_policy(), ca.clone()).unwrap();
+    let sb = provision::sandbox(
+        &paths,
+        &adapter,
+        &fixture_policy(),
+        ca.clone(),
+        &out::Ctx::plain(),
+    )
+    .unwrap();
 
     assert_eq!(
         sb.recipe(),
@@ -5507,8 +5520,14 @@ fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
     let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
     let repo = fixture_policy();
 
-    let first =
-        provision::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
+    let first = provision::sandbox(
+        &paths,
+        &adapter,
+        &repo,
+        image::ca_for(&paths).unwrap(),
+        &out::Ctx::plain(),
+    )
+    .unwrap();
     assert_eq!(
         first.owed,
         BTreeSet::from(["zulu".to_string(), "alpha".to_string()]),
@@ -5532,8 +5551,14 @@ fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
     );
     facts.save(&paths).unwrap();
 
-    let second =
-        provision::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
+    let second = provision::sandbox(
+        &paths,
+        &adapter,
+        &repo,
+        image::ca_for(&paths).unwrap(),
+        &out::Ctx::plain(),
+    )
+    .unwrap();
     assert_eq!(
         second.resolves.get("alpha"),
         Some(&false),
@@ -7113,38 +7138,19 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // The relays of a child's stream are neither, and are listed separately
     // below.
     //
-    // The rest are **owed a fix, not excused one**. They predate the
-    // scan reading their files at all, and every one writes an `omh: ` line
-    // straight to stderr — no palette, and not suppressed under `--json`,
-    // which is what `progress` and `announce` exist to do. Routing them
-    // means threading a `Ctx` through `image`, `facts` and the delivery
-    // path, roughly sixteen call sites, one of which (`sandbox`) has none
-    // in scope. That is its own change; doing it inside a release fix would
-    // be a large diff in the wrong week. The list is here so it cannot grow
-    // quietly in the meantime — the count below fails on another entry.
+    // The rest were **owed a fix, not excused one**, and are paid: `image`'s
+    // build notes and reaper, and `facts`' two warnings, wrote an `omh: `
+    // line straight to stderr — no palette, and not suppressed under
+    // `--json`. They go through the `Ctx` their callers already held, as
+    // `announce` and `warn`, and an exemption left for any of them fails
+    // below as stale.
     // Named by what the line *is*, not by where it sits. The first draft
     // pinned `file:line` and went stale the moment anything above it grew,
     // which is a guard failing for a reason that has nothing to do with
     // what it guards.
     let named = [
-        // The real exemptions.
+        // The real exemption.
         ("src/mcp_server.rs", "omh-mcp: ignoring unparseable line"),
-        // Owed a `Ctx`. See above.
-        ("src/facts.rs", "could not read"),
-        // Wrapped, so the macro line carries no text of its own — the
-        // only one of these where the file alone has to do it.
-        ("src/facts.rs", "eprintln!("),
-        // The three build-note prints in `ensure`/`ensure_stack` were folded
-        // into one `provide`, which `eprintln!`s the note it is handed — so
-        // the two `provide`/`provide_to_sbx` sites carry the same debt the old
-        // three did, under one text. The sbx delivery adds one note of its own.
-        ("src/image.rs", "omh: {note}"),
-        ("src/image.rs", "loading {tag} into the sbx template store"),
-        ("src/image.rs", "could not list images to reap"),
-        ("src/image.rs", "this build replaced"),
-        // Not new: owed as long as the others, and unseen until the scan read
-        // past a line's first token.
-        ("src/image.rs", "could not remove {tag}"),
     ];
     // **A relay is not a message.** These do not write anything omh
     // composed — they hand a child process's stream back to the terminal
@@ -7187,12 +7193,9 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     }
     assert_eq!(
         named.len(),
-        8,
-        "the debt register grew. The MCP exemption and seven owed sites — the \
-         sbx delivery folded three build-note prints into `provide` (one text) \
-         and added the template-load note beside it, and `reap`'s failed \
-         removal was always there, behind a `=>`. Another owed site is a fix, \
-         not an entry"
+        1,
+        "the exemptions grew. The MCP server's stdout is protocol and is the one \
+         there is; a new write past the output layer is a fix, not an entry"
     );
     // The comment above `relayed` says it "may not quietly become a second
     // way in", and nothing made that true: only `named` was counted, so
