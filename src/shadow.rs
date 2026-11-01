@@ -2376,15 +2376,25 @@ impl Shadow {
     /// here is exactly the orphan nobody goes looking for.
     pub fn reap(&self) -> crate::session::Gone {
         let why = std::fs::remove_dir_all(&self.gitdir).err();
-        let _ = std::fs::remove_file(&self.seed_record);
         // With the seed, and for the reason the seed goes: session ids come
         // back around, and a replay point inherited by a stranger says a branch
-        // has already been given commits it has never seen.
-        let _ = std::fs::remove_file(&self.landed_record);
-        let _ = std::fs::remove_file(&self.exclude_record);
+        // has already been given commits it has never seen. Each one that
+        // would not go is said: they were `let _ =`, and the answer was
+        // `Gone::Yes` with the seed still naming a repository that was gone.
+        let stayed: Vec<String> = [&self.seed_record, &self.landed_record, &self.exclude_record]
+            .into_iter()
+            .filter_map(|record| match std::fs::remove_file(record) {
+                Ok(()) => None,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => Some(format!("{} ({e})", record.display())),
+            })
+            .collect();
         match crate::session::still_there(&self.gitdir) {
             // A session that never built one is not a failed removal.
-            Ok(false) => crate::session::Gone::Yes,
+            Ok(false) if stayed.is_empty() => crate::session::Gone::Yes,
+            Ok(false) => {
+                crate::session::Gone::No(format!("its records would not go: {}", stayed.join(", ")))
+            }
             Err(e) => {
                 crate::session::Gone::No(format!("omh could not tell whether it is there: {e}"))
             }

@@ -292,9 +292,12 @@ fn fetch_into(
         .status()
         .context("running tar")?;
     anyhow::ensure!(status.success(), "unpacking {} failed", urls.name);
-    let binary = std::fs::read_dir(&extracted)?
-        .flatten()
-        .map(|e| e.path().join("omh"))
+    let unpacked = std::fs::read_dir(&extracted)?
+        .map(|e| e.map(|e| e.path().join("omh")))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("reading what {} unpacked to", urls.name))?;
+    let binary = unpacked
+        .into_iter()
         .find(|p| p.exists())
         .with_context(|| format!("{} held no omh binary", urls.name))?;
 

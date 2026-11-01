@@ -12746,6 +12746,12 @@ fn omh_account_says_it_could_not_read_what_an_account_keeps() {
     sb.seed_base();
     sb.seed_catalogue(&["adapters"]);
     sb.account("claude", "work");
+    // **And one broken account hides no other.** The listing stopped at the
+    // first account it could not read, so every harness after it went unlisted.
+    sb.account("codex", "personal");
+    let codex_kept = sb.home.join(".omh/creds/codex/personal/preferences");
+    std::fs::create_dir_all(&codex_kept).unwrap();
+    std::fs::write(codex_kept.join("config.toml"), "model = \"gpt-x\"\n").unwrap();
     let kept = sb.home.join(".omh/creds/claude/work/preferences");
     std::fs::create_dir_all(&kept).unwrap();
     std::fs::write(kept.join("settings.json"), r#"{"model":"m"}"#).unwrap();
@@ -12754,6 +12760,11 @@ fn omh_account_says_it_could_not_read_what_an_account_keeps() {
     let out = sb.omh(&["account"]);
     std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("personal") && printed(&out).contains("gpt-x"),
+        "the readable account is listed too: {}",
+        printed(&out)
+    );
     assert!(
         printed(&out).contains("creds/claude/work/preferences"),
         "{}",

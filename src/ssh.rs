@@ -54,7 +54,7 @@ pub fn assigned_port(
     session: &str,
     taken: &dyn Fn(u16) -> bool,
 ) -> Result<u16> {
-    if let Some(recorded) = recorded_port(runs, session) {
+    if let Some(recorded) = recorded_port(runs, session)? {
         return Ok(recorded);
     }
     let mut candidate = port(repo, session);
@@ -78,12 +78,23 @@ pub fn assigned_port(
 /// probe — `attach` builds a block for a session whose port is in use by the
 /// session itself — read this, and fall back to the pure `port` for a session
 /// an older omh launched without recording one.
-pub fn recorded_port(runs: &Path, session: &str) -> Option<u16> {
-    std::fs::read_to_string(runs.join(session).join("port"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+///
+/// Absent is `None`; a file omh could not read or parse is an error, never
+/// `None` — that chose a port again and wrote it over the old one.
+pub fn recorded_port(runs: &Path, session: &str) -> Result<Option<u16>> {
+    let at = runs.join(session).join("port");
+    let raw = match std::fs::read_to_string(&at) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", at.display())),
+    };
+    raw.trim().parse().map(Some).with_context(|| {
+        format!(
+            "{} holds `{}`, which is not a port",
+            at.display(),
+            raw.trim()
+        )
+    })
 }
 
 /// A `taken` probe for real: the port is in use if nothing else can bind it.
@@ -225,7 +236,7 @@ pub fn config_blocks(root: &Path) -> Result<Vec<String>> {
             let id = session.file_name().to_string_lossy().into_owned();
             blocks.push(config_block(
                 &host_alias(&repo_id, &id),
-                recorded_port(&root.join("run").join(&repo_id), &id)
+                recorded_port(&root.join("run").join(&repo_id), &id)?
                     .unwrap_or_else(|| port(&repo_id, &id)),
                 &key,
                 &known_hosts,
@@ -341,6 +352,25 @@ fn keygen(key: &Path, comment: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// **A port file omh could not read is not a session with no port.** It
+    /// was `.ok()?`, so a corrupt one read as *never recorded*: the launch
+    /// chose a port again and wrote it over the old, and every editor window
+    /// saved against the alias pointed at the one that moved.
+    #[test]
+    fn a_port_file_omh_could_not_read_is_an_error() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("s01")).unwrap();
+        std::fs::write(d.path().join("s01/port"), "not a port\n").unwrap();
+        assert!(recorded_port(d.path(), "s01").is_err());
+        let got = assigned_port(d.path(), "repo", "s01", &|_| false);
+        assert!(got.is_err(), "a corrupt port was replaced: {got:?}");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("s01/port")).unwrap(),
+            "not a port\n",
+            "and the file is left for someone to look at"
+        );
+    }
+
     #[test]
     fn aliases_are_unique_per_repo_and_session() {
         assert_ne!(host_alias("a", "s01"), host_alias("b", "s01"));
@@ -376,8 +406,8 @@ mod tests {
             50000,
             "the record wins over the hash and the probe"
         );
-        assert_eq!(recorded_port(d.path(), "s01"), Some(50000));
-        assert_eq!(recorded_port(d.path(), "s02"), None);
+        assert_eq!(recorded_port(d.path(), "s01").unwrap(), Some(50000));
+        assert_eq!(recorded_port(d.path(), "s02").unwrap(), None);
     }
 
     #[test]

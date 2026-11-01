@@ -424,7 +424,16 @@ pub fn check(adapter: &Adapter, account: &Path) -> Result<Option<Account>> {
         return Ok(None);
     };
     let kept_dir = account.join(KEPT);
-    let marked = kept_dir.join(MARKER).is_file();
+    // Not `is_file()`, which answers `false` for a marker omh could not stat —
+    // and unmarked is the branch that migrates, trusting the account's own
+    // file. Absent is unmarked; anything else omh could not look at stops here.
+    let marked = match std::fs::symlink_metadata(kept_dir.join(MARKER)) {
+        Ok(meta) => meta.is_file(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {}", kept_dir.join(MARKER).display()));
+        }
+    };
     let mut files = Vec::new();
     for declared in prefs.declared() {
         let (state, kept) = match prefs.mount {
@@ -763,10 +772,15 @@ impl Account {
         // Read under the lock: a launch that took it first may have finished
         // the migration this one was checked for — and its sandbox, now
         // running, is not one from before the link.
+        //
+        // A marker omh could not stat is not an absent one: it fell through to
+        // migrating again.
         if !self.marked
             && matches!(
-                kept_dir.entry(OsStr::new(MARKER)),
-                Ok(crate::held::Entry::File)
+                kept_dir.entry(OsStr::new(MARKER)).with_context(|| {
+                    format!("reading {}", self.dir.join(KEPT).join(MARKER).display())
+                })?,
+                crate::held::Entry::File
             )
         {
             return Ok(Vec::new());
@@ -873,7 +887,16 @@ impl Account {
         let root = home.path();
         std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
         let mut notes = Vec::new();
-        let recorded = std::fs::read_to_string(root.join(RECORD)).ok();
+        // Absent only when it is absent: this was `.ok()`, so a record omh
+        // could not read skipped the guard below that refuses to reseed over
+        // changes nobody reviewed, and the reseed wiped them.
+        let recorded = match std::fs::read_to_string(root.join(RECORD)) {
+            Ok(recorded) => Some(recorded),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading {}", root.join(RECORD).display()));
+            }
+        };
         let this = self.dir.display().to_string();
         let mut rest_of = BTreeMap::new();
         for f in &self.files {
@@ -1622,6 +1645,39 @@ base_url = "https://example.invalid"
     /// from its own copy; another account is refused while the session has a
     /// change to review — it belongs to the old one — and seeds from the new
     /// once it is reviewed.
+    /// **An account record omh could not read is not a session never seeded.**
+    /// It was `.ok()`, so an unreadable record skipped the guard that refuses to
+    /// reseed over changes nobody reviewed — and the reseed wiped them.
+    #[test]
+    fn a_session_whose_record_omh_could_not_read_keeps_its_changes() {
+        let (root, work, _) = account();
+        std::fs::create_dir_all(work.join("preferences")).unwrap();
+        std::fs::write(work.join("preferences/config.toml"), "model = \"w\"\n").unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let checked = check(&codex(), &work).unwrap().unwrap();
+        checked.apply(&none_running).unwrap();
+        checked
+            .seed(&codex(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        let at_live = live(&home).join("config.toml");
+        std::fs::write(&at_live, "model = \"mine\"\n").unwrap();
+        // A record that cannot be read: a directory where the file belongs.
+        let record = home.path().join(RECORD);
+        std::fs::remove_file(&record).unwrap();
+        std::fs::create_dir_all(record.join("x")).unwrap();
+
+        let again = checked.seed(&codex(), &home, &BTreeMap::new(), true);
+        assert!(
+            again.is_err(),
+            "an unreadable record was read as never seeded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            "model = \"mine\"\n",
+            "and the session's own change is still there"
+        );
+    }
+
     #[test]
     fn a_session_is_seeded_once_and_again_only_for_another_account() {
         let (root, work, _) = account();

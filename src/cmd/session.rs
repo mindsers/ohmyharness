@@ -449,7 +449,7 @@ pub(crate) fn attach(
     let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     // Selected once, here, and handed down: `session_up` used to select its
     // own, so a launch chose a runtime twice and a test could inject neither.
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     })?;
     sandbox.top_up(
@@ -479,7 +479,9 @@ pub(crate) fn attach(
     // image is built.
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
     carry_in(&paths, &session, ctx)?;
-    let _ = idle::touch(&paths.runs(), &session.id);
+    if let Some(why) = mark_in_use(&paths, &session.id) {
+        ctx.warn(&why);
+    }
 
     let configured = auth::configured(&paths, &adapter)?;
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
@@ -624,6 +626,21 @@ pub(crate) fn attach(
     Ok(())
 }
 
+/// Record that `id` is in use, or say why it could not be.
+///
+/// The record is what keeps the idle reaper off a session somebody is working
+/// in. It was `let _ =`, so a launch that could not write it went on in
+/// silence, and with `idle_timeout` set the next launch could stop the session
+/// out from under its user.
+fn mark_in_use(paths: &Paths, id: &str) -> Option<String> {
+    idle::touch(&paths.runs(), id).err().map(|e| {
+        format!(
+            "could not record that {id} is in use ({e}) — with idle_timeout set, a later \
+             launch may stop it as idle"
+        )
+    })
+}
+
 /// Stop sessions nobody has used for longer than `policy.idle_timeout`.
 ///
 /// N sessions is N containers — the sprawl the risks page names. Only
@@ -633,8 +650,15 @@ pub(crate) fn attach(
 /// Best-effort by design: this runs on the way to starting a session, and a
 /// failure to reap must never stop you working.
 pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
-    let Some(raw) = crate::policy_value(paths, "idle_timeout") else {
-        return;
+    let raw = match crate::policy_value(paths, "idle_timeout") {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
+        // Said, not skipped as though unset: the settings the launch is about
+        // to read are the ones that could not be.
+        Err(e) => {
+            ctx.warn(&format!("not stopping idle sessions — {e:#}"));
+            return;
+        }
     };
     let Some(timeout) = idle::parse_duration(&raw) else {
         // Say so rather than ignoring silently — a setting that resolves with
@@ -644,9 +668,9 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         ));
         return;
     };
-    let Ok(backend) = runtime::select(&crate::runtime_preference(paths), &|p| {
-        runtime::installed(p)
-    }) else {
+    let Ok(backend) = crate::runtime_preference(paths)
+        .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)))
+    else {
         return;
     };
 
@@ -702,7 +726,7 @@ pub(crate) fn down(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     })?;
     let ids = match id {
@@ -1299,7 +1323,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // Said once, about the machine, rather than once per row. The `running`
     // column renders a `None` as an absence — nobody asked — and *why* nobody
     // asked is one fact, not N.
-    let backend = match runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = match runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     }) {
         Ok(backend) => Ok(backend),
@@ -2285,7 +2309,7 @@ pub(crate) fn remember_hooks(record: Option<notice::Record>, ctx: &out::Ctx) {
 pub(crate) fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
     // Nothing here for omh's own placeholders: the host reads in `session.rs`
     // leave them out, so your checkout's `info/exclude` is not asked to.
-    let patterns = config::policy_list(paths, "carry_in");
+    let patterns = config::policy_list(paths, "carry_in")?;
     if patterns.is_empty() {
         return Ok(());
     }
@@ -2418,7 +2442,7 @@ pub(crate) fn run(
     // validation, and to `session_up`, which used to select its own. A dry run
     // selects too: the plan it prints is validated against the backend's
     // capabilities and spelled in the backend's argv.
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     })?;
     // A write guard, so it is spelled like the other write guards. It was
@@ -2439,7 +2463,7 @@ pub(crate) fn run(
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
         staging,
-        persist: crate::policy_value(&paths, "persistence")
+        persist: crate::policy_value(&paths, "persistence")?
             .as_deref()
             .unwrap_or("dtach")
             .parse()?,
@@ -2488,7 +2512,9 @@ pub(crate) fn run(
         // Reap before starting another container, and record that this one is
         // in use so it is not reaped by the next launch.
         reap_idle(&paths, &session.id, ctx);
-        let _ = idle::touch(&paths.runs(), &session.id);
+        if let Some(why) = mark_in_use(&paths, &session.id) {
+            ctx.warn(&why);
+        }
     }
 
     let plan = container::plan(
@@ -2793,7 +2819,7 @@ pub(crate) fn rm(
     // opposite two lines earlier.
     let mut went: Vec<String> = Vec::new();
     let mut unreached: Vec<String> = Vec::new();
-    match runtime::select(&crate::runtime_preference(&paths), &|p| {
+    match runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     }) {
         Err(e) => {
@@ -3156,6 +3182,21 @@ pub(crate) fn rm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_omh_could_not_mark_in_use_is_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.runs()).unwrap();
+        // A file where the session's run directory belongs.
+        std::fs::write(paths.runs().join("s01"), "").unwrap();
+        let said = mark_in_use(&paths, "s01").expect("a record that failed was not said");
+        assert!(said.contains("idle"), "{said}");
+        assert_eq!(mark_in_use(&paths, "s02"), None);
+    }
 
     /// dtach's exit told from a detach (#197 §4): only an exit is reviewed.
     /// Under `persistence = none` the terminal coming back is the exit, and

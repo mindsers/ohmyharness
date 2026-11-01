@@ -355,7 +355,16 @@ fn copy_selected(
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            // Said like a source that would not open, never skipped: an
+            // eject that leaves with less than you have must say so.
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    unreadable.push(format!("an entry of {} ({e})", src.display()));
+                    continue;
+                }
+            };
             let name = entry.file_name();
             if !repo
                 .selection
@@ -382,7 +391,8 @@ fn copy_selected(
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)?.flatten() {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry.with_context(|| format!("reading {}", from.display()))?;
         let dst = to.join(entry.file_name());
         if entry.path().is_dir() {
             copy_tree(&entry.path(), &dst)?;

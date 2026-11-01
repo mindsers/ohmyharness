@@ -480,21 +480,47 @@ pub fn holds_work(item: &Item, adapters: &std::path::Path) -> Option<String> {
     }
     match std::fs::read_dir(path) {
         Err(e) => Some(format!("omh could not read it to tell what it holds ({e})")),
-        Ok(entries) => {
-            let held: Vec<String> = entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            (!held.is_empty()).then(|| {
-                format!(
-                    "holds {} thing{} omh cannot vouch for ({})",
-                    held.len(),
-                    if held.len() == 1 { "" } else { "s" },
-                    held.join(", ")
-                )
-            })
+        Ok(entries) => what_it_holds(entries.map(|e| e.map(|e| e.file_name()))),
+    }
+}
+
+/// What a work-bearing directory holds, from its listing.
+///
+/// An entry that failed to read is said, with its reason, and keeps the
+/// directory: it was `.flatten()`ed away, so a listing whose every entry failed
+/// held nothing — which is what `prune` removes without asking.
+fn what_it_holds(
+    entries: impl Iterator<Item = std::io::Result<std::ffi::OsString>>,
+) -> Option<String> {
+    let mut held: Vec<String> = Vec::new();
+    let mut unread: Vec<String> = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(name) => held.push(name.to_string_lossy().into_owned()),
+            Err(e) => {
+                let why = e.to_string();
+                if !unread.contains(&why) {
+                    unread.push(why);
+                }
+            }
         }
     }
+    let mut said = Vec::new();
+    if !held.is_empty() {
+        said.push(format!(
+            "holds {} thing{} omh cannot vouch for ({})",
+            held.len(),
+            if held.len() == 1 { "" } else { "s" },
+            held.join(", ")
+        ));
+    }
+    if !unread.is_empty() {
+        said.push(format!(
+            "omh could not read all of it to tell what it holds ({})",
+            unread.join("; ")
+        ));
+    }
+    (!said.is_empty()).then(|| said.join(", and "))
 }
 
 /// A run directory is derived on every launch — but for the preferences its
@@ -847,7 +873,7 @@ pub fn prune_cmd(
     out: &mut dyn std::io::Write,
 ) -> anyhow::Result<()> {
     let paths = crate::catalogue::Paths::discover(cwd)?;
-    let backend = crate::runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = crate::runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         crate::runtime::installed(p)
     })
     .ok();
@@ -937,6 +963,27 @@ pub fn prune_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An entry omh could not read is not an entry that is not there.**
+    /// The listing was `.flatten()`ed, so a directory whose every entry failed
+    /// to read held nothing — and nothing is what `prune` removes without
+    /// asking, from a directory that may hold a session's work.
+    #[test]
+    fn an_entry_omh_could_not_read_is_reason_to_keep_the_directory() {
+        let failed = || Err(std::io::Error::other("stale file handle"));
+        let only_failures = what_it_holds(vec![failed(), failed()].into_iter());
+        assert!(
+            only_failures.is_some_and(|w| w.contains("stale file handle")),
+            "every entry failed to read, and it was called empty"
+        );
+        let mixed = what_it_holds(vec![Ok("notes.md".into()), failed()].into_iter())
+            .expect("it holds something");
+        assert!(
+            mixed.contains("notes.md") && mixed.contains("could not"),
+            "{mixed}"
+        );
+        assert_eq!(what_it_holds(std::iter::empty()), None, "empty is empty");
+    }
 
     fn item(class: Class, name: &str, id: &str) -> Item {
         Item {

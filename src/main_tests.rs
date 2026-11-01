@@ -1961,7 +1961,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // off` with its `omh init` for a name omh owns. + `omh settings rm`
         // where `use` refuses a link to nothing.
         ("src/cmd/catalogue.rs", 18),
-        ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
+        // + the --no-verify pointer, + `omh s` in the name-a-session refusal,
+        // + `omh <id>` where a checks outcome could not be recorded
+        ("src/cmd/harvest.rs", 22),
         // + the `omh upgrade` redirect when a repo is already set up, + `omh
         // set` in the header of the gitignored file `init` seeds, + `omh set
         // carry_in` teaching the key in the committed file's header, + `omh
@@ -2027,8 +2029,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // named as one of omh's own. + `omh init` refusing, twice, in a
         // list's warning — a kind that is not one, a value that is not a list.
         // + `omh <line>` for each command the screen ran, said once it closes —
-        // twice, a server's line with its values held back.
-        ("src/cmd/settings_tui.rs", 18),
+        // twice, a server's line with its values held back. + `omh init`
+        // where a feature switch is not true or false.
+        ("src/cmd/settings_tui.rs", 19),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
@@ -8966,4 +8969,180 @@ fn no_message_breaks_a_line_without_a_backslash() {
         "string literals broken without a `\\`:\n{}",
         found.join("\n")
     );
+}
+
+/// **A file omh could not read as text is not an empty one.** `ensure_ignored`
+/// and `ensure_line` read with `unwrap_or_default()` and then wrote the whole
+/// file back — so a `.omh/.gitignore` holding one non-UTF-8 byte came back
+/// holding only omh's lines, and every rule the user had put there was gone.
+/// The file that keeps credentials out of `git add .` is the last one to lose.
+#[test]
+fn a_gitignore_omh_cannot_read_as_text_keeps_every_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home"),
+        repo: dir.path().join("repo"),
+    };
+    let ignore = paths.repo.join(".omh/.gitignore");
+    std::fs::create_dir_all(ignore.parent().unwrap()).unwrap();
+    let mine: &[u8] = b"secret.env\nlegacy-\xff\xfe\n";
+    std::fs::write(&ignore, mine).unwrap();
+    let _ = cmd::init::ensure_ignored(&paths, &out::Ctx::plain());
+    let now = std::fs::read(&ignore).unwrap();
+    assert!(
+        now.starts_with(mine),
+        "the user's rules were lost: {:?}",
+        String::from_utf8_lossy(&now)
+    );
+
+    let other = paths.repo.join("elsewhere/.gitignore");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, mine).unwrap();
+    let _ = cmd::init::ensure_line(&other, "seeded-by");
+    let now = std::fs::read(&other).unwrap();
+    assert!(
+        now.starts_with(mine),
+        "ensure_line lost them too: {:?}",
+        String::from_utf8_lossy(&now)
+    );
+}
+
+/// And one it could not read at all is refused, never replaced.
+#[cfg(unix)]
+#[test]
+fn a_gitignore_omh_cannot_read_is_refused_and_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads through 0o000: nothing here would be tested
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home"),
+        repo: dir.path().join("repo"),
+    };
+    let ignore = paths.repo.join(".omh/.gitignore");
+    std::fs::create_dir_all(ignore.parent().unwrap()).unwrap();
+    std::fs::write(&ignore, "secret.env\n").unwrap();
+    std::fs::set_permissions(&ignore, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let got = cmd::init::ensure_ignored(&paths, &out::Ctx::plain());
+    std::fs::set_permissions(&ignore, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(got.is_err(), "an unreadable .gitignore was read as empty");
+    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "secret.env\n");
+}
+
+/// **No `.flatten()` over a directory listing.** It drops an entry that failed
+/// to read, and what is left reads as everything: `prune` called a directory
+/// whose entries all failed empty and removed it without asking; `eject` and
+/// `carry_in` copied less than there was and said nothing; the base manifest
+/// skipped the newest file. Every listing either says what it could not read
+/// or stops — see the `could-not-look` skill.
+///
+/// Read from the code with comments and literals blanked: a listing chained
+/// straight into `.flatten()`, or a name bound from a `read_dir` and flattened
+/// later in the same function.
+#[test]
+fn no_directory_listing_is_flattened() {
+    fn flattened(body: &str) -> Vec<usize> {
+        let code = crate::testsrc::code_of(body);
+        let lines: Vec<&str> = code.lines().collect();
+        let mut bound: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| w == "fn")
+            {
+                bound.clear();
+            }
+            if line.contains("read_dir(") {
+                if let Some(name) = line
+                    .trim()
+                    .strip_prefix("let ")
+                    .and_then(|r| r.split(['=', ':']).next())
+                {
+                    bound.push(name.trim().trim_start_matches("mut ").to_string());
+                }
+            }
+            let chained = line.contains(".flatten()")
+                && (line.contains("read_dir(")
+                    || (line.trim_start().starts_with(".flatten()")
+                        && i > 0
+                        && lines[i - 1].contains("read_dir(")));
+            let through = bound
+                .iter()
+                .any(|b| !b.is_empty() && line.contains(&format!("{b}.flatten()")));
+            if chained || through {
+                out.push(i + 1);
+            }
+        }
+        out
+    }
+    assert_eq!(
+        flattened("for e in std::fs::read_dir(d)?.flatten() {}\n"),
+        vec![1]
+    );
+    assert_eq!(
+        flattened("let x = std::fs::read_dir(d)?\n    .flatten()\n"),
+        vec![2]
+    );
+    assert_eq!(
+        flattened(
+            "let entries = match std::fs::read_dir(d) {\n};\nfor e in entries.flatten() {}\n"
+        ),
+        vec![3]
+    );
+    assert!(flattened("let v = opts.iter().flatten();\n").is_empty());
+    assert!(flattened("// read_dir(d).flatten()\n").is_empty());
+
+    let mut found = Vec::new();
+    for (path, body) in crate::testsrc::production() {
+        for n in flattened(&body) {
+            found.push(format!("{}:{n}", path.display()));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "a directory listing flattened:\n{}",
+        found.join("\n")
+    );
+}
+
+/// **A `.omh/.gitignore` that is a link is not followed.** A cloned repo can
+/// commit one pointing anywhere — `~/.bashrc` — and appending through it
+/// wrote omh's lines into a file outside the repo. Nor is a `.omh` that is a
+/// link. Refused, naming the path, and the file it pointed at untouched.
+#[cfg(unix)]
+#[test]
+fn a_gitignore_that_is_a_link_is_never_written_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home"),
+        repo: dir.path().join("repo"),
+    };
+    let outside = dir.path().join("bashrc");
+    std::fs::write(&outside, "export PATH\n").unwrap();
+    std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+    std::os::unix::fs::symlink(&outside, paths.repo.join(".omh/.gitignore")).unwrap();
+    let got = cmd::init::ensure_ignored(&paths, &out::Ctx::plain());
+    assert!(
+        got.is_err(),
+        "a link at .omh/.gitignore was written through"
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "export PATH\n");
+
+    let other = tempfile::tempdir().unwrap();
+    let elsewhere = other.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let repo = other.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, repo.join(".omh")).unwrap();
+    let got = cmd::init::ensure_ignored(
+        &Paths {
+            root: other.path().join("home"),
+            repo: repo.clone(),
+        },
+        &out::Ctx::plain(),
+    );
+    assert!(got.is_err(), "a .omh that is a link was written through");
+    assert!(!elsewhere.join(".gitignore").exists());
 }

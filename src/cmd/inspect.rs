@@ -25,7 +25,7 @@ use std::process::Command;
 /// and going, and lets the container mount only the index.
 pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     })?;
     let container = base::ui_container(&paths.repo_id());
@@ -161,9 +161,11 @@ pub(crate) fn doctor_cmd(
     // output — so on a machine with no container runtime this command printed
     // nothing at all, and the facts that would have named the problem were
     // gated behind the problem. Computed here, reported below whatever happens.
-    let chosen = runtime::select(&crate::runtime_preference(&paths), &|p| {
-        runtime::installed(p)
-    });
+    //
+    // Not `?` on the preference either: settings omh cannot read are what the
+    // settings row below exists to name, and stopping here printed nothing.
+    let chosen = crate::runtime_preference(&paths)
+        .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)));
     // Not `?`. A stack definition omh cannot read is something to report, not
     // a reason to print nothing — see `host_checks`.
     // The same resolution `sandbox()` uses to decide what installs, so the row
@@ -473,7 +475,7 @@ pub(crate) fn doctor_cmd(
         }
 
         let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
-        if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
+        if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
             runtime::installed(p)
         }) {
             sandbox.top_up(
@@ -558,7 +560,7 @@ pub(crate) fn doctor_cmd(
         // Invisible on Docker Desktop, which maps the mount to the calling user.
         crate::ssh::ensure_host_key(&paths.keys())?;
 
-        let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
             runtime::installed(p)
         })?;
 

@@ -542,7 +542,7 @@ pub fn plan(
         crate::carry::to_mount(
             &paths.repo,
             &stage.join("carried"),
-            &crate::config::policy_list(paths, "carry_in"),
+            &crate::config::policy_list(paths, "carry_in")?,
         )?
     } else {
         Vec::new()
@@ -597,7 +597,7 @@ pub fn plan(
         let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
 
         let workdir = crate::container_workdir();
-        let mut excluded = crate::config::policy_list(paths, "carry_in");
+        let mut excluded = crate::config::policy_list(paths, "carry_in")?;
         excluded.extend(mounts.iter().filter_map(|m| {
             m.guest
                 .strip_prefix(workdir)
@@ -639,7 +639,10 @@ pub fn plan(
             // is one whose gitdir never mounted, not one whose hooks were
             // quiet. That distinction only holds if this never silently
             // skips a launch.
-            let _ = crate::shadow::replace_record(&crate::shadow::events_file(&shadow.gitdir), "");
+            let events = crate::shadow::events_file(&shadow.gitdir);
+            crate::shadow::replace_record(&events, "").with_context(|| {
+                format!("starting the session's events file at {}", events.display())
+            })?;
         }
 
         mounts.push(Mount {
@@ -876,7 +879,7 @@ pub fn plan(
         //   which holds nothing.
         let worktree =
             session.branch.is_some() && !matches!(session.worktree.try_exists(), Ok(false));
-        let carried = crate::config::policy_list(paths, "carry_in")
+        let carried = crate::config::policy_list(paths, "carry_in")?
             .iter()
             .any(|p| {
                 let p = p.trim().trim_start_matches("./").trim_end_matches('/');
@@ -918,7 +921,9 @@ pub fn plan(
         // nothing — but the mount itself is part of the plan in either mode,
         // so `Staging::Skip` and `Staging::Apply` describe the same container.
         if staging == Staging::Apply {
-            std::fs::create_dir_all(&host).ok();
+            std::fs::create_dir_all(&host).with_context(|| {
+                format!("creating the transcripts directory {}", host.display())
+            })?;
         }
         mounts.push(Mount {
             host,
@@ -939,8 +944,8 @@ pub fn plan(
         // must read the same as no key, or it would stamp differently and read
         // as drift against a session launched without it.
         limits: Limits {
-            memory: crate::policy_value(paths, "sandbox_memory").filter(|s| !s.is_empty()),
-            cpus: crate::policy_value(paths, "sandbox_cpus").filter(|s| !s.is_empty()),
+            memory: crate::policy_value(paths, "sandbox_memory")?.filter(|s| !s.is_empty()),
+            cpus: crate::policy_value(paths, "sandbox_cpus")?.filter(|s| !s.is_empty()),
         },
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),
@@ -2032,6 +2037,19 @@ mod tests {
     /// resolved to the running executable — so the absent case could not be
     /// constructed there at all.
     fn plan_with_memory_bin(fx: &Fx, harness: &str, memory_bin: Option<PathBuf>) -> Plan {
+        try_plan_with_memory_bin(fx, harness, memory_bin).unwrap()
+    }
+
+    /// [`plan_for`], with the error a launch would see.
+    fn try_plan_for(fx: &Fx, harness: &str) -> anyhow::Result<Plan> {
+        try_plan_with_memory_bin(fx, harness, None)
+    }
+
+    fn try_plan_with_memory_bin(
+        fx: &Fx,
+        harness: &str,
+        memory_bin: Option<PathBuf>,
+    ) -> anyhow::Result<Plan> {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
         let (own, repo) = decided_from(fx);
         plan(
@@ -2055,7 +2073,6 @@ mod tests {
                 recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
-        .unwrap()
     }
 
     /// A repo with every hook off still gets the settings document, because
@@ -4095,6 +4112,42 @@ mod tests {
             std::fs::read_to_string(&events).expect("the events file must survive a relaunch"),
             "",
             "a relaunch must not inherit the previous launch's observations"
+        );
+    }
+
+    /// A transcripts directory omh could not make is a failed launch, named
+    /// here — not a `.ok()` and then a mount the runtime refuses to make, in
+    /// its own words, about a path nobody chose.
+    #[test]
+    fn a_transcripts_directory_omh_could_not_make_fails_the_launch() {
+        let fx = fixture();
+        let run = fx.paths.runs().join(&fx.session.id);
+        std::fs::create_dir_all(&run).unwrap();
+        // A file where the directory belongs.
+        std::fs::write(run.join("transcripts"), "").unwrap();
+        let err = try_plan_for(&fx, "claude")
+            .expect_err("a launch with no transcripts directory went ahead");
+        assert!(format!("{err:#}").contains("transcripts"), "{err:#}");
+    }
+
+    /// **A launch that could not start its observed half empty says so.** Its
+    /// absence is what tells `read_hooks` the gitdir never mounted, so the
+    /// comment beside the write says it must never silently skip one — and it
+    /// was `let _ =`. A launch that cannot write it fails, naming it.
+    #[test]
+    fn a_launch_that_could_not_start_the_events_file_fails() {
+        let fx = fixture();
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        shadow.ensure(&fx.session.worktree, &[]).unwrap();
+        let events = crate::shadow::events_file(&shadow.gitdir);
+        let _ = std::fs::remove_file(&events);
+        // A directory with something in it: nothing can replace it with a file.
+        std::fs::create_dir_all(events.join("stuck")).unwrap();
+        let err = try_plan_for(&fx, "claude")
+            .expect_err("a launch whose events file could not be started went ahead");
+        assert!(
+            format!("{err:#}").contains("events"),
+            "the error names what it could not write: {err:#}"
         );
     }
 

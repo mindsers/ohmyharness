@@ -1919,6 +1919,9 @@ pub struct Account {
     /// The same values by key, dotted, in the adapter's order: what the
     /// listing prints.
     pub keys: Vec<(String, crate::prefs::Value)>,
+    /// Why omh could not read what this account keeps, when it could not —
+    /// said in its row, never read as *keeps nothing*.
+    pub unread: Option<String>,
 }
 
 /// A harness's accounts, and which one a launch here uses.
@@ -1980,6 +1983,13 @@ impl Report for Accounts {
                     .iter()
                     .map(|(key, value)| (key.as_str(), value.to_string()))
                     .collect();
+                if let Some(why) = &a.unread {
+                    s.push_str(&out::untrusted(&format!(
+                        "    {}\n",
+                        p.paint(out::BAD, &format!("could not read what it keeps: {why}"))
+                    )));
+                    continue;
+                }
                 if lines.is_empty() {
                     s.push_str(&format!("    {}\n", p.paint(out::DIM, "keeps nothing")));
                     continue;
@@ -2006,13 +2016,21 @@ impl Report for Accounts {
                 "harness": h.harness,
                 "configured": h.configured,
                 "selected": h.selected,
-                "accounts": h.accounts.iter().map(|a| json!({
-                    "name": a.name,
-                    "kept": a.kept.iter()
-                        .filter(|(_, doc)| !doc.is_empty())
-                        .map(|(file, doc)| (file.clone(), serde_json::Value::Object(doc.clone())))
-                        .collect::<serde_json::Map<_, _>>(),
-                })).collect::<Vec<_>>(),
+                "accounts": h.accounts.iter().map(|a| {
+                    let mut row = json!({
+                        "name": a.name,
+                        "kept": a.kept.iter()
+                            .filter(|(_, doc)| !doc.is_empty())
+                            .map(|(file, doc)| (file.clone(), serde_json::Value::Object(doc.clone())))
+                            .collect::<serde_json::Map<_, _>>(),
+                    });
+                    // Only when omh could not read it: `kept` is then empty
+                    // because nothing was read, and this says so.
+                    if let Some(why) = &a.unread {
+                        row["unread"] = json!(why);
+                    }
+                    row
+                }).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })
     }

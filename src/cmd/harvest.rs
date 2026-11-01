@@ -217,7 +217,7 @@ pub(crate) fn stop_before_syncing(
     // sync is also not something that machine was going to do usefully. The
     // message says which it is and `--down` is not the way past — the way past
     // is a runtime.
-    let backend = runtime::select(&crate::runtime_preference(paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(paths)?, &|p| {
         runtime::installed(p)
     })
     .with_context(|| {
@@ -442,8 +442,17 @@ pub(crate) fn diff_report(
     // a never-launched session the same way. Without it, `omh sNN log` said
     // *no checkpoints* and exited 0 while `omh sNN diff 1` quoted the path of
     // a seed record at a user who has never heard of one.
+    //
+    // Asked of the disk properly: `exists()` answers `false` for a path omh
+    // could not stat, and that told the user the agent had committed nothing,
+    // about a repository omh could not look at.
+    let there = |at: &std::path::Path| {
+        session::still_there(at).map_err(|e| {
+            anyhow::anyhow!("omh could not tell whether {} is there: {e}", at.display())
+        })
+    };
     anyhow::ensure!(
-        shadow.seed_record.exists() || shadow.gitdir.exists(),
+        there(&shadow.seed_record)? || there(&shadow.gitdir)?,
         "there is no checkpoint {number} in this session. The agent has not committed \
          anything here yet — its sandbox has never run"
     );
@@ -1201,7 +1210,7 @@ pub(crate) fn commit(
                 .as_deref()
                 .context("a scratch session has no branch to commit to")?;
             let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
-            let carried = config::policy_list(&paths, "carry_in");
+            let carried = config::policy_list(&paths, "carry_in")?;
             let keep = what_to_keep(
                 &shadow,
                 &session,
@@ -1288,7 +1297,7 @@ pub(crate) fn commit(
 
     // The same list the launcher copies from, so what `commit` refuses to
     // publish and what omh put there cannot disagree.
-    let carried = config::policy_list(&paths, "carry_in");
+    let carried = config::policy_list(&paths, "carry_in")?;
     let policy = if skip_carried {
         session::Carried::skipping(&carried)
     } else {
@@ -1485,7 +1494,14 @@ pub(crate) fn push(
 /// commit, only facts the report carries.
 fn run_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::Ctx) -> Result<()> {
     let outcome = decide_checks(paths, session, no_verify, ctx);
-    record_check(paths, &session.id, &outcome);
+    // Best-effort still — a record is not a reason to hold a commit — but
+    // said, never dropped.
+    if let Err(e) = record_check(paths, &session.id, &outcome) {
+        ctx.warn(&format!(
+            "{e:#} — `omh {}` will not show this run",
+            session.id
+        ));
+    }
     match &outcome {
         Checked::Passed(n) => ctx.progress(&format!("checks passed ({n})")),
         Checked::NotRun(why) => ctx.warn(&format!("checks not run — {why}")),
@@ -1519,9 +1535,11 @@ fn decide_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::C
     if the_checks.is_empty() {
         return Checked::NotRun("this repo declares no turn-end checks".into());
     }
-    let Ok(backend) = runtime::select(&crate::runtime_preference(paths), &|p| {
-        runtime::installed(p)
-    }) else {
+    let preference = match crate::runtime_preference(paths) {
+        Ok(preference) => preference,
+        Err(e) => return Checked::NotRun(format!("{e:#}")),
+    };
+    let Ok(backend) = runtime::select(&preference, &|p| runtime::installed(p)) else {
         return Checked::NotRun("no container runtime to run them in".into());
     };
     let container = paths.container(&session.id);
@@ -1566,7 +1584,7 @@ fn checks_for(paths: &Paths, ctx: &out::Ctx) -> std::result::Result<Vec<(String,
 }
 
 /// Write the check outcome where `omh sNN` reads it, best-effort.
-fn record_check(paths: &Paths, id: &str, outcome: &Checked) {
+fn record_check(paths: &Paths, id: &str, outcome: &Checked) -> Result<()> {
     let (state, detail): (&str, serde_json::Value) = match outcome {
         Checked::Passed(n) => ("passed", serde_json::json!({ "count": n })),
         Checked::Failed { name, .. } => ("failed", serde_json::json!({ "check": name })),
@@ -1580,13 +1598,11 @@ fn record_check(paths: &Paths, id: &str, outcome: &Checked) {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     });
-    let dir = paths.runs().join(id);
-    if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(
-            dir.join("check.json"),
-            serde_json::to_string(&record).unwrap_or_default(),
-        );
-    }
+    // Replaced whole or not at all, and a failure said: it was `let _ =`, so
+    // a write that failed left the last run's `passed` for `omh sNN` to show.
+    let at = paths.runs().join(id).join("check.json");
+    crate::shadow::replace_record(&at, serde_json::to_string(&record)?)
+        .with_context(|| format!("recording the checks' outcome at {}", at.display()))
 }
 
 /// The turn-end commands this repo's hooks declare, in name order.
@@ -1681,6 +1697,50 @@ fn check_tail(stdout: &[u8], stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sandbox omh could not stat is not one that never ran: `exists()`
+    /// answered `false` for both, and the user was told the agent had
+    /// committed nothing, about a repository omh could not look at.
+    #[cfg(unix)]
+    #[test]
+    fn a_sandbox_omh_could_not_stat_is_not_one_that_never_ran() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root stats through 0o000: nothing would be tested
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let shadows = paths.shadows();
+        std::fs::create_dir_all(&shadows).unwrap();
+        let session = Session::new(&paths.worktrees(), "s01".into());
+        std::fs::set_permissions(&shadows, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let got = diff_report(&paths, &session, Some(1), None, false, &out::Ctx::plain());
+        std::fs::set_permissions(&shadows, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let said = format!(
+            "{:#}",
+            got.expect_err("it could not look, so it cannot answer")
+        );
+        assert!(!said.contains("never run"), "{said}");
+    }
+
+    /// A checks outcome omh could not record is an error its caller says, not
+    /// a `let _ =` that leaves the last run's `passed` for `omh sNN` to show.
+    #[test]
+    fn an_outcome_omh_could_not_record_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        // A file where the session's run directory belongs.
+        std::fs::create_dir_all(paths.runs()).unwrap();
+        std::fs::write(paths.runs().join("s01"), "").unwrap();
+        let got = record_check(&paths, "s01", &Checked::Passed(1));
+        assert!(got.is_err(), "an outcome that was not recorded answered Ok");
+    }
     use crate::hook::{Action, Event, Hook};
     use crate::runtime::{answered, Backend, Docker};
     use std::collections::BTreeMap;
