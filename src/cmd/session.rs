@@ -2395,96 +2395,13 @@ pub(crate) fn rm(
         ctx.warn(note.trim());
     }
 
-    // Drop the graph with the code it describes, while the container is still
-    // around to do it. Otherwise the index outlives the worktree forever.
-    //
-    // Then take the container itself down. A session is the container *and* the
-    // worktree, and removing only the worktree leaves a half that can never be
-    // reached again: the bind mount still points at the deleted directory, the
-    // next launch recreates it at a new inode the mount does not follow, and
-    // `session_up` — seeing a container that is up — execs into it and gets
-    // "current working directory is outside of container mount namespace root"
-    // for every command from then on. Nothing else ever removes it.
     // What actually happened, part by part. The report below is built from
     // these rather than asserting a list of four removals it never checked —
     // which is what it did, including in runs whose own warnings said the
     // opposite two lines earlier.
     let mut went: Vec<String> = Vec::new();
     let mut unreached: Vec<String> = Vec::new();
-    match runtime::for_repo(&paths) {
-        Err(e) => {
-            // Was `if let Ok(_)`, so this fell through in silence and the
-            // report went on to claim the container had gone.
-            ctx.warn(&format!(
-                "no container runtime omh can use, so {id}'s container and graph \
-                 entry were left alone: {e:#}"
-            ));
-            unreached.push("the container and its graph entry".to_string());
-        }
-        Ok(backend) => {
-            let name = paths.container(id);
-            // Best-effort already — `let _` below says so — and *could not tell*
-            // joins *not running* because the exec would fail against a runtime
-            // that will not answer anyway. Failing a removal over a tidy-up nobody
-            // asked for would be the tail wagging the dog.
-            //
-            // An earlier version of this comment claimed the graph entry is
-            // dropped on the next launch that reuses the id. It is not:
-            // `drop_graph_command` has exactly one caller, this one. What is
-            // skipped here is skipped for good, so it is said rather than
-            // swallowed.
-            let up = image::container_running(&backend, &name);
-            if let image::Running::Unknown(why) = &up {
-                ctx.warn(&format!(
-                    "could not tell whether {id}'s sandbox was up, so its graph entry \
-                 was left behind: {why}"
-                ));
-                unreached.push("its graph entry".to_string());
-            }
-            if matches!(up, image::Running::Yes) {
-                let project = base::project_name(&paths.repo_id(), id);
-                match drop_graph_entry(&backend, &name, &project) {
-                    Ok(()) => went.push("its graph entry".to_string()),
-                    // The report is built from what happened, not from the list
-                    // of things this function set out to do — and this line
-                    // pushed "its graph entry" over a discarded result, so a
-                    // removal that never reached the runtime still claimed it.
-                    Err(why) => {
-                        ctx.warn(&format!("{id}'s graph entry was left behind: {why}"));
-                        unreached.push("its graph entry".to_string());
-                    }
-                }
-            }
-            // Best-effort: a container that was never started has nothing to
-            // remove, and that must not stop the worktree from going.
-            // Warned rather than swallowed, and the line above already warns
-            // about the weaker failure — not being able to *tell* whether it was
-            // up. A removal that fails leaves a live container bound to a worktree
-            // this function is about to delete, which manufactures exactly the
-            // unenterable state `Probe::NotEnterable` exists for. This function's
-            // own doc names `omh s rm` as the historical cause of it.
-            match image::container_remove(&backend, &name) {
-                Ok(()) => {
-                    went.push("the container".to_string());
-                    match image::network_remove(&backend, &paths.session_network(id)) {
-                        Ok(()) => went.push("its network".to_string()),
-                        Err(e) => {
-                            ctx.warn(&format!("{id}'s network was left behind: {e:#}"));
-                            unreached.push("its network".to_string());
-                        }
-                    }
-                }
-                Err(e) => {
-                    ctx.warn(&format!(
-                        "{id}'s container would not stop, and its worktree is going: it is left \
-                     running against a directory that will not be there. `docker rm -f {name}` \
-                     clears it — {e:#}"
-                    ));
-                    unreached.push("the container".to_string());
-                }
-            }
-        }
-    }
+    take_down(&paths, id, &mut went, &mut unreached, ctx);
 
     // Counted again, now that nothing is writing. The count was taken, and
     // asked about, with the agent still running, so what it wrote meanwhile
@@ -2595,6 +2512,47 @@ pub(crate) fn rm(
         );
     }
 
+    let action = removal_report(id, &base, removed);
+    // **What did not go, on the answer itself.** `unreached` was built for
+    // this whole function and printed by one branch of it — the one above,
+    // for a worktree still on disk. With the worktree gone, a sandbox
+    // repository that would not delete went into the list and the list went
+    // nowhere: `removed session s01`, exit 0, and a document with no field
+    // for it. That repository holds every commit the agent made.
+    //
+    // Still a success, as it is for a container that would not stop: the
+    // session is gone and `omh s` will find what stayed. But a consequence is
+    // part of what happened, so it is a note on the answer and a field in the
+    // document — always there, and empty when nothing stayed, so a script can
+    // ask without first asking whether the key exists.
+    let mut action = action;
+    action.data["left_behind"] = serde_json::json!(unreached);
+    if !unreached.is_empty() {
+        action = action
+            .note(format!("left behind: {}", unreached.join(", ")))
+            .next(format!("omh {id} rm"));
+    }
+    ctx.say(&action);
+
+    // The review moment rides on something already happening rather than a
+    // ritual nobody performs. Best-effort on purpose: a store omh cannot read
+    // is a reason to say nothing, never a reason to leave a session that
+    // cannot be removed.
+    //
+    // A nudge is advice, so it goes through `hint`: on stderr, and absent
+    // under `--json`, where a sentence about reviewing notes is noise in a
+    // stream something else is parsing.
+    if let Ok(notes) = memory::load(&paths) {
+        if let Some(line) = memory::session_nudge(&notes, id) {
+            ctx.hint(&line);
+        }
+    }
+    Ok(())
+}
+
+/// What `omh <id> rm` answers, from what `Session::remove` did with the
+/// branch, which may or may not be on `base`.
+fn removal_report(id: &str, base: &str, removed: session::Removed) -> report::Action {
     // What a `Dropped` says about the branch, for the two arms that carry one.
     // Built once so the sentence and the document cannot disagree about the
     // count, or about whether there is a proof to name.
@@ -2606,7 +2564,7 @@ pub(crate) fn rm(
             }
         }
     };
-    let action = match removed {
+    match removed {
         session::Removed::BranchKept(session::Kept::Commits(n)) => {
             // The count comes back from `remove` rather than being asked
             // again: it is the number that *made* the decision, and a second
@@ -2744,42 +2702,100 @@ pub(crate) fn rm(
                 }),
             )
         }
-    };
-    // **What did not go, on the answer itself.** `unreached` was built for
-    // this whole function and printed by one branch of it — the one above,
-    // for a worktree still on disk. With the worktree gone, a sandbox
-    // repository that would not delete went into the list and the list went
-    // nowhere: `removed session s01`, exit 0, and a document with no field
-    // for it. That repository holds every commit the agent made.
-    //
-    // Still a success, as it is for a container that would not stop: the
-    // session is gone and `omh s` will find what stayed. But a consequence is
-    // part of what happened, so it is a note on the answer and a field in the
-    // document — always there, and empty when nothing stayed, so a script can
-    // ask without first asking whether the key exists.
-    let mut action = action;
-    action.data["left_behind"] = serde_json::json!(unreached);
-    if !unreached.is_empty() {
-        action = action
-            .note(format!("left behind: {}", unreached.join(", ")))
-            .next(format!("omh {id} rm"));
     }
-    ctx.say(&action);
+}
 
-    // The review moment rides on something already happening rather than a
-    // ritual nobody performs. Best-effort on purpose: a store omh cannot read
-    // is a reason to say nothing, never a reason to leave a session that
-    // cannot be removed.
-    //
-    // A nudge is advice, so it goes through `hint`: on stderr, and absent
-    // under `--json`, where a sentence about reviewing notes is noise in a
-    // stream something else is parsing.
-    if let Ok(notes) = memory::load(&paths) {
-        if let Some(line) = memory::session_nudge(&notes, id) {
-            ctx.hint(&line);
+/// Drop the graph with the code it describes, while the container is still
+/// around to do it. Otherwise the index outlives the worktree forever.
+///
+/// Then take the container itself down. A session is the container *and* the
+/// worktree, and removing only the worktree leaves a half that can never be
+/// reached again: the bind mount still points at the deleted directory, the
+/// next launch recreates it at a new inode the mount does not follow, and
+/// `session_up` — seeing a container that is up — execs into it and gets
+/// "current working directory is outside of container mount namespace root"
+/// for every command from then on. Nothing else ever removes it.
+fn take_down(
+    paths: &Paths,
+    id: &str,
+    went: &mut Vec<String>,
+    unreached: &mut Vec<String>,
+    ctx: &out::Ctx,
+) {
+    match runtime::for_repo(paths) {
+        Err(e) => {
+            // Was `if let Ok(_)`, so this fell through in silence and the
+            // report went on to claim the container had gone.
+            ctx.warn(&format!(
+                "no container runtime omh can use, so {id}'s container and graph \
+                 entry were left alone: {e:#}"
+            ));
+            unreached.push("the container and its graph entry".to_string());
+        }
+        Ok(backend) => {
+            let name = paths.container(id);
+            // Best-effort already — `let _` below says so — and *could not tell*
+            // joins *not running* because the exec would fail against a runtime
+            // that will not answer anyway. Failing a removal over a tidy-up nobody
+            // asked for would be the tail wagging the dog.
+            //
+            // An earlier version of this comment claimed the graph entry is
+            // dropped on the next launch that reuses the id. It is not:
+            // `drop_graph_command` has exactly one caller, this one. What is
+            // skipped here is skipped for good, so it is said rather than
+            // swallowed.
+            let up = image::container_running(&backend, &name);
+            if let image::Running::Unknown(why) = &up {
+                ctx.warn(&format!(
+                    "could not tell whether {id}'s sandbox was up, so its graph entry \
+                 was left behind: {why}"
+                ));
+                unreached.push("its graph entry".to_string());
+            }
+            if matches!(up, image::Running::Yes) {
+                let project = base::project_name(&paths.repo_id(), id);
+                match drop_graph_entry(&backend, &name, &project) {
+                    Ok(()) => went.push("its graph entry".to_string()),
+                    // The report is built from what happened, not from the list
+                    // of things this function set out to do — and this line
+                    // pushed "its graph entry" over a discarded result, so a
+                    // removal that never reached the runtime still claimed it.
+                    Err(why) => {
+                        ctx.warn(&format!("{id}'s graph entry was left behind: {why}"));
+                        unreached.push("its graph entry".to_string());
+                    }
+                }
+            }
+            // Best-effort: a container that was never started has nothing to
+            // remove, and that must not stop the worktree from going.
+            // Warned rather than swallowed, and the line above already warns
+            // about the weaker failure — not being able to *tell* whether it was
+            // up. A removal that fails leaves a live container bound to a worktree
+            // this function is about to delete, which manufactures exactly the
+            // unenterable state `Probe::NotEnterable` exists for. This function's
+            // own doc names `omh s rm` as the historical cause of it.
+            match image::container_remove(&backend, &name) {
+                Ok(()) => {
+                    went.push("the container".to_string());
+                    match image::network_remove(&backend, &paths.session_network(id)) {
+                        Ok(()) => went.push("its network".to_string()),
+                        Err(e) => {
+                            ctx.warn(&format!("{id}'s network was left behind: {e:#}"));
+                            unreached.push("its network".to_string());
+                        }
+                    }
+                }
+                Err(e) => {
+                    ctx.warn(&format!(
+                        "{id}'s container would not stop, and its worktree is going: it is left \
+                     running against a directory that will not be there. `docker rm -f {name}` \
+                     clears it — {e:#}"
+                    ));
+                    unreached.push("the container".to_string());
+                }
+            }
         }
     }
-    Ok(())
 }
 
 /// What to tell someone whose word matched nothing. Pure so it can be tested:
