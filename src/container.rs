@@ -449,8 +449,6 @@ pub fn plan(
         .is_some()
         .then_some(crate::shadow::GUEST_EVENTS);
 
-    // Built once, which is what the type is for. Constructed inside the loop it
-    // rebuilt every value six times and bought nothing its own doc claimed.
     // The account's provider, for the harness that takes one: checked here,
     // so a file that would stop every start of the harness refuses the
     // launch instead, naming itself.
@@ -460,6 +458,8 @@ pub fn plan(
         }
         _ => None,
     };
+    // Built once, which is what the type is for. Constructed inside the loop it
+    // rebuilt every value six times and bought nothing its own doc claimed.
     let stager = Stager {
         adapter,
         rules_doc: &rules_doc,

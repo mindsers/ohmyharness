@@ -582,7 +582,18 @@ pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
     Names::Neither
 }
 
-/// A value only omh can check: which captured login `account` names.
+/// `codex:work` as the harness it names and the account, or `work` for every
+/// harness.
+pub(crate) fn account_target(value: &str) -> (Option<&str>, &str) {
+    match value.split_once(':') {
+        Some((harness, name)) => (Some(harness), name),
+        None => (None, value),
+    }
+}
+
+/// Refuse an `account` value that names no harness omh has, or a login that
+/// harness — or, with none named, any harness — does not have. Only omh can
+/// check it: only omh knows which logins it captured.
 ///
 /// The account is one thing with one spelling — `omh account login <harness> -n work`
 /// creates it, this selects it, and everything that launches or probes reads
@@ -596,17 +607,6 @@ pub(crate) fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
 /// captured for *some* harness is accepted, because "I only use claude" is
 /// ordinary, and the harnesses are named because `work` is right until the day
 /// you run `omh new opencode`.
-/// `codex:work` as the harness it names and the account, or `work` for every
-/// harness.
-pub(crate) fn account_target(value: &str) -> (Option<&str>, &str) {
-    match value.split_once(':') {
-        Some((harness, name)) => (Some(harness), name),
-        None => (None, value),
-    }
-}
-
-/// Refuse an `account` value that names no harness omh has, or a login that
-/// harness — or, with none named, any harness — does not have.
 pub(crate) fn check_account(paths: &Paths, value: &str, ctx: &out::Ctx) -> Result<()> {
     let (harness, name) = account_target(value);
     if let Some(h) = harness {
