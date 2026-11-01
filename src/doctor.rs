@@ -5084,18 +5084,26 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
-    /// This repo's own catalogue and settings, audited by the function
-    /// `omh doctor` runs — the CI gate. It needs no container, so it must
-    /// run on every platform CI builds on, not only the one with Docker.
+    /// This repo's shipped catalogue, audited by the function `omh doctor`
+    /// runs — the CI gate. It needs no container, so it must run on every
+    /// platform CI builds on, not only the one with Docker.
+    ///
+    /// **What ships, and nothing of the machine running it.** The repo side
+    /// was this checkout, whose `.omh/` git ignores: in CI there is none, and
+    /// on a developer's laptop it is their own settings — so a typo in a file
+    /// nobody else has failed this test there and nowhere else. The repo is an
+    /// empty one; the catalogue is copied from what git carries.
     #[test]
-    fn this_repos_own_config_audits_clean() {
+    fn this_repos_shipped_catalogue_audits_clean() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
-            root: dir.path().to_path_buf(),
-            repo: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
         };
+        std::fs::create_dir_all(paths.repo.join(".git")).unwrap();
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR"));
         for kind in ["base", "adapters", "hooks", "stacks"] {
-            let src = paths.repo.join(kind);
+            let src = shipped.join(kind);
             let dst = paths.root.join(kind);
             std::fs::create_dir_all(&dst).unwrap();
             for entry in std::fs::read_dir(src).unwrap().flatten() {
@@ -5103,6 +5111,7 @@ mod tests {
             }
         }
         let rows = audit(&paths);
+        assert!(rows.len() > 1, "the audit checked nothing: {rows:?}");
         for row in &rows {
             assert!(row.ok, "{}: {}", row.name, row.detail);
         }
