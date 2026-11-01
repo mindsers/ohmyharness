@@ -624,7 +624,7 @@ claude in omh/claude:794db230f74d46a0
   ✓  hooks       /etc/omh/claude/settings.json
   ✓  memory
 
-  all 21 checks passed — claude's adapter paths are verified
+  all 21 checks passed in claude's sandbox
 ```
 
 Above those, in the same table, are the **host's** rows: whether the container
@@ -633,7 +633,7 @@ omh has left behind, which omh set this checkout up, disk, and the host's git.
 They are gathered before any container work, so a machine that cannot build a
 sandbox still gets them instead of a single error.
 
-A clean run ends `all N checks passed — claude's adapter paths are verified`;
+A clean run ends `all N checks passed in claude's sandbox`;
 anything else fails the command and the tally goes to stderr. With an account
 chosen there is a credential check too, and the header names which account it
 used.

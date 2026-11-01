@@ -1721,6 +1721,29 @@ fn check(name: &str, ok: bool) -> crate::doctor::Outcome {
     }
 }
 
+/// A clean doctor run says the checks it ran passed, and where — not that the
+/// harness's adapter paths are verified. omp's and opencode's adapters name
+/// paths no doctor run can settle, so for them that sentence overclaimed, which
+/// is the claim AGENTS.md's *honesty about coverage* exists to stop.
+#[test]
+fn a_clean_doctor_run_claims_its_checks_and_no_more() {
+    let report = Doctor {
+        sandbox: Some(DoctorSandbox {
+            harness: "omp".into(),
+            tag: "omh/omp:abc".into(),
+        }),
+        account: None,
+        host_count: 0,
+        outcomes: vec![check("rules", true), check("mcp", true)],
+    };
+    let human = emit(&report, Format::Human, &Palette::plain());
+    assert!(
+        human.contains("all 2 checks passed in omp's sandbox"),
+        "{human}"
+    );
+    assert!(!human.contains("verified"), "{human}");
+}
+
 /// **Colour is never the only thing carrying the answer.**
 ///
 /// `omh doctor` is read on a pipe, in CI logs, by users with `NO_COLOR`
