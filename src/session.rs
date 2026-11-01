@@ -103,6 +103,31 @@ pub enum Dropped {
     Landed { commits: usize, by: Proof },
 }
 
+/// Delete `branch` at the tip `rm` decided on: `None`, or why it was not.
+///
+/// `update-ref -d` with that tip as the old value, never `branch -D`, which
+/// deletes whatever the branch holds by then: a commit landing between the
+/// decision and the delete — `omh s01 commit` from another terminal — went
+/// with it. With no tip read, nothing is deleted. The branch's config — `push`
+/// sets an upstream — goes after it, as `branch -D` took it; a section that
+/// will not go is a stale line, not work.
+pub fn drop_branch(repo: &Path, branch: &str, decided: Option<&str>) -> Option<String> {
+    let Some(tip) = decided else {
+        return Some("omh could not read its tip when it decided, so it deleted nothing".into());
+    };
+    if let Err(e) = git(
+        repo,
+        &["update-ref", "-d", &format!("refs/heads/{branch}"), tip],
+    ) {
+        return Some(format!("{e:#}"));
+    }
+    let _ = git(
+        repo,
+        &["config", "--remove-section", &format!("branch.{branch}")],
+    );
+    None
+}
+
 /// What omh learned after running the delete.
 ///
 /// Pure, so the three readings of git's answer can be stated as a table rather
@@ -610,6 +635,11 @@ impl Session {
         // that rule lives, and `holding` is where the reading that feeds it
         // does, including the existence test that keeps an id nothing ever
         // created from reading as a branch omh could not count.
+        let tip = self
+            .branch
+            .as_ref()
+            .and_then(|b| git(repo, &["rev-parse", "--verify", "--quiet", b]).ok())
+            .map(|t| t.trim().to_string());
         let outcome = decide(&self.holding(repo, base));
 
         // **Asked of the disk, not of git's exit code.** The fallback used to
@@ -665,9 +695,7 @@ impl Session {
         let mut outcome = outcome;
         if let (Removed::BranchDropped(held), Some(branch)) = (&outcome, &self.branch) {
             let held = held.clone();
-            let refused = git(repo, &["branch", "-D", branch])
-                .err()
-                .map(|e| format!("{e:#}"));
+            let refused = drop_branch(repo, branch, tip.as_deref());
             // **Asked of git, not assumed** — the same rule the worktree above
             // follows. `branch -D` refuses over an unwritable ref store, a
             // stale lock, or a registration that outlived its directory, and
@@ -3000,6 +3028,61 @@ mod tests {
             !matches!(done.branch, Removed::BranchDropped(_)),
             "the branch is still there, so nothing may report it dropped: {:?}",
             done.branch
+        );
+    }
+
+    /// The delete names the tip `rm` decided on. A commit landing between the
+    /// decision and the delete — `omh s01 commit` from another terminal —
+    /// keeps the branch: `branch -D` deleted whatever it held by then.
+    #[test]
+    fn a_branch_that_moved_since_the_decision_is_not_deleted() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let decided = git(&root, &["rev-parse", "omh/s01"]).unwrap();
+        git(
+            &s.worktree,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "late",
+            ],
+        )
+        .unwrap();
+        // As `remove` has it by then: the worktree gone, which is what lets
+        // git delete a branch at all.
+        git(
+            &root,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &s.worktree.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        let refused = drop_branch(&root, "omh/s01", Some(decided.trim()));
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s01"]).is_ok(),
+            "the late commit went with the branch"
+        );
+        assert!(refused.is_some(), "and the delete said nothing");
+
+        // At the tip it decided on, it goes, and its upstream with it: left,
+        // the next session given this id tracked the old one's remote branch.
+        git(&root, &["config", "branch.omh/s01.remote", "origin"]).unwrap();
+        let tip = git(&root, &["rev-parse", "omh/s01"]).unwrap();
+        assert_eq!(drop_branch(&root, "omh/s01", Some(tip.trim())), None);
+        assert!(git(&root, &["rev-parse", "--verify", "omh/s01"]).is_err());
+        assert!(
+            git(&root, &["config", "branch.omh/s01.remote"]).is_err(),
+            "its upstream outlived it"
         );
     }
 
