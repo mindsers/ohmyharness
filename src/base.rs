@@ -1094,7 +1094,9 @@ pub fn own(manifest: &Manifest, off: &BTreeSet<String>) -> Result<Own> {
     let on = |name: &str| -> Result<bool> {
         let entry = manifest.entry(name).with_context(|| {
             format!(
-                "this omh ships `{name}` and {} describes no entry for it — the                  binary and the manifest disagree about the base set.                  `omh init` refreshes the bundled manifest.",
+                "this omh ships `{name}` and {} describes no entry for it — the \
+                  binary and the manifest disagree about the base set. \
+                  `omh init` refreshes the bundled manifest.",
                 manifest.source()
             )
         })?;

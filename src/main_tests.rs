@@ -5215,8 +5215,8 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
         &out::Ctx::plain(),
     );
 
-    // **The build went to the shim, not to the host's docker.** It is the
-    // one runner that spawns a `Child` instead of going through `output`,
+    // **The build went to the shim, not to the host's docker.** It spawns a
+    // `Child` instead of going through `output`,
     // and a shim that covered only `output` sent this test's `docker build`
     // to whatever `docker` was on PATH — a real image build on any machine
     // that ran the default suite.
@@ -8821,6 +8821,149 @@ fn help_text_carries_no_release_history() {
     assert!(
         found.is_empty(),
         "release history in --help:\n{}",
+        found.join("\n")
+    );
+}
+
+/// An ordinary string literal that runs onto the next source line without a
+/// `\` keeps that line's indentation in the text: four of omh's messages
+/// printed eighteen spaces mid-sentence — "the                  binary and the
+/// manifest disagree". A `\` at the end of the line is what drops it; a raw
+/// string means its newlines and is left alone.
+#[test]
+fn no_message_breaks_a_line_without_a_backslash() {
+    fn unjoined(body: &str) -> Vec<usize> {
+        let c: Vec<char> = body.chars().collect();
+        let mut out = Vec::new();
+        let (mut i, mut line) = (0, 1);
+        while i < c.len() {
+            let at = |k: usize| c.get(k).copied();
+            match c[i] {
+                '\n' => line += 1,
+                '/' if at(i + 1) == Some('/') => {
+                    while i < c.len() && c[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '/' if at(i + 1) == Some('*') => {
+                    while i + 1 < c.len() && !(c[i] == '*' && c[i + 1] == '/') {
+                        line += usize::from(c[i] == '\n');
+                        i += 1;
+                    }
+                }
+                'r' if (at(i + 1) == Some('"') || at(i + 1) == Some('#'))
+                    && (i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '_')) =>
+                {
+                    let hashes = (i + 1..c.len()).take_while(|&h| c[h] == '#').count();
+                    if at(i + 1 + hashes) == Some('"') {
+                        let close: Vec<char> = std::iter::once('"')
+                            .chain(std::iter::repeat_n('#', hashes))
+                            .collect();
+                        let mut k = i + 2 + hashes;
+                        while k < c.len() && !c[k..].starts_with(&close) {
+                            line += usize::from(c[k] == '\n');
+                            k += 1;
+                        }
+                        i = k + close.len();
+                        continue;
+                    }
+                }
+                '\'' if at(i + 1) == Some('\\') => {
+                    while i + 1 < c.len() && c[i + 1] != '\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                '\'' if at(i + 2) == Some('\'') => i += 2,
+                '"' => {
+                    let mut k = i + 1;
+                    while k < c.len() && c[k] != '"' {
+                        if c[k] == '\\' {
+                            if at(k + 1) == Some('\n') {
+                                line += 1;
+                            }
+                            k += 2;
+                            continue;
+                        }
+                        // A newline the text means is written at column
+                        // zero — a certificate, a TOML template. One followed
+                        // by indentation is the source's layout leaking in.
+                        if c[k] == '\n' {
+                            if matches!(at(k + 1), Some(' ' | '\t')) {
+                                out.push(line);
+                            }
+                            line += 1;
+                        }
+                        k += 1;
+                    }
+                    i = k;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out
+    }
+    assert_eq!(unjoined("let s = \"a \\\n    b\";\n"), Vec::<usize>::new());
+    assert_eq!(unjoined("let s = \"a\n    b\";\n"), vec![1]);
+    assert_eq!(unjoined("let s = r\"a\n    b\";\n"), Vec::<usize>::new());
+    assert_eq!(unjoined("let s = \"a\nb\";\n"), Vec::<usize>::new());
+
+    // The same damage, already on one line: a `\` continuation joined with
+    // its indentation kept. A run of spaces mid-prose, in a line of text that
+    // does not itself start indented — an aligned row (`\n  omh s   lists
+    // them`) starts with two spaces, and its gaps are meant.
+    fn gaps(line: &str) -> bool {
+        let mut rest = line;
+        while let Some(open) = rest.find('"') {
+            let body = &rest[open + 1..];
+            let mut end = None;
+            let mut escaped = false;
+            for (k, ch) in body.char_indices() {
+                match (escaped, ch) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => {
+                        end = Some(k);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { return false };
+            for row in body[..end].split("\\n") {
+                if row.starts_with("  ") {
+                    continue;
+                }
+                let t = row.trim_start();
+                if t.contains(&" ".repeat(8)) && !t.trim_end().ends_with(' ') {
+                    return true;
+                }
+            }
+            rest = &body[end + 1..];
+        }
+        false
+    }
+    assert!(gaps("bail!(\"the                  binary and\")"));
+    assert!(!gaps(
+        "said: \"x:\\n  omh s                     lists them\""
+    ));
+
+    let mut found = Vec::new();
+    for (path, body) in crate::testsrc::production() {
+        for line in unjoined(&body) {
+            found.push(format!("{}:{line}", path.display()));
+        }
+        for (n, line) in crate::testsrc::production_of(&body).lines().enumerate() {
+            if gaps(line) {
+                found.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "string literals broken without a `\\`:\n{}",
         found.join("\n")
     );
 }
