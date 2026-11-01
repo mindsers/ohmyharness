@@ -214,6 +214,37 @@ fn a_second_sync_replaces_the_note_rather_than_stacking_on_it() {
     assert!(strays.is_empty(), "no scaffolding left behind: {strays:?}");
 }
 
+/// A conflicted path is kept out of the base-moved commit as the path it is,
+/// never as a pattern: `src/[id].tsx` read as a glob also kept `src/i.tsx`
+/// and `src/d.tsx` out, so what trunk changed in them was left uncommitted
+/// beside the one file that needed resolving.
+#[test]
+fn a_conflicted_path_is_kept_out_by_name_not_by_pattern() {
+    let (_d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    for f in ["src/[id].tsx", "src/i.tsx", "src/d.tsx"] {
+        std::fs::write(wt.join(f), "moved\n").unwrap();
+    }
+    s.record_base_moved(&wt, "abc123", &["src/[id].tsx".to_string()])
+        .unwrap();
+    let committed = git(
+        &s.gitdir,
+        &wt,
+        &["show", "--name-only", "--format=", "HEAD"],
+    )
+    .unwrap();
+    assert!(
+        committed.contains("src/i.tsx") && committed.contains("src/d.tsx"),
+        "kept out by a pattern: {committed}"
+    );
+    assert!(
+        !committed.contains("[id]"),
+        "the conflicted file went in: {committed}"
+    );
+}
+
 /// A note that cannot be written does not fail the sync, and does not
 /// leave a fragment behind claiming to be one.
 ///

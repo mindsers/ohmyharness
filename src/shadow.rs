@@ -1309,10 +1309,11 @@ impl Shadow {
         let mut add: Vec<&str> = vec!["add", "-A", "."];
         // `:(exclude)` rather than adding everything and unstaging: an
         // unstage would have to name paths git quotes, and the pathspec does
-        // not.
+        // not. `literal`, or `src/[id].tsx` is a pattern that keeps
+        // `src/i.tsx` and `src/d.tsx` out too.
         let keep_out: Vec<String> = conflicted
             .iter()
-            .map(|path| format!(":(exclude){path}"))
+            .map(|path| format!(":(exclude,literal){path}"))
             .collect();
         add.extend(keep_out.iter().map(String::as_str));
         stage(&self.gitdir, worktree, &add)?;
