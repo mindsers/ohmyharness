@@ -1504,10 +1504,19 @@ impl Adapter {
             );
         }
         for (cap, binding) in &self.capabilities {
-            let declares = !binding.events.is_empty()
-                || !binding.fields.is_empty()
-                || binding.inject.is_some()
-                || binding.refuse.is_some();
+            // Every hook map, named by the key that declares it: `fields-by-tool`
+            // was left out, so one under `rules` loaded and did nothing.
+            let declared: Vec<&str> = [
+                ("events", !binding.events.is_empty()),
+                ("fields", !binding.fields.is_empty()),
+                ("fields-by-tool", !binding.tool_fields.is_empty()),
+                ("inject", binding.inject.is_some()),
+                ("refuse", binding.refuse.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(map, there)| there.then_some(map))
+            .collect();
+            let declares = !declared.is_empty();
             match cap {
                 Capability::Hooks if binding.events.is_empty() => anyhow::bail!(
                     "adapter {}: `hooks` declares no `events`, so it can express no \
@@ -1518,10 +1527,15 @@ impl Adapter {
                 ),
                 Capability::Hooks => {}
                 _ if declares => anyhow::bail!(
-                    "adapter {}: `{cap}` declares hook maps (`events`, `fields` \
-                     or `inject`), which are read only under `hooks`. Nothing \
-                     would use them.",
-                    path.display()
+                    "adapter {}: `{cap}` declares {}, read only under `hooks`. \
+                     Nothing would use {}.",
+                    path.display(),
+                    declared
+                        .iter()
+                        .map(|m| format!("`{m}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if declared.len() == 1 { "it" } else { "them" }
                 ),
                 _ => {}
             }
@@ -2158,6 +2172,9 @@ mod tests {
             "[capabilities.rules.events]\nturn-end = \"Stop\"",
             "[capabilities.rules.fields]\ntool-file = \".tool_input.file_path\"",
             "[capabilities.rules.inject]\ntemplate = \"echo {{text}}\"",
+            // Left out of the check, so these two loaded cleanly too.
+            "[capabilities.rules.refuse]\ntemplate = \"echo {{text}}\"",
+            "[capabilities.rules.fields-by-tool.edit]\ntool-file = \".input\"",
         ] {
             let d = tempfile::tempdir().unwrap();
             write(
@@ -2171,6 +2188,9 @@ mod tests {
             );
             let err = format!("{:#}", Adapter::find(d.path(), "odd").unwrap_err());
             assert!(err.contains("rules"), "{map} must be refused: {err}");
+            let named = map.trim_start_matches("[capabilities.rules.");
+            let named = named.split(['.', ']']).next().unwrap();
+            assert!(err.contains(&format!("`{named}`")), "and named: {err}");
         }
     }
 
