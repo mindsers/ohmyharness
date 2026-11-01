@@ -1230,30 +1230,28 @@ pub fn provider_check(adapter: &Adapter, account: Option<&std::path::Path>) -> O
         )
     };
     let (ok, detail) = match provider.format {
-        crate::adapter::ProviderFormat::CodexConfig => match crate::provider::read(account) {
-            Ok(None) => return None,
-            Ok(Some(doc)) => {
-                let names: Vec<&str> = doc
-                    .get("model_providers")
-                    .and_then(|p| p.as_table())
-                    .map(|p| p.keys().map(String::as_str).collect())
-                    .unwrap_or_default();
-                let selected = doc.get("model_provider").and_then(|p| p.as_str());
-                (
-                    true,
-                    format!(
-                        "{} — {}, from {}",
-                        selected.map_or("none selected".into(), |s| format!("`{s}` selected")),
-                        match names.as_slice() {
-                            [] => "no provider defined".into(),
-                            names => format!("defines {}", names.join(", ")),
-                        },
-                        path.display()
-                    ),
-                )
+        crate::adapter::ProviderFormat::CodexConfig => {
+            match crate::provider::codex::read(account) {
+                Ok(None) => return None,
+                Ok(Some(doc)) => {
+                    let names = crate::provider::codex::names(&doc);
+                    let selected = doc.get("model_provider").and_then(|p| p.as_str());
+                    (
+                        true,
+                        format!(
+                            "{} — {}, from {}",
+                            selected.map_or("none selected".into(), |s| format!("`{s}` selected")),
+                            match names.as_slice() {
+                                [] => "no provider defined".into(),
+                                names => format!("defines {}", names.join(", ")),
+                            },
+                            path.display()
+                        ),
+                    )
+                }
+                Err(e) => refused(e),
             }
-            Err(e) => refused(e),
-        },
+        }
         crate::adapter::ProviderFormat::OmpModels => {
             use crate::provider::omp;
             match omp::read(account) {
@@ -1273,10 +1271,7 @@ pub fn provider_check(adapter: &Adapter, account: Option<&std::path::Path>) -> O
                     match own {
                         Ok(None | Some(None)) => return None,
                         Ok(Some(Some(own))) => {
-                            let name = account
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default();
+                            let name = crate::paths::account_name(account);
                             (false, own.refusal(&name))
                         }
                         Err(e) => (

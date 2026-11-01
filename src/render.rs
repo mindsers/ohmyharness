@@ -67,7 +67,7 @@ pub struct RenderContext<'a> {
     /// probe, and (per `container::plan`) a scratch session with no branch,
     /// which never mounts the shadow gitdir this path would point into.
     pub log: Option<&'a str>,
-    /// The account's provider file, checked by `provider::read`, for the one
+    /// The account's provider file, checked by `provider::codex::read`, for the one
     /// render that carries it: Codex's System layer.
     pub provider: Option<&'a toml::Table>,
 }
@@ -2066,7 +2066,7 @@ fn codex_hooks(
     let Some(provider) = provider else {
         return toml::to_string(&doc).context("rendering codex hooks");
     };
-    // The account's provider, beside omh's keys: `provider::read` has held it to
+    // The account's provider, beside omh's keys: `provider::codex::read` has held it to
     // `model_provider` and `[model_providers.*]`, and neither collides with
     // a key above.
     let mut table = toml::Table::try_from(&doc).context("rendering codex hooks")?;

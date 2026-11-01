@@ -260,39 +260,7 @@ fn escape(name: &str) -> String {
 
 /// The account's provider file, checked — `None` when it has none.
 pub fn read(account_dir: &Path) -> Result<Option<Value>> {
-    let path = account_dir.join(FILE);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let doc = parse(&raw).with_context(|| format!("{}", path.display()))?;
-    validate(&doc).with_context(|| format!("{}", path.display()))?;
-    Ok(Some(doc))
-}
-
-/// `raw` as YAML, or where it stops being YAML omh reads — by line and column
-/// only: the parser's own message quotes the line, and the line can be a token.
-///
-/// Read the way omp's reader does where readers differ — only `true` and
-/// `false` are booleans, as Bun's YAML has it — and refused where a file could
-/// say one thing two ways: a merge key (`<<`), a duplicate key, a second
-/// document. The parser's budget bounds nodes, nesting and alias replay, so a
-/// file cannot make a launch's parse unbounded.
-pub(crate) fn parse(raw: &str) -> Result<Value> {
-    let options = serde_saphyr::options! {
-        strict_booleans: true,
-        merge_keys: serde_saphyr::MergeKeyPolicy::Error,
-        with_snippet: false,
-    };
-    serde_saphyr::from_str_with_options::<Value>(raw, options).map_err(|e| match e.location() {
-        Some(at) => anyhow::anyhow!(
-            "is not YAML omh reads, at line {}, column {}",
-            at.line(),
-            at.column()
-        ),
-        None => anyhow::anyhow!("is not YAML omh reads"),
-    })
+    super::read_checked(account_dir, FILE, crate::doc::parse_yaml, validate)
 }
 
 /// The providers of an omp `models.yml` — the host's, or a file the user
@@ -303,7 +271,7 @@ pub fn from_models_config(
     raw: &str,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Option<Value>> {
-    let config = parse(raw)?;
+    let config = crate::doc::parse_yaml(raw)?;
     let providers = match config.get("providers") {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::Object(p)) if p.is_empty() => return Ok(None),
@@ -363,12 +331,8 @@ fn names_a_variable(value: &str) -> bool {
 /// Write `doc` as the account's provider file, readable by the user alone.
 pub fn write(account_dir: &Path, doc: &Value) -> Result<()> {
     validate(doc)?;
-    std::fs::create_dir_all(account_dir)?;
-    let path = account_dir.join(FILE);
     let body = serde_saphyr::to_string(doc).context("writing the provider file as YAML")?;
-    crate::held::Dir::open(account_dir)?
-        .replace_private(std::ffi::OsStr::new(FILE), body.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
+    super::write_private(account_dir, FILE, body.as_bytes())
 }
 
 /// The `models.yml` a session reads: the providers `doc` defines, or `{}`.
@@ -464,7 +428,7 @@ pub fn stranded(account_dir: &Path, models_yml: &str) -> Result<Option<Stranded>
         let path = account_dir.join(&rel);
         let raw = crate::held::read_under(account_dir, &rel, CAP)
             .with_context(|| format!("{} could not be read", path.display()))?;
-        let doc = parse(&raw).with_context(|| format!("{}", path.display()))?;
+        let doc = crate::doc::parse_yaml(&raw).with_context(|| format!("{}", path.display()))?;
         let providers: Vec<(String, Option<String>)> = providers(&doc)
             .into_iter()
             .map(|(id, p, ..)| {
@@ -524,7 +488,7 @@ mod tests {
 
     #[test]
     fn a_provider_file_holds_providers_and_nothing_else() {
-        validate(&parse(FAKE).unwrap()).unwrap();
+        validate(&crate::doc::parse_yaml(FAKE).unwrap()).unwrap();
         validate(&json!({})).unwrap();
         validate(&Value::Null).unwrap();
         // The selection keys are config.yml's; a file holding one would say a
@@ -592,51 +556,6 @@ mod tests {
         ] {
             assert!(validate(&doc).is_err(), "{doc}");
         }
-    }
-
-    #[test]
-    fn a_file_that_is_not_yaml_is_named_by_position_and_never_quoted() {
-        let raw = "providers:\n  x:\n    apiKey: sk-secret-value\n   bad: [\n";
-        let e = format!("{:#}", parse(raw).unwrap_err());
-        assert!(e.contains("line") && e.contains("column"), "{e}");
-        assert!(!e.contains("sk-secret"), "{e}");
-    }
-
-    #[test]
-    fn a_file_cannot_make_a_parse_unbounded() {
-        let mut bomb =
-            String::from("a: &a [\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\",\"x\"]\n");
-        let mut prev = "a".to_string();
-        for n in ["b", "c", "d", "e", "f", "g", "h", "i"] {
-            bomb.push_str(&format!(
-                "{n}: &{n} [{}]\n",
-                vec![format!("*{prev}"); 9].join(",")
-            ));
-            prev = n.to_string();
-        }
-        assert!(parse(&bomb).is_err(), "an alias bomb parsed");
-        let deep = "[".repeat(100_000) + &"]".repeat(100_000);
-        assert!(parse(&deep).is_err(), "nesting without a bound parsed");
-        // A second document would be a second file omp reads one of.
-        assert!(parse("providers: {}\n---\nproviders: {}\n").is_err());
-        assert!(
-            parse("providers:\n  x: {}\n  x: {}\n").is_err(),
-            "a duplicate key"
-        );
-        assert!(
-            parse("a: &a {x: 1}\nproviders:\n  <<: *a\n").is_err(),
-            "a merge key"
-        );
-    }
-
-    /// Only `true` and `false` are booleans, as omp's reader has it — Bun's
-    /// YAML reads `yes` and `on` as the strings they are (measured, 1.3.14).
-    #[test]
-    fn a_word_is_a_string_as_omps_reader_reads_it() {
-        assert_eq!(
-            parse("a: yes\nb: on\nc: true\n").unwrap(),
-            json!({"a": "yes", "b": "on", "c": true})
-        );
     }
 
     #[test]
@@ -718,14 +637,23 @@ mod tests {
 
     #[test]
     fn the_render_is_the_providers_and_reads_back_as_written() {
-        assert_eq!(parse(&render(None).unwrap()).unwrap(), json!({}));
-        let doc = parse(FAKE).unwrap();
-        assert_eq!(parse(&render(Some(&doc)).unwrap()).unwrap(), doc);
+        assert_eq!(
+            crate::doc::parse_yaml(&render(None).unwrap()).unwrap(),
+            json!({})
+        );
+        let doc = crate::doc::parse_yaml(FAKE).unwrap();
+        assert_eq!(
+            crate::doc::parse_yaml(&render(Some(&doc)).unwrap()).unwrap(),
+            doc
+        );
         // Every string quoted, so no reader takes a value for a boolean or a
         // number that omh wrote as text.
         let tricky = json!({"providers": {"x": {"baseUrl": "https://x.test",
             "headers": {"A": "yes", "B": "0x10", "C": "on", "D": "~", "E": "null"}}}});
-        assert_eq!(parse(&render(Some(&tricky)).unwrap()).unwrap(), tricky);
+        assert_eq!(
+            crate::doc::parse_yaml(&render(Some(&tricky)).unwrap()).unwrap(),
+            tricky
+        );
     }
 
     #[test]
@@ -751,7 +679,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         assert!(read(d.path()).unwrap().is_none());
-        let doc = parse(FAKE).unwrap();
+        let doc = crate::doc::parse_yaml(FAKE).unwrap();
         write(d.path(), &doc).unwrap();
         let mode = std::fs::metadata(d.path().join(FILE))
             .unwrap()

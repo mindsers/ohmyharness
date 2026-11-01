@@ -24,9 +24,8 @@ pub struct Caps {
 }
 
 pub trait Runtime: std::fmt::Debug {
-    /// Backend identity, for error messages that name which runtime refused a
-    /// plan.
-    fn name(&self) -> &'static str;
+    /// Which backend this is.
+    fn engine(&self) -> Engine;
     /// Executable to invoke.
     fn program(&self) -> &'static str;
     fn caps(&self) -> Caps;
@@ -280,11 +279,51 @@ pub struct Docker;
 #[derive(Debug)]
 pub struct Sbx;
 
-pub const NAMES: [&str; 3] = ["docker", "podman", "sbx"];
+/// Which backend a [`Runtime`] is: what a check about one backend asks,
+/// instead of comparing its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    Docker,
+    Podman,
+    Sbx,
+}
+
+impl Engine {
+    pub const ALL: [Engine; 3] = [Engine::Docker, Engine::Podman, Engine::Sbx];
+
+    /// As a setting spells it, and as a message names it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Engine::Docker => "docker",
+            Engine::Podman => "podman",
+            Engine::Sbx => "sbx",
+        }
+    }
+
+    /// The backend a setting names, or `None` for a word that names none.
+    pub fn named(name: &str) -> Option<Engine> {
+        Engine::ALL.into_iter().find(|e| e.name() == name)
+    }
+
+    fn build(self) -> Box<dyn Runtime> {
+        match self {
+            Engine::Docker => Box::new(Docker),
+            Engine::Podman => Box::new(Podman),
+            Engine::Sbx => Box::new(Sbx),
+        }
+    }
+}
+
+/// Every [`Engine`] by name: the choices `select` lists when it refuses one.
+pub const NAMES: [&str; 3] = [
+    Engine::Docker.name(),
+    Engine::Podman.name(),
+    Engine::Sbx.name(),
+];
 
 impl Runtime for Docker {
-    fn name(&self) -> &'static str {
-        "docker"
+    fn engine(&self) -> Engine {
+        Engine::Docker
     }
 
     /// Measured 2026-08-24 against docker 29.7.2. `ps` without `-a` is the
@@ -499,8 +538,8 @@ impl Podman {
 }
 
 impl Runtime for Podman {
-    fn name(&self) -> &'static str {
-        "podman"
+    fn engine(&self) -> Engine {
+        Engine::Podman
     }
     fn program(&self) -> &'static str {
         "podman"
@@ -614,8 +653,8 @@ pub fn encode_links(links: &[(std::path::PathBuf, std::path::PathBuf)]) -> Strin
 }
 
 impl Runtime for Sbx {
-    fn name(&self) -> &'static str {
-        "sbx"
+    fn engine(&self) -> Engine {
+        Engine::Sbx
     }
 
     /// PROVISIONAL, like everything else here — sbx is not installed on the
@@ -850,14 +889,7 @@ fn workspace_args(staging: &SbxStaging) -> Vec<String> {
 
 /// The backend the settings ask for, or the one measured backend under `auto`.
 pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Backend> {
-    let build = |name: &str| -> Option<Box<dyn Runtime>> {
-        match name {
-            "docker" => Some(Box::new(Docker)),
-            "podman" => Some(Box::new(Podman)),
-            "sbx" => Some(Box::new(Sbx)),
-            _ => None,
-        }
-    };
+    let build = |name: &str| Engine::named(name).map(Engine::build);
 
     if preference == "auto" {
         // Only the measured backend. `auto` used to prefer `sbx` when it was
@@ -868,10 +900,8 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Back
         // nobody had exercised. `sbx` is an explicit opt-in until the spike in
         // `docs/design` measures it, so `auto` never chooses a backend nobody
         // has run.
-        if available("docker") {
-            return Ok(Backend::real(
-                build("docker").expect("name from the known list"),
-            ));
+        if available(Engine::Docker.name()) {
+            return Ok(Backend::real(Engine::Docker.build()));
         }
         anyhow::bail!(
             "no measured container runtime found — install docker, or set \
@@ -900,7 +930,8 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Back
 /// through `detect::preferred_harness` — so a `;` in one of them was a second
 /// command, running on the host, with the first one's exit status deciding the
 /// answer. The runtime caller was never exposed: the `build` closure in
-/// `select` checks the preference against `NAMES` before `available` runs.
+/// `select` checks the preference is an [`Engine`]'s name before `available`
+/// runs.
 ///
 /// Still `sh`, and still `command -v`: it is POSIX, it is a builtin so it needs
 /// nothing installed to answer, and it resolves builtins and functions as well
@@ -1069,7 +1100,7 @@ mod tests {
     ///
     /// `installed` interpolated its argument into `sh -c "command -v {program}"`.
     /// The runtime caller is safe by ordering — `build(preference)` checks the
-    /// name against `NAMES` before `available` is reached — but two other
+    /// name is an [`Engine`]'s before `available` is reached — but two other
     /// callers are not: `runtime::installed(&ed.bin)` takes the `bin` field of
     /// an editor TOML, and `detect::preferred_harness` takes adapter names.
     /// Those are files under `~/.omh`, so this is the same trust boundary as
@@ -1191,10 +1222,14 @@ mod tests {
     fn auto_never_picks_a_backend_nobody_has_measured() {
         // Both present: docker, not the unmeasured sbx.
         let r = select("auto", &|_| true).unwrap();
-        assert_eq!(r.name(), "docker", "auto does not silently pick sbx");
+        assert_eq!(
+            r.engine(),
+            Engine::Docker,
+            "auto does not silently pick sbx"
+        );
         // Docker present: docker.
         let r = select("auto", &only("docker")).unwrap();
-        assert_eq!(r.name(), "docker");
+        assert_eq!(r.engine(), Engine::Docker);
     }
 
     /// With only the unmeasured backend installed, `auto` refuses and names
@@ -1221,7 +1256,7 @@ mod tests {
     #[test]
     fn an_explicit_choice_overrides_detection() {
         let r = select("docker", &|_| true).unwrap();
-        assert_eq!(r.name(), "docker");
+        assert_eq!(r.engine(), Engine::Docker);
     }
 
     /// The whole thesis of the auto change: `sbx` is still reachable, just
@@ -1231,7 +1266,7 @@ mod tests {
     #[test]
     fn an_explicit_sbx_still_selects_it() {
         let r = select("sbx", &only("sbx")).unwrap();
-        assert_eq!(r.name(), "sbx", "sbx is reachable by naming it");
+        assert_eq!(r.engine(), Engine::Sbx, "sbx is reachable by naming it");
     }
 
     #[test]
@@ -1683,7 +1718,7 @@ mod tests {
                 ro,
                 plan.mounts.len() - 1,
                 "{} dropped a read-only marker",
-                backend.name()
+                backend.engine().name()
             );
         }
     }
@@ -1965,7 +2000,7 @@ mod tests {
                 assert!(
                     args.iter().any(|a| *a == format!("{key}={value}")),
                     "{} does not record {key}",
-                    backend.name()
+                    backend.engine().name()
                 );
             }
         }

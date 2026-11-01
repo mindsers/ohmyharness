@@ -387,16 +387,11 @@ fn author_provider(
 ) -> Result<Option<Vec<String>>> {
     match format {
         ProviderFormat::CodexConfig => {
-            let Some(doc) = crate::provider::from_codex_config(raw, env)? else {
+            let Some(doc) = crate::provider::codex::from_codex_config(raw, env)? else {
                 return Ok(None);
             };
-            crate::provider::write(account_dir, &doc)?;
-            let names = doc
-                .get("model_providers")
-                .and_then(|p| p.as_table())
-                .map(|p| p.keys().cloned().collect())
-                .unwrap_or_default();
-            Ok(Some(names))
+            crate::provider::codex::write(account_dir, &doc)?;
+            Ok(Some(crate::provider::codex::names(&doc)))
         }
         ProviderFormat::OmpModels => {
             let Some(doc) = crate::provider::omp::from_models_config(raw, env)? else {
@@ -416,8 +411,9 @@ fn read_host_provider(
     host: &std::path::Path,
 ) -> Result<Option<(std::path::PathBuf, String)>> {
     let mut candidates = vec![host.to_path_buf()];
-    if format == ProviderFormat::OmpModels {
-        candidates.push(host.with_extension("yaml"));
+    match format {
+        ProviderFormat::OmpModels => candidates.push(host.with_extension("yaml")),
+        ProviderFormat::CodexConfig => {}
     }
     for at in candidates {
         match std::fs::read_to_string(&at) {

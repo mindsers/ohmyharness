@@ -9,7 +9,7 @@
 
 use crate::adapter::Adapter;
 use crate::base::GRAPH_CACHE;
-use crate::runtime::Backend;
+use crate::runtime::{Backend, Engine};
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -1078,7 +1078,7 @@ pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<
 /// everything already. `info` is
 /// `docker info`'s operating system and security options.
 pub(crate) fn agent_owner(
-    backend: &str,
+    backend: Engine,
     linux: bool,
     uid: u32,
     gid: u32,
@@ -1086,7 +1086,11 @@ pub(crate) fn agent_owner(
 ) -> Option<(u32, u32)> {
     let rootful_engine =
         !info.is_empty() && !info.contains("Docker Desktop") && !info.contains("rootless");
-    (backend == "docker" && linux && uid != 0 && uid != crate::runtime::AGENT_UID && rootful_engine)
+    (backend == Engine::Docker
+        && linux
+        && uid != 0
+        && uid != crate::runtime::AGENT_UID
+        && rootful_engine)
         .then_some((uid, gid))
 }
 
@@ -1110,7 +1114,7 @@ pub(crate) fn host_owner(backend: &Backend) -> Result<Option<(u32, u32)>> {
         );
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    owner_of(backend.name(), cfg!(target_os = "linux"), uid, gid, info)
+    owner_of(backend.engine(), cfg!(target_os = "linux"), uid, gid, info)
 }
 
 /// [`agent_owner`], with `docker info` asked only where the answer could
@@ -1119,13 +1123,13 @@ pub(crate) fn host_owner(backend: &Backend) -> Result<Option<(u32, u32)>> {
 /// "nothing to change", it left the agent at 1000 on a host that needed it
 /// moved, and the first edit failed with nothing to say why.
 fn owner_of(
-    backend: &str,
+    backend: Engine,
     linux: bool,
     uid: u32,
     gid: u32,
     info: impl FnOnce() -> Result<String>,
 ) -> Result<Option<(u32, u32)>> {
-    let asked = linux && backend == "docker" && uid != 0 && uid != crate::runtime::AGENT_UID;
+    let asked = linux && backend == Engine::Docker && uid != 0 && uid != crate::runtime::AGENT_UID;
     let info = if asked {
         info().context("`docker info` would not say whether the agent must be the host user")?
     } else {
@@ -1200,7 +1204,7 @@ fn provide(
     ca: Option<&str>,
     note: &str,
 ) -> Result<()> {
-    if backend.name() == crate::runtime::Runtime::name(&crate::runtime::Sbx) {
+    if backend.engine() == Engine::Sbx {
         return provide_to_sbx(backend, tag, dockerfile, kind, ca, note);
     }
     if !exists(backend, tag) {
@@ -2330,28 +2334,40 @@ mod tests {
         let desktop = "Docker Desktop [\"name=seccomp,profile=builtin\"]";
         let rootless = "Ubuntu 24.04 LTS [\"name=seccomp,profile=builtin\",\"name=rootless\"]";
         assert_eq!(
-            agent_owner("docker", true, 1001, 1001, engine),
+            agent_owner(Engine::Docker, true, 1001, 1001, engine),
             Some((1001, 1001))
         );
         assert_eq!(
-            agent_owner("docker", true, 1001, 100, engine),
+            agent_owner(Engine::Docker, true, 1001, 100, engine),
             Some((1001, 100))
         );
         for (backend, linux, uid, info, why) in [
-            ("docker", true, 1000, engine, "the image's own uid"),
-            ("docker", true, 0, engine, "root writes anything already"),
-            ("docker", false, 1001, engine, "not Linux"),
-            ("docker", true, 1001, desktop, "Docker Desktop"),
-            ("docker", true, 1001, rootless, "rootless Docker"),
+            (Engine::Docker, true, 1000, engine, "the image's own uid"),
             (
-                "docker",
+                Engine::Docker,
+                true,
+                0,
+                engine,
+                "root writes anything already",
+            ),
+            (Engine::Docker, false, 1001, engine, "not Linux"),
+            (Engine::Docker, true, 1001, desktop, "Docker Desktop"),
+            (Engine::Docker, true, 1001, rootless, "rootless Docker"),
+            (
+                Engine::Docker,
                 true,
                 1001,
                 "",
                 "a daemon that would not say what it is",
             ),
-            ("podman", true, 1001, engine, "podman maps the user itself"),
-            ("sbx", true, 1001, engine, "sbx"),
+            (
+                Engine::Podman,
+                true,
+                1001,
+                engine,
+                "podman maps the user itself",
+            ),
+            (Engine::Sbx, true, 1001, engine, "sbx"),
         ] {
             assert_eq!(agent_owner(backend, linux, uid, uid, info), None, "{why}");
         }
@@ -2367,7 +2383,7 @@ mod tests {
     fn a_daemon_that_will_not_say_what_it_is_stops_the_launch() {
         let engine = "Ubuntu 24.04 LTS [\"name=seccomp,profile=builtin\"]";
         let refused = || -> Result<String> { anyhow::bail!("Cannot connect to the Docker daemon") };
-        let err = owner_of("docker", true, 1001, 1001, refused).unwrap_err();
+        let err = owner_of(Engine::Docker, true, 1001, 1001, refused).unwrap_err();
         assert!(
             format!("{err:#}").contains("Cannot connect to the Docker daemon"),
             "{err:#}"
@@ -2375,18 +2391,18 @@ mod tests {
         assert!(format!("{err:#}").contains("docker info"), "{err:#}");
 
         assert_eq!(
-            owner_of("docker", true, 1001, 1001, || Ok(engine.into())).unwrap(),
+            owner_of(Engine::Docker, true, 1001, 1001, || Ok(engine.into())).unwrap(),
             Some((1001, 1001))
         );
         // Not asked at all where the answer could not matter.
         for (backend, linux, uid) in [
-            ("docker", true, 1000),
-            ("docker", true, 0),
-            ("docker", false, 1001),
-            ("podman", true, 1001),
+            (Engine::Docker, true, 1000),
+            (Engine::Docker, true, 0),
+            (Engine::Docker, false, 1001),
+            (Engine::Podman, true, 1001),
         ] {
             let never =
-                || -> Result<String> { panic!("asked docker info for {backend} {linux} {uid}") };
+                || -> Result<String> { panic!("asked docker info for {backend:?} {linux} {uid}") };
             assert_eq!(owner_of(backend, linux, uid, uid, never).unwrap(), None);
         }
     }
@@ -2847,7 +2863,7 @@ mod tests {
             assert!(
                 args.first().is_some_and(|a| a == "ps"),
                 "{}: the running set: {args:?}",
-                backend.name()
+                backend.engine().name()
             );
         }
         // sbx: `ls --json`, filtered to running by `running_names`.
@@ -2867,7 +2883,7 @@ mod tests {
             assert!(
                 !args.iter().any(|a| a == "-a"),
                 "{}: running, not every container ever created: {args:?}",
-                backend.name()
+                backend.engine().name()
             );
             // No container name anywhere in the argv. Handing one to the
             // runtime is what made it a pattern, and `.` in a repo directory
@@ -2875,7 +2891,7 @@ mod tests {
             assert!(
                 !args.iter().any(|a| a.contains("filter") || a.contains('^')),
                 "{}: nothing the runtime will read as a pattern: {args:?}",
-                backend.name()
+                backend.engine().name()
             );
         }
     }

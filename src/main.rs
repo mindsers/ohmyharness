@@ -19,6 +19,7 @@ mod config;
 mod container;
 mod derive;
 mod detect;
+mod doc;
 mod doctor;
 mod editor;
 mod facts;
@@ -442,19 +443,19 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                         if let session::Ran::Harness(before) =
                             session::harness_of(&paths.runs(), &session.id)
                         {
-                            if before != *named {
+                            if before.as_str() != named.as_str() {
                                 ctx.warn(&format!(
                                     "{} was running {}; resuming as {named} \
                                      restarts its sandbox and records {named}",
                                     session.id,
-                                    out::untrusted(&before)
+                                    out::untrusted(before.as_str())
                                 ));
                             }
                         }
                         (named.clone(), false)
                     }
                     None => match session::harness_of(&paths.runs(), &session.id) {
-                        session::Ran::Harness(name) => (name, true),
+                        session::Ran::Harness(name) => (name.to_string(), true),
                         // Refused, never guessed. `detect::preferred_harness`
                         // would answer for a session it knows nothing about,
                         // and the answer would be indistinguishable from a

@@ -56,12 +56,12 @@ impl Format {
     pub fn parse(self, raw: &[u8]) -> Result<Doc> {
         let text = std::str::from_utf8(raw).context("it is not UTF-8")?;
         let value = match self {
-            Format::Toml => serde_json::to_value(crate::provider::parse(text)?)?,
+            Format::Toml => serde_json::to_value(crate::doc::parse_toml(text)?)?,
             Format::Json if text.trim().is_empty() => return Ok(Doc::new()),
             Format::Json => serde_json::from_str(text).context("it is not JSON")?,
             // As omp reads it: a file with no document is no settings.
             Format::Yaml => {
-                match crate::provider::omp::parse(text).map_err(|e| anyhow::anyhow!("it {e}"))? {
+                match crate::doc::parse_yaml(text).map_err(|e| anyhow::anyhow!("it {e}"))? {
                     Value::Null => return Ok(Doc::new()),
                     v => v,
                 }
@@ -319,6 +319,20 @@ fn hold_parent<'a>(
 /// [`hold_parent`], made.
 fn make_parent<'a>(dir: &Path, rel: &'a str) -> Result<(crate::held::Dir, &'a OsStr)> {
     hold_parent(dir, rel, true)?.context("a directory omh made is not there")
+}
+
+/// The account's [`KEPT`] directory, held, with its [`LOCK`] taken. Dropping
+/// the file releases the lock.
+///
+/// Two callers take the same lock their own way: [`Account::seed`] waits
+/// for it only briefly, because a review holds it across its prompt, and
+/// [`forget`] never creates the directory and takes no lock on a dry run.
+fn lock_kept(account: &Path) -> Result<(crate::held::Dir, std::fs::File)> {
+    let (kept_dir, _) = make_parent(account, &format!("{KEPT}/{LOCK}"))?;
+    let lock = kept_dir
+        .lock(OsStr::new(LOCK))
+        .with_context(|| format!("locking {}", account.join(KEPT).display()))?;
+    Ok((kept_dir, lock))
 }
 
 /// `name` in `dir`, read once: absent is `None`; anything but a regular file
@@ -609,11 +623,11 @@ fn refuse_a_lost_provider(
     let Some(selected) = doc.get("model_provider").and_then(|p| p.as_str()) else {
         return Ok(());
     };
-    let reads = adapter
-        .provider
-        .as_ref()
-        .is_some_and(|p| p.format == crate::adapter::ProviderFormat::CodexConfig);
-    if selected == "openai" || !reads || crate::provider::read(account)?.is_some() {
+    let reads = adapter.provider.as_ref().is_some_and(|p| match p.format {
+        crate::adapter::ProviderFormat::CodexConfig => true,
+        crate::adapter::ProviderFormat::OmpModels => false,
+    });
+    if selected == "openai" || !reads || crate::provider::codex::read(account)?.is_some() {
         return Ok(());
     }
     let url = doc
@@ -623,10 +637,7 @@ fn refuse_a_lost_provider(
         .and_then(|u| u.as_str())
         .map(|u| format!(", at {}", crate::provider::redacted_url(u)))
         .unwrap_or_default();
-    let name = account
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = crate::paths::account_name(account);
     anyhow::bail!(
         "{} selects `model_provider = {}`{url}, and sessions no longer read it from there — \
          this launch would go to OpenAI instead. Keep it as the account's provider:\n\n    \
@@ -643,10 +654,9 @@ fn refuse_a_lost_provider(
 /// a `file` adapter, whose copy of `~/.claude.json` holds the account's
 /// identity, and as they always were for `link` and `dir`.
 fn place(dir: &crate::held::Dir, name: &OsStr, body: &[u8], mount: PrefMount) -> Result<()> {
-    match mount {
-        PrefMount::File => dir.replace_private(name, body)?,
-        PrefMount::Link => dir.replace(name, body)?,
-        PrefMount::Dir => dir.replace(name, body)?,
+    match mount.private() {
+        true => dir.replace_private(name, body)?,
+        false => dir.replace(name, body)?,
     }
     Ok(())
 }
@@ -657,7 +667,7 @@ impl Account {
     /// rename over the link, or keep on reading as the shared file.
     pub fn needs_quiet(&self) -> bool {
         !self.marked
-            && self.mount == PrefMount::Link
+            && self.mount.links()
             && self
                 .files
                 .iter()
@@ -668,13 +678,13 @@ impl Account {
     /// its preferences file — relative to the home — so that the copy is
     /// written here, around the session's own values, and nowhere else.
     pub fn copies(&self) -> Vec<String> {
-        match self.mount {
-            PrefMount::File => self
+        match self.mount.mounts_each_file() {
+            true => self
                 .files
                 .iter()
                 .map(|f| account_rel(&f.declared).to_string())
                 .collect(),
-            PrefMount::Link | PrefMount::Dir => Vec::new(),
+            false => Vec::new(),
         }
     }
 
@@ -742,11 +752,8 @@ impl Account {
         if self.files.iter().all(|f| matches!(f.state, State::Ready)) {
             return Ok(Vec::new());
         }
-        let (kept_dir, _) = make_parent(&self.dir, &format!("{KEPT}/{LOCK}"))?;
-        let _lock = kept_dir
-            .lock(OsStr::new(LOCK))
-            .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?;
-        if self.mount == PrefMount::File {
+        let (kept_dir, _lock) = lock_kept(&self.dir)?;
+        if self.mount.mounts_each_file() {
             let mut notes = Vec::new();
             for f in &self.files {
                 let name = OsStr::new(&f.declared.name);
@@ -982,7 +989,7 @@ impl Account {
         // the record is a seed's last write, so a home without one holds a
         // seed that stopped partway, which no review has seen.
         let keep_state = matches!(home, Home::Kept(_))
-            && self.mount == PrefMount::Dir
+            && self.mount.whole_directory()
             && !created
             && recorded.is_some();
         for part in ["base", "reviewed", "live", REST] {
@@ -1125,12 +1132,8 @@ pub fn keep(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
             return Err(e).with_context(|| format!("reading {}", root.join(RECORD).display()))
         }
     };
-    let shown_account = account
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (kept_dir, _) = make_parent(&account, &format!("{KEPT}/{LOCK}"))?;
-    let _lock = kept_dir.lock(OsStr::new(LOCK))?;
+    let shown_account = crate::paths::account_name(&account);
+    let (kept_dir, _lock) = lock_kept(&account)?;
     let live_dir = crate::held::Dir::open(&live(home));
     let mut notes = Vec::new();
     for d in prefs.declared() {
@@ -1555,7 +1558,7 @@ base_url = "https://example.invalid"
         assert_eq!(std::fs::read_to_string(&file).unwrap(), azure);
         assert!(!account.join("preferences").exists());
 
-        crate::provider::write(
+        crate::provider::codex::write(
             &account,
             &toml::from_str(
                 "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n",
@@ -1675,10 +1678,6 @@ base_url = "https://example.invalid"
         );
     }
 
-    /// A session is seeded once from the account, and a relaunch continues
-    /// from its own copy; another account is refused while the session has a
-    /// change to review — it belongs to the old one — and seeds from the new
-    /// once it is reviewed.
     /// **A launch never waits in silence for a review.** A review holds the
     /// account's lock across its prompt, and `seed` blocked on it with nothing
     /// said — for as long as nobody answered — after it had already cleared the
@@ -1701,9 +1700,9 @@ base_url = "https://example.invalid"
         let at_live = live(&home).join("config.toml");
         let before = std::fs::read_to_string(&at_live).unwrap();
 
-        // What a review waiting at its prompt holds.
-        let kept = crate::held::Dir::open(&personal.join(KEPT)).unwrap();
-        let _held = kept.lock(OsStr::new(LOCK)).unwrap();
+        // What a review waiting at its prompt holds, taken the way it takes
+        // it: a launch that waited on another file would not wait at all.
+        let _held = lock_kept(&personal).unwrap();
 
         let other = check(&codex(), &personal).unwrap().unwrap();
         let seeding = std::thread::spawn({
@@ -1767,6 +1766,10 @@ base_url = "https://example.invalid"
         );
     }
 
+    /// A session is seeded once from the account, and a relaunch continues
+    /// from its own copy; another account is refused while the session has a
+    /// change to review — it belongs to the old one — and seeds from the new
+    /// once it is reviewed.
     #[test]
     fn a_session_is_seeded_once_and_again_only_for_another_account() {
         let (root, work, _) = account();

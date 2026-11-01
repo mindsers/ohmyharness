@@ -1745,8 +1745,8 @@ pub fn remember_harness(run_dir: &Path, session: &str, harness: &str) -> std::io
 /// `Unknown(String)` carries why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ran {
-    /// omh recorded this name.
-    Harness(String),
+    /// omh recorded this name, and it is one: [`crate::adapter::Name`]'s rule.
+    Harness(crate::adapter::Name),
     /// No run directory, or no marker in it. The honest reading of a session
     /// older than this feature — and of one started by `omh s attach`, which
     /// makes a session for an editor and never runs a harness in it.
@@ -1776,11 +1776,12 @@ pub fn harness_of(run_dir: &Path, session: &str) -> Ran {
     // omh wrote this, but a file on disk is not omh's word. The value becomes
     // `argv[0]` of a launch and is joined into a path, and whatever it holds
     // reaches the terminal in an error message — a marker carrying an ANSI
-    // escape printed one, before this check.
-    if name.contains(['/', '\\', '\n']) || name.chars().any(char::is_control) {
-        return Ran::CouldNotTell(format!("{} does not name a harness", path.display()));
+    // escape printed one, before this check. Held to the rule an adapter's
+    // own name is, so what is read back is one omh could have written.
+    match crate::adapter::Name::parse(name) {
+        Ok(name) => Ran::Harness(name),
+        Err(_) => Ran::CouldNotTell(format!("{} does not name a harness", path.display())),
     }
-    Ran::Harness(name.to_string())
 }
 
 /// Which session a command is asking for.
@@ -5422,13 +5423,19 @@ mod tests {
 
         assert_eq!(harness_of(runs, "s01"), Ran::NeverRecorded, "nothing yet");
         remember_harness(runs, "s01", "opencode").unwrap();
-        assert_eq!(harness_of(runs, "s01"), Ran::Harness("opencode".into()));
+        assert_eq!(
+            harness_of(runs, "s01"),
+            Ran::Harness(crate::adapter::Name::parse("opencode").unwrap())
+        );
 
         // A relaunch records what it launched, not what it launched last time.
         // `fs::write` truncates, and that is load-bearing: an append would
         // resolve to `opencodeclaude` and resume as neither.
         remember_harness(runs, "s01", "claude").unwrap();
-        assert_eq!(harness_of(runs, "s01"), Ran::Harness("claude".into()));
+        assert_eq!(
+            harness_of(runs, "s01"),
+            Ran::Harness(crate::adapter::Name::parse("claude").unwrap())
+        );
 
         // A different session is a different answer.
         assert_eq!(harness_of(runs, "s02"), Ran::NeverRecorded);
@@ -5456,7 +5463,16 @@ mod tests {
         // Content that is not a harness name never becomes one. It would
         // otherwise be `argv[0]` of a launch, joined into a path, and printed
         // raw in the error.
-        for junk in ["../claude", "cla\u{7}ude", "a/b"] {
+        // Nor does a name no adapter could have, which is all omh writes
+        // there: a space, a dot, a letter outside ASCII.
+        for junk in [
+            "../claude",
+            "cla\u{7}ude",
+            "a/b",
+            "my harness",
+            "codex.v2",
+            "café",
+        ] {
             std::fs::write(harness_marker(runs, "s01"), junk).unwrap();
             assert!(
                 matches!(harness_of(runs, "s01"), Ran::CouldNotTell(_)),

@@ -224,8 +224,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     let preferred = adapter
         .preferences
         .iter()
-        .filter(|p| p.mount == crate::adapter::PrefMount::File)
-        .flat_map(|p| p.files.keys())
+        .flat_map(|p| p.mounted_files())
         .map(|path| (path, Point::File));
     let bound = adapter.capabilities.values().map(|b| match b.render {
         crate::adapter::Render::Dir => (&b.path, Point::Dir),
@@ -571,10 +570,7 @@ fn unusable(
     rel: &str,
     why: anyhow::Error,
 ) -> anyhow::Error {
-    let name = account_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = crate::paths::account_name(account_dir);
     anyhow::anyhow!(
         "{} cannot seed a session: {why:#}. A session before this omh could have \
          written it — `omh account login {} --name {name}` sets it aside and captures the \
