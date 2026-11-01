@@ -2571,7 +2571,7 @@ fn a_session_omh_cannot_ask_about_is_never_reaped() {
 /// matter is the one time the agent threw the tree away.
 #[test]
 fn a_removal_names_the_turn_snapshots_it_takes_without_refusing_over_them() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
 
     // Harvested first, so nothing of the agent's own is at stake — which
     // is the branch this decision is really about, and the one `force:
@@ -2618,7 +2618,7 @@ fn a_removal_names_the_turn_snapshots_it_takes_without_refusing_over_them() {
     // With the agent's own commits at stake it still refuses — that is
     // the guard this must not have weakened — and the snapshots ride along
     // in the same message rather than displacing it.
-    let (paths, unkept, _shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, unkept, _shadow) = a_session_with_two_checkpoints();
     let refused = cmd::harvest::may_remove(
         &paths,
         &unkept,
@@ -2667,7 +2667,7 @@ fn a_removal_names_the_turn_snapshots_it_takes_without_refusing_over_them() {
 /// printing it inside makes checkable at all.
 #[test]
 fn a_sync_whose_note_cannot_be_written_still_succeeds_and_says_so() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     let repo_git = |args: &[&str]| {
         let out = Command::new("git")
             .current_dir(&paths.repo)
@@ -2719,7 +2719,7 @@ fn a_sync_whose_note_cannot_be_written_still_succeeds_and_says_so() {
 /// agent's work on the branch and does not land trunk's twice.
 #[test]
 fn a_sync_brings_trunk_over_and_leaves_the_agents_work_harvestable() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     let repo_git = |args: &[&str]| {
         let out = Command::new("git")
             .current_dir(&paths.repo)
@@ -2814,7 +2814,7 @@ fn a_sync_brings_trunk_over_and_leaves_the_agents_work_harvestable() {
 
 #[test]
 fn a_sync_preserves_committed_and_uncommitted_session_work() {
-    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, _shadow) = a_session_with_two_checkpoints();
     let git = |cwd: &std::path::Path, args: &[&str]| {
         let out = Command::new("git")
             .current_dir(cwd)
@@ -2857,7 +2857,7 @@ fn a_sync_preserves_committed_and_uncommitted_session_work() {
 /// on its own, because that branch is checked out in the session's worktree.
 #[test]
 fn a_sync_that_refuses_has_changed_nothing() {
-    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, _shadow) = a_session_with_two_checkpoints();
     let git = |cwd: &std::path::Path, args: &[&str]| {
         let out = Command::new("git")
             .current_dir(cwd)
@@ -2975,7 +2975,7 @@ fn consent_is_read_from_the_flag_and_the_terminal_once() {
 /// is the one that watches for the question.
 #[test]
 fn removing_unkept_work_needs_force_when_there_is_nobody_to_ask() {
-    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, _shadow) = a_session_with_two_checkpoints();
 
     // No terminal, no force: refused, with every way out still named.
     let err = cmd::harvest::may_remove(
@@ -3019,7 +3019,7 @@ fn removing_unkept_work_needs_force_when_there_is_nobody_to_ask() {
 /// `reap` deletes it. omh could not ask this until `log` learned to count.
 #[test]
 fn a_session_holding_unkept_work_is_not_removed_without_being_asked() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
 
     let err = cmd::harvest::may_remove(
         &paths,
@@ -3106,7 +3106,7 @@ fn a_session_holding_unkept_work_is_not_removed_without_being_asked() {
 /// a new call site with the old shape.
 #[test]
 fn a_person_who_is_asked_can_say_yes_and_can_say_nothing() {
-    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, _shadow) = a_session_with_two_checkpoints();
     let ask = |said: &'static str| {
         let mut heard = Vec::new();
         let answered = cmd::harvest::may_remove(
@@ -3146,7 +3146,7 @@ fn a_person_who_is_asked_can_say_yes_and_can_say_nothing() {
 /// where no one can answer it.
 #[test]
 fn a_removal_with_nobody_to_ask_asks_nothing() {
-    let (paths, session, _shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, _shadow) = a_session_with_two_checkpoints();
     let mut heard = Vec::new();
     let refused = cmd::harvest::may_remove(
         &paths,
@@ -3181,7 +3181,7 @@ fn a_removal_with_nobody_to_ask_asks_nothing() {
 /// good.
 #[test]
 fn work_the_sandbox_can_still_reach_counts_however_the_agent_left_it() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     let sandbox_git = |args: &[&str]| {
         let out = Command::new("git")
             .arg("--git-dir")
@@ -3333,7 +3333,7 @@ fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
     // write truncates before it writes, so a process killed in that window
     // leaves zero bytes — and the session has demonstrably been harvested,
     // so the repository demonstrably holds commits.
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::write(&shadow.landed_record, "").unwrap();
     let err = cmd::harvest::may_remove(
         &paths,
@@ -3364,7 +3364,7 @@ fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
     // A repository with no record of where it started — what `reap` leaves
     // when `remove_dir_all` fails on a live mount and the seed file goes
     // anyway. `log` refuses to *show* this one; `rm` would have deleted it.
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::remove_file(&shadow.seed_record).unwrap();
     assert!(
         cmd::harvest::may_remove(
@@ -3381,7 +3381,7 @@ fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
 
     // Gone entirely: nothing is left to lose, and `rm` must not stand in
     // the way of clearing up.
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::remove_file(session.worktree.join("one.rs")).unwrap();
     std::fs::remove_file(session.worktree.join("two.rs")).unwrap();
     std::fs::remove_dir_all(&shadow.gitdir).unwrap();
@@ -3414,7 +3414,7 @@ fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
 
 #[test]
 fn a_missing_shadow_does_not_hide_uncommitted_worktree_files() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::remove_dir_all(&shadow.gitdir).unwrap();
     std::fs::remove_file(&shadow.seed_record).unwrap();
     std::fs::write(session.worktree.join("only-copy.txt"), "keep me\n").unwrap();
@@ -3438,7 +3438,7 @@ fn a_missing_shadow_does_not_hide_uncommitted_worktree_files() {
 /// measured 2026-10-11 against git 2.56.0, in `session`'s own tests.
 #[test]
 fn asking_what_a_removal_would_lose_never_enters_a_nested_repository() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::remove_dir_all(&shadow.gitdir).unwrap();
     std::fs::remove_file(&shadow.seed_record).unwrap();
     let marker = paths.root.join("GIT-RAN-IN-THE-NESTED-REPOSITORY");
@@ -3506,7 +3506,7 @@ fn asking_what_a_removal_would_lose_never_enters_a_nested_repository() {
 /// string assertion in this file.
 #[test]
 fn one_of_a_thing_is_said_in_the_singular() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     let landed = Command::new("git")
         .arg("--git-dir")
         .arg(&shadow.gitdir)
@@ -3550,7 +3550,7 @@ fn one_of_a_thing_is_said_in_the_singular() {
 /// found nothing at stake, asked nothing, and deleted it.
 #[test]
 fn work_the_agent_told_its_index_to_ignore_is_still_at_stake() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     let sandbox_git = |args: &[&str]| {
         let out = Command::new("git")
             .arg("--git-dir")
@@ -3609,8 +3609,8 @@ fn agent_git(shadow: &shadow::Shadow, session: &Session, args: &[&str]) -> Strin
 
 /// A session whose every commit has been handed over, so only what follows
 /// is at stake.
-fn a_session_with_nothing_unkept() -> (Paths, Session, shadow::Shadow) {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+fn a_session_with_nothing_unkept() -> (tempfile::TempDir, Paths, Session, shadow::Shadow) {
+    let (dir, paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::write(
         &shadow.landed_record,
         agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
@@ -3623,7 +3623,7 @@ fn a_session_with_nothing_unkept() -> (Paths, Session, shadow::Shadow) {
         ),
         "precondition: nothing at stake"
     );
-    (paths, session, shadow)
+    (dir, paths, session, shadow)
 }
 
 /// **Nor are the agent's ignore rules asked whether its work is there.** The
@@ -3633,7 +3633,7 @@ fn a_session_with_nothing_unkept() -> (Paths, Session, shadow::Shadow) {
 /// file from `status`, and `rm` deleted it without asking.
 #[test]
 fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
-    let (paths, session, shadow) = a_session_with_nothing_unkept();
+    let (_tmp, paths, session, shadow) = a_session_with_nothing_unkept();
     std::fs::write(session.worktree.join("afternoon.rs"), "fn work() {}\n").unwrap();
     let exclude = shadow.gitdir.join("info").join("exclude");
     let mut rules = std::fs::read_to_string(&exclude).unwrap_or_default();
@@ -3645,7 +3645,7 @@ fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
         "an exclude the agent appended hid afternoon.rs from rm: {stake:?}"
     );
 
-    let (paths, session, _shadow) = a_session_with_nothing_unkept();
+    let (_tmp, paths, session, _shadow) = a_session_with_nothing_unkept();
     std::fs::create_dir_all(session.worktree.join("sub")).unwrap();
     std::fs::write(session.worktree.join("sub/.gitignore"), "*\n").unwrap();
     std::fs::write(session.worktree.join("sub/morning.rs"), "fn more() {}\n").unwrap();
@@ -3661,7 +3661,7 @@ fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
 /// `.gitignore` names. Counting them would make `rm` ask about every session.
 #[test]
 fn what_omh_and_the_repository_ignore_is_not_at_stake() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     std::fs::write(session.worktree.join(".gitignore"), "target/\n").unwrap();
     agent_git(&shadow, &session, &["add", ".gitignore"]);
     agent_git(
@@ -3694,7 +3694,7 @@ fn what_omh_and_the_repository_ignore_is_not_at_stake() {
 /// has nothing to compare the worktree with, which is *cannot tell*.
 #[test]
 fn a_sandbox_head_with_no_commit_is_not_read_as_nothing_at_stake() {
-    let (paths, session, shadow) = a_session_with_nothing_unkept();
+    let (_tmp, paths, session, shadow) = a_session_with_nothing_unkept();
     agent_git(
         &shadow,
         &session,
@@ -3714,7 +3714,7 @@ fn a_sandbox_head_with_no_commit_is_not_read_as_nothing_at_stake() {
 /// deleting the guard changed nothing any test could see.
 #[test]
 fn a_selection_on_a_git_that_cannot_do_it_says_which_command_still_works() {
-    let (_paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, _paths, session, shadow) = a_session_with_two_checkpoints();
 
     let err = cmd::harvest::what_to_keep(&shadow, &session, "1", false, false, &|| Ok(false))
         .expect_err("this git cannot take a selection");
@@ -3827,7 +3827,7 @@ fn host_checks_never_stand_in_for_a_probe_that_did_not_run() {
 /// suite green. With the answer passed in, the decision is a table.
 #[test]
 fn what_keep_and_edit_mean_together() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
 
     let keep = |selection: &str, edit: bool, terminal: bool| {
         cmd::harvest::what_to_keep(&shadow, &session, selection, edit, terminal, &|| Ok(true))
@@ -3872,7 +3872,7 @@ fn what_keep_and_edit_mean_together() {
 /// means something else entirely in omh.
 #[test]
 fn a_selection_naming_a_merge_is_refused_before_anything_moves() {
-    let (paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, paths, session, shadow) = a_session_with_two_checkpoints();
     let sandbox_git = |args: &[&str]| {
         let out = Command::new("git")
             .arg("--git-dir")
@@ -3927,7 +3927,7 @@ fn a_selection_naming_a_merge_is_refused_before_anything_moves() {
 /// ignored every rule left that test green.
 #[test]
 fn a_number_the_session_does_not_have_is_refused_with_the_range() {
-    let (_paths, session, shadow) = a_session_with_two_checkpoints();
+    let (_tmp, _paths, session, shadow) = a_session_with_two_checkpoints();
     for spec in ["9", "0", "two", "4-2", "1,1"] {
         let err = cmd::harvest::what_to_keep(&shadow, &session, spec, false, false, &|| Ok(true))
             .unwrap_err()
@@ -3939,9 +3939,32 @@ fn a_number_the_session_does_not_have_is_refused_with_the_range() {
     }
 }
 
+/// Each `cargo test` left 32 fixture repositories in `$TMPDIR`, one per use of
+/// these two, because their directory was leaked to outlive the function that
+/// made it. The test that holds the fixture holds its directory now, and the
+/// directory goes when the test does.
+#[test]
+fn the_session_fixtures_leave_nothing_behind() {
+    let two = {
+        let (_tmp, paths, _session, _shadow) = a_session_with_two_checkpoints();
+        paths.repo.parent().unwrap().to_path_buf()
+    };
+    let forked = {
+        let (_tmp, paths, _session, _shadow) = a_session_forked_from_a_trunk_with_files();
+        paths.repo.parent().unwrap().to_path_buf()
+    };
+    for dir in [two, forked] {
+        assert!(
+            !dir.exists(),
+            "{} outlived the test that made it",
+            dir.display()
+        );
+    }
+}
+
 /// A repository, a session, and a sandbox holding two checkpoints.
-fn a_session_with_two_checkpoints() -> (Paths, Session, shadow::Shadow) {
-    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+fn a_session_with_two_checkpoints() -> (tempfile::TempDir, Paths, Session, shadow::Shadow) {
+    let dir = tempfile::tempdir().unwrap();
     let paths = Paths {
         root: dir.path().join("home"),
         repo: dir.path().join("repo"),
@@ -3986,7 +4009,7 @@ fn a_session_with_two_checkpoints() -> (Paths, Session, shadow::Shadow) {
             assert!(out.status.success(), "{args:?}: {out:?}");
         }
     }
-    (paths, session, shadow)
+    (dir, paths, session, shadow)
 }
 
 /// Work the branch already has cannot be handed over twice.
@@ -7320,8 +7343,9 @@ fn a_command_that_hands_you_a_program_has_no_json_to_print() {
 
 /// A repository whose trunk holds files before the session forks from it,
 /// so trunk can later delete one the session also has.
-fn a_session_forked_from_a_trunk_with_files() -> (Paths, Session, shadow::Shadow) {
-    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+fn a_session_forked_from_a_trunk_with_files() -> (tempfile::TempDir, Paths, Session, shadow::Shadow)
+{
+    let dir = tempfile::tempdir().unwrap();
     let paths = Paths {
         root: dir.path().join("home"),
         repo: dir.path().join("repo"),
@@ -7350,7 +7374,7 @@ fn a_session_forked_from_a_trunk_with_files() -> (Paths, Session, shadow::Shadow
     session.ensure(&paths.repo, "main").unwrap();
     let shadow = shadow::Shadow::new(&paths.shadows(), "s01");
     shadow.ensure(&session.worktree, &[]).unwrap();
-    (paths, session, shadow)
+    (dir, paths, session, shadow)
 }
 
 /// After a sync the worktree holds the merged tree — no more and **no
@@ -7363,7 +7387,7 @@ fn a_session_forked_from_a_trunk_with_files() -> (Paths, Session, shadow::Shadow
 /// git 2.55 before this test was written.
 #[test]
 fn syncing_leaves_the_worktree_holding_exactly_the_merged_tree() {
-    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let (_tmp, paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
     let repo_git = |args: &[&str]| {
         let out = Command::new("git")
             .current_dir(&paths.repo)
@@ -7414,7 +7438,7 @@ fn syncing_leaves_the_worktree_holding_exactly_the_merged_tree() {
 /// conflict in trunk's favour without a word.
 #[test]
 fn a_file_the_session_changed_and_trunk_deleted_is_kept_and_reported() {
-    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let (_tmp, paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
     let repo_git = |args: &[&str]| {
         let out = Command::new("git")
             .current_dir(&paths.repo)
@@ -7454,7 +7478,7 @@ fn a_file_the_session_changed_and_trunk_deleted_is_kept_and_reported() {
 /// than the one caller gives it today.
 #[test]
 fn materialise_never_removes_the_placeholders_omh_mounts_over() {
-    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let (_tmp, paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
     let git_in = |cwd: &std::path::Path, args: &[&str]| {
         let out = Command::new("git")
             .current_dir(cwd)
@@ -7520,7 +7544,7 @@ fn materialise_never_removes_the_placeholders_omh_mounts_over() {
 /// back out.
 #[test]
 fn a_launch_changes_nothing_about_what_your_checkout_ignores() {
-    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let (_tmp, paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
     cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
 
     for name in carry::hidden_in_the_worktree() {
@@ -7609,7 +7633,7 @@ fn an_untouched_session_holds_nothing_but_omhs_placeholders() {
 /// matched that name at every depth.
 #[test]
 fn a_rules_file_the_agent_writes_below_the_root_is_its_work() {
-    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let (_tmp, paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
     cmd::session::carry_in(&paths, &session, &out::Ctx::plain()).unwrap();
     std::fs::create_dir_all(session.worktree.join("pkg")).unwrap();
     for name in carry::hidden_in_the_worktree() {
@@ -7634,7 +7658,7 @@ fn a_rules_file_the_agent_writes_below_the_root_is_its_work() {
 /// the next one.
 #[test]
 fn the_users_own_exclude_rules_survive_a_launch() {
-    let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let (_tmp, paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
     let exclude = carry::exclude_path(&session.worktree).unwrap();
     std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
     let theirs: &[u8] = b"caf\xe9.local\nprivate-notes.txt\n";
