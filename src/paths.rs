@@ -422,13 +422,18 @@ impl Paths {
     /// Per-launch staging. Keyed by repo as well as session and harness: two
     /// checkouts both on `s01` must not share a rendered catalogue.
     pub fn staging(&self, session: &str, harness: &str) -> PathBuf {
-        self.runs().join(session).join(harness)
+        self.run(session).staging(harness)
     }
 
     /// Per-repo run state: staged catalogues, and the marker recording when each
     /// session was last used.
     pub fn runs(&self) -> PathBuf {
         self.root.join("run").join(self.repo_id())
+    }
+
+    /// One session's run directory, under [`Paths::runs`].
+    pub fn run(&self, session: &str) -> crate::rundir::Run {
+        crate::rundir::Run::at(&self.runs(), session)
     }
 
     /// A throwaway working directory, deliberately outside `worktrees/` so a

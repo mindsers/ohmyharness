@@ -551,7 +551,7 @@ fn preferences_to_review(run: &std::path::Path, adapters: &std::path::Path) -> O
             continue;
         }
         let session = entry.file_name().to_string_lossy().into_owned();
-        let homes = match crate::prefs::review::homes_of(&entry.path()) {
+        let homes = match crate::prefs::review::homes_of(&crate::rundir::Run::at(run, &session)) {
             Ok(homes) => homes,
             Err(e) => {
                 return could_not(format!(

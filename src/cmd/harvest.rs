@@ -1571,7 +1571,7 @@ fn record_check(paths: &Paths, id: &str, outcome: &Checked) -> Result<()> {
     });
     // Replaced whole or not at all, and a failure said: it was `let _ =`, so
     // a write that failed left the last run's `passed` for `omh sNN` to show.
-    let at = paths.runs().join(id).join("check.json");
+    let at = paths.run(id).check();
     crate::shadow::replace_record(&at, serde_json::to_string(&record)?)
         .with_context(|| format!("recording the checks' outcome at {}", at.display()))
 }

@@ -24,7 +24,7 @@ use crate::home::Home;
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The account a session's preferences were seeded from, or `None` for one
 /// never seeded.
@@ -525,8 +525,8 @@ fn ask(
 
 /// The preferences homes of session `id` under `run`, one per harness it
 /// ran, by harness name.
-pub fn homes_of(run: &Path) -> Result<Vec<(String, Home)>> {
-    let dir = run.join(".preferences");
+pub fn homes_of(run: &crate::rundir::Run) -> Result<Vec<(String, Home)>> {
+    let dir = run.preferences_root();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -568,14 +568,15 @@ fn kind(v: &super::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn a_stray_file_beside_the_homes_is_not_one() {
         let dir = tempfile::tempdir().unwrap();
-        let prefs = dir.path().join(".preferences");
+        let prefs = dir.path().join("s01/.preferences");
         std::fs::create_dir_all(prefs.join("claude")).unwrap();
         std::fs::write(prefs.join(".DS_Store"), "").unwrap();
-        let homes: Vec<String> = homes_of(dir.path())
+        let homes: Vec<String> = homes_of(&crate::rundir::Run::at(dir.path(), "s01"))
             .unwrap()
             .into_iter()
             .map(|(n, _)| n)

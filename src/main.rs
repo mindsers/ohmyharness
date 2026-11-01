@@ -52,6 +52,7 @@ mod quote;
 mod render;
 mod report;
 mod rules;
+mod rundir;
 mod runtime;
 mod selection;
 mod servers;

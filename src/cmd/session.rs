@@ -261,7 +261,7 @@ pub(crate) fn session_up(
     // is cached, and the staging the plan performs happens every launch anyway.
     // Where a label-less runtime records this session's stamp, read back on the
     // next launch in place of a container label.
-    let stamp_path = paths.runs().join(&session.id).join("stamp.json");
+    let stamp_path = paths.run(&session.id).stamp();
     if running {
         if let Disposition::Attach = reuse_or_replace(
             backend,
@@ -896,7 +896,7 @@ pub(crate) enum Review {
 /// What session `id` changed among its preferences and no review has
 /// answered, per harness it ran: the keys, or why omh could not tell.
 fn unreviewed(paths: &Paths, id: &str) -> Vec<(String, Result<Vec<String>>)> {
-    let homes = match crate::prefs::review::homes_of(&paths.runs().join(id)) {
+    let homes = match crate::prefs::review::homes_of(&paths.run(id)) {
         Ok(homes) => homes,
         Err(e) => return vec![(String::new(), Err(e))],
     };
@@ -943,7 +943,7 @@ pub(crate) fn review_preferences(
     > = std::collections::BTreeMap::new();
     let mut left = Vec::new();
     for id in ids {
-        let homes = match crate::prefs::review::homes_of(&paths.runs().join(id)) {
+        let homes = match crate::prefs::review::homes_of(&paths.run(id)) {
             Ok(homes) => homes,
             Err(e) => {
                 ctx.warn(&format!(
@@ -1063,7 +1063,7 @@ fn session_activity(
             adapter.name
         ));
     }
-    let dir = paths.runs().join(id).join("transcripts");
+    let dir = paths.run(id).transcripts();
     // A directory that is not there is "no transcript yet"; a directory omh
     // could not read, or a file in it it could not open, is *unreadable* — a
     // real failure must not be reported as an empty history.
@@ -1186,7 +1186,7 @@ fn read_check(paths: &Paths, id: &str) -> Option<report::CheckState> {
     // A file that is not there is "no check recorded" (`None`, no line). A file
     // that is there and will not read, or carries a state this version does not
     // know, is `Unreadable` — a damaged record must not vanish.
-    let text = match std::fs::read_to_string(paths.runs().join(id).join("check.json")) {
+    let text = match std::fs::read_to_string(paths.run(id).check()) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(_) => return Some(report::CheckState::Unreadable),
@@ -2325,7 +2325,7 @@ pub(crate) fn rm(
         || shadow::Shadow::new(&paths.shadows(), &session.id)
             .gitdir
             .exists()
-        || paths.runs().join(id).exists();
+        || paths.run(id).path().exists();
     if !present {
         // Surface a stray branch as information — it is real (a namespace
         // filling with dead refs is worth knowing) — but never under a removal
@@ -2521,7 +2521,7 @@ pub(crate) fn rm(
     // leaving it costs nothing that breaks — but the `last-used` marker beside
     // it is what says a session ran here, and a marker with no session behind it
     // is how `omh s` learns to report a leftover that is not there any more.
-    match std::fs::remove_dir_all(paths.runs().join(id)) {
+    match std::fs::remove_dir_all(paths.run(id).path()) {
         Ok(()) => went.push("the run directory".to_string()),
         // Never made, or already gone: not a removal that failed.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
