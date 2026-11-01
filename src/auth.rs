@@ -27,9 +27,6 @@ pub struct CredMount {
 
 pub const DEFAULT_ACCOUNT: &str = "default";
 
-/// Home inside the sandbox. Re-exported so callers here need not reach into
-/// `image`, but there is exactly one definition.
-
 /// Where one account's captured login lives.
 ///
 /// **The adapter, not the word that found it.** `Adapter::find` resolves

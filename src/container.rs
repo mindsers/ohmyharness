@@ -183,8 +183,6 @@ pub fn drift(
     out
 }
 
-/// Home directory *inside* the container. Adapters template `$HOME` against it.
-
 /// Where catalogue layer `i`'s copy of `cap` is mounted inside the container.
 fn guest_layer(i: usize, cap: Capability) -> PathBuf {
     PathBuf::from(format!("/omh/layers/{i}/{}", cap.source()))
