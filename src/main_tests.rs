@@ -3667,6 +3667,115 @@ fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
         !matches!(stake, cmd::harvest::AtStake::Nothing),
         "a .gitignore the agent wrote hid sub/morning.rs from rm: {stake:?}"
     );
+
+    // Nor an excludes file named in the sandbox repository's own config: its
+    // source is an absolute path, and every absolute source was believed as
+    // the user's own `core.excludesFile`. A second line, and these cases with
+    // it: that config is mounted read-only into the sandbox and rewritten to
+    // an allowlist at every launch (#52), so the agent cannot set the key the
+    // fixtures write here directly.
+    let (tmp, paths, session, shadow) = a_session_with_nothing_unkept();
+    let planted = tmp.path().join("agents-ignore");
+    std::fs::write(&planted, "*\n").unwrap();
+    std::fs::write(session.worktree.join("evening.rs"), "fn late() {}\n").unwrap();
+    let ok = Command::new("git")
+        .arg("--git-dir")
+        .arg(&shadow.gitdir)
+        .args(["config", "core.excludesFile"])
+        .arg(&planted)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "an excludes file the agent's config named hid evening.rs from rm: {stake:?}"
+    );
+
+    // Nor one named by a relative path, at a file the repository tracks: git
+    // reads only `.gitignore` as a per-directory rule, and any tracked file
+    // was believed as one — a tracked `.dockerignore` holding `*`, say.
+    let (_tmp, paths, session, shadow) = a_session_with_nothing_unkept();
+    std::fs::write(session.worktree.join(".dockerignore"), "*\n").unwrap();
+    agent_git(&shadow, &session, &["add", "-f", ".dockerignore"]);
+    agent_git(&shadow, &session, &["commit", "-qm", "as the trunk's own"]);
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    std::fs::write(session.worktree.join("night.rs"), "fn later() {}\n").unwrap();
+    agent_git(
+        &shadow,
+        &session,
+        &["config", "core.excludesFile", ".dockerignore"],
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a tracked file the agent's config named as excludes hid night.rs: {stake:?}"
+    );
+
+    // And a tracked `.gitignore` the agent's config names as the excludes
+    // file — from an `include`, out of `--local`'s sight — applies at the root
+    // rather than in its own directory: it is the agent's rule there.
+    let (_tmp, paths, session, shadow) = a_session_with_nothing_unkept();
+    std::fs::create_dir_all(session.worktree.join("sub")).unwrap();
+    std::fs::write(session.worktree.join("sub/.gitignore"), "*\n").unwrap();
+    agent_git(&shadow, &session, &["add", "-f", "sub/.gitignore"]);
+    agent_git(&shadow, &session, &["commit", "-qm", "as the trunk's own"]);
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    std::fs::write(session.worktree.join("dawn.rs"), "fn early() {}\n").unwrap();
+    let included = shadow.gitdir.join("more-config");
+    std::fs::write(&included, "[core]\n\texcludesFile = sub/.gitignore\n").unwrap();
+    agent_git(
+        &shadow,
+        &session,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a tracked .gitignore the agent's config named as excludes hid dawn.rs: {stake:?}"
+    );
+
+    // Or from `config.worktree`, which `check-ignore` reads once the agent
+    // turns `extensions.worktreeConfig` on, and `--local` never does.
+    let (_tmp, paths, session, shadow) = a_session_with_nothing_unkept();
+    std::fs::create_dir_all(session.worktree.join("sub")).unwrap();
+    std::fs::write(session.worktree.join("sub/.gitignore"), "*\n").unwrap();
+    agent_git(&shadow, &session, &["add", "-f", "sub/.gitignore"]);
+    agent_git(&shadow, &session, &["commit", "-qm", "as the trunk's own"]);
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    std::fs::write(session.worktree.join("dusk.rs"), "fn evening() {}\n").unwrap();
+    agent_git(
+        &shadow,
+        &session,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    agent_git(
+        &shadow,
+        &session,
+        &[
+            "config",
+            "--worktree",
+            "core.excludesFile",
+            "sub/.gitignore",
+        ],
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "an excludes file in the agent's config.worktree hid dusk.rs: {stake:?}"
+    );
 }
 
 /// What omh and the repository themselves ignore stays out of the count: a
@@ -7522,6 +7631,58 @@ fn syncing_leaves_the_worktree_holding_exactly_the_merged_tree() {
         claimed.trim(),
         "",
         "the session claims no change after a clean sync, yet diff says:\n{claimed}"
+    );
+}
+
+/// Removing what trunk deleted never reaches through a link the agent
+/// planted at a directory above it: the path was checked to be plain
+/// components, then removed with `remove_file(worktree.join(rel))` and its
+/// emptied parents with `remove_dir`, all of which follow a link on the way
+/// — deleting outside the worktree, as the user.
+///
+/// Not reachable today by luck: `ignored_here` asks `git check-ignore` about
+/// the path first, and git refuses one "beyond a symbolic link". With that
+/// call removed, the old removal deleted the outside file; the removal now
+/// refuses on its own.
+#[cfg(unix)]
+#[test]
+fn removing_what_trunk_deleted_never_goes_through_a_planted_link() {
+    let (tmp, paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("deep.rs"), "the user's own\n").unwrap();
+    std::fs::remove_dir_all(session.worktree.join("nested")).unwrap();
+    std::os::unix::fs::symlink(&outside, session.worktree.join("nested")).unwrap();
+    let repo_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&paths.repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    let tree_at = |rev: &str| {
+        let out = Command::new("git")
+            .current_dir(&paths.repo)
+            .args(["rev-parse", &format!("{rev}^{{tree}}")])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    repo_git(&["rm", "-q", "nested/deep.rs"]);
+    repo_git(&["commit", "-qm", "trunk deletes"]);
+
+    // The removal itself, between a tree that holds `nested/deep.rs` and one
+    // that does not: a sync reaches it whenever the session's tree still
+    // holds the path the worktree has since put behind a link.
+    let removed = session.materialise(&tree_at("HEAD~1"), &tree_at("HEAD"));
+    assert!(removed.is_err(), "removed through a link without a word");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("deep.rs"))
+            .ok()
+            .as_deref(),
+        Some("the user's own\n"),
+        "a sync deleted through a link, outside the worktree"
     );
 }
 

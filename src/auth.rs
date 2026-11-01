@@ -245,21 +245,65 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         mountpoint(&cred.host, relative, point)?;
     }
 
+    // Through held descriptors from the account directory, never by path: the
+    // account is mounted into its sessions, and a stat-then-write by path
+    // followed a link at a credential — truncating the user's file it pointed
+    // at, or creating a dangling one's target. The account directory itself is
+    // omh's, under `~/.omh/creds`, and no session mounts it whole.
+    std::fs::create_dir_all(account_dir)
+        .with_context(|| format!("making {}", account_dir.display()))?;
     for cred in creds {
+        let Ok(rel) = cred.host.strip_prefix(account_dir) else {
+            anyhow::bail!(
+                "{} is not inside the account at {}",
+                cred.host.display(),
+                account_dir.display()
+            );
+        };
+        let names: Vec<&std::ffi::OsStr> = rel.iter().collect();
+        let refused = |e: std::io::Error| {
+            anyhow::Error::new(e).context(format!(
+                "preparing {}: a link or something that is not a {} is there, and omh \
+                 does not write through one — remove it",
+                cred.host.display(),
+                if cred.file { "file" } else { "directory" }
+            ))
+        };
+        let held = crate::held::Dir::open(account_dir)
+            .with_context(|| format!("opening {}", account_dir.display()))?;
         if cred.file {
-            if let Some(parent) = cred.host.parent() {
-                std::fs::create_dir_all(parent)?;
+            let Some((leaf, above)) = names.split_last() else {
+                continue;
+            };
+            let mut dir = held;
+            for name in above {
+                dir = dir.sub_or_create(name).map_err(refused)?;
             }
             // Empty counts as absent: it is not a login, and an empty JSON file
             // is what makes a harness refuse to start.
-            let empty = std::fs::metadata(&cred.host)
-                .map(|m| m.len() == 0)
-                .unwrap_or(true);
-            if empty {
-                std::fs::write(&cred.host, placeholder(&cred.host))?;
+            match dir.entry(leaf).map_err(refused)? {
+                crate::held::Entry::Absent => dir
+                    .create_new(leaf, placeholder(&cred.host).as_bytes())
+                    .map_err(refused)?,
+                crate::held::Entry::File => {
+                    let empty = dir
+                        .file(leaf)
+                        .and_then(|f| f.metadata())
+                        .map_err(refused)?
+                        .len()
+                        == 0;
+                    if empty {
+                        dir.replace(leaf, placeholder(&cred.host).as_bytes())
+                            .map_err(refused)?;
+                    }
+                }
+                _ => return Err(refused(std::io::Error::other("not a file omh can write"))),
             }
         } else {
-            std::fs::create_dir_all(&cred.host)?;
+            let mut dir = held;
+            for name in &names {
+                dir = dir.sub_or_create(name).map_err(refused)?;
+            }
         }
     }
     Ok(())
@@ -621,20 +665,37 @@ pub fn logged_out(adapter: &Adapter, host_home: &std::path::Path) -> String {
     format!("no {harness} account — starting logged out. `omh account login {harness}` to log in{import}")
 }
 
-/// Does this file hold more than what `prepare` put there?
+/// How much of a credential file omh reads to decide it holds a login: past
+/// this, it plainly holds something.
+const CONTENT_CAP: u64 = 1 << 20;
+
+/// Does `rel`, under the account directory, hold more than what `prepare` put
+/// there?
 ///
-/// Read as bytes, and an unreadable file counts as *present*: a credential omh
-/// cannot read is still a credential, and calling it empty makes a successful
-/// login report as incomplete.
-fn holds_content(path: &std::path::Path) -> bool {
-    match std::fs::read(path) {
-        Ok(bytes) => !is_placeholder(&String::from_utf8_lossy(&bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => true,
+/// Read the way omh reads what a session could have written — the whole
+/// account is mounted into one — a name at a time from the account directory
+/// down: never through a link, never blocking, never past [`CONTENT_CAP`]. It
+/// was `fs::read`, so a FIFO the agent planted at codex's `auth.json` made
+/// every command that lists codex accounts hang, printing nothing, and a link
+/// to `/dev/zero` read forever.
+///
+/// **Absent is empty; anything else omh cannot read as a plain file is
+/// content**: a credential omh cannot read is still a credential, and a link,
+/// a FIFO or a directory where a file belongs is something present.
+fn holds_content(account_dir: &std::path::Path, rel: &std::path::Path) -> bool {
+    let names: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    let Some((leaf, above)) = names.split_last() else {
+        return true;
+    };
+    match walk_to(account_dir, above) {
+        Walked::Absent => false,
+        Walked::Unreadable => true,
+        Walked::Held(dir) => file_holds_content(&dir, leaf),
     }
 }
 
-/// Any file below `dir` holding more than what `prepare` put there.
+/// Any file below `rel`, under the account directory, holding more than what
+/// `prepare` put there.
 ///
 /// **Absent is empty; unreadable is content**, which is [`holds_content`]'s
 /// rule one level up. This was `read_dir(dir).into_iter().flatten().flatten()`,
@@ -644,26 +705,81 @@ fn holds_content(path: &std::path::Path) -> bool {
 /// `token` list is empty and which therefore reaches this rather than the early
 /// return in [`unfilled`], that turned a completed login into *the login did
 /// not complete*, naming a guest path the user has no way to fill.
-fn has_real_content(dir: &std::path::Path) -> bool {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        // Nothing was ever written here. `prepare` creates the mount points, so
-        // this is a path no login has reached, not a read that failed.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(_) => return true,
+///
+/// Walked through held descriptors, as [`holds_content`] reads: the tree is
+/// the agent's to fill, with links, FIFOs and depth.
+fn has_real_content(account_dir: &std::path::Path, rel: &std::path::Path) -> bool {
+    let names: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    match walk_to(account_dir, &names) {
+        Walked::Absent => false,
+        Walked::Unreadable => true,
+        Walked::Held(dir) => dir_holds_content(&dir, 0),
+    }
+}
+
+/// Where a walk from the account directory ended.
+enum Walked {
+    Held(crate::held::Dir),
+    /// A name on the way is not there: nothing was ever written below it.
+    Absent,
+    /// A name on the way could not be opened as a directory — a link, a
+    /// file, a permission — so what is below it is not omh's to call empty.
+    Unreadable,
+}
+
+fn walk_to(account_dir: &std::path::Path, names: &[&std::ffi::OsStr]) -> Walked {
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let mut held = match crate::held::Dir::open(account_dir) {
+        Ok(dir) => dir,
+        Err(e) if gone(&e) => return Walked::Absent,
+        Err(_) => return Walked::Unreadable,
     };
-    entries.into_iter().any(|e| match e {
-        // `readdir` failing part-way through is the same answer as the open
-        // failing: omh did not get to look, so it must not report absence.
-        Err(_) => true,
-        Ok(e) => {
-            let p = e.path();
-            if p.is_dir() {
-                has_real_content(&p)
-            } else {
-                holds_content(&p)
+    for name in names {
+        held = match held.sub(name) {
+            Ok(dir) => dir,
+            Err(e) if gone(&e) => return Walked::Absent,
+            Err(_) => return Walked::Unreadable,
+        };
+    }
+    Walked::Held(held)
+}
+
+fn file_holds_content(dir: &crate::held::Dir, name: &std::ffi::OsStr) -> bool {
+    use std::io::Read;
+    match dir.file(name) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            match file.take(CONTENT_CAP + 1).read_to_end(&mut bytes) {
+                Ok(_) if bytes.len() as u64 > CONTENT_CAP => true,
+                Ok(_) => !is_placeholder(&String::from_utf8_lossy(&bytes)),
+                Err(_) => true,
             }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+/// Deeper than any harness keeps its state; a tree past it is the agent's
+/// doing, and is something present.
+const CONTENT_DEPTH: usize = 32;
+
+fn dir_holds_content(dir: &crate::held::Dir, depth: usize) -> bool {
+    if depth > CONTENT_DEPTH {
+        return true;
+    }
+    let Ok(names) = dir.names() else {
+        return true;
+    };
+    names.iter().any(|name| match dir.entry(name) {
+        Ok(crate::held::Entry::Absent) => false,
+        Ok(crate::held::Entry::File) => file_holds_content(dir, name),
+        Ok(crate::held::Entry::Dir) => match dir.sub(name) {
+            Ok(sub) => dir_holds_content(&sub, depth + 1),
+            Err(_) => true,
+        },
+        // A link, a FIFO, a socket: something present, and not followed.
+        Ok(_) | Err(_) => true,
     })
 }
 
@@ -729,10 +845,10 @@ pub fn unfilled(
             .iter()
             .map(|t| {
                 let guest = crate::adapter::expand(t.trim_end_matches('/'), guest_home);
-                let host = account_dir.join(t.trim_end_matches('/').trim_start_matches("$HOME/"));
-                (host, guest)
+                let rel = PathBuf::from(t.trim_end_matches('/').trim_start_matches("$HOME/"));
+                (rel, guest)
             })
-            .filter(|(host, _)| !holds_content(host))
+            .filter(|(rel, _)| !holds_content(account_dir, rel))
             .map(|(_, guest)| guest)
             .collect();
     }
@@ -740,10 +856,15 @@ pub fn unfilled(
     mounts(adapter, account_dir, guest_home)
         .into_iter()
         .filter(|c| {
+            // Below the account directory by construction; a mount that is
+            // not is one omh did not make, and is not called empty.
+            let Ok(rel) = c.host.strip_prefix(account_dir) else {
+                return false;
+            };
             if c.file {
-                !holds_content(&c.host)
+                !holds_content(account_dir, rel)
             } else {
-                !has_real_content(&c.host)
+                !has_real_content(account_dir, rel)
             }
         })
         .map(|c| c.guest)
@@ -1071,6 +1192,75 @@ mod tests {
     }
 
     // ── importing a host login ──────────────────────────────────────────────
+
+    /// `prepare` writes the placeholders a launch mounts, and never through a
+    /// link at one: it stat'ed the path, following, then `fs::write` to it,
+    /// following again — so a link at claude's `.claude.json` had the user's
+    /// file truncated to `{}`, and a dangling one had its target created. A
+    /// link there is refused, and nothing outside the account changes.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_never_writes_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside.json");
+        std::fs::write(&outside, "").unwrap();
+        let account = d.path().join("acct");
+        std::fs::create_dir_all(&account).unwrap();
+        std::os::unix::fs::symlink(&outside, account.join(".claude.json")).unwrap();
+        let _ = prepare(&claude(), &account, GUEST_HOME);
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "",
+            "written through a link"
+        );
+
+        let dangling = d.path().join("acct2");
+        std::fs::create_dir_all(&dangling).unwrap();
+        let target = d.path().join("made-by-omh.json");
+        std::os::unix::fs::symlink(&target, dangling.join(".claude.json")).unwrap();
+        let _ = prepare(&claude(), &dangling, GUEST_HOME);
+        assert!(!target.exists(), "a dangling link's target was created");
+    }
+
+    /// What a session can plant where a login lives is read without blocking
+    /// and without bound, or not read: a FIFO at codex's `auth.json` made
+    /// every command that lists codex accounts hang, printing nothing, and a
+    /// link to `/dev/zero` read forever. Each is a file present — content —
+    /// and answered at once. For omp, with no token, the walk of its whole
+    /// directory meets the same FIFO.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_fifo_or_link_is_answered_at_once_as_present() {
+        fn mkfifo(at: &Path) {
+            let c = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        }
+        let within = |adapter: Adapter, account: PathBuf| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(unfilled(&adapter, &account, GUEST_HOME));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(3))
+        };
+        let d = tempfile::tempdir().unwrap();
+
+        let fifo = d.path().join("codex-fifo");
+        std::fs::create_dir_all(fifo.join(".codex")).unwrap();
+        mkfifo(&fifo.join(".codex/auth.json"));
+        let left = within(codex(), fifo).expect("a FIFO at the token path hung the read");
+        assert!(left.is_empty(), "a FIFO is a file present: {left:?}");
+
+        let zero = d.path().join("codex-zero");
+        std::fs::create_dir_all(zero.join(".codex")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", zero.join(".codex/auth.json")).unwrap();
+        let left = within(codex(), zero).expect("a link to /dev/zero was read without end");
+        assert!(left.is_empty(), "a link is a file present: {left:?}");
+
+        let omp_dir = d.path().join("omp-fifo");
+        std::fs::create_dir_all(omp_dir.join(".omp/agent/sub")).unwrap();
+        mkfifo(&omp_dir.join(".omp/agent/sub/models.yml"));
+        within(omp(), omp_dir).expect("a FIFO under omp's directory hung the walk");
+    }
 
     fn codex() -> Adapter {
         Adapter::find(Path::new(ADAPTERS), "codex").unwrap()

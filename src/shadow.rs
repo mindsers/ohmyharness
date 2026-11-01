@@ -1215,16 +1215,72 @@ impl Shadow {
             Some(&paths),
         )?;
         let fields: Vec<&str> = answer.split('\0').collect();
+        let users = users_excludes_file();
+        // Every excludes file a config other than the user's own names — the
+        // repository's, its `config.worktree`, anything they include — is not
+        // the user's, whatever it points at. A second line: that config is
+        // mounted read-only into the sandbox and rewritten to an allowlist at
+        // every launch (#52), so none of those keys survives to be read here
+        // today. `--show-scope` says whose each value is: `--local` alone
+        // reads neither `config.worktree` nor an `include`.
+        //
+        // `-z`, read as `scope NUL value NUL` pairs and never trimmed: a value
+        // is the agent's to write, newlines and all, and `check-ignore` names
+        // the source exactly as configured.
+        let listed = git(
+            &self.gitdir,
+            worktree,
+            &[
+                "config",
+                "-z",
+                "--show-scope",
+                "--get-all",
+                "core.excludesFile",
+            ],
+        )
+        .unwrap_or_default();
+        let scoped: Vec<&str> = listed.split('\0').collect();
+        let agents: Vec<String> = scoped
+            .chunks(2)
+            .filter_map(|pair| match pair {
+                [scope, value] if !matches!(*scope, "global" | "system") && !value.is_empty() => {
+                    Some(value.to_string())
+                }
+                _ => None,
+            })
+            .collect();
         let mut believed: Vec<&str> = Vec::new();
         // `source NUL line NUL pattern NUL path NUL`, one per path.
         for &[source, _line, pattern, path] in fields.as_chunks::<4>().0 {
-            let trusted = if std::path::Path::new(source) == exclude {
+            let trusted = if agents.iter().any(|a| a == source) {
+                false
+            } else if std::path::Path::new(source) == exclude {
                 ours.as_ref()
                     .is_some_and(|ours| ours.iter().any(|o| o == pattern))
             } else if std::path::Path::new(source).is_absolute() {
-                true
+                // Only the user's own excludes file. Every absolute source was
+                // believed as that — and the sandbox repository's config is the
+                // agent's to write, so an excludes file it named hid its work
+                // from the count `rm` asks about.
+                users
+                    .as_deref()
+                    .is_some_and(|u| same_file(u, std::path::Path::new(source)))
             } else {
-                tracked.iter().any(|t| t == source)
+                // A per-directory rule, which git reads only from a file
+                // named `.gitignore`: any tracked file was believed, so a
+                // tracked `.dockerignore` holding `*`, named as the excludes
+                // file by the sandbox's config, hid everything new.
+                //
+                // And only where git reads one: beside or above the ignored
+                // path. A tracked `sub/.gitignore` that hides a file at the
+                // root is acting as an excludes file someone named, however
+                // the naming was hidden from the lookup above.
+                let rule = std::path::Path::new(source);
+                rule.file_name().is_some_and(|n| n == ".gitignore")
+                    && tracked.iter().any(|t| t == source)
+                    && rule
+                        .parent()
+                        .is_some_and(|dir| std::path::Path::new(path).starts_with(dir))
             };
             if trusted {
                 believed.push(path);
@@ -1247,25 +1303,39 @@ impl Shadow {
     /// case for a session whose agent has just committed its work — that is not
     /// a failure and must not read as one.
     pub fn checkpoint(&self, worktree: &Path, why: &str) -> Result<Option<String>> {
+        // Through a fresh index read from HEAD, never the agent's: the sandbox's
+        // index is the agent's to write, and a changed file it marked
+        // `skip-worktree` was hidden from `status` — no checkpoint was taken,
+        // and the sync then wrote over the change with nothing to take it back
+        // from.
+        let index = tempfile::NamedTempFile::new().context("staging a checkpoint index")?;
+        let index = index.path();
+        let with = |args: &[&str]| git_with_index(&self.gitdir, worktree, index, args, None);
+        with(&["read-tree", "HEAD"])?;
+        let held = || -> Result<Vec<String>> { Ok(pointers(&with(&["ls-files", "-s", "-z"])?)) };
         // Nothing changed *and* nothing nested. `status` is told to stay out
         // of a nested repository, so it is silent about a pointer that has not
         // moved — and a silent `status` used to end this function, which let a
         // sync merge, rewrite the worktree and move the branch before `stage`
         // refused at `record_base_moved`. This is the only point a sync can
         // stop with nothing done, so the pointer is asked about here.
-        if git(&self.gitdir, worktree, &["status", "--porcelain"])?
-            .trim()
-            .is_empty()
-            && nested(&self.gitdir, worktree)?.is_empty()
-        {
+        if with(&["status", "--porcelain"])?.trim().is_empty() && held()?.is_empty() {
             return Ok(None);
         }
-        stage(&self.gitdir, worktree, &["add", "-A", "."])?;
-        git(
-            &self.gitdir,
-            worktree,
-            &["commit", "-q", "--no-verify", "-m", why],
-        )?;
+        // `stage`, over this index.
+        let nested = held()?;
+        if !nested.is_empty() {
+            let mut drop = vec!["update-index", "--force-remove", "--"];
+            drop.extend(nested.iter().map(String::as_str));
+            with(&drop)?;
+        }
+        with(&["add", "-A", "."])?;
+        let nested = held()?;
+        anyhow::ensure!(nested.is_empty(), "{}", nested_refusal(&nested));
+        with(&["commit", "-q", "--no-verify", "-m", why])?;
+        // And the agent's index rebuilt from the checkpoint, rather than left
+        // holding what hid the change from everything after this.
+        git(&self.gitdir, worktree, &["read-tree", "HEAD"])?;
         Ok(Some(
             git(&self.gitdir, worktree, &["rev-parse", "HEAD"])?
                 .trim()
@@ -3612,6 +3682,36 @@ fn nested_refusal(held: &[String]) -> String {
          it out, then run this again",
         of_their_own(held)
     )
+}
+
+/// The user's own excludes file, as the user's git names it — the global
+/// config, never the sandbox repository's, which the agent writes — or git's
+/// default, `$XDG_CONFIG_HOME/git/ignore`.
+fn users_excludes_file() -> Option<PathBuf> {
+    let asked = std::process::Command::new("git")
+        .args(["config", "--global", "--path", "--get", "core.excludesFile"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_CONFIG")
+        .output()
+        .ok()?;
+    let named = String::from_utf8_lossy(&asked.stdout).trim().to_string();
+    if asked.status.success() && !named.is_empty() {
+        return Some(PathBuf::from(named));
+    }
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|x| !x.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
+    Some(config.join("git").join("ignore"))
+}
+
+/// One file under two spellings: equal, or equal once resolved.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 /// A path as a gitignore pattern that matches it and nothing else.

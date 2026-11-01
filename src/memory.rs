@@ -796,7 +796,10 @@ pub(crate) fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let path = entry.path();
         if kind.is_dir() {
             markdown_files(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "md") {
+        // A plain file only: a FIFO the agent planted was collected, and the
+        // read of it blocked every caller, `tools/list` included. A FIFO is not
+        // a note, as a link is not one.
+        } else if kind.is_file() && path.extension().is_some_and(|e| e == "md") {
             out.push(path);
         }
     }
@@ -880,6 +883,24 @@ pub(crate) fn write_held(root: &Path, path: &Path, body: &[u8]) -> Result<()> {
         .with_context(|| format!("writing {}", path.display()))
 }
 
+/// How much of a note omh reads. A note is a paragraph or a page; past this,
+/// it is not one a session wrote to be read.
+const NOTE_CAP: u64 = 1 << 20;
+
+/// A note's text, read as omh reads what a session could have written — the
+/// store is mounted writable into every one: a name at a time from the store's
+/// root, never through a link, never blocking on a FIFO swapped in after the
+/// listing, never past [`NOTE_CAP`].
+fn read_note(root: &Path, path: &Path) -> Result<String> {
+    let rel = path
+        .strip_prefix(root)
+        .ok()
+        .and_then(Path::to_str)
+        .with_context(|| format!("{} is not a note under {}", path.display(), root.display()))?;
+    crate::held::read_under(root, rel, NOTE_CAP)
+        .with_context(|| format!("reading {}", path.display()))
+}
+
 /// Every note in one directory.
 ///
 /// Takes a directory rather than `Paths` because the MCP server runs inside
@@ -893,8 +914,7 @@ pub fn notes_in(root: &Path) -> Result<Vec<Note>> {
     files
         .iter()
         .map(|path| {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))?;
+            let raw = read_note(root, path)?;
             // Never `filter_map(..ok())`: a store that silently drops a note
             // answers from a subset and says nothing about the gap.
             parse(&raw, path)
@@ -931,10 +951,7 @@ fn read_store(root: &Path) -> Result<StoreRead> {
     let mut notes = Vec::new();
     let mut opaque = Vec::new();
     for path in files {
-        match std::fs::read_to_string(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|raw| parse(&raw, &path))
-        {
+        match read_note(root, &path).and_then(|raw| parse(&raw, &path)) {
             Ok(note) => notes.push(note),
             Err(_) => opaque.push(path),
         }
@@ -2229,6 +2246,30 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             ..note_with(Kind::Surprise, key, body)
         };
         std::fs::write(&path, render(&note)).unwrap();
+    }
+
+    /// The store is mounted writable into every session, so a session can
+    /// plant a FIFO where a note goes. Collected as a note and read, it blocked
+    /// `omh memory`, `lint`, `rm`, `remember`, the nudge after `omh sNN rm` and
+    /// every session's `tools/list`. A FIFO is not a note, as a link is not
+    /// one; the store answers at once with the notes it has.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_store_is_not_a_note_and_blocks_nothing() {
+        let (_d, paths) = fixture();
+        seed(&paths, "real", "a real note");
+        let fifo = paths.memory().join("planted.md");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let root = paths.memory();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(notes_in(&root).map(|n| keys(&n)));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("a FIFO in the store blocked the read");
+        assert_eq!(got.unwrap(), ["real"]);
     }
 
     fn keys(notes: &[Note]) -> Vec<String> {

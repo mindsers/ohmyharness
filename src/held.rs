@@ -44,6 +44,21 @@ fn step(name: &OsStr) -> io::Result<CString> {
     CString::new(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
+/// Zero `errno`, so a `readdir` that returns nothing can say whether it ended
+/// or failed: it says so only through `errno`, and leaves it as it was.
+fn clear_errno() {
+    // SAFETY: the thread's own `errno`, which this thread alone writes.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+    // SAFETY: as above.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
 /// What has a name in a held directory, as [`Dir::entry`] sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Entry {
@@ -280,6 +295,56 @@ impl Dir {
         })
     }
 
+    /// The names in this directory, without `.` and `..`, read through the
+    /// held descriptor: never by path, which the agent can re-point between
+    /// the listing and the next step.
+    ///
+    /// An entry that failed to read fails the listing, which is the
+    /// could-not-look rule: a listing that dropped it would be a smaller
+    /// directory, not a partial one.
+    pub(crate) fn names(&self) -> io::Result<Vec<std::ffi::OsString>> {
+        // SAFETY: `dup` of a descriptor this value holds open. `fdopendir`
+        // takes ownership of what it is given, so it is given the duplicate.
+        let fd = unsafe { libc::dup(self.fd.as_raw_fd()) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just returned by `dup` and nothing else has it.
+        let dir = unsafe { libc::fdopendir(fd) };
+        if dir.is_null() {
+            let why = io::Error::last_os_error();
+            // SAFETY: `fdopendir` failed, so `fd` is still ours to close.
+            unsafe { libc::close(fd) };
+            return Err(why);
+        }
+        // The duplicate shares the held descriptor's offset, which an earlier
+        // listing may have moved.
+        // SAFETY: `dir` is the stream `fdopendir` just returned.
+        unsafe { libc::rewinddir(dir) };
+        let mut out = Vec::new();
+        let ended = loop {
+            clear_errno();
+            // SAFETY: `dir` is an open stream; the entry it returns is valid
+            // until the next call on it, and read before then.
+            let entry = unsafe { libc::readdir(dir) };
+            if entry.is_null() {
+                let why = io::Error::last_os_error();
+                break match why.raw_os_error() {
+                    Some(0) | None => Ok(()),
+                    _ => Err(why),
+                };
+            }
+            // SAFETY: `d_name` is a NUL-terminated name within `entry`.
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                out.push(OsStr::from_bytes(name).to_os_string());
+            }
+        };
+        // SAFETY: `dir` is open, closed once, and its descriptor with it.
+        unsafe { libc::closedir(dir) };
+        ended.map(|()| out)
+    }
+
     /// Make `name` a link to `target`, replacing the file or link that has
     /// the name: laid beside and renamed over, so the name is never missing
     /// and never anything else. A directory there is refused — a rename does
@@ -314,6 +379,23 @@ impl Dir {
         // SAFETY: as `open_under` — an open descriptor and a C string, both
         // outliving the call.
         if unsafe { libc::unlinkat(self.fd.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+            return Ok(());
+        }
+        let why = io::Error::last_os_error();
+        match why.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(why),
+        }
+    }
+
+    /// Remove the directory `name` here if it is empty — never a link, which
+    /// `unlinkat` with `AT_REMOVEDIR` refuses as not a directory. Not there is
+    /// done; not empty is said, as `ENOTEMPTY`.
+    pub(crate) fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+        let name = step(name)?;
+        // SAFETY: as `open_under` — an open descriptor and a C string, both
+        // outliving the call.
+        if unsafe { libc::unlinkat(self.fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
             return Ok(());
         }
         let why = io::Error::last_os_error();
@@ -428,6 +510,24 @@ mod tests {
             Entry::Link("/omh/prefs/config.toml".into())
         );
         assert!(held.entry(name("../x")).is_err(), "a route is not a name");
+    }
+
+    /// A listing names what is there, links as names and never visited, and
+    /// a second listing of the same held directory names it all again: the
+    /// stream is opened on a duplicate that shares the held descriptor's
+    /// offset, so without the rewind the second came back empty.
+    #[test]
+    fn a_listing_names_what_is_there_and_follows_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("file"), "x").unwrap();
+        std::fs::create_dir(d.path().join("dir")).unwrap();
+        symlink("/omh/elsewhere", d.path().join("link")).unwrap();
+        let held = Dir::open(d.path()).unwrap();
+        for _ in 0..2 {
+            let mut names = held.names().unwrap();
+            names.sort();
+            assert_eq!(names, ["dir", "file", "link"]);
+        }
     }
 
     /// A link laid over a file or over another link replaces it whole, in
