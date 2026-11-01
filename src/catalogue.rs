@@ -92,7 +92,13 @@ pub fn id_for(repo: &Path) -> String {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repo".into());
     let full = settled(repo);
-    format!("{name}-{:08x}", stable_digest(&full.to_string_lossy()))
+    // The path's own bytes. Hashed after `to_string_lossy`, two Linux paths
+    // differing in a byte that is not UTF-8 became one id; a UTF-8 path has
+    // the same bytes either way, so no existing id moves.
+    format!(
+        "{name}-{:08x}",
+        stable_digest(full.as_os_str().as_encoded_bytes())
+    )
 }
 
 /// A repo id as the container runtime and ssh can be handed it.
@@ -1021,10 +1027,10 @@ fn owner_of(body: &str, beside: &Path) -> Option<PathBuf> {
 /// pinning a known vector is not ceremony: it is the only thing standing
 /// between a tidy-up of this function and every existing session becoming
 /// unreachable.
-fn stable_digest(s: &str) -> u32 {
+fn stable_digest(bytes: &[u8]) -> u32 {
     // FNV-1a, 32-bit. The constants are the specification's.
     let mut hash: u32 = 0x811c_9dc5;
-    for byte in s.as_bytes() {
+    for byte in bytes {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
@@ -2359,9 +2365,31 @@ mod tests {
     #[test]
     fn the_digest_matches_the_published_fnv_vectors() {
         // From the FNV reference test vectors for the 32-bit 1a variant.
-        assert_eq!(stable_digest(""), 0x811c_9dc5, "the offset basis");
-        assert_eq!(stable_digest("a"), 0xe40c_292c);
-        assert_eq!(stable_digest("foobar"), 0xbf9c_f968);
+        assert_eq!(stable_digest(b""), 0x811c_9dc5, "the offset basis");
+        assert_eq!(stable_digest(b"a"), 0xe40c_292c);
+        assert_eq!(stable_digest(b"foobar"), 0xbf9c_f968);
+    }
+
+    /// Two checkouts whose paths differ in a byte that is not UTF-8 are two
+    /// ids — on Linux a path is bytes. Hashed after `to_string_lossy`, both
+    /// bytes became U+FFFD and the two shared one id: one `~/.omh` subtree,
+    /// one set of containers, each session reachable from the other. A UTF-8
+    /// path keeps the id it had, so no existing checkout moves.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_has_an_id_of_its_own() {
+        use std::os::unix::ffi::OsStrExt;
+        let at = |bytes: &[u8]| id_for(Path::new(std::ffi::OsStr::from_bytes(bytes)));
+        assert_ne!(at(b"/omh-nowhere/r\xff"), at(b"/omh-nowhere/r\xfe"));
+        let utf8 = Path::new("/omh-nowhere/caf\u{e9}");
+        assert_eq!(
+            id_for(utf8),
+            format!(
+                "caf\u{e9}-{:08x}",
+                stable_digest(utf8.to_string_lossy().as_bytes())
+            ),
+            "a UTF-8 path keeps its id"
+        );
     }
 
     /// A repo id still reads as the directory it belongs to.
