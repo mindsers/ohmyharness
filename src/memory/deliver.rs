@@ -207,10 +207,14 @@ pub fn available(paths: &crate::catalogue::Paths, ctx: &crate::out::Ctx) -> Opti
 }
 
 /// Build it if it is not there yet. Called before launch, like `image::ensure`.
+///
+/// `ca` is the caller's reading of `ca_cert`, the one it built its image
+/// with. Resolved again in here, a launch read the setting twice.
 pub fn ensure(
     program: &str,
     paths: &crate::catalogue::Paths,
     sources: Option<&Path>,
+    ca: Option<&crate::image::Root>,
     fetch: &dyn Fn(&Urls, &Path) -> Result<()>,
     ctx: &crate::out::Ctx,
 ) -> Result<PathBuf> {
@@ -230,8 +234,7 @@ pub fn ensure(
             let crate_dir = sources.expect("MustBuild is only chosen when sources are present");
             // The proxy that made `ca_cert` necessary is in front of
             // crates.io too, and this container is not omh's image.
-            let root = crate::image::ca_for(paths)?;
-            let ca = root.as_ref().map(crate::image::Root::path);
+            let ca = ca.map(crate::image::Root::path);
             build(program, crate_dir, &out, arch, ca, ctx)?;
             Ok(out)
         }
@@ -955,7 +958,15 @@ mod tests {
             repo: dir.path().join("repo"),
         };
         let fetch = |_: &Urls, _: &Path| bail!("could not resolve github.com");
-        let err = ensure("docker", &paths, None, &fetch, &crate::out::Ctx::plain()).unwrap_err();
+        let err = ensure(
+            "docker",
+            &paths,
+            None,
+            None,
+            &fetch,
+            &crate::out::Ctx::plain(),
+        )
+        .unwrap_err();
         let said = format!("{err:#}");
         assert!(
             said.contains("could not resolve"),
@@ -990,7 +1001,15 @@ mod tests {
             )?;
             Ok(())
         };
-        let err = ensure("docker", &paths, None, &fetch, &crate::out::Ctx::plain()).unwrap_err();
+        let err = ensure(
+            "docker",
+            &paths,
+            None,
+            None,
+            &fetch,
+            &crate::out::Ctx::plain(),
+        )
+        .unwrap_err();
         assert!(
             format!("{err:#}").contains("does not match"),
             "got: {err:#}"
@@ -1039,7 +1058,15 @@ mod tests {
             Ok(())
         };
 
-        let installed = ensure("docker", &paths, None, &fetch, &crate::out::Ctx::plain()).unwrap();
+        let installed = ensure(
+            "docker",
+            &paths,
+            None,
+            None,
+            &fetch,
+            &crate::out::Ctx::plain(),
+        )
+        .unwrap();
         assert_eq!(
             installed,
             cached_at(&paths.root, arch, env!("CARGO_PKG_VERSION"))

@@ -3872,8 +3872,12 @@ mod tests {
                     .display()
                     .to_string();
                 let lines: Vec<&str> = body.lines().collect();
+                // Indented too: a method is a function. Read at column zero
+                // only, `Recipe::here`'s body was counted as part of whatever
+                // free function came before it, and its resolution was
+                // nobody's.
                 let opens = |l: &str| {
-                    let l = l.trim_end();
+                    let l = l.trim();
                     l.starts_with("fn ")
                         || l.starts_with("pub fn ")
                         || l.starts_with("pub(crate) fn ")
@@ -3919,20 +3923,71 @@ mod tests {
              as a parameter instead"
         );
 
-        // **Liveness by name.** A scan keyed on a spelling goes quiet the
-        // moment the spelling changes, and an empty result would read as a
-        // pass. These are the entry points that legitimately resolve once.
-        for must in [
-            "src/cmd/init.rs",
-            "src/cmd/inspect.rs",
-            "src/memory/deliver.rs",
-        ] {
-            assert!(
-                resolvers.iter().any(|f| f.starts_with(must)),
-                "{must} no longer resolves `ca_cert` under a spelling this \
-                 scan can see — it reads less than it did: {resolvers:#?}"
-            );
-        }
+        // **Exactly these, by name.** The rule is one resolution per
+        // *command*, and a scan of one function at a time cannot see a
+        // command: a launch that resolved, then called a second function that
+        // resolved again, passed both rules above — `Recipe::here` did that,
+        // inside `container::plan`, on every launch. So the functions that
+        // resolve are declared, and a new one fails here until someone has
+        // walked the commands that reach it. A list rather than a floor, for
+        // the reason the floor existed: a scan that reads less goes quiet.
+        let mut resolvers: Vec<String> = resolvers
+            .iter()
+            // The resolver's own definition names itself.
+            .filter(|r| !r.contains("fn ca_for("))
+            .map(|r| {
+                let (file, sig) = r.split_once(": ").unwrap();
+                let name = sig
+                    .split("fn ")
+                    .nth(1)
+                    .and_then(|s| s.split(['(', '<']).next())
+                    .unwrap_or(sig);
+                format!("{file}: {name}")
+            })
+            .collect();
+        resolvers.sort();
+        assert_eq!(
+            resolvers,
+            [
+                // Per command, each the one reading that command takes and
+                // hands on — `deliver::ensure` and `Recipe::of` are given it.
+                "src/cmd/account.rs: login_in_sandbox",
+                "src/cmd/init.rs: init",
+                "src/cmd/inspect.rs: doctor_cmd",
+                "src/cmd/inspect.rs: graph",
+                "src/cmd/session.rs: attach",
+                "src/cmd/session.rs: run",
+                "src/cmd/upgrade.rs: upgrade_cmd",
+                // For the commands with no reading of their own: `omh memory
+                // stale` and `omh memory remember`. A launch hands its reading
+                // to `Recipe::of`.
+                "src/memory/expiry.rs: here",
+            ],
+            "the functions that resolve `ca_cert` changed. A new one is a \
+             second reading for every command that already took one: hand it \
+             the caller's `Root` instead"
+        );
+
+        // And `Recipe::here`, being on that list, must be called only where no
+        // reading exists. Inside `container::plan` it read `ca_cert` a second
+        // time on every launch; a launch passes its reading to `Recipe::of`.
+        let callers: Vec<String> = crate::testsrc::production()
+            .into_iter()
+            .filter(|(_, body)| crate::testsrc::code_of(body).contains("Recipe::here("))
+            .map(|(path, _)| {
+                path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            callers,
+            ["src/memory/expiry.rs", "src/memory.rs"],
+            "`Recipe::here` reads `ca_cert` itself: call it only from a command \
+             with no reading of its own — `omh memory stale` (`expiry::gather`) \
+             and `omh memory remember` (`memory::remember`)"
+        );
     }
 
     /// **`Root::read` is the only way to hold one.** That is the whole of what
@@ -3940,10 +3995,15 @@ mod tests {
     /// "already been refused upstream", and none of them could be true of a
     /// function taking `&str`. A second constructor — or a `pub` field, or a
     /// `Root { .. }` literal anywhere else — would quietly restore that.
+    ///
+    /// Three ways in were invisible to the first version of this, which
+    /// counted `Root {` and one exact spelling of the construction: a second
+    /// `Self { .. }` inside `impl Root` under other names, and a derived
+    /// `Default`, which builds one out of nothing.
     #[test]
     fn nothing_builds_a_root_except_its_one_constructor() {
         let src = std::fs::read_to_string(file!()).unwrap();
-        let body = crate::testsrc::production_of(&src);
+        let body = crate::testsrc::code_of(&crate::testsrc::production_of(&src));
         // `Root {` also opens the `struct` and its `impl`; neither builds one.
         let literals = body.matches("Root {").count()
             - body.matches("struct Root {").count()
@@ -3953,10 +4013,28 @@ mod tests {
             "a `Root {{ .. }}` literal outside `read` is a way to build one \
              that skipped the refusals"
         );
+        // Every `Self {` inside `impl Root`, under whatever names.
+        let start = body.find("impl Root {").expect("impl Root");
+        let end = start
+            + body[start..]
+                .find("\n}\n")
+                .expect("impl Root closes at column zero");
+        // A signature's `-> Self {` returns one; it does not build one.
+        let block = &body[start..end];
         assert_eq!(
-            body.matches("Self { path: at, pem }").count(),
+            block.matches("Self {").count() - block.matches("-> Self {").count(),
             1,
             "and one construction, inside `read`"
+        );
+        assert!(
+            body.contains("Self { path: at, pem }"),
+            "and that one is `read`'s"
+        );
+        let struct_at = body.find("pub struct Root {").expect("struct Root");
+        let derives = body[..struct_at].lines().next_back().unwrap_or_default();
+        assert!(
+            derives.contains("derive(") && !derives.contains("Default"),
+            "a derived `Default` builds a Root from nothing: {derives}"
         );
         assert!(
             !body.contains("pub path:") && !body.contains("pub pem:"),
@@ -4499,8 +4577,15 @@ mod tests {
         let mut declarations = Vec::new();
         for (path, body) in crate::testsrc::production() {
             for line in body.lines() {
+                // Whatever its visibility, and a `static` as much as a
+                // `const`: `pub(crate) const` was invisible to this.
                 let l = line.trim();
-                let is_const = l.starts_with("const ") || l.starts_with("pub const ");
+                let bare = l
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| l.strip_prefix("pub(super) "))
+                    .or_else(|| l.strip_prefix("pub "))
+                    .unwrap_or(l);
+                let is_const = bare.starts_with("const ") || bare.starts_with("static ");
                 if is_const && l.contains("= \"/home/agent\"") {
                     declarations.push(format!("{}: {l}", path.display()));
                 }

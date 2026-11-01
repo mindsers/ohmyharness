@@ -587,6 +587,7 @@ pub(crate) fn doctor_cmd(
                     env!("CARGO_PKG_VERSION"),
                 )
                 .as_deref(),
+                sandbox.ca.as_ref(),
                 &memory::deliver::fetch,
                 ctx,
             ) {
@@ -618,6 +619,7 @@ pub(crate) fn doctor_cmd(
                 true,
             )?,
             resolves: sandbox.resolves.clone(),
+            recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
         };
         if let Some(account_dir) = &account {
             auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;

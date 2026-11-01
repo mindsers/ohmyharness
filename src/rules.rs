@@ -1133,9 +1133,24 @@ mod tests {
 
         let msg = format!("{err:#}");
         assert!(msg.contains("git show"), "must name what it ran: {msg}");
+        // git's reason is in the reader's language, so it is asked for here
+        // rather than spelled: under a Turkish locale "not a git repository"
+        // never appears, and this failed while omh was passing it through.
+        let asked = std::process::Command::new("git")
+            .current_dir(&fx.paths.repo)
+            .args(["rev-parse", "--git-dir"])
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&asked.stderr);
+        let reason = said
+            .lines()
+            .next()
+            .and_then(|l| l.split_once(": ").map(|(_, why)| why))
+            .expect("git refuses a directory that is not a repository");
+        let reason = reason.split(" (").next().unwrap();
         assert!(
-            msg.contains("not a git repository"),
-            "must pass git's own reason through: {msg}"
+            msg.contains(reason),
+            "must pass git's own reason through — `{reason}`: {msg}"
         );
     }
 }

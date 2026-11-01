@@ -559,7 +559,9 @@ mod tests {
         {
             for (_path, body) in crate::testsrc::production() {
                 files += 1;
-                for call in ["policy_value(", "policy_list("] {
+                // `policy_list_checked(` too: `doctor` reads `carry_in` through
+                // it, and a key read only there was a key this scan never saw.
+                for call in ["policy_value(", "policy_list(", "policy_list_checked("] {
                     for (at, _) in body.match_indices(call) {
                         // `policy_value(&paths, "account")` — the literal is
                         // the second argument, so take what is between the

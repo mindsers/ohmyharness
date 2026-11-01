@@ -84,19 +84,28 @@ impl Recipe {
     /// An unreadable certificate is `Unknowable`, never a digest: it is the
     /// same "the recipe is not what this would compute" case as the sandbox,
     /// arriving by a different road.
+    ///
+    /// For a command with no reading of its own. One that has one — every
+    /// launch, which built its image from it — hands it to [`Recipe::of`]: a
+    /// second read here can differ from the first, and then the digest the
+    /// sandbox is told describes an image it is not running.
     pub fn here(paths: &crate::catalogue::Paths) -> Self {
         match crate::image::ca_for(paths) {
             Err(e) => Self::Unknowable(format!(
                 "the image recipe depends on `ca_cert`, which could not be read: {e:#}"
             )),
-            Ok(ca) => {
-                match crate::image::recipe_digest(&crate::image::base_dockerfile(
-                    ca.as_ref().map(crate::image::Root::pem),
-                )) {
-                    Ok(d) => Self::Digest(d),
-                    Err(e) => Self::Unknowable(format!("could not digest the image recipe: {e:#}")),
-                }
-            }
+            Ok(ca) => Self::of(ca.as_ref()),
+        }
+    }
+
+    /// The digest of the base recipe, built with the certificate the caller
+    /// already read.
+    pub fn of(ca: Option<&crate::image::Root>) -> Self {
+        match crate::image::recipe_digest(&crate::image::base_dockerfile(
+            ca.map(crate::image::Root::pem),
+        )) {
+            Ok(d) => Self::Digest(d),
+            Err(e) => Self::Unknowable(format!("could not digest the image recipe: {e:#}")),
         }
     }
 }

@@ -112,9 +112,13 @@ impl Drop for Sandbox {
         if !self.real {
             return;
         }
-        // Everything omh names for this checkout starts with the checkout's
-        // id — `omh-<id>-sNN`, `omh-<id>`, `omh-graph-<id>` — and the id holds
-        // a digest of a temporary path, so nothing of anyone else's can match.
+        // Everything omh names for this checkout carries the checkout's id —
+        // `omh-<id>-sNN`, `omh-<id>`, `omh-graph-<id>`, and the graph index's
+        // volume `omh-cache-<id>` — and the id holds a digest of a temporary
+        // path, so nothing of anyone else's can match. The volume was left out
+        // once, and every real run left one behind: hundreds of
+        // `omh-cache-repo-*` on a developer's daemon, which `omh prune` then
+        // reports as unattributable.
         // Asked of omh, like every other use of it here; a sandbox that never
         // got as far as having one left nothing to clear.
         let out = self.omh(&["info", "--repo", "--json"]);
@@ -135,6 +139,7 @@ impl Drop for Sandbox {
                         .filter(|name| {
                             name.starts_with(&format!("omh-{id}"))
                                 || *name == format!("omh-graph-{id}")
+                                || *name == format!("omh-cache-{id}")
                         })
                         .map(str::to_string)
                         .collect()
@@ -150,6 +155,11 @@ impl Drop for Sandbox {
         for network in named(&["network", "ls", "--format", "{{.Name}}"]) {
             let _ = Command::new("docker")
                 .args(["network", "rm", &network])
+                .output();
+        }
+        for volume in named(&["volume", "ls", "--format", "{{.Name}}"]) {
+            let _ = Command::new("docker")
+                .args(["volume", "rm", "-f", &volume])
                 .output();
         }
     }
@@ -11361,22 +11371,6 @@ fn a_check_the_sandbox_did_not_answer_fails_the_run_by_name() {
     );
 }
 
-/// `omh doctor` honours the account you name, or says why it cannot.
-///
-/// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
-/// says so under *honesty about coverage* — and credentials are the half no
-/// in-process test can reach. So a `doctor` that skips the credential checks is
-/// the one failure that leaves nothing behind it.
-///
-/// It skipped them for anyone with more than one account. `doctor_cmd` passed a
-/// hardcoded `None` where `omh new` passes the user's `-a`, and then wrapped the
-/// resolver in `.unwrap_or(None)` — turning a function whose own doc comment
-/// reads *"Ambiguity is an error, never a guess"* into a guess of *no account*.
-/// Two accounts captured, and `omh -a work doctor` printed *"no account, so
-/// credentials go unchecked"*, byte-identical to naming none.
-///
-/// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
-/// flag `doctor` was discarding, and was swallowed before it could print.
 /// **The host's answers survive the thing that stopped the sandbox.**
 ///
 /// This is the whole feature, and nothing reached it: `doctor_cmd` needs a
@@ -12431,6 +12425,22 @@ fn doctor_without_adapters_reports_the_host_and_fails_honestly() {
     );
 }
 
+/// `omh doctor` honours the account you name, or says why it cannot.
+///
+/// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
+/// says so under *honesty about coverage* — and credentials are the half no
+/// in-process test can reach. So a `doctor` that skips the credential checks is
+/// the one failure that leaves nothing behind it.
+///
+/// It skipped them for anyone with more than one account. `doctor_cmd` passed a
+/// hardcoded `None` where `omh new` passes the user's `-a`, and then wrapped the
+/// resolver in `.unwrap_or(None)` — turning a function whose own doc comment
+/// reads *"Ambiguity is an error, never a guess"* into a guess of *no account*.
+/// Two accounts captured, and `omh -a work doctor` printed *"no account, so
+/// credentials go unchecked"*, byte-identical to naming none.
+///
+/// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
+/// flag `doctor` was discarding, and was swallowed before it could print.
 #[test]
 fn doctor_checks_the_credentials_of_the_account_it_was_given() {
     let sb = sandbox();
@@ -18451,13 +18461,24 @@ fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
     }
 }
 
+/// What `--help` does not list, walked by name.
+///
+/// A hidden command needed no run: the surface is read from `--help`, which
+/// leaves it out, so its flags were never asked for either. `omh memory
+/// serve` is the harness's entry point to the memory server, and it declared a
+/// `--session` that the global `--session` always caught first — refused on
+/// every use, and nothing ran it to find out. Its own `--help` still answers,
+/// so it is read the same way as the rest. `the_hidden_commands_are_the_ones_
+/// clap_hides` holds this list to the definition.
+const HIDDEN: &[&[&str]] = &[&["memory", "serve"]];
+
 fn surface() -> Surface {
     let mut out = Surface::default();
-    surface_under(
-        std::path::Path::new(env!("CARGO_BIN_EXE_omh")),
-        &[],
-        &mut out,
-    );
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_omh"));
+    surface_under(bin, &[], &mut out);
+    for path in HIDDEN {
+        surface_under(bin, path, &mut out);
+    }
     out
 }
 
@@ -18607,6 +18628,11 @@ enum Expect {
     /// because some of what a refusal prints is the runtime's own words and
     /// those differ by platform.
     Refuses(&'static [&'static str]),
+    /// clap's own refusal: its usage text, exit 2, naming each of these. For
+    /// the rows where that is the contract — `omh` alone, a group with no
+    /// default verb — and only there: `Refuses` holds a refusal to omh's own
+    /// voice.
+    Usage(&'static [&'static str]),
 }
 
 /// One real invocation.
@@ -18640,7 +18666,7 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &[],
         needs: Needs::Repo,
-        expect: Expect::Refuses(&["Usage: omh"]),
+        expect: Expect::Usage(&["Commands:"]),
         runtime: false,
     },
     Exercise {
@@ -18787,7 +18813,7 @@ const EXERCISES: &[Exercise] = &[
     Exercise {
         argv: &["settings", "mcp"],
         needs: Needs::Repo,
-        expect: Expect::Refuses(&["MCP servers", "Commands:", "import"]),
+        expect: Expect::Usage(&["MCP servers", "Commands:", "import"]),
         runtime: false,
     },
     Exercise {
@@ -18941,6 +18967,13 @@ const EXERCISES: &[Exercise] = &[
     },
     Exercise {
         argv: &["memory", "lint"],
+        needs: Needs::Store,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // Hidden, and run: with nothing on stdin the server reads EOF and ends.
+    Exercise {
+        argv: &["memory", "serve", "--notes", "."],
         needs: Needs::Store,
         expect: Expect::Ok,
         runtime: false,
@@ -19287,10 +19320,33 @@ fn exercise(sb: &Sandbox, e: &Exercise) {
             "`omh {}` failed:\n{said}",
             e.argv.join(" ")
         ),
+        Expect::Usage(words) => {
+            assert!(
+                out.status.code() == Some(2) && said.contains("Usage: omh"),
+                "`omh {}` was supposed to be clap's usage, exit 2:\n{said}",
+                e.argv.join(" ")
+            );
+            for word in words {
+                assert!(
+                    said.contains(word),
+                    "`omh {}` printed its usage without `{word}`:\n{said}",
+                    e.argv.join(" ")
+                );
+            }
+        }
         Expect::Refuses(words) => {
             assert!(
                 !out.status.success(),
                 "`omh {}` was supposed to refuse:\n{said}",
+                e.argv.join(" ")
+            );
+            // omh's refusal, not clap's. A line clap could not parse also
+            // exits non-zero, and its usage text names the flags and
+            // commands a needle is likely to — so a run that never reached
+            // omh could pass for one omh refused.
+            assert!(
+                !said.contains("\nUsage: ") && !said.starts_with("error: "),
+                "`omh {}` was refused by the argument parser, not by omh:\n{said}",
                 e.argv.join(" ")
             );
             let lowered = said.to_lowercase();

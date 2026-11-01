@@ -216,6 +216,7 @@ pub(crate) fn session_up(
             env!("CARGO_PKG_VERSION"),
         )
         .as_deref(),
+        sandbox.ca.as_ref(),
         &memory::deliver::fetch,
         ctx,
     ) {
@@ -529,6 +530,7 @@ pub(crate) fn attach(
                 true,
             )?,
             resolves: sandbox.resolves.clone(),
+            recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
         },
         &sandbox,
         ctx,
@@ -2457,6 +2459,7 @@ pub(crate) fn run(
             staging.is_apply(),
         )?,
         resolves: sandbox.resolves.clone(),
+        recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
     };
 
     // Not on a dry run: `next_id` answers `s01` for a directory that is not

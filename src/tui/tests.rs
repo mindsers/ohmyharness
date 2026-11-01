@@ -148,9 +148,14 @@ fn read(app: &App, width: u16, height: u16) -> String {
 }
 
 /// **No size breaks it.** A panic in a draw is a panic in raw mode, with the
-/// terminal still the screen's — the costliest thing a layout can do. Widths
-/// from 1 to 160 and heights from 1 to 60, on every page and with every kind
-/// of box open, draw, and draw no control character.
+/// terminal still the screen's — the costliest thing a layout can do. On every
+/// page and with every kind of box open, it draws, and draws no control
+/// character, at every width and height up to 12 — where a layout runs out of
+/// room — and then every 7th width to 160 and every 5th height to 60.
+///
+/// Each state is set up once and drawn at every size: `draw` takes `&self`, so
+/// a size cannot leave anything behind for the next one. Built afresh for each
+/// size, this took eight seconds for the same draws.
 #[test]
 fn no_size_breaks_a_draw() {
     type State = Box<dyn Fn(&mut App)>;
@@ -198,11 +203,13 @@ fn no_size_breaks_a_draw() {
             );
         }),
     ];
+    let widths: std::collections::BTreeSet<u16> = (1..=12).chain((1..=160).step_by(7)).collect();
+    let heights: std::collections::BTreeSet<u16> = (1..=12).chain((1..=60).step_by(5)).collect();
     for (n, state) in states.iter().enumerate() {
-        for width in (1..=160).step_by(7) {
-            for height in (1..=60).step_by(5) {
-                let mut app = App::new(model(), true);
-                state(&mut app);
+        let mut app = App::new(model(), true);
+        state(&mut app);
+        for &width in &widths {
+            for &height in &heights {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 terminal
                     .draw(|f| app.draw(f))

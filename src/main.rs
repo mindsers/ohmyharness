@@ -744,9 +744,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             None => cmd::memory::memory_ls(&cwd, ctx),
             Some(MemoryCmd::Lint) => cmd::memory::memory_lint(&cwd, ctx),
             Some(MemoryCmd::Stale) => cmd::memory::memory_stale(&cwd, ctx),
-            Some(MemoryCmd::Serve { notes, session }) => {
-                cmd::memory::memory_serve(notes.clone(), session.clone())
-            }
+            Some(MemoryCmd::Serve { notes }) => cmd::memory::memory_serve(notes.clone()),
             Some(MemoryCmd::Rm { key, at }) => {
                 cmd::memory::memory_rm(&cwd, key, at.as_deref(), cli.dry_run, ctx)
             }

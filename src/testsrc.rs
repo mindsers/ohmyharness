@@ -166,6 +166,7 @@ fn uses_on(
         let mut segments: Vec<String> = Vec::new();
         let mut j = i;
         let mut group_at: Option<usize> = None;
+        let mut glob = false;
         loop {
             let start = j;
             while j < chars.len() && ident(chars[j]) {
@@ -181,6 +182,10 @@ fn uses_on(
             j = chars.len() - after_ws.chars().count();
             if after_ws.starts_with('{') {
                 group_at = Some(j);
+                break;
+            }
+            if after_ws.starts_with('*') {
+                glob = true;
                 break;
             }
             if !after_ws.starts_with(|c: char| ident(c)) {
@@ -210,6 +215,12 @@ fn uses_on(
                 out.push(name.clone());
             } else if let Some(at) = group_at {
                 out.extend(group_members(code, n, at));
+            } else if glob {
+                // `use crate::*` names no module and takes everything the root
+                // has. That is an edge to the root, which `main` stands for;
+                // read as no edge, a module could reach the root through a
+                // glob and the cycle it made would not exist here.
+                out.push("main".to_string());
             }
         }
         i = next;
@@ -460,7 +471,7 @@ fn resolve(file: &Path, name: &str, path_attr: Option<&str>) -> Vec<PathBuf> {
 /// `body` with every item under a column-zero `#[cfg(test)]` blanked.
 ///
 /// An item is the attribute, whatever attributes and doc comments follow it,
-/// and then either one line ending in `;` with no block opened, or everything
+/// and then either one line ending in `;` that closes every brace it opens, or everything
 /// up to the next column-zero `}`. rustfmt puts both at column zero, which is
 /// what makes a textual rule sound here without parsing Rust.
 pub(crate) fn production_of(body: &str) -> String {
@@ -480,7 +491,11 @@ pub(crate) fn production_of(body: &str) -> String {
         }
         if i < lines.len() {
             let head = lines[i];
-            let one_liner = head.trim_end().ends_with(';') && !head.contains('{');
+            // One line, ending in `;`, that closes every brace it opens: a
+            // grouped `use crate::{a, b};` is one item, not the start of a
+            // block, and read as one it cut everything after it.
+            let one_liner = head.trim_end().ends_with(';')
+                && head.matches('{').count() == head.matches('}').count();
             if one_liner {
                 i += 1;
             } else {
@@ -583,6 +598,27 @@ mod tests {
             role_of(&sources, dir.path(), "stray.rs"),
             Role::Undeclared,
             "a file no `mod` line reaches is not part of the program"
+        );
+    }
+
+    /// A grouped `use` closes on its own line. Read as a block because it holds
+    /// a `{`, it cut everything after it down to the next column-zero `}` —
+    /// production code the scans then never saw.
+    #[test]
+    fn a_grouped_test_only_use_hides_nothing_after_it() {
+        let body = "\
+#[cfg(test)]
+use crate::{a, b};
+
+pub fn shipped() {
+    println!(\"production\");
+}
+";
+        let kept = production_of(body);
+        assert!(!kept.contains("use crate"), "the gated use is cut: {kept}");
+        assert!(
+            kept.contains("pub fn shipped") && kept.contains("println!"),
+            "and what follows it is production: {kept}"
         );
     }
 
@@ -757,7 +793,9 @@ impl Ctx {
                 "pub struct Exported;\n\
                  pub fn line() -> String { format!(\"  // {}\\n\", crate::h::NAME) }\n",
             ),
-            ("g.rs", "pub fn g() {}\n"),
+            // A glob of the root names nothing, and takes everything the root
+            // has: that is an edge to it.
+            ("g.rs", "use crate::*;\npub fn g() {}\n"),
             ("h.rs", "pub const NAME: &str = \"h\";\n"),
         ]);
         let graph = module_graph(dir.path());
@@ -773,6 +811,7 @@ impl Ctx {
                 pair("d", "e"),
                 pair("e", "g"),
                 pair("f", "h"),
+                pair("g", "main"),
                 pair("main", "a"),
                 pair("main", "b"),
             ],
@@ -890,6 +929,31 @@ impl Ctx {
             "the cycles between modules changed. A new one is a dependency to \
              invert; a broken one is progress — strike it from KNOWN_CYCLES.\
              \nNow:{report}"
+        );
+
+        // **Inside a cycle, the edges are the ratchet.** A cycle that gained an
+        // edge has the same members, so the list above cannot see it: #197
+        // added six inside the big one with this test green. Counted rather
+        // than listed — a refactor moves dozens — and printed whole when the
+        // count moves, so a diff of two runs names the edge.
+        const KNOWN_EDGES_INSIDE: usize = 136;
+        let inside: Vec<String> = found
+            .iter()
+            .flat_map(|cycle| {
+                cycle.iter().flat_map(|from| {
+                    graph[from]
+                        .keys()
+                        .filter(|to| cycle.contains(to))
+                        .map(move |to| format!("{from} → {to}"))
+                })
+            })
+            .collect();
+        assert_eq!(
+            inside.len(),
+            KNOWN_EDGES_INSIDE,
+            "the edges inside the known cycles changed. One more is a dependency \
+             to invert; one fewer is progress — lower KNOWN_EDGES_INSIDE.\nNow:\n  {}",
+            inside.join("\n  ")
         );
     }
 

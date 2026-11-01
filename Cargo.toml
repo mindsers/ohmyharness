@@ -79,3 +79,10 @@ path = "src/main.rs"
 name = "e2e"
 path = "tests/e2e/main.rs"
 required-features = ["e2e"]
+
+# Dependencies only, and only a little: omh's own code stays at opt-level 0 so
+# it builds fast and debugs plainly. Unoptimised ratatui spent eight seconds of
+# the suite drawing one test's screens; at 1 it draws 2.3 times as many sizes
+# in under two. Built once, then cached like any dependency.
+[profile.dev.package."*"]
+opt-level = 1

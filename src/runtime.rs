@@ -1988,19 +1988,106 @@ mod tests {
         }
     }
 
+    /// Every line of `body` that starts the runtime's program without going
+    /// through the backend, by line number from 1.
+    ///
+    /// Three spellings, because the first reader only knew one:
+    /// `Command::new(backend.program())` on one line; the same split across
+    /// two — `let program = backend.program();`, then `Command::new(program)`
+    /// — which is how `image::build` holds its program to this day; and the
+    /// runtime spawned by name, `Command::new("docker")`.
+    ///
+    /// A binding counts in the function it was made in: a name is cleared at
+    /// the next `fn`, so a `program` bound from a path somewhere else in the
+    /// file is not taken for one bound from `.program()`.
+    fn runtime_spawns(body: &str) -> Vec<usize> {
+        let code = crate::testsrc::code_of(body);
+        let mut bound: Vec<String> = Vec::new();
+        let mut hits = Vec::new();
+        for (i, (line, raw)) in code.lines().zip(body.lines()).enumerate() {
+            if line
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| w == "fn")
+            {
+                bound.clear();
+            }
+            if let Some((lhs, rhs)) = line.split_once('=') {
+                let name = lhs.trim().strip_prefix("let ").map(|n| {
+                    n.trim_start_matches("mut ")
+                        .split(':')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                });
+                if let (Some(name), true) = (name, rhs.contains(".program()")) {
+                    bound.push(name);
+                }
+            }
+            let Some(at) = line.find("Command::new(") else {
+                continue;
+            };
+            let arg = line[at + "Command::new(".len()..].trim_start();
+            let arg = arg.strip_prefix('&').unwrap_or(arg);
+            let by_binding = bound.iter().any(|b| {
+                arg.strip_prefix(b.as_str())
+                    .is_some_and(|rest| rest.trim_start().starts_with(')'))
+            });
+            let by_name = ["docker", "podman", "sbx"]
+                .iter()
+                .any(|p| raw.contains(&format!("Command::new(\"{p}\")")));
+            if line.contains(".program()") || by_binding || by_name {
+                hits.push(i + 1);
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn the_spawn_reader_sees_each_spelling() {
+        let two_lines = "let program = backend.program();\n\
+                         let out = std::process::Command::new(program).output();\n";
+        assert_eq!(runtime_spawns(two_lines), vec![2]);
+        let borrowed = "let mut p = rt.program();\nCommand::new(&p).arg(\"ps\");\n";
+        assert_eq!(runtime_spawns(borrowed), vec![2]);
+        let by_name = "std::process::Command::new(\"docker\").arg(\"ps\");\n";
+        assert_eq!(runtime_spawns(by_name), vec![1]);
+        let one_line = "Command::new(backend.program()).args(a);\n";
+        assert_eq!(runtime_spawns(one_line), vec![1]);
+        let through = "let program = backend.program();\nbackend.command().arg(program);\n";
+        assert!(
+            runtime_spawns(through).is_empty(),
+            "the backend's own command"
+        );
+        let elsewhere = "fn a() {\n    let program = rt.program();\n}\n\
+                         fn b(program: &Path) {\n    Command::new(program).output();\n}\n";
+        assert!(
+            runtime_spawns(elsewhere).is_empty(),
+            "a name bound in another function is not this one's"
+        );
+        let prose = "// Command::new(\"docker\") would bypass it\n";
+        assert!(runtime_spawns(prose).is_empty(), "a comment is not a spawn");
+    }
+
     /// The runtime's program is started from `Backend::command`, so a test's
     /// stand-in owns every spawn. A `Command::new(backend.program())` is a
     /// spawn the stand-in cannot see: the image build was one, and the
     /// default suite ran a real `docker build` through it.
+    ///
+    /// One spawn is the backend itself: `Backend::real`, which is what
+    /// `Backend::command` and `output` stand on.
     #[test]
     fn no_spawn_of_the_runtime_bypasses_the_backend() {
         let mut found = Vec::new();
         let mut files = 0;
         for (path, body) in crate::testsrc::production() {
             files += 1;
-            for (i, line) in crate::testsrc::code_of(&body).lines().enumerate() {
-                if line.contains("Command::new(") && line.contains(".program()") {
-                    found.push(format!("{}:{}", path.display(), i + 1));
+            for n in runtime_spawns(&body) {
+                let line = body.lines().nth(n - 1).unwrap_or_default();
+                let the_backend = path.ends_with("src/runtime.rs")
+                    && line.contains("Command::new(program).args(args).output()");
+                if !the_backend {
+                    found.push(format!("{}:{n}: {}", path.display(), line.trim()));
                 }
             }
         }
@@ -2010,7 +2097,7 @@ mod tests {
         );
         assert!(
             found.is_empty(),
-            "a spawn of the runtime that no stand-in can answer: {found:?}"
+            "a spawn of the runtime that no stand-in can answer: {found:#?}"
         );
     }
 }

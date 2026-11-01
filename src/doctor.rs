@@ -1617,6 +1617,21 @@ pub fn inspection_at(endpoint: &str, servername: &str) -> Inspection {
 /// Shared by the real probe and the canary that checks whether `-CAfile` is
 /// honoured at all, so the two cannot drift into asking differently.
 fn probe(endpoint: &str, servername: &str, roots: &std::path::Path) -> Option<String> {
+    probe_within(
+        endpoint,
+        servername,
+        roots,
+        std::time::Duration::from_secs(5),
+    )
+}
+
+/// [`probe`], with the deadline a test can shorten.
+fn probe_within(
+    endpoint: &str,
+    servername: &str,
+    roots: &std::path::Path,
+    limit: std::time::Duration,
+) -> Option<String> {
     use std::io::Read;
     let mut child = std::process::Command::new("openssl")
         .args([
@@ -1642,7 +1657,7 @@ fn probe(endpoint: &str, servername: &str, roots: &std::path::Path) -> Option<St
     // this runs before doctor has printed anything, so a corporate network
     // that drops direct 443 made `omh doctor` look hung. `.output()` cannot be
     // given a deadline, so the child is polled and killed.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + limit;
     let timed_out = loop {
         match child.try_wait() {
             Ok(Some(_)) => break false,
@@ -2331,12 +2346,18 @@ mod tests {
             "the fixture must actually produce a leaf"
         );
 
-        // Serve it, on a port nothing else is likely to hold.
+        // Serve it, on a port the kernel says is free. A fixed one collided
+        // with whatever else on the machine held it, and failed as a verdict.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .unwrap()
+            .port()
+            .to_string();
         let mut server = std::process::Command::new("openssl")
             .args([
                 "s_server",
                 "-accept",
-                "34443",
+                &port,
                 "-cert",
                 &at("leaf.pem"),
                 "-key",
@@ -2350,7 +2371,7 @@ mod tests {
             .expect("openssl s_server");
         std::thread::sleep(std::time::Duration::from_millis(1500));
 
-        let said = inspection_at("127.0.0.1:34443", "testserver");
+        let said = inspection_at(&format!("127.0.0.1:{port}"), "testserver");
         // Killed *and* reaped: a `kill` without a `wait` leaves a zombie for
         // as long as the test binary runs, and clippy is right to say so.
         let _ = server.kill();
@@ -2485,8 +2506,21 @@ mod tests {
     /// Driven against a real listener that accepts the TCP connection and then
     /// never completes the handshake, which is the shape a timeout has to
     /// survive — a closed port would return immediately and prove nothing.
+    ///
+    /// **And it has to reach the deadline.** With no `openssl` on PATH the
+    /// spawn fails, `probe` answers `None` at once, and this passed in no time
+    /// having timed nothing out. So `openssl` is required here, and the probe
+    /// must have run for its whole deadline — a short one, so the test does
+    /// not pay the real five seconds.
     #[test]
     fn a_server_that_never_answers_does_not_hang_the_probe() {
+        assert!(
+            std::process::Command::new("openssl")
+                .arg("version")
+                .output()
+                .is_ok_and(|o| o.status.success()),
+            "this test drives a real `openssl s_client`, and there is none on PATH"
+        );
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         // Accept and hold. Never write, never close.
@@ -2500,15 +2534,22 @@ mod tests {
             }
         });
 
-        let roots = std::env::temp_dir().join("omh-probe-timeout-test.pem");
+        let dir = tempfile::tempdir().unwrap();
+        let roots = dir.path().join("roots.pem");
         std::fs::write(&roots, CANARY).unwrap();
 
+        let limit = std::time::Duration::from_secs(1);
         let began = std::time::Instant::now();
-        let said = probe(&format!("127.0.0.1:{port}"), "testserver", &roots);
+        let said = probe_within(&format!("127.0.0.1:{port}"), "testserver", &roots, limit);
         let took = began.elapsed();
 
         assert!(
-            took < std::time::Duration::from_secs(20),
+            took >= limit,
+            "the probe gave up after {took:?}, before its deadline — it never \
+             reached the handshake that hangs, so nothing here was timed out"
+        );
+        assert!(
+            took < limit * 10,
             "the probe must give up on a server that never answers; it took {took:?}"
         );
         assert!(
@@ -2523,7 +2564,6 @@ mod tests {
         ));
 
         drop(held);
-        let _ = std::fs::remove_file(&roots);
     }
 
     /// **Six ways of failing told the user the same false thing.**
@@ -5044,18 +5084,26 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
-    /// This repo's own catalogue and settings, audited by the function
-    /// `omh doctor` runs — the CI gate. It needs no container, so it must
-    /// run on every platform CI builds on, not only the one with Docker.
+    /// This repo's shipped catalogue, audited by the function `omh doctor`
+    /// runs — the CI gate. It needs no container, so it must run on every
+    /// platform CI builds on, not only the one with Docker.
+    ///
+    /// **What ships, and nothing of the machine running it.** The repo side
+    /// was this checkout, whose `.omh/` git ignores: in CI there is none, and
+    /// on a developer's laptop it is their own settings — so a typo in a file
+    /// nobody else has failed this test there and nowhere else. The repo is an
+    /// empty one; the catalogue is copied from what git carries.
     #[test]
-    fn this_repos_own_config_audits_clean() {
+    fn this_repos_shipped_catalogue_audits_clean() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
-            root: dir.path().to_path_buf(),
-            repo: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
         };
+        std::fs::create_dir_all(paths.repo.join(".git")).unwrap();
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR"));
         for kind in ["base", "adapters", "hooks", "stacks"] {
-            let src = paths.repo.join(kind);
+            let src = shipped.join(kind);
             let dst = paths.root.join(kind);
             std::fs::create_dir_all(&dst).unwrap();
             for entry in std::fs::read_dir(src).unwrap().flatten() {
@@ -5063,6 +5111,7 @@ mod tests {
             }
         }
         let rows = audit(&paths);
+        assert!(rows.len() > 1, "the audit checked nothing: {rows:?}");
         for row in &rows {
             assert!(row.ok, "{}: {}", row.name, row.detail);
         }
