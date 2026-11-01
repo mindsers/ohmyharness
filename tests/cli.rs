@@ -19675,6 +19675,51 @@ fn a_provider_under_omh_is_never_read_through_a_link_and_is_named_when_kept() {
         std::fs::rename(&aside, level).unwrap();
     }
 
+    // Nor when `~/.omh` is spelled another way — through a link to the home,
+    // as a symlinked home directory spells it: where the file is decides,
+    // not how it was written.
+    let alias = sb.home.parent().unwrap().join("alias");
+    std::os::unix::fs::symlink(&sb.home, &alias).unwrap();
+    let respelled = alias.join(linked.strip_prefix(&sb.home).unwrap());
+    std::fs::remove_file(&linked).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+    let out = login(&respelled);
+    assert!(
+        !out.status.success() && !root.join("creds/omp/default/provider.yml").exists(),
+        "read through a link under ~/.omh spelled another way: {}",
+        printed(&out)
+    );
+    std::fs::remove_file(&linked).unwrap();
+    std::fs::copy(&elsewhere, &linked).unwrap();
+
+    // Spelled that way, with a directory under `~/.omh` a link out of it:
+    // resolving the file's directory leads outside, which is no reason to
+    // follow the link there.
+    let creds = root.join("creds");
+    let outside = sb.home.join("outside-creds");
+    std::fs::rename(&creds, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &creds).unwrap();
+    let out = login(&respelled);
+    assert!(
+        !out.status.success() && !outside.join("omp/default/provider.yml").exists(),
+        "read through a link out of ~/.omh spelled another way: {}",
+        printed(&out)
+    );
+    std::fs::remove_file(&creds).unwrap();
+    std::fs::rename(&outside, &creds).unwrap();
+
+    // And a link of your own into a directory under `~/.omh` enters it
+    // somewhere no walk from `~/.omh` starts: refused, naming the way in.
+    let shortcut = sb.home.join("shortcut");
+    std::os::unix::fs::symlink(linked.parent().unwrap(), &shortcut).unwrap();
+    let out = login(&shortcut.join("models.yaml"));
+    assert!(
+        !out.status.success() && printed(&out).contains("through a link at"),
+        "entered ~/.omh below its top: {}",
+        printed(&out)
+    );
+    std::fs::remove_file(&shortcut).unwrap();
+
     let out = login(&linked);
     assert!(out.status.success(), "{}", printed(&out));
     assert!(
