@@ -1500,6 +1500,43 @@ fn a_carried_file_is_not_something_the_shadow_tracks() {
     );
 }
 
+/// A carried path is excluded as the path it is, never read as a pattern:
+/// `#notes` was a comment, `config[dev].json` a character class, `!keep` a
+/// negation, so each stayed in the agent's `git status`, where `git add -A`
+/// commits it — the secret `carry_in` exists to hand over without that.
+#[test]
+fn a_carried_path_is_excluded_as_itself() {
+    let (_d, wt, shadow_dir) = fixture();
+    let carried = ["#notes", "config[dev].json", "!keep", "star*"];
+    for name in carried {
+        std::fs::write(wt.join(name), "SECRET=1\n").unwrap();
+    }
+    let s = Shadow::new(&shadow_dir, "s01");
+    let excluded: Vec<String> = carried.iter().map(|n| n.to_string()).collect();
+    s.ensure(&wt, &excluded).unwrap();
+    let tracked = git(&s.gitdir, &wt, &["ls-files"]).unwrap();
+    let status = git(
+        &s.gitdir,
+        &wt,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .unwrap();
+    for name in carried {
+        assert!(
+            !tracked.contains(name),
+            "{name} was committed into the seed: {tracked:?}"
+        );
+        assert!(
+            !status.contains(name),
+            "{name} is in the agent's status: {status:?}"
+        );
+    }
+    // And only itself: a pattern read off `star*` would hide `starling`.
+    std::fs::write(wt.join("starling"), "x\n").unwrap();
+    let status = git(&s.gitdir, &wt, &["status", "--porcelain"]).unwrap();
+    assert!(status.contains("starling"), "{status:?}");
+}
+
 /// The one thing that stays walled. Everything else about this repo is
 /// meant to work, so the agent has no standing reason to think a push
 /// would — and `git push` reaching a real remote is the one mistake that
@@ -3910,7 +3947,8 @@ fn a_relaunch_does_not_write_the_exclude_list_through_a_link() {
         !exclude.symlink_metadata().unwrap().file_type().is_symlink(),
         "and the link is gone rather than stepped around"
     );
-    assert_eq!(std::fs::read_to_string(&exclude).unwrap(), ".env\n");
+    // Anchored, as every entry is: a path from the root, never a pattern.
+    assert_eq!(std::fs::read_to_string(&exclude).unwrap(), "/.env\n");
 
     // And the directory it sits in.
     let elsewhere = d.path().join("elsewhere");
@@ -3931,7 +3969,7 @@ fn a_relaunch_does_not_write_the_exclude_list_through_a_link() {
     );
     assert_eq!(
         std::fs::read_to_string(info.join("exclude")).unwrap(),
-        ".env\n"
+        "/.env\n"
     );
 }
 

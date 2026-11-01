@@ -711,9 +711,17 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         &live,
     ) {
         match image::container_remove(&backend, &paths.container(&id)) {
-            Ok(()) => ctx.progress(&format!(
-                "stopped {id} — idle over {raw} (worktree and branch survive)"
-            )),
+            Ok(()) => {
+                // Its network with it, as `down` takes it: the reaper took the
+                // container only, and with `idle_timeout` set the networks
+                // left walked toward the runtime's address-pool limit.
+                if let Err(e) = image::network_remove(&backend, &paths.session_network(&id)) {
+                    ctx.warn(&format!("{id}'s network was left behind: {e:#}"));
+                }
+                ctx.progress(&format!(
+                    "stopped {id} — idle over {raw} (worktree and branch survive)"
+                ))
+            }
             Err(e) => ctx.warn(&format!("could not stop idle session {id}: {e}")),
         }
     }
@@ -789,6 +797,12 @@ pub(crate) fn down(
         let name = paths.container(i);
         match image::running_in(&up, &name) {
             image::Running::No => {
+                // Not running is not without a network: one the reaper or a
+                // crash stopped kept it, since this `continue`d before the
+                // removal below.
+                if let Err(e) = image::network_remove(&backend, &paths.session_network(i)) {
+                    ctx.warn(&format!("{i}'s network was left behind: {e:#}"));
+                }
                 down.push(i.clone());
                 sessions.push((i.clone(), report::Stopped::WasNotRunning));
                 continue;

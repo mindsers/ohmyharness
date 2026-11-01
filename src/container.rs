@@ -1504,6 +1504,21 @@ fn symlink(src: &Path, dst: &Path) -> Result<()> {
         .with_context(|| format!("linking {} -> {}", dst.display(), src.display()))
 }
 
+/// Whether `path` can be the host side of a mount. Docker's and podman's
+/// `-v` read `:` as the separator between host, guest and options, so a path
+/// holding one is handed over as a mount they cannot parse, and the launch
+/// fails in their words instead of omh's.
+pub fn mountable(path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !path.as_os_str().as_encoded_bytes().contains(&b':'),
+        "{} holds a `:`, which docker's and podman's `-v` read as the separator \
+         between a mount's parts, so omh cannot mount it — move it to a path \
+         without one",
+        path.display()
+    );
+    Ok(())
+}
+
 impl Plan {
     /// Refuse a plan the chosen backend cannot honour. Starting a sandbox where
     /// the catalogue silently is not there is the worst available outcome.
@@ -1519,6 +1534,9 @@ impl Plan {
     }
 
     pub fn validate(&self, caps: &crate::runtime::Caps) -> Result<()> {
+        for m in &self.mounts {
+            mountable(&m.host)?;
+        }
         let mut problems = Vec::new();
         for m in &self.mounts {
             if !caps.file_mounts && m.file {
@@ -1595,6 +1613,13 @@ impl Plan {
             ("omh.mounts".into(), mounts.join("\n")),
             ("omh.env".into(), env.join("\n")),
             ("omh.limits".into(), self.limits.stamp()),
+            // What confines it, as the flags that do: a release that changes
+            // `SESSION_CAPS` or the pids limit alone read as no drift, and the
+            // running container kept the old ones.
+            (
+                "omh.confinement".into(),
+                crate::runtime::confinement(self).join("\n"),
+            ),
         ]
     }
 
@@ -2744,7 +2769,9 @@ mod tests {
             std::fs::read_to_string(shadow.gitdir.join("info/exclude")).expect("a seeded shadow");
         for rel in staged {
             assert!(
-                exclude.lines().any(|l| l == rel),
+                exclude
+                    .lines()
+                    .any(|l| l == crate::shadow::literal_pattern(&rel)),
                 "omh mounts {rel} into the worktree, so the sandbox's repository \
                  must not track it. exclude list was:\n{exclude}"
             );
@@ -2791,7 +2818,9 @@ mod tests {
             std::fs::read_to_string(shadow.gitdir.join("info/exclude")).expect("a seeded shadow");
         for rel in arrived {
             assert!(
-                exclude.lines().any(|l| l == *rel),
+                exclude
+                    .lines()
+                    .any(|l| l == crate::shadow::literal_pattern(rel)),
                 "{rel} was mounted by the second launch and the sandbox built by the \
                  first has never heard of it. exclude list was:\n{exclude}"
             );

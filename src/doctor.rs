@@ -2017,24 +2017,13 @@ fn server_names(
 pub fn probe_programs(programs: &[&str]) -> String {
     let mut out = String::from("#!/bin/sh\n");
     for p in programs {
-        let q = single_quote(p);
+        let q = crate::quote::sh(p);
         out.push_str(&format!(
             "if command -v {q} >/dev/null 2>&1; then printf 'ok\\t%s\\tresolves\\n' {q}; \
              else printf 'fail\\t%s\\tnot installed in the sandbox\\n' {q}; fi\n"
         ));
     }
     out
-}
-
-/// Wrap a word so the shell reads it as one literal, whatever is in it.
-///
-/// Program names reach here from commands a person wrote, so they are not
-/// omh's to trust: a stray quote would otherwise end the literal early and the
-/// rest of the name would be read as shell. Single quotes suspend every
-/// expansion, and the one character they cannot contain is closed, escaped and
-/// reopened — the standard `'\''` idiom.
-pub(crate) fn single_quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 /// Run a generated probe through a real `/bin/sh`, in `cwd`, and hand back its
@@ -2062,12 +2051,15 @@ pub(crate) fn run_probe_in(script: &str, cwd: &std::path::Path) -> String {
 pub fn probe_script(checks: &[Check]) -> String {
     let mut out = String::from("#!/bin/sh\n");
     for check in checks {
-        let path = check.guest.display();
-        let name = &check.name;
+        // Every value as one quoted word, and never inside a `printf` format:
+        // a path sat in bare single quotes, so a `'` in it broke the script,
+        // and in the format, so a `%` was read as a directive.
+        let p = crate::quote::sh(&check.guest.display().to_string());
+        let n = crate::quote::sh(&check.name);
         match &check.expect {
             Expect::NonEmptyFile => out.push_str(&format!(
-                "if [ -s '{path}' ]; then printf 'ok\\t{name}\\t{path}\\n'; \
-                 else printf 'fail\\t{name}\\t{path} missing or empty\\n'; fi\n"
+                "if [ -s {p} ]; then printf 'ok\\t%s\\t%s\\n' {n} {p}; \
+                 else printf 'fail\\t%s\\t%s missing or empty\\n' {n} {p}; fi\n"
             )),
             // `node --check` inside the sandbox, for the same reason
             // `Expect::Speaks` runs a handshake there: the question is whether
@@ -2080,34 +2072,34 @@ pub fn probe_script(checks: &[Check]) -> String {
             // check that cannot fail. The staged file keeps its `.ts` name
             // because that is what opencode loads.
             Expect::Parses(names) => out.push_str(&format!(
-                "cp '{path}' /tmp/omh-probe.mjs 2>/dev/null; \
+                "cp {p} /tmp/omh-probe.mjs 2>/dev/null; \
                  if ! err=$(node --check /tmp/omh-probe.mjs 2>&1); then \
-                   printf 'fail\\t{name}\\tdoes not parse: %s\\n' \"$err\"; \
-                 else missing=''; for n in {}; do grep -q -- \"$n\" '{path}' || missing=\"$missing $n\"; done; \
-                   if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path}\\n'; \
-                   else printf 'fail\\t{name}\\tmissing:%s\\n' \"$missing\"; fi; fi\n",
-                shell_list(names)
+                   printf 'fail\\t%s\\tdoes not parse: %s\\n' {n} \"$err\"; \
+                 else missing=''; for w in {}; do grep -qF -- \"$w\" {p} || missing=\"$missing $w\"; done; \
+                   if [ -z \"$missing\" ]; then printf 'ok\\t%s\\t%s\\n' {n} {p}; \
+                   else printf 'fail\\t%s\\tmissing:%s\\n' {n} \"$missing\"; fi; fi\n",
+                crate::quote::sh_words(names)
             )),
             // Preserve what is there: a probe that costs the user their token
             // is worse than no probe. The directory case writes a scratch file
             // and removes it; the file case renames byte-identical content back.
             Expect::AtomicWrite if check.dir => out.push_str(&format!(
-                "if ( echo probe > '{path}/.omh-probe.tmp' && mv '{path}/.omh-probe.tmp' '{path}/.omh-probe' ) 2>/dev/null; \
-                 then printf 'ok\\t{name}\\t{path} (atomic write)\\n'; \
-                 else printf 'fail\\t{name}\\t{path} cannot be renamed over (EBUSY?)\\n'; fi; \
-                 rm -f '{path}/.omh-probe' '{path}/.omh-probe.tmp' 2>/dev/null\n"
+                "if ( echo probe > {p}/.omh-probe.tmp && mv {p}/.omh-probe.tmp {p}/.omh-probe ) 2>/dev/null; \
+                 then printf 'ok\\t%s\\t%s (atomic write)\\n' {n} {p}; \
+                 else printf 'fail\\t%s\\t%s cannot be renamed over (EBUSY?)\\n' {n} {p}; fi; \
+                 rm -f {p}/.omh-probe {p}/.omh-probe.tmp 2>/dev/null\n"
             )),
             Expect::AtomicWrite => out.push_str(&format!(
-                "if ( cp '{path}' '{path}.omh-probe' && mv '{path}.omh-probe' '{path}' ) 2>/dev/null; \
-                 then printf 'ok\\t{name}\\t{path} (atomic write)\\n'; \
-                 else printf 'fail\\t{name}\\t{path} cannot be renamed over — a token saved here will not persist\\n'; fi; \
-                 rm -f '{path}.omh-probe' 2>/dev/null\n"
+                "if ( cp {p} {p}.omh-probe && mv {p}.omh-probe {p} ) 2>/dev/null; \
+                 then printf 'ok\\t%s\\t%s (atomic write)\\n' {n} {p}; \
+                 else printf 'fail\\t%s\\t%s cannot be renamed over — a token saved here will not persist\\n' {n} {p}; fi; \
+                 rm -f {p}.omh-probe 2>/dev/null\n"
             )),
             Expect::Entries(names) => out.push_str(&format!(
-                "missing=''; for n in {}; do [ -e '{path}'/\"$n\" ] || missing=\"$missing $n\"; done; \
-                 if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path}\\n'; \
-                 else printf 'fail\\t{name}\\tmissing:%s\\n' \"$missing\"; fi\n",
-                shell_list(names)
+                "missing=''; for w in {}; do [ -e {p}/\"$w\" ] || missing=\"$missing $w\"; done; \
+                 if [ -z \"$missing\" ]; then printf 'ok\\t%s\\t%s\\n' {n} {p}; \
+                 else printf 'fail\\t%s\\tmissing:%s\\n' {n} \"$missing\"; fi\n",
+                crate::quote::sh_words(names)
             )),
             // Three frames down a pipe: initialize, the notification the
             // protocol requires after it, then tools/list. Reading the reply
@@ -2118,10 +2110,13 @@ pub fn probe_script(checks: &[Check]) -> String {
                   '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"omh-doctor\",\"version\":\"0\"}}}}}}' \
                   '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}' \
                   '{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{{}}}}'; }} | {path} 2>/dev/null ); \
-                  missing=''; for n in {}; do printf '%s' \"$out\" | grep -q \"$n\" || missing=\"$missing $n\"; done; \
-                  if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t%s\\n' \"$(printf '%s' \"$out\" | grep -o 'The store [^.]*' | head -1)\"; \
-                  else printf 'fail\\t{name}\\tno reply naming:%s\\n' \"$missing\"; fi\n",
-                shell_list(names)
+                  missing=''; for w in {}; do printf '%s' \"$out\" | grep -qF -- \"$w\" || missing=\"$missing $w\"; done; \
+                  if [ -z \"$missing\" ]; then printf 'ok\\t%s\\t%s\\n' {n} \"$(printf '%s' \"$out\" | grep -o 'The store [^.]*' | head -1)\"; \
+                  else printf 'fail\\t%s\\tno reply naming:%s\\n' {n} \"$missing\"; fi\n",
+                crate::quote::sh_words(names),
+                // Not quoted: this "path" is the server's command line, its
+                // arguments included, and runs as one.
+                path = check.guest.display(),
             )),
             // Run from the document's own directory, which is the check rather
             // than incidental: a harness that finds its config by project root
@@ -2137,19 +2132,26 @@ pub fn probe_script(checks: &[Check]) -> String {
                 command,
                 names,
                 ready,
+            //
+            // The command and the ready word reach `printf` as arguments: in
+            // the format, as they were, a `%` was a directive, and the ready
+            // word's quotes were deleted to keep the format's quoting whole.
             } => out.push_str(&format!(
-                "out=$( cd '{path}' 2>/dev/null && {command} 2>&1 ); missing=''; \
-                 for n in {}; do printf '%s\\n' \"$out\" | grep -- \"$n\" | grep -q -- '{ready}' || missing=\"$missing $n\"; done; \
-                 if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path} ({command}: {ready})\\n'; \
-                 else printf 'fail\\t{name}\\t{command} in {path} does not report as {ready}:%s\\n' \"$missing\"; fi\n",
-                shell_list(names),
-                ready = ready.replace('\'', ""),
+                "out=$( cd {p} 2>/dev/null && {command} 2>&1 ); missing=''; \
+                 for w in {}; do printf '%s\\n' \"$out\" | grep -F -- \"$w\" | grep -qF -- {ready} || missing=\"$missing $w\"; done; \
+                 if [ -z \"$missing\" ]; then printf 'ok\\t%s\\t%s (%s: %s)\\n' {n} {p} {cmd} {ready}; \
+                 else printf 'fail\\t%s\\t%s in %s does not report as %s:%s\\n' {n} {cmd} {p} {ready} \"$missing\"; fi\n",
+                crate::quote::sh_words(names),
+                cmd = crate::quote::sh(command),
+                ready = crate::quote::sh(ready),
             )),
+            // `grep -F --`: a name is a name, not a pattern — read as one,
+            // `a.b` was found in a file holding `axb`.
             Expect::Mentions(names) => out.push_str(&format!(
-                "missing=''; for n in {}; do grep -q \"$n\" '{path}' 2>/dev/null || missing=\"$missing $n\"; done; \
-                 if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path}\\n'; \
-                 else printf 'fail\\t{name}\\tmissing:%s\\n' \"$missing\"; fi\n",
-                shell_list(names)
+                "missing=''; for w in {}; do grep -qF -- \"$w\" {p} 2>/dev/null || missing=\"$missing $w\"; done; \
+                 if [ -z \"$missing\" ]; then printf 'ok\\t%s\\t%s\\n' {n} {p}; \
+                 else printf 'fail\\t%s\\tmissing:%s\\n' {n} \"$missing\"; fi\n",
+                crate::quote::sh_words(names)
             )),
             // One fact, so `ready` is looked for anywhere in stdout rather than
             // on a line with a name beside it.
@@ -2182,38 +2184,27 @@ pub fn probe_script(checks: &[Check]) -> String {
             // a permission error, a missing library, a config it refused.
             // `command` reaches `printf` as an argument, as in `Answers`.
             Expect::Starts { command } => out.push_str(&format!(
-                "out=$( cd '{path}' 2>/dev/null && {command} 2>&1 ); code=$?; \
-                 if [ \"$code\" -eq 0 ]; then printf 'ok\\t{name}\\t%s\\n' {cmd}; \
-                 else printf 'fail\\t{name}\\t%s exited %s: %s\\n' {cmd} \"$code\" \
+                "out=$( cd {p} 2>/dev/null && {command} 2>&1 ); code=$?; \
+                 if [ \"$code\" -eq 0 ]; then printf 'ok\\t%s\\t%s\\n' {n} {cmd}; \
+                 else printf 'fail\\t%s\\t%s exited %s: %s\\n' {n} {cmd} \"$code\" \
                    \"$(printf '%s' \"$out\" | head -c 300 | tr '\\n' ' ')\"; fi\n",
-                cmd = single_quote(command),
+                cmd = crate::quote::sh(command),
             )),
             Expect::Answers { command, ready } => out.push_str(&format!(
                 "e=$(mktemp 2>/dev/null || echo /tmp/omh-login.$$); \
-                 out=$( cd '{path}' 2>/dev/null && {command} 2>\"$e\" ); code=$?; \
+                 out=$( cd {p} 2>/dev/null && {command} 2>\"$e\" ); code=$?; \
                  err=$(cat \"$e\" 2>/dev/null); rm -f \"$e\"; \
                  if [ \"$code\" -eq 0 ] && printf '%s' \"$out\" | grep -qF -- {ready}; \
-                 then printf 'ok\\t{name}\\t%s reports %s\\n' {cmd} {ready}; \
-                 else printf 'fail\\t{name}\\t%s exited %s without %s: %s\\n' \
+                 then printf 'ok\\t%s\\t%s reports %s\\n' {n} {cmd} {ready}; \
+                 else printf 'fail\\t%s\\t%s exited %s without %s: %s\\n' {n} \
                    {cmd} \"$code\" {ready} \
                    \"$(printf '%s %s' \"$out\" \"$err\" | head -c 200 | tr '\\n' ' ')\"; fi\n",
-                cmd = single_quote(command),
-                ready = single_quote(ready),
+                cmd = crate::quote::sh(command),
+                ready = crate::quote::sh(ready),
             )),
         }
     }
     out
-}
-
-fn shell_list(names: &[String]) -> String {
-    if names.is_empty() {
-        return "''".into();
-    }
-    names
-        .iter()
-        .map(|n| format!("'{}'", n.replace('\'', "")))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub fn parse(output: &str) -> Vec<Outcome> {
@@ -4465,6 +4456,66 @@ mod tests {
         );
     }
 
+    /// Every value a check carries reaches the probe as one literal word, and
+    /// never inside a `printf` format. Three ways it did not:
+    ///
+    /// - a path sat in bare single quotes, so one holding a `'` broke the
+    ///   script, and in the format, so a `%` was read as a directive;
+    /// - `shell_list` deleted a quote rather than escaping it, so a skill
+    ///   called `don't-panic` was looked for as `dont-panic`, and `grep` read
+    ///   each name as a pattern, so `a.b` was found in a file holding `axb`;
+    /// - `Loaded` put its command and ready word in the format, with the ready
+    ///   word's quotes deleted.
+    #[cfg(unix)]
+    #[test]
+    fn a_checks_values_reach_the_probe_as_literals() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("it's 100%");
+        std::fs::create_dir_all(dir.join("don't-panic")).unwrap();
+        std::fs::write(dir.join("doc"), "don't-panic a.b\n").unwrap();
+        std::fs::write(dir.join("near"), "don't-panic axb\n").unwrap();
+        let check = |name: &str, file: &str, expect: Expect| Check {
+            name: name.into(),
+            guest: dir.join(file),
+            expect,
+            dir: false,
+        };
+        let names = vec!["don't-panic".to_string(), "a.b".to_string()];
+        let checks = [
+            check("there", "doc", Expect::NonEmptyFile),
+            check("mentions", "doc", Expect::Mentions(names.clone())),
+            check("near", "near", Expect::Mentions(names.clone())),
+            Check {
+                name: "entries".into(),
+                guest: dir.clone(),
+                expect: Expect::Entries(vec!["don't-panic".into()]),
+                dir: true,
+            },
+            Check {
+                name: "loaded".into(),
+                guest: dir.clone(),
+                expect: Expect::Loaded {
+                    command: "printf 'srv it'\\''s 100%% up\\n'".into(),
+                    names: vec!["srv".into()],
+                    ready: "it's 100% up".into(),
+                },
+                dir: true,
+            },
+        ];
+        let outcomes = parse(&run_probe(&probe_script(&checks)));
+        let ok = |name: &str| {
+            outcomes
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("nothing said about {name}: {outcomes:?}"))
+                .ok
+        };
+        for name in ["there", "mentions", "entries", "loaded"] {
+            assert!(ok(name), "{name}: {outcomes:?}");
+        }
+        assert!(!ok("near"), "`a.b` was found in `axb`: {outcomes:?}");
+    }
+
     /// Program names are read out of commands a person wrote, so they are not
     /// omh's to trust. Interpolated bare, a name carrying a quote ends the
     /// shell literal early and everything after it is read as shell — which
@@ -4805,8 +4856,8 @@ mod tests {
             format!(
                 "#!/bin/sh\nif [ \"$1 $2\" = 'merge-tree -h' ]; then \
                  printf '%s\\n' {usage} >&2; exit 129; fi\nprintf '%s\\n' {version}\n",
-                usage = single_quote(usage),
-                version = single_quote(version),
+                usage = crate::quote::sh(usage),
+                version = crate::quote::sh(version),
             ),
         )
         .unwrap();

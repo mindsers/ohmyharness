@@ -699,6 +699,12 @@ pub(crate) fn doctor_cmd(
             &paths.repo,
         )?;
         image::ensure_network(&backend, &plan.network)?;
+        // Gone with the probe, as a login's is: doctor left it behind on
+        // every run.
+        let _network_cleanup = image::NetworkCleanup {
+            backend: &backend,
+            name: &plan.network,
+        };
 
         let account_name = account
             .as_ref()

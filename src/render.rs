@@ -1251,7 +1251,10 @@ fn opencode_plugin(
         // Every hook in a handler shares its parameter list, which is why the
         // drop above has to happen before a hook reaches one.
         let args = Slot::of(handler).args();
-        out.push_str(&format!("  {handler:?}: async {args} => {{\n"));
+        out.push_str(&format!(
+            "  {}: async {args} => {{\n",
+            crate::quote::js(handler)
+        ));
         for block in blocks {
             out.push_str(block);
         }
@@ -1437,9 +1440,9 @@ fn omp_one_hook(
     // hold its result. opencode needs both because its harness gives one
     // handler per moment and omh has to share it; omp does not.
     let mut b = format!(
-        "  // {}\n  pi.on({:?}, async (event, ctx) => {{\n",
+        "  // {}\n  pi.on({}, async (event, ctx) => {{\n",
         label(name),
-        wired.event
+        crate::quote::js(wired.event)
     );
     if !wired.tools.is_empty() {
         let names = wired
@@ -1448,7 +1451,7 @@ fn omp_one_hook(
             // A vocabulary entry can name several tools, `edit|write`, which
             // Claude Code and Codex read as their own matcher; a list here.
             .flat_map(|t| t.split('|'))
-            .map(|t| format!("{t:?}"))
+            .map(crate::quote::js)
             .collect::<Vec<_>>()
             .join(", ");
         b.push_str(&format!(
@@ -1478,8 +1481,8 @@ fn omp_one_hook(
                 format!("event.input?.{at}")
             };
             b.push_str(&format!(
-                "    env[{:?}] = String({expr} ?? \"\")\n",
-                field.var()
+                "    env[{}] = String({expr} ?? \"\")\n",
+                crate::quote::js(field.var())
             ));
             if *field == hook::Field::ToolFile {
                 b.push_str(&hook::absolute_file_js("    ", true));
@@ -1492,17 +1495,17 @@ fn omp_one_hook(
     } = &hook.action
     {
         b.push_str(&format!(
-            "    const cap = sh({}, env)\n    if (!cap.ran || cap.code !== 0) warn({}, \"capture\", cap)\n    env[{:?}] = cap.out\n",
-            js(capture),
-            js(name),
-            hook::CAPTURE_VAR,
+            "    const cap = sh({}, env)\n    if (!cap.ran || cap.code !== 0) warn({}, \"capture\", cap)\n    env[{}] = cap.out\n",
+            crate::quote::js(capture),
+            crate::quote::js(name),
+            crate::quote::js(hook::CAPTURE_VAR),
         ));
     }
     if let Some(when) = &hook.when {
         b.push_str(&format!(
             "    const p = sh({}, env)\n    if (!p.ran || p.err) warn({}, \"its `when`\", p)\n",
-            js(when),
-            js(name),
+            crate::quote::js(when),
+            crate::quote::js(name),
         ));
         // A guard that could not be evaluated is not a guard that declined.
         // Both leave `p.code` at 1, and returning from `tool_call` means allow
@@ -1515,7 +1518,7 @@ fn omp_one_hook(
                 log_call(log, name, ledger::Decision::Unevaluated),
                 t.template.replace(
                     "{{text}}",
-                    &js(&format!(
+                    &crate::quote::js(&format!(
                         "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
                     )),
                 ),
@@ -1537,8 +1540,8 @@ fn omp_one_hook(
     match &hook.action {
         hook::Action::Run(run) => b.push_str(&format!(
             "    const r = sh({}, env)\n    if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
-            js(run),
-            js(name),
+            crate::quote::js(run),
+            crate::quote::js(name),
         )),
         hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
             let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
@@ -1549,9 +1552,9 @@ fn omp_one_hook(
                         "{{text}}",
                         &format!(
                             "t({}, {}, {}, env)",
-                            js(name),
-                            js(text),
-                            js(&hook::interpolating(text))
+                            crate::quote::js(name),
+                            crate::quote::js(text),
+                            crate::quote::js(&hook::interpolating(text))
                         ),
                     )
                     .replace("{{event}}", wired.event)
@@ -1580,7 +1583,8 @@ fn one_hook(
     // stops `graph-refresh` re-indexing on every message part.
     if let Slot::Bus { ty } = slot {
         b.push_str(&format!(
-            "      if (input?.event?.type !== {ty:?}) return\n"
+            "      if (input?.event?.type !== {}) return\n",
+            crate::quote::js(ty)
         ));
     }
     if !wired.tools.is_empty() {
@@ -1590,7 +1594,7 @@ fn one_hook(
             // A vocabulary entry can name several tools, `edit|write`, which
             // Claude Code and Codex read as their own matcher; a list here.
             .flat_map(|t| t.split('|'))
-            .map(|t| format!("{t:?}"))
+            .map(crate::quote::js)
             .collect::<Vec<_>>()
             .join(", ");
         b.push_str(&format!(
@@ -1611,8 +1615,8 @@ fn one_hook(
                 format!("{args}?.args?.{at}")
             };
             b.push_str(&format!(
-                "      env[{:?}] = String({expr} ?? \"\")\n",
-                field.var()
+                "      env[{}] = String({expr} ?? \"\")\n",
+                crate::quote::js(field.var())
             ));
             if *field == hook::Field::ToolFile {
                 b.push_str(&hook::absolute_file_js("      ", false));
@@ -1625,17 +1629,17 @@ fn one_hook(
     } = &hook.action
     {
         b.push_str(&format!(
-            "      const cap = sh({}, env)\n      if (!cap.ran || cap.code !== 0) warn({}, \"capture\", cap)\n      env[{:?}] = cap.out\n",
-            js(capture),
-            js(name),
-            hook::CAPTURE_VAR,
+            "      const cap = sh({}, env)\n      if (!cap.ran || cap.code !== 0) warn({}, \"capture\", cap)\n      env[{}] = cap.out\n",
+            crate::quote::js(capture),
+            crate::quote::js(name),
+            crate::quote::js(hook::CAPTURE_VAR),
         ));
     }
     if let Some(when) = &hook.when {
         b.push_str(&format!(
             "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n",
-            js(when),
-            js(name),
+            crate::quote::js(when),
+            crate::quote::js(name),
         ));
         // Fails closed, as `omp_one_hook` does and for its reason: a shell
         // that never started leaves `p.code` at 1, the same as a guard that
@@ -1649,7 +1653,7 @@ fn one_hook(
                 t.template
                     .replace(
                         "{{text}}",
-                        &js(&format!(
+                        &crate::quote::js(&format!(
                             "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
                         )),
                     )
@@ -1678,8 +1682,8 @@ fn one_hook(
         // saying rather than discarding.
         hook::Action::Run(run) => b.push_str(&format!(
             "      const r = sh({}, env)\n      if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
-            js(run),
-            js(name),
+            crate::quote::js(run),
+            crate::quote::js(name),
         )),
         // The harness's protocol comes from the adapter, as it does for every
         // other render. `{{text}}` receives an expression evaluating to the
@@ -1694,9 +1698,9 @@ fn one_hook(
                         "{{text}}",
                         &format!(
                             "t({}, {}, {}, env)",
-                            js(name),
-                            js(text),
-                            js(&hook::interpolating(text))
+                            crate::quote::js(name),
+                            crate::quote::js(text),
+                            crate::quote::js(&hook::interpolating(text))
                         ),
                     )
                     .replace("{{event}}", wired.event)
@@ -1714,28 +1718,13 @@ fn one_hook(
 fn log_call(log: Option<&str>, name: &str, decision: ledger::Decision) -> String {
     match log {
         Some(path) => format!(
-            "omh_log({}, {}, {:?}); ",
-            js(path),
-            js(name),
-            decision.wire()
+            "omh_log({}, {}, {}); ",
+            crate::quote::js(path),
+            crate::quote::js(name),
+            crate::quote::js(decision.wire())
         ),
         None => String::new(),
     }
-}
-
-/// A Rust string as a JavaScript string literal. Through `serde_json` because
-/// JSON string syntax is a subset of JavaScript's, and hand-rolling the escapes
-/// for a hook body — which holds quotes, backslashes and newlines by design —
-/// is how a generated program stops parsing.
-///
-/// U+2028 and U+2029 are escaped too. `serde_json` leaves them raw, which is
-/// legal inside a string literal since ES2019 — but they end a line anywhere
-/// else, so the literal is safe wherever it lands.
-fn js(s: &str) -> String {
-    serde_json::to_string(s)
-        .unwrap_or_else(|_| "\"\"".into())
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
 }
 
 /// A hook's name as the `//` comment labelling its handler.
@@ -1749,7 +1738,7 @@ fn label(name: &str) -> String {
         .chars()
         .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
     {
-        js(name)
+        crate::quote::js(name)
     } else {
         name.to_string()
     }
@@ -3868,6 +3857,33 @@ mod tests {
             err.contains("session.idel") && err.contains("not an event opencode"),
             "{err}"
         );
+    }
+
+    /// Every string the hook modules carry is written as a JavaScript
+    /// literal, never with `{:?}`: Rust's debug syntax writes a NUL followed by
+    /// a digit as `"\01"`, which strict-mode JavaScript refuses as a legacy
+    /// octal escape — and the module with it, every hook in it. A tool name
+    /// comes from the adapter, so it can hold one.
+    #[test]
+    fn a_string_in_a_hook_module_is_a_js_literal() {
+        let hooks = BTreeMap::from([(
+            "guard".to_string(),
+            hook::Hook::parse(
+                r#"{"on":"before-tool","tools":["shell"],"run":"true"}"#,
+                "h",
+            )
+            .unwrap(),
+        )]);
+        let tools = BTreeMap::from([(hook::Tool::Shell, "sh\u{0}1".to_string())]);
+        for body in [
+            opencode_plugin(&hooks, opencode_hooks(), &tools, None)
+                .unwrap()
+                .body,
+            omp_plugin(&hooks, omp_hooks(), &tools, None).unwrap().body,
+        ] {
+            assert!(body.contains(r#""sh\u00001""#), "{body}");
+            assert!(!body.contains(r#""sh\01""#), "{body}");
+        }
     }
 
     fn omp() -> &'static Adapter {

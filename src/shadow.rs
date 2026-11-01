@@ -2408,10 +2408,12 @@ impl Shadow {
 
     /// The exclude list, where the agent's git reads it and, beside the
     /// gitdir, where only omh does.
+    ///
+    /// The record holds the patterns as written, not the paths: `hidden`
+    /// believes a line of `info/exclude` by finding it here.
     fn exclude(&self, gitdir: &Path, excluded: &[String]) -> Result<()> {
         Self::write_exclude(gitdir, excluded)?;
-        let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
-        replace_record(&self.exclude_record, body)
+        replace_record(&self.exclude_record, exclude_body(excluded))
     }
 
     /// Keep the agent's own `git status` clean at launch.
@@ -2446,8 +2448,7 @@ impl Shadow {
         // mounts it is about to make, which already covers omh's staged rules —
         // chaining `carry::STAGED_RULES` here as well only made the list
         // disagree with its own source when a capability changed.
-        let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
-        held.replace("exclude", body.as_bytes())
+        held.replace("exclude", exclude_body(excluded).as_bytes())
             .with_context(|| format!("writing {}", info.join("exclude").display()))?;
         Ok(())
     }
@@ -3611,6 +3612,40 @@ fn nested_refusal(held: &[String]) -> String {
          it out, then run this again",
         of_their_own(held)
     )
+}
+
+/// A path as a gitignore pattern that matches it and nothing else.
+///
+/// `info/exclude` reads patterns, and `carry_in` names paths: `#notes` was a
+/// comment, `config[dev].json` a character class and `!keep` a negation, so
+/// each was committed into the seed and stayed in the agent's `git status`;
+/// `star*` hid files nobody carried. Anchored at the root, as an entry is a
+/// path from it — which also keeps a leading `#` or `!` from meaning anything
+/// — and every character a pattern gives meaning to escaped, trailing spaces
+/// included, which git would otherwise drop.
+pub(crate) fn literal_pattern(path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let kept = path.trim_end_matches(' ').len();
+    let mut out = String::from("/");
+    for (i, c) in path.char_indices() {
+        match c {
+            '\\' | '*' | '?' | '[' | ']' => {
+                out.push('\\');
+                out.push(c);
+            }
+            ' ' if i >= kept => out.push_str("\\ "),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The exclude list as `info/exclude` holds it, and as its record does.
+fn exclude_body(excluded: &[String]) -> String {
+    excluded
+        .iter()
+        .map(|n| format!("{}\n", literal_pattern(n)))
+        .collect()
 }
 
 #[cfg(test)]

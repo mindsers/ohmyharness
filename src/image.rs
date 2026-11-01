@@ -510,8 +510,13 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     let ca_layer = ca_layer(ca);
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
+    //
+    // By digest: the tag is one its publisher moves, so the image every
+    // session runs in changed under an unchanged omh. The multi-arch index,
+    // read 2026-11-01 with `docker buildx imagetools inspect
+    // node:22-trixie-slim`; moved by hand, as nothing else reads this recipe.
     format!(
-        r#"FROM node:22-trixie-slim
+        r#"FROM node:22-trixie-slim@sha256:2117f713a417f3aff682ac8f5bc2ebbdf1beed51f36e67ab1e0fd3866b6d2d8f
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
@@ -617,11 +622,15 @@ pub fn harness_dockerfile(adapter: &Adapter, ca: Option<&str>) -> String {
     // Docker creates a missing mount parent as root, leaving the agent unable
     // to write beside its own config — atomic credential writes and transcripts
     // both fail, the first of them silently.
+    //
+    // Each a shell word: they come from the adapter's paths, and joined bare a
+    // path with a space was two directories, one with a `;` a second command
+    // run as root at build time.
     let dirs = mount_parents(adapter);
     if !dirs.is_empty() {
         df.push_str(&format!(
             "RUN mkdir -p {0} && chown -R agent:agent {0}\n",
-            dirs.join(" ")
+            crate::quote::sh_words(&dirs)
         ));
     }
     // A document the harness reads only when told to, handed to every run of
@@ -1675,6 +1684,21 @@ pub fn ensure_network(backend: &Backend, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Removes a network when it goes out of scope: a scratch verb's — a login,
+/// doctor's probe — on every way out of the verb, an error included.
+/// Best-effort, as the scratch network is shared: one still in use by
+/// another verb refuses to go, and that is the right answer.
+pub(crate) struct NetworkCleanup<'a> {
+    pub(crate) backend: &'a Backend,
+    pub(crate) name: &'a str,
+}
+
+impl Drop for NetworkCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = network_remove(self.backend, self.name);
+    }
+}
+
 /// Remove the session's network once its container is gone.
 ///
 /// A network per session is an isolation boundary only while it goes with the
@@ -1767,11 +1791,11 @@ pub enum Running {
 pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) -> Running {
     running_in(
         &listed_from(asked, |s| {
-            s.lines()
+            Ok(s.lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .map(str::to_string)
-                .collect()
+                .collect())
         }),
         name,
     )
@@ -1789,7 +1813,7 @@ pub type Listed = std::result::Result<std::collections::BTreeSet<String>, String
 
 pub fn listed_from(
     asked: std::io::Result<std::process::Output>,
-    names: impl Fn(&str) -> Vec<String>,
+    names: impl Fn(&str) -> Result<Vec<String>, String>,
 ) -> Listed {
     let out = match asked {
         Ok(out) => out,
@@ -1809,7 +1833,10 @@ pub fn listed_from(
             &out.status,
         ));
     }
+    // A listing the backend could not read is *could not tell*, as a failed
+    // exit is: never an empty set, which reads as nothing running.
     Ok(names(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| crate::out::untrusted(&e))?
         .into_iter()
         .collect())
 }
@@ -2199,6 +2226,35 @@ pub fn exists(backend: &Backend, tag: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The directories made for a harness's mounts are shell words, each
+    /// one: they come from the adapter's paths, and joined bare into the
+    /// Dockerfile's `RUN`, a path with a space was two directories, and one
+    /// with a `;` was a second command run as root at build time.
+    #[cfg(unix)]
+    #[test]
+    fn a_mount_parent_is_one_shell_word() {
+        let d = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/claude.toml"),
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("claude.toml"),
+            real.replace("creds   = [", "creds   = [\"$HOME/my dir;id/sub/\", "),
+        )
+        .unwrap();
+        let adapter = Adapter::find(d.path(), "claude").unwrap();
+        let df = harness_dockerfile(&adapter, None);
+        let run = df
+            .lines()
+            .find(|l| l.starts_with("RUN mkdir -p"))
+            .unwrap_or_else(|| panic!("no mkdir in:\n{df}"));
+        assert!(
+            run.contains(&crate::quote::sh("/home/agent/my dir;id")),
+            "{run}"
+        );
+    }
+
     /// **A listing of what is in use that failed is not a listing of nothing.**
     /// `images_in_use` read stdout whatever the status, and `[]` on a spawn
     /// that failed — so a runtime that would not list its containers made
@@ -2340,7 +2396,9 @@ mod tests {
             df.lines()
                 .filter_map(|l| l.split(&format!("chown -R {owner} ")).nth(1))
                 .flat_map(|dirs| dirs.split_whitespace().take_while(|d| *d != "\\"))
-                .map(str::to_string)
+                // A harness's directories are shell words, quoted; the base
+                // image's are omh's own and bare.
+                .map(|d| d.trim_matches('\'').to_string())
                 .collect()
         };
         let moved = chowned(&df, "1001:100");
@@ -2629,10 +2687,10 @@ mod tests {
     #[test]
     fn a_runtime_that_will_not_list_containers_is_never_read_as_none() {
         let lines = |s: &str| {
-            s.lines()
+            Ok(s.lines()
                 .filter(|l| !l.is_empty())
                 .map(str::to_string)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>())
         };
         let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""), lines);
         assert_eq!(running_in(&listed, "omh-repo-s01"), Running::Yes);
@@ -3129,9 +3187,27 @@ mod tests {
     #[test]
     fn the_base_image_ships_a_git_that_can_merge() {
         assert!(
-            base_dockerfile(None).starts_with("FROM node:22-trixie-slim\n"),
+            base_dockerfile(None).starts_with("FROM node:22-trixie-slim@"),
             "{}",
             base_dockerfile(None).lines().next().unwrap_or_default()
+        );
+    }
+
+    /// The base is pinned by digest, not by tag alone: `node:22-trixie-slim`
+    /// is a tag its publisher moves, so the image every session runs in could
+    /// change under an unchanged omh, and nothing would say so. The digest
+    /// moves only when omh's source moves it.
+    #[test]
+    fn the_base_image_is_pinned_by_digest() {
+        let from = base_dockerfile(None)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let digest = from.split_once("@sha256:").map(|(_, d)| d).unwrap_or("");
+        assert!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{from}"
         );
     }
 
