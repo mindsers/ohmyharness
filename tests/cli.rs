@@ -14313,6 +14313,40 @@ fn use_all_does_not_turn_on_a_guard() {
     assert!(!settings.contains("config-guard"), "got: {settings}");
 }
 
+/// `omh use <capability>` with no name takes everything the catalogue has of
+/// that kind, as its help and the reference say, and leaves every other
+/// list as it was. It refused, asking for a name.
+#[test]
+fn use_with_a_capability_alone_takes_that_kind_whole() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.seed_catalogue(&["hooks", "stacks"]);
+    fx.catalogue(&["skills/tdd/SKILL.md", "skills/review-diff/SKILL.md"]);
+    std::fs::write(fx.repo.join("go.mod"), "module x\n").unwrap();
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(
+        fx.repo.join(".omh/settings.toml"),
+        "[use]\nskills = []\nhooks = []\n",
+    )
+    .unwrap();
+
+    let out = fx.omh(&["use", "skills"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let settings: toml::Table = toml::from_str(&fx.settings()).unwrap();
+    let skills = settings["use"]["skills"].as_array().unwrap();
+    assert!(
+        skills.iter().any(|s| s.as_str() == Some("tdd"))
+            && skills.iter().any(|s| s.as_str() == Some("review-diff")),
+        "{settings}"
+    );
+    assert_eq!(
+        settings["use"]["hooks"].as_array().unwrap().len(),
+        0,
+        "another kind's list moved: {settings}"
+    );
+}
+
 /// A part of omh's features cannot be edited on its own: `settings edit` under
 /// the name of one of omh's hooks or rules sections used to open an editor on a
 /// new catalogue file of that name — one every launch then refuses. It is

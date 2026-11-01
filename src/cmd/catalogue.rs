@@ -33,11 +33,21 @@ pub(crate) fn use_cmd(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    if all {
-        if capability.is_some() {
+    // A kind with no name is that kind whole — what the help and the
+    // reference said it was, while this refused, asking for a name. `--all`
+    // is every kind at once.
+    let kind = match (capability, name) {
+        (Some(key), None) if !all => Some(crate::cmd::settings::capability_from(key)?),
+        _ => None,
+    };
+    if all || kind.is_some() {
+        if all && capability.is_some() {
             anyhow::bail!("`--all` resyncs every capability — it takes no arguments");
         }
-        let lists = catalogue_lists(&paths)?;
+        let mut lists = catalogue_lists(&paths)?;
+        if let Some(kind) = kind {
+            lists.retain(|cap, _| *cap == kind);
+        }
         ctx.say(&report::Resynced {
             dry_run,
             wrote: write_lists(&paths, &lists, dry_run)?
@@ -54,7 +64,7 @@ pub(crate) fn use_cmd(
 
     let (Some(key), Some(name)) = (capability, name) else {
         anyhow::bail!(
-            "omh use <capability> <name>, or omh use --all\n  capabilities: {}",
+            "omh use <capability> [name], or omh use --all\n  capabilities: {}",
             crate::cmd::settings::capability_list()
         );
     };
