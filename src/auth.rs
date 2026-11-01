@@ -9,7 +9,7 @@
 //! it actually varies: this repo is work, that one is personal.
 
 use crate::adapter::Adapter;
-use crate::catalogue::Paths;
+use crate::paths::Paths;
 use anyhow::Context;
 use anyhow::Result;
 use std::path::PathBuf;

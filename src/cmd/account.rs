@@ -8,8 +8,9 @@
 //! reports.
 
 use crate::adapter::{Adapter, ProviderFormat};
-use crate::catalogue::{Catalogue, Paths};
+use crate::catalogue::Catalogue;
 use crate::out;
+use crate::paths::Paths;
 use crate::session::Session;
 use crate::{auth, container, image, memory, persist, report, runtime};
 use anyhow::{Context, Result};

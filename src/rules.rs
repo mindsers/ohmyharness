@@ -16,7 +16,7 @@
 //! and composed into what the harness is given.
 
 use crate::adapter::{Adapter, Binding, Capability};
-use crate::catalogue::Paths;
+use crate::paths::Paths;
 use anyhow::{Context, Result};
 use std::path::Path;
 

@@ -2458,7 +2458,7 @@ impl Shadow {
                 Err(e) => Some(format!("{} ({e})", record.display())),
             })
             .collect();
-        match crate::session::still_there(&self.gitdir) {
+        match crate::fsx::still_there(&self.gitdir) {
             // A session that never built one is not a failed removal.
             Ok(false) if stayed.is_empty() => crate::session::Gone::Yes,
             Ok(false) => {

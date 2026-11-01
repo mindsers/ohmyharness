@@ -18,7 +18,7 @@
 //! purpose was content.
 
 use crate::base::Manifest;
-use crate::catalogue::Paths;
+use crate::paths::Paths;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};

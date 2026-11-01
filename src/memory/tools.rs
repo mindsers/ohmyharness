@@ -6,7 +6,7 @@
 //! one-shot shape implemented rather than prompted — is a benefit, not the
 //! reason.
 
-use crate::mcp::{Tool, ToolResult, Tools};
+use crate::mcp_server::{Tool, ToolResult, Tools};
 use crate::memory::index::{describe, Index};
 use crate::memory::recall::{render, search_phrased, Budget};
 use crate::memory::{self, IfExists, Kind, Remembered, Wrote};
@@ -267,7 +267,7 @@ impl Tools for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::{ToolResult, Tools};
+    use crate::mcp_server::{ToolResult, Tools};
     use crate::memory::{self};
     use serde_json::json;
     use std::collections::BTreeMap;

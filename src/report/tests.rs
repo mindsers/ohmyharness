@@ -2127,11 +2127,11 @@ fn a_capability_holding_nothing_is_not_a_row() {
         base: "2026.08".into(),
         catalogue_dir: "/h/.omh".into(),
         catalogue: vec![
-            Catalogue {
+            CatalogueSlice {
                 capability: "rules".into(),
                 entries: vec![],
             },
-            Catalogue {
+            CatalogueSlice {
                 capability: "skills".into(),
                 entries: vec!["review-diff".into()],
             },

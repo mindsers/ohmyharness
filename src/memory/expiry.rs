@@ -89,7 +89,7 @@ impl Recipe {
     /// launch, which built its image from it — hands it to [`Recipe::of`]: a
     /// second read here can differ from the first, and then the digest the
     /// sandbox is told describes an image it is not running.
-    pub fn here(paths: &crate::catalogue::Paths) -> Self {
+    pub fn here(paths: &crate::paths::Paths) -> Self {
         match crate::image::ca_for(paths) {
             Err(e) => Self::Unknowable(format!(
                 "the image recipe depends on `ca_cert`, which could not be read: {e:#}"
@@ -369,7 +369,7 @@ pub fn evaluate(trigger: Option<&Trigger>, facts: &Facts) -> Verdict {
 /// Only the files the notes actually name. Walking the repo would make `stale`
 /// O(repo) and slow enough that nobody runs it, and a check nobody runs is a
 /// check that does not exist.
-pub fn gather(paths: &crate::catalogue::Paths, triggers: &[Trigger]) -> Facts {
+pub fn gather(paths: &crate::paths::Paths, triggers: &[Trigger]) -> Facts {
     let mut facts = Facts::default();
 
     for trigger in triggers {
@@ -464,10 +464,7 @@ pub struct Judged {
 }
 
 /// `omh memory stale` — a join, in one pass.
-pub fn judge(
-    paths: &crate::catalogue::Paths,
-    notes: &[crate::memory::Note],
-) -> Result<Vec<Judged>> {
+pub fn judge(paths: &crate::paths::Paths, notes: &[crate::memory::Note]) -> Result<Vec<Judged>> {
     let triggers: Vec<Trigger> = notes
         .iter()
         .filter_map(|n| n.invalidated_by.as_deref())
@@ -507,9 +504,9 @@ mod tests {
 
     // ── gathering ───────────────────────────────────────────────────────────
 
-    fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::catalogue::Paths) {
+    fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::paths::Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::catalogue::Paths {
+        let paths = crate::paths::Paths {
             root: dir.path().join("home"),
             repo: dir.path().join("repo"),
         };

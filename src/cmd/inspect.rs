@@ -6,8 +6,9 @@
 //! sees. The rest read what is already on disk.
 
 use crate::adapter::Adapter;
-use crate::catalogue::{Catalogue, Paths};
+use crate::catalogue::Catalogue;
 use crate::out;
+use crate::paths::Paths;
 use crate::session::{self, Session};
 use crate::{
     adapter, auth, base, config, container, detect, doctor, editor, image, key, memory, persist,
@@ -220,16 +221,16 @@ pub(crate) fn doctor_cmd(
     let volumes = volumes_on_this_machine(&paths, chosen.as_ref().ok());
     let split = match &volumes {
         Ok(names) => doctor::attributed(names, &|name| match name.strip_prefix("omh-cache-") {
-            Some(id) => crate::catalogue::attribution_of(
+            Some(id) => crate::paths::attribution_of(
                 &paths.root,
                 id,
                 // A diagnostic that writes what a delete command later acts on
                 // is not read-only. `omh doctor` reports; it does not decide.
-                crate::catalogue::Backfill::DoNot,
+                crate::paths::Backfill::DoNot,
             ),
             // A name omh does not key that way is not something it may reason
             // about at all.
-            None => crate::catalogue::Attribution::Unknown(
+            None => crate::paths::Attribution::Unknown(
                 "omh does not recognise this name's shape".into(),
             ),
         }),
@@ -914,7 +915,7 @@ pub(crate) fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let mine = Catalogue::resolve(&paths);
     let mut catalogue = Vec::new();
     for cap in adapter::Capability::ALL {
-        catalogue.push(report::Catalogue {
+        catalogue.push(report::CatalogueSlice {
             capability: cap.to_string(),
             entries: mine.entries(cap)?,
         });

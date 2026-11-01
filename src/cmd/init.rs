@@ -6,8 +6,9 @@
 //! only run when nothing on disk can answer.
 
 use crate::adapter::{self, Adapter};
-use crate::catalogue::{Catalogue, Paths};
+use crate::catalogue::Catalogue;
 use crate::out;
+use crate::paths::Paths;
 use crate::{
     ask, base, bundled, config, derive, detect, doctor, facts, hook, image, key, memory, render,
     report, runtime, settings, stack,

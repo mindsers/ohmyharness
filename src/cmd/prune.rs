@@ -13,7 +13,7 @@
 //! take everything. The bucket for it is `kept_unknown`, and only a flag whose
 //! name says `dangerously` reaches it.
 
-use crate::catalogue::Attribution;
+use crate::paths::Attribution;
 
 /// What kind of thing this is. The report groups by it, and each class is
 /// removed a different way.
@@ -174,7 +174,7 @@ impl Plan {
 
 /// The per-repo directories omh writes, and whether losing one can lose work.
 ///
-/// The names come from `catalogue::KEYED`, which is the canonical list and whose
+/// The names come from `paths::KEYED`, which is the canonical list and whose
 /// own doc says adding a seventh should be "a change in one place". This adds
 /// only the work flag. A second independent spelling was exactly the second
 /// place that doc warns about, and
@@ -211,7 +211,7 @@ pub const STATE_DIRS: &[(&str, bool)] = &[
 pub fn inventory(
     root: &std::path::Path,
     backend: Option<&crate::runtime::Backend>,
-    backfill: crate::catalogue::Backfill,
+    backfill: crate::paths::Backfill,
 ) -> (Vec<Item>, Vec<String>) {
     let mut items = Vec::new();
     let mut blind = Vec::new();
@@ -318,7 +318,7 @@ fn images(
     root: &std::path::Path,
     backend: &crate::runtime::Backend,
     blind: &mut Vec<String>,
-    backfill: crate::catalogue::Backfill,
+    backfill: crate::paths::Backfill,
 ) {
     let Some(args) = backend.image_args() else {
         blind.push("omh has not measured how this runtime lists images".into());
@@ -371,9 +371,8 @@ fn images(
                     // every volume, container, network and directory keyed by
                     // the same checkout — one label pays for all of them.
                     let path = std::path::Path::new(repo);
-                    if backfill == crate::catalogue::Backfill::Record {
-                        let _ =
-                            crate::catalogue::remember(root, &crate::catalogue::id_for(path), path);
+                    if backfill == crate::paths::Backfill::Record {
+                        let _ = crate::paths::remember(root, &crate::paths::id_for(path), path);
                     }
                 }
             }
@@ -789,7 +788,7 @@ pub fn remove_one(item: &Item, backend: Option<&crate::runtime::Backend>) -> Opt
         Class::State => {
             let path = std::path::Path::new(&item.name);
             let why = std::fs::remove_dir_all(path).err();
-            return match crate::session::still_there(path) {
+            return match crate::fsx::still_there(path) {
                 Ok(false) => None,
                 Err(e) => Some(format!("omh could not tell whether it is still there: {e}")),
                 Ok(true) => Some(match why {
@@ -872,7 +871,7 @@ pub fn prune_cmd(
     input: &mut dyn std::io::BufRead,
     out: &mut dyn std::io::Write,
 ) -> anyhow::Result<()> {
-    let paths = crate::catalogue::Paths::discover(cwd)?;
+    let paths = crate::paths::Paths::discover(cwd)?;
     let backend = crate::runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         crate::runtime::installed(p)
     })
@@ -882,16 +881,16 @@ pub fn prune_cmd(
     // nothing can appear between the two — a second inventory after the prompt
     // removed a directory created while the question was on screen.
     let backfill = if dry_run {
-        crate::catalogue::Backfill::DoNot
+        crate::paths::Backfill::DoNot
     } else {
-        crate::catalogue::Backfill::Record
+        crate::paths::Backfill::Record
     };
     let home = paths.root.parent().unwrap_or(&paths.root).to_path_buf();
     let (items, blind) = inventory(&paths.root, backend.as_ref(), backfill);
     let mut plan_ = plan(
         items,
         blind,
-        &|id| crate::catalogue::attribution_of(&paths.root, id, backfill),
+        &|id| crate::paths::attribution_of(&paths.root, id, backfill),
         &|item| holds_work(item, &paths.adapters()),
         false,
     );
@@ -1097,7 +1096,7 @@ mod tests {
 
     /// Every directory a checkout's identity names is one `prune` considers.
     ///
-    /// `catalogue::KEYED` is the canonical list and its doc asks for adding a
+    /// `paths::KEYED` is the canonical list and its doc asks for adding a
     /// seventh to be "a change in one place". `STATE_DIRS` re-spelled the same
     /// six independently, which made it a second place — and a directory
     /// missing from it is not reported, not attributed and never cleaned,
@@ -1106,8 +1105,7 @@ mod tests {
     fn every_directory_omh_keys_is_one_prune_considers() {
         let considered: std::collections::BTreeSet<&str> =
             STATE_DIRS.iter().map(|(d, _)| *d).collect();
-        let keyed: std::collections::BTreeSet<&str> =
-            crate::catalogue::KEYED.iter().copied().collect();
+        let keyed: std::collections::BTreeSet<&str> = crate::paths::KEYED.iter().copied().collect();
         assert_eq!(
             considered, keyed,
             "prune must consider exactly the directories a checkout's identity names"
@@ -1246,7 +1244,7 @@ mod tests {
             std::fs::create_dir_all(root.join(dir).join("tmp.1s9QTT4H5v-cfd406d4")).unwrap();
         }
 
-        let (items, blind) = inventory(&root, None, crate::catalogue::Backfill::DoNot);
+        let (items, blind) = inventory(&root, None, crate::paths::Backfill::DoNot);
         assert!(
             blind.iter().any(|b| b.contains("runtime")),
             "no runtime: {blind:?}"

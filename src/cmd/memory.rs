@@ -4,9 +4,9 @@
 //! where the store's own rules are — these read arguments, call it, and
 //! decide what to print.
 
-use crate::catalogue::Paths;
 use crate::out;
-use crate::{mcp, memory, report};
+use crate::paths::Paths;
+use crate::{mcp_server, memory, report};
 use anyhow::Result;
 
 /// The `source` a note written from the command line gets when `--source` is
@@ -78,7 +78,7 @@ pub(crate) fn memory_serve(notes: std::path::PathBuf) -> Result<()> {
     };
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
-    mcp::serve(stdin, stdout, &mut server)
+    mcp_server::serve(stdin, stdout, &mut server)
 }
 
 /// A join against facts omh already holds. Three groups, because they are

@@ -173,14 +173,14 @@ pub struct Attributed {
 /// state directories on the same call. The prober is the closure.
 pub fn attributed(
     names: &[String],
-    attribute: &dyn Fn(&str) -> crate::catalogue::Attribution,
+    attribute: &dyn Fn(&str) -> crate::paths::Attribution,
 ) -> Attributed {
     let mut out = Attributed::default();
     for name in names {
         match attribute(name) {
-            crate::catalogue::Attribution::Gone(path) => out.gone.push((name.clone(), path)),
-            crate::catalogue::Attribution::Live(_) => out.live += 1,
-            crate::catalogue::Attribution::Unknown(why) => out.unknown.push((name.clone(), why)),
+            crate::paths::Attribution::Gone(path) => out.gone.push((name.clone(), path)),
+            crate::paths::Attribution::Live(_) => out.live += 1,
+            crate::paths::Attribution::Unknown(why) => out.unknown.push((name.clone(), why)),
         }
     }
     out
@@ -451,7 +451,7 @@ fn gigabytes(bytes: u64) -> String {
 /// **A repo with no commit has no branch to fork.**
 ///
 /// `repo_root` already refuses a directory that is not a git repository at all
-/// (`catalogue::repo_root`), naming the cause and `git init` — so *that* is
+/// (`paths::repo_root`), naming the cause and `git init` — so *that* is
 /// deliberately not a row here; it could never fail, because doctor cannot
 /// reach its own body without it. This is the narrower gap it leaves: `git
 /// init` with nothing committed yet is inside a repository, passes that gate,
@@ -605,7 +605,7 @@ pub struct HostRows(pub Vec<Outcome>);
 /// cannot see, because it never looks at the catalogue or the filesystem —
 /// a `[use]` name a rename left behind, a `carry_in` path that moved, a
 /// hand-edited repo hook that does not parse.
-pub fn audit(paths: &crate::catalogue::Paths) -> Vec<Outcome> {
+pub fn audit(paths: &crate::paths::Paths) -> Vec<Outcome> {
     let (_, repo) = match crate::cmd::session::resolved(paths) {
         Ok(pair) => pair,
         // Every check below reads the resolved policy, so a repo whose
@@ -638,7 +638,7 @@ pub fn audit(paths: &crate::catalogue::Paths) -> Vec<Outcome> {
 /// answers `None` for a capability following the whole catalogue — nothing
 /// was declared, so nothing can have drifted — and only a `Some` list is
 /// worth checking against what `catalogue_names` says exists today.
-fn use_row(paths: &crate::catalogue::Paths, repo: &crate::settings::RepoPolicy) -> Outcome {
+fn use_row(paths: &crate::paths::Paths, repo: &crate::settings::RepoPolicy) -> Outcome {
     let mut missing = Vec::new();
     let mut inapplicable = Vec::new();
     let mut unreadable = Vec::new();
@@ -729,7 +729,7 @@ fn use_row(paths: &crate::catalogue::Paths, repo: &crate::settings::RepoPolicy) 
 /// copies are covered by `everything_in_the_repo_is_embedded_byte_for_byte`;
 /// this is the one place nothing else checks, because it is the one place a
 /// person, not `omh init`, wrote the file.
-fn hooks_row(paths: &crate::catalogue::Paths) -> Outcome {
+fn hooks_row(paths: &crate::paths::Paths) -> Outcome {
     let dir = paths.repo.join(".omh").join("hooks");
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -834,7 +834,7 @@ fn hooks_row(paths: &crate::catalogue::Paths) -> Outcome {
 /// is reported and never copied, launch proceeds — this row exists so that
 /// shows up before a session starts rather than after one silently carried
 /// nothing.
-fn carry_in_row(paths: &crate::catalogue::Paths) -> Outcome {
+fn carry_in_row(paths: &crate::paths::Paths) -> Outcome {
     // The checked read: a `carry_in` that is declared but is not a list
     // resolves to nothing, and "nothing declared" is exactly the wrong thing
     // to tell someone who declared something.
@@ -3272,7 +3272,7 @@ mod tests {
     /// let "omh could not tell" quietly join either of the other two.
     #[test]
     fn the_row_separates_gone_from_live_from_could_not_tell() {
-        use crate::catalogue::Attribution;
+        use crate::paths::Attribution;
         let names: Vec<String> = ["omh-cache-a", "omh-cache-b", "omh-cache-c", "omh-cache-d"]
             .iter()
             .map(|s| s.to_string())
@@ -3636,7 +3636,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::catalogue::Paths;
+    use crate::paths::Paths;
     use std::collections::BTreeMap;
     use std::path::Path;
 

@@ -1783,7 +1783,7 @@ pub struct Inventory {
     /// It lived under the command 0.7.0 deleted. `omh info` means
     /// *what you have here*, and a catalogue is exactly that — dropping it
     /// with the command would have lost the only listing of it.
-    pub catalogue: Vec<Catalogue>,
+    pub catalogue: Vec<CatalogueSlice>,
 }
 
 impl Report for Inventory {
@@ -2203,7 +2203,7 @@ pub struct Setting {
 
 /// One capability's slice of the catalogue.
 #[derive(Debug, Clone)]
-pub struct Catalogue {
+pub struct CatalogueSlice {
     pub capability: String,
     pub entries: Vec<String>,
 }
