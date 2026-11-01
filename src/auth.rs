@@ -245,21 +245,65 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
         mountpoint(&cred.host, relative, point)?;
     }
 
+    // Through held descriptors from the account directory, never by path: the
+    // account is mounted into its sessions, and a stat-then-write by path
+    // followed a link at a credential — truncating the user's file it pointed
+    // at, or creating a dangling one's target. The account directory itself is
+    // omh's, under `~/.omh/creds`, and no session mounts it whole.
+    std::fs::create_dir_all(account_dir)
+        .with_context(|| format!("making {}", account_dir.display()))?;
     for cred in creds {
+        let Ok(rel) = cred.host.strip_prefix(account_dir) else {
+            anyhow::bail!(
+                "{} is not inside the account at {}",
+                cred.host.display(),
+                account_dir.display()
+            );
+        };
+        let names: Vec<&std::ffi::OsStr> = rel.iter().collect();
+        let refused = |e: std::io::Error| {
+            anyhow::Error::new(e).context(format!(
+                "preparing {}: a link or something that is not a {} is there, and omh \
+                 does not write through one — remove it",
+                cred.host.display(),
+                if cred.file { "file" } else { "directory" }
+            ))
+        };
+        let held = crate::held::Dir::open(account_dir)
+            .with_context(|| format!("opening {}", account_dir.display()))?;
         if cred.file {
-            if let Some(parent) = cred.host.parent() {
-                std::fs::create_dir_all(parent)?;
+            let Some((leaf, above)) = names.split_last() else {
+                continue;
+            };
+            let mut dir = held;
+            for name in above {
+                dir = dir.sub_or_create(name).map_err(refused)?;
             }
             // Empty counts as absent: it is not a login, and an empty JSON file
             // is what makes a harness refuse to start.
-            let empty = std::fs::metadata(&cred.host)
-                .map(|m| m.len() == 0)
-                .unwrap_or(true);
-            if empty {
-                std::fs::write(&cred.host, placeholder(&cred.host))?;
+            match dir.entry(leaf).map_err(refused)? {
+                crate::held::Entry::Absent => dir
+                    .create_new(leaf, placeholder(&cred.host).as_bytes())
+                    .map_err(refused)?,
+                crate::held::Entry::File => {
+                    let empty = dir
+                        .file(leaf)
+                        .and_then(|f| f.metadata())
+                        .map_err(refused)?
+                        .len()
+                        == 0;
+                    if empty {
+                        dir.replace(leaf, placeholder(&cred.host).as_bytes())
+                            .map_err(refused)?;
+                    }
+                }
+                _ => return Err(refused(std::io::Error::other("not a file omh can write"))),
             }
         } else {
-            std::fs::create_dir_all(&cred.host)?;
+            let mut dir = held;
+            for name in &names {
+                dir = dir.sub_or_create(name).map_err(refused)?;
+            }
         }
     }
     Ok(())
@@ -1148,6 +1192,35 @@ mod tests {
     }
 
     // ── importing a host login ──────────────────────────────────────────────
+
+    /// `prepare` writes the placeholders a launch mounts, and never through a
+    /// link at one: it stat'ed the path, following, then `fs::write` to it,
+    /// following again — so a link at claude's `.claude.json` had the user's
+    /// file truncated to `{}`, and a dangling one had its target created. A
+    /// link there is refused, and nothing outside the account changes.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_never_writes_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside.json");
+        std::fs::write(&outside, "").unwrap();
+        let account = d.path().join("acct");
+        std::fs::create_dir_all(&account).unwrap();
+        std::os::unix::fs::symlink(&outside, account.join(".claude.json")).unwrap();
+        let _ = prepare(&claude(), &account, GUEST_HOME);
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "",
+            "written through a link"
+        );
+
+        let dangling = d.path().join("acct2");
+        std::fs::create_dir_all(&dangling).unwrap();
+        let target = d.path().join("made-by-omh.json");
+        std::os::unix::fs::symlink(&target, dangling.join(".claude.json")).unwrap();
+        let _ = prepare(&claude(), &dangling, GUEST_HOME);
+        assert!(!target.exists(), "a dangling link's target was created");
+    }
 
     /// What a session can plant where a login lives is read without blocking
     /// and without bound, or not read: a FIFO at codex's `auth.json` made
