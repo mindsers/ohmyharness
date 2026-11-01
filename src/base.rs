@@ -252,10 +252,15 @@ impl Manifest {
     pub fn load_dir(dir: &Path) -> Result<Self> {
         let mut newest: Option<((u32, u32), PathBuf, Self)> = None;
 
-        for entry in std::fs::read_dir(dir)
-            .with_context(|| format!("reading {}", dir.display()))?
-            .flatten()
-        {
+        // Absent is a machine omh was never set up on, and that has one answer.
+        let listed = match std::fs::read_dir(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+                "omh is not set up on this machine — {} does not exist; run `omh init`",
+                dir.display()
+            ),
+            listed => listed.with_context(|| format!("reading {}", dir.display()))?,
+        };
+        for entry in listed.flatten() {
             let path = entry.path();
             if !path.extension().is_some_and(|x| x == "toml") {
                 continue;
@@ -1766,6 +1771,17 @@ command = "c"
             ("a.toml", &format!("version = \"2027.10\"{ONE_ENTRY}")),
         ]);
         assert_eq!(Manifest::load_dir(dir.path()).unwrap().version, "2027.10");
+    }
+
+    /// Before `omh init` there is no `~/.omh/base` at all, and every command
+    /// loads the manifest — so the first thing a new user saw was "reading
+    /// …/base because No such file", which names a directory they never made
+    /// and not the command that makes it.
+    #[test]
+    fn a_machine_omh_never_set_up_is_told_to_run_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Manifest::load_dir(&dir.path().join("base")).unwrap_err();
+        assert!(format!("{err:#}").contains("run `omh init`"), "{err:#}");
     }
 
     /// A manifest that parses but names nothing is an empty base set: every

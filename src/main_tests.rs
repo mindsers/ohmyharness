@@ -1945,10 +1945,11 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // route — which was `omh settings rm mcp <server>` until omh's own
         // servers could no longer be removed.
         ("base/2026.08.toml", 27),
-        // `omh eject`, where a document handed by a flag names no `eject`.
-        ("src/adapter.rs", 1),
+        // `omh eject`, where a document handed by a flag names no `eject`. +
+        // `omh init`, for a machine with no harness installed
+        ("src/adapter.rs", 2),
         ("src/auth.rs", 8),
-        ("src/base.rs", 3),
+        ("src/base.rs", 4), // + `omh init`, for a machine with no base set
         // + the retired --force, --file and server-rm sentences, + the retired
         // `auth`'s three, + `omh new` and `omh new <harness>` in each of the
         // four bare-name launches' sentences
