@@ -679,62 +679,45 @@ pub fn merge_hooks(
         // quieter, not louder: omh's own are merged in afterwards, so the
         // document is never empty and `omh doctor`'s hooks check passes while
         // the user's whole layer is missing.
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        let Some(files) = hook::files_in(dir)? else {
+            continue;
         };
-        for entry in entries {
-            // Not `.flatten()`. `readdir` can fail part-way through — a network
-            // or synced mount dropping out, a disk erroring — and skipping the
-            // entry ships a session missing a hook, with the document still
-            // well-formed because omh's own are merged in afterwards. A hook
-            // that is not there behaves exactly like one with nothing to say.
-            let path = entry
-                .with_context(|| format!("reading {}", dir.display()))?
-                .path();
-            if path.extension().is_some_and(|e| e == "json") {
-                let name = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                // The stem is the hook's name from here on — in a `[use]` list,
-                // in the ledger, and labelling its handler in a generated
-                // module — so it is held to the rule every other name is, here
-                // where it is first read. A line break in it ended that label's
-                // comment and turned the rest of the name into code.
-                crate::selection::validate_entry_name(&name, Capability::Hooks, &path)?;
-                // A manifest name is omh's, on or off — an error naming both
-                // rather than an override. A repo that could replace
-                // `graph-refresh` could make the graph lie while looking
-                // installed: the server answers, the index never updates, and
-                // every structural answer is about code the agent has since
-                // rewritten.
-                //
-                // Read-and-then-override would not be enough even if it were
-                // wanted: with the feature off there is nothing to override the
-                // file with, so it would go on running.
-                if own.reserved.contains(&name) {
-                    anyhow::bail!(
-                        "{}: `{name}` is a name omh ships, so this file answers to \
-                         nothing — it is not read, and it does not override omh's. \
-                         Rename it, or switch the feature off with `[omh]` in \
-                         .omh/settings.toml if what you want is omh's gone.",
-                        path.display()
-                    );
-                }
-                // Checked *after* the reserved-name guard, so a repo that
-                // shipped a `graph-refresh.json` still hears about it whether
-                // or not `[use].hooks` happens to name it. A file that answers
-                // to nothing is a mistake at any selection.
-                if !repo.selection.allows(Capability::Hooks, &name) {
-                    continue;
-                }
-                let raw = std::fs::read_to_string(&path)
-                    .with_context(|| format!("reading {}", path.display()))?;
-                out.insert(name, hook::Hook::parse(&raw, &path.display().to_string())?);
+        for (name, path) in files {
+            // The stem is the hook's name from here on — in a `[use]` list,
+            // in the ledger, and labelling its handler in a generated
+            // module — so it is held to the rule every other name is, here
+            // where it is first read. A line break in it ended that label's
+            // comment and turned the rest of the name into code.
+            crate::selection::validate_entry_name(&name, Capability::Hooks, &path)?;
+            // A manifest name is omh's, on or off — an error naming both
+            // rather than an override. A repo that could replace
+            // `graph-refresh` could make the graph lie while looking
+            // installed: the server answers, the index never updates, and
+            // every structural answer is about code the agent has since
+            // rewritten.
+            //
+            // Read-and-then-override would not be enough even if it were
+            // wanted: with the feature off there is nothing to override the
+            // file with, so it would go on running.
+            if own.reserved.contains(&name) {
+                anyhow::bail!(
+                    "{}: `{name}` is a name omh ships, so this file answers to \
+                     nothing — it is not read, and it does not override omh's. \
+                     Rename it, or switch the feature off with `[omh]` in \
+                     .omh/settings.toml if what you want is omh's gone.",
+                    path.display()
+                );
             }
+            // Checked *after* the reserved-name guard, so a repo that
+            // shipped a `graph-refresh.json` still hears about it whether
+            // or not `[use].hooks` happens to name it. A file that answers
+            // to nothing is a mistake at any selection.
+            if !repo.selection.allows(Capability::Hooks, &name) {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            out.insert(name, hook::Hook::parse(&raw, &path.display().to_string())?);
         }
     }
     // omh's own, merged in unfiltered. They are a feature's parts, and `[omh]`

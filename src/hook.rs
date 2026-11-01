@@ -799,6 +799,34 @@ pub(crate) fn absolute_file_js(indent: &str, plugin: Plugin) -> String {
     format!("{indent}env.OMH_TOOL_FILE = omh_file(env.OMH_TOOL_FILE, {omp_first})\n")
 }
 
+/// The hook files in `dir`: each `*.json`, named by its file name without the
+/// extension, in the order the directory lists them. `None` when there is no
+/// directory. Not `.flatten()`: a `readdir` failing part-way through would
+/// drop a hook, and a hook that is not there behaves exactly like one with
+/// nothing to say — so an entry omh could not read is an error naming the
+/// directory. The launch and `omh settings` walk the same directories through
+/// this, so the two cannot tell different stories about one.
+pub(crate) fn files_in(dir: &std::path::Path) -> Result<Option<Vec<(String, std::path::PathBuf)>>> {
+    let Some(entries) = crate::fsx::read_dir_or_absent(dir)? else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("reading {}", dir.display()))?
+            .path();
+        if path.extension().is_some_and(|e| e == "json") {
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            out.push((name, path));
+        }
+    }
+    Ok(Some(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
