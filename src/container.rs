@@ -5234,6 +5234,9 @@ mod tests {
         // this is a harness that keeps hooks and loses three of them.
         let dir = tempfile::tempdir().unwrap();
         let real = std::fs::read_to_string(Path::new(ADAPTERS).join("claude.toml")).unwrap();
+        // Up to `[preferences]`: `NEVER` has no row for a renamed harness, so
+        // it takes none.
+        let real = real.split("\n[preferences]").next().unwrap();
         std::fs::write(
             dir.path().join("partial.toml"),
             real.replace("name    = \"claude\"", "name    = \"partial\"")

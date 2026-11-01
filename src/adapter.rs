@@ -557,13 +557,18 @@ pub const NEVER: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// [`NEVER`]'s keys for `harness`, parsed.
-pub fn never_for(harness: &str) -> Vec<KeyPath> {
-    NEVER
-        .iter()
-        .filter(|(h, _)| *h == harness)
-        .flat_map(|(_, keys)| keys.iter())
-        .filter_map(|k| key_path(k).ok())
+/// [`NEVER`]'s keys for `harness`, parsed. A harness it has no row for has no
+/// floor, not an empty one, and a key that does not parse is not dropped from
+/// it: both were, and a fifth harness's adapter could declare any key at all.
+pub fn never_for(harness: &str) -> Result<Vec<KeyPath>> {
+    let Some((_, keys)) = NEVER.iter().find(|(h, _)| *h == harness) else {
+        anyhow::bail!(
+            "omh has no list of what is never a preference for `{harness}`, so it takes no \
+             `[preferences]`"
+        );
+    };
+    keys.iter()
+        .map(|k| key_path(k).map_err(|e| anyhow::anyhow!("NEVER, for `{harness}`: {e}")))
         .collect()
 }
 
@@ -1240,7 +1245,8 @@ impl Adapter {
     /// which would hide the copy; and named unlike every other, since each
     /// file lives by its name in one directory. Its keys are dotted keys,
     /// each declared once, none inside another, and none at, inside or around
-    /// a [`NEVER`] key. A fallback is for a `link` file, beside it, in a
+    /// a [`NEVER`] key — so a harness [`NEVER`] has no row for declares none.
+    /// A fallback is for a `link` file, beside it, in a
     /// format `prefs` reads, and neither the file itself nor another one.
     /// `dir` names a `root` under the home, with no `..`, and clear of every
     /// credential path, since the session's copy is mounted whole there; its
@@ -1256,7 +1262,8 @@ impl Adapter {
             .filter(|c| c.ends_with('/'))
             .map(String::as_str)
             .collect();
-        let never = never_for(self.name.as_str());
+        let never =
+            never_for(self.name.as_str()).map_err(|e| anyhow::anyhow!("adapter {shown}: {e}"))?;
         let masked: &[String] = self.policy.as_ref().map_or(&[], |p| &p.mask);
         let mut names: Vec<&str> = Vec::new();
         for (file, keys) in &prefs.files {
@@ -2581,7 +2588,7 @@ render = "concat"
             "{quiet:?}"
         );
         for key in file.keys.iter().chain(&file.quiet) {
-            for never in never_for("codex") {
+            for never in never_for("codex").unwrap() {
                 assert!(
                     !related(key, &never),
                     "{} is near never-key {}",
@@ -2660,7 +2667,7 @@ render = "concat"
         );
         for d in &declared {
             for key in &d.keys {
-                for never in never_for("claude") {
+                for never in never_for("claude").unwrap() {
                     assert!(
                         !related(key, &never),
                         "{} is near never-key {}",
@@ -2725,7 +2732,7 @@ render = "concat"
         );
         let quiet: Vec<String> = file.quiet.iter().map(dotted).collect();
         assert_eq!(quiet, ["setupVersion"]);
-        let never = never_for("omp");
+        let never = never_for("omp").unwrap();
         assert!(!never.is_empty(), "omp has no never-list");
         for key in file.keys.iter().chain(&file.quiet) {
             for n in &never {
@@ -2887,7 +2894,7 @@ render = "concat"
                 ),
             ]
         );
-        let never = never_for("opencode");
+        let never = never_for("opencode").unwrap();
         assert_eq!(
             never.iter().map(dotted).collect::<Vec<_>>(),
             ["plugin_enabled", "share_consent"]
@@ -3019,6 +3026,38 @@ render = "concat"
             );
             let err = Adapter::find(d.path(), "codex").unwrap_err().to_string();
             assert!(err.contains(names), "{body}: {err}");
+        }
+    }
+
+    /// [`NEVER`] is the floor every preference stands on, and a harness it
+    /// has no row for has no floor: its adapter declaring preferences is
+    /// refused, never read as one where nothing is off limits.
+    #[test]
+    fn preferences_for_a_harness_never_lists_nothing_for_are_refused() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "pi.toml",
+            "name = \"pi\"\nbin = \"pi\"\ninstall = \"true\"\ncreds = [\"$HOME/.pi/\"]\n\n\
+             [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n\n\
+             [preferences]\nmount = \"link\"\n\n\
+             [preferences.files]\n\"$HOME/.pi/config.toml\" = [\"mcp_servers\"]\n",
+        );
+        let err = Adapter::find(d.path(), "pi").unwrap_err().to_string();
+        assert!(
+            err.contains("omh has no list of what is never a preference for `pi`"),
+            "{err}"
+        );
+    }
+
+    /// And every key in it is one: a key that did not parse was dropped from
+    /// the floor without a word.
+    #[test]
+    fn every_never_key_is_a_key() {
+        for (harness, keys) in NEVER {
+            for k in *keys {
+                assert!(key_path(k).is_ok(), "{harness}: `{k}` is not a key");
+            }
         }
     }
 
