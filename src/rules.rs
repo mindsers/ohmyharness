@@ -273,7 +273,7 @@ fn body(paths: &Paths, worktree: &Path, base: Option<&str>, name: &str) -> Resul
     //
     // A file with nothing in it states no rules under any reading, so there is
     // no case where treating it as absent loses something the user wrote.
-    if let Some(body) = read(&worktree.join(name))?.filter(|b| !b.trim().is_empty()) {
+    if let Some(body) = read_in_worktree(worktree, name)?.filter(|b| !b.trim().is_empty()) {
         return Ok(Some(Found {
             body,
             from_base: None,
@@ -361,6 +361,44 @@ fn read(path: &Path) -> Result<Option<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+/// How much of a rules file omh composes.
+const RULES_CAP: u64 = 1 << 20;
+
+/// `name` in the worktree, read as omh reads what a session could have
+/// written — the worktree is the agent's to write.
+///
+/// A link is followed only while it stays inside the worktree: a repo's own
+/// `CLAUDE.md -> AGENTS.md` is common and composes. One leading out was
+/// followed, and composed a host file into the document the agent is handed;
+/// a FIFO blocked the launch. The resolved path is then read a name at a time
+/// from the worktree's root, never through a link swapped in meanwhile, never
+/// blocking, never past [`RULES_CAP`].
+fn read_in_worktree(worktree: &Path, name: &str) -> Result<Option<String>> {
+    let at = worktree.join(name);
+    let real = match std::fs::canonicalize(&at) {
+        Ok(real) => real,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", at.display())),
+    };
+    let root = std::fs::canonicalize(worktree)
+        .with_context(|| format!("reading {}", worktree.display()))?;
+    let rel = real
+        .strip_prefix(&root)
+        .ok()
+        .and_then(Path::to_str)
+        .with_context(|| {
+            format!(
+                "{} leads out of the worktree, to {} — omh composes rules only from \
+                 inside it",
+                at.display(),
+                real.display()
+            )
+        })?;
+    crate::held::read_under(&root, rel, RULES_CAP)
+        .map(Some)
+        .with_context(|| format!("reading {}", at.display()))
 }
 
 /// The marker prefix. One place, because `render` writes it and `neutralise`
@@ -549,6 +587,61 @@ mod tests {
             "{doc}"
         );
         assert!(!doc.contains("NOT A RULE"), "{doc}");
+    }
+
+    /// The worktree is the agent's to write, so its rules files are read as
+    /// omh reads what a session could have written. A link that stays inside
+    /// the worktree is the project's own — `CLAUDE.md -> AGENTS.md` is
+    /// common — and composes. One that leads out was followed, and composed a
+    /// host file into the document the agent is handed; a FIFO blocked the
+    /// launch. Both are refused, naming the file.
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_rules_file_is_read_only_from_inside_the_worktree() {
+        let fx = fixture();
+        write(fx.worktree.join("AGENTS.md"), "the project's own rules");
+        std::os::unix::fs::symlink("AGENTS.md", fx.worktree.join("CLAUDE.md")).unwrap();
+        let (doc, _) = composed(&fx);
+        assert!(doc.contains("the project's own rules"), "{doc}");
+
+        let fx = fixture();
+        let secret = fx._dir.path().join("secret");
+        write(secret.clone(), "HOST SECRET");
+        std::os::unix::fs::symlink(&secret, fx.worktree.join("CLAUDE.md")).unwrap();
+        let got = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            None,
+            &[],
+            &Default::default(),
+        );
+        match got {
+            Ok((doc, _)) => assert!(
+                !doc.contains("HOST SECRET"),
+                "a host file was composed: {doc}"
+            ),
+            Err(e) => assert!(format!("{e:#}").contains("CLAUDE.md"), "{e:#}"),
+        }
+
+        let fx = fixture();
+        let fifo = fx.worktree.join("CLAUDE.md");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let paths = Paths {
+            root: fx.paths.root.clone(),
+            repo: fx.paths.repo.clone(),
+        };
+        let worktree = fx.worktree.clone();
+        std::thread::spawn(move || {
+            let r = compose(&paths, &claude(), &worktree, None, &[], &Default::default());
+            let _ = tx.send(r.map(|(doc, _)| doc).map_err(|e| format!("{e:#}")));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("a FIFO at CLAUDE.md blocked the launch");
+        assert!(got.is_err_and(|e| e.contains("CLAUDE.md")));
     }
 
     /// A rules file answering to a manifest name is an error naming both — the
