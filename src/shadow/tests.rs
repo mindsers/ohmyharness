@@ -4043,3 +4043,24 @@ fn the_exclude_list_keeps_the_mode_a_plain_write_gives_it() {
         "the list is not as readable as a file written the ordinary way"
     );
 }
+
+/// **A record that would not go is not a sandbox repository that went.** The
+/// seed, the replay point and the exclude record were removed with `let _ =`
+/// and the answer was `Gone::Yes` whatever happened — and a seed left naming a
+/// repository that is gone is exactly what `ensure`'s fast path reads as
+/// already built.
+#[test]
+fn a_record_that_would_not_go_is_not_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let shadow = Shadow::new(dir.path(), "s01");
+    std::fs::create_dir_all(&shadow.gitdir).unwrap();
+    // A directory with something in it is a seed `remove_file` cannot take.
+    std::fs::create_dir_all(shadow.seed_record.join("stuck")).unwrap();
+    match shadow.reap() {
+        crate::session::Gone::No(why) => assert!(
+            why.contains(&shadow.seed_record.display().to_string()),
+            "the answer names the record that stayed: {why}"
+        ),
+        other => panic!("a seed that stayed was answered {other:?}"),
+    }
+}
