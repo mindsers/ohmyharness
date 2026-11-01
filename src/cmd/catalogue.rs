@@ -333,6 +333,13 @@ pub(crate) fn import_cmd(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let cap = crate::cmd::settings::capability_from(capability)?;
+    // Refused before anything is read: below the look for a source, a harness
+    // with no servers answered "claude has no mcp here" and exit 0.
+    anyhow::ensure!(
+        cap != adapter::Capability::Mcp,
+        "MCP servers are `omh settings mcp import {harness}` — a server is a \
+         record in one file, not an entry with its own"
+    );
     // Hooks land in this repo's `.omh/hooks/`, so they need one. Everything else
     // lands in `~/.omh`, which is there outside a checkout too — refusing there
     // was `omh settings`' old defect, one verb over.
@@ -386,10 +393,6 @@ pub(crate) fn import_cmd(
         adapter::Capability::Hooks => {
             import_hooks(&paths, &adapter, binding, &source, dry_run, ctx)
         }
-        adapter::Capability::Mcp => anyhow::bail!(
-            "MCP servers are `omh settings mcp import {harness}` — a server is a \
-             record in one file, not an entry with its own"
-        ),
         _ => import_entries(&paths, harness, cap, binding.render, &source, dry_run, ctx),
     }
 }

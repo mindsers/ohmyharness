@@ -2807,6 +2807,23 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
     );
 }
 
+/// `omh import mcp` is refused whether or not the harness has servers to
+/// read: with no `.mcp.json`, it said "claude has no mcp here" and exited 0,
+/// before the refusal that names `omh settings mcp import`.
+#[test]
+fn import_mcp_is_refused_with_nothing_there_too() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters"]);
+    let out = sb.omh(&["import", "mcp", "claude"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("`omh settings mcp import claude`"),
+        "{}",
+        printed(&out)
+    );
+}
+
 /// `--env` or `--replace` after the command is the server's, so a server
 /// added as `mcp add foo npx a --env K=V` ran `npx a --env K=V` with no
 /// variable set, and omh said it wrote it. Refused, naming the order omh
