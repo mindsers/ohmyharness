@@ -164,117 +164,7 @@ pub(crate) fn doctor_cmd(
     // Not `?` on the preference either: settings omh cannot read are what the
     // settings row below exists to name, and stopping here printed nothing.
     let chosen = runtime::for_repo(&paths);
-    // Not `?`. A stack definition omh cannot read is something to report, not
-    // a reason to print nothing — see `host_checks`.
-    // The same resolution `sandbox()` uses to decide what installs, so the row
-    // and the image cannot disagree about what a stack means here.
-    // Not `?`. This is one more thing that must not stop the host being
-    // reported; a policy omh cannot resolve just means the row cannot say
-    // whether a detected stack is switched on.
-    let provision = crate::settings::resolved(&paths)
-        .map(|(_, repo)| repo.provision)
-        .unwrap_or_default();
-    let loaded = stack::load_all(&paths.stacks(), &paths.repo_stacks());
-    let stacks = match &loaded {
-        Ok(defs) => Ok((defs.as_slice(), stack::detected(defs, &paths.repo))),
-        Err(e) => Err(format!("{e:#}")),
-    };
-    // **Asked, not assumed.** `runtime::installed` only proved a binary is on
-    // PATH. This is a real round-trip to whatever is on the other end.
-    //
-    // Through the trait's `running_args` so each runtime is asked in its own
-    // spelling — though today `Sbx::running_args` is still docker's, by its
-    // own admission ("PROVISIONAL … assumed rather than measured"). So for sbx
-    // this probe inherits that assumption, and a wrong spelling would report a
-    // working sbx as not answering. The trait is the right seam; the sbx
-    // measurement is the thing still owed, and its doc names `omh doctor` as
-    // where it lands.
-    let answering = chosen.as_ref().map(|b| (b.program(), daemon_answering(b)));
-    // **The two layers that actually resolve.** `omh settings` already makes
-    // this comparison for `Layer::Personal`, the template — these are the
-    // files a launch reads, and nothing has ever checked them. Not `?`: a file
-    // omh cannot parse is the single most valuable thing this row can say.
-    let held: doctor::SettingsHeld = config::Layer::SETTINGS
-        .iter()
-        .map(|layer| {
-            let at = layer.file(&paths);
-            let name = at
-                .strip_prefix(&paths.repo)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| at.display().to_string());
-            let values = config::values(&paths, *layer)
-                .map(|m| m.into_iter().collect::<Vec<_>>())
-                .map_err(|e| format!("{e:#}"));
-            (name, values)
-        })
-        .collect();
-    let files: doctor::SettingsRead = held.iter().map(|(n, h)| (n.as_str(), h.clone())).collect();
-    let known: Vec<&str> = key::KEYS.iter().map(|k| k.name).collect();
-
-    // Volumes are read once and then attributed, rather than counted. `repo_id`
-    // is a one-way digest, so until the registry landed omh could see that
-    // these existed and never whose they were — which is what the row used to
-    // say, accurately. The name carries the id: `omh-cache-<repo_id>`.
-    let volumes = volumes_on_this_machine(&paths, chosen.as_ref().ok());
-    let split = match &volumes {
-        Ok(names) => doctor::attributed(names, &|name| match name.strip_prefix("omh-cache-") {
-            Some(id) => crate::paths::attribution_of(
-                &paths.root,
-                id,
-                // A diagnostic that writes what a delete command later acts on
-                // is not read-only. `omh doctor` reports; it does not decide.
-                crate::paths::Backfill::DoNot,
-            ),
-            // A name omh does not key that way is not something it may reason
-            // about at all.
-            None => crate::paths::Attribution::Unknown(
-                "omh does not recognise this name's shape".into(),
-            ),
-        }),
-        Err(_) => doctor::Attributed::default(),
-    };
-
-    // **Both halves, not one or the other.** This was a `match` collapsing the
-    // pair into a `Result`, so a single failed read discarded every leftover the
-    // other two reads had already found — the failure made omh report *less*
-    // than it knew, in the row whose whole job is to notice what is left behind.
-    let orphans = crate::leftovers::leftovers(
-        &paths,
-        chosen.as_ref().map_err(|e| format!("{e:#}")),
-        crate::leftovers::Unchecked::new(ctx),
-    );
-
-    let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
-        .into_iter()
-        .chain(doctor::settings_checks(&files, &known))
-        .chain(std::iter::once(doctor::leftovers_from(
-            orphans, volumes, split,
-        )))
-        .chain(std::iter::once(doctor::seeded_from(
-            std::fs::read_to_string(paths.repo.join(".omh").join(crate::cmd::init::SEEDED_BY))
-                .ok()
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty()),
-            env!("CARGO_PKG_VERSION"),
-        )))
-        .chain(std::iter::once(doctor::disk_from(
-            &paths.root,
-            doctor::free_space,
-        )))
-        // Absent on a healthy repo: a row saying "you have a commit" on every
-        // run is a line nobody reads.
-        .chain(doctor::commit_from(
-            crate::git::users()
-                .arg("-C")
-                .arg(&paths.repo)
-                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-                .output(),
-        ))
-        .chain(doctor::git_checks())
-        .chain(doctor::audit(&paths))
-        .collect::<Vec<_>>();
-    let host = doctor::HostRows(host);
+    let host = host_rows(&paths, &chosen, ctx);
 
     // **Said on every exit below, not on the ones that remembered.** Between
     // gathering these rows and reporting them sat sixteen `?` — adapter
@@ -494,16 +384,6 @@ pub(crate) fn doctor_cmd(
                 ctx,
             )?;
         }
-        // The harness first, then the image's own git: both are about whether
-        // the sandbox can work at all, and neither depends on what omh mounted.
-        let mut checks = vec![doctor::start_check(&adapter), doctor::sandbox_git_check()];
-        checks.extend(doctor::checks(
-            &catalogue,
-            &adapter,
-            &own,
-            &repo,
-            &sandbox.resolves,
-        )?);
         // A login to probe, not merely an account: one can hold only its model
         // provider, and a probe of a token that is not there fails as a token
         // that will not persist.
@@ -521,29 +401,9 @@ pub(crate) fn doctor_cmd(
             auth::unfilled(&adapter, a, crate::guest::GUEST_HOME).is_empty()
                 && !provider_is_login(a)
         });
-        if logged_in {
-            checks.extend(doctor::credential_checks(&adapter));
-        }
-        // The one claim about this image no test can settle: whether the root
-        // omh embedded actually got into the store the toolchains read.
-        checks.extend(doctor::ca_check(sandbox.ca.as_ref().map(image::Root::pem)));
-        // The memory server as omh generates it, with the arguments that say
-        // which directory it reads — the whole point of the check. Absent only
-        // when this repo switched the feature off: the server is left out of
-        // the document on purpose, and checking for it would check a claim omh
-        // deliberately did not make.
-        //
-        // Found by the name the base set in `~/.omh/base` gives it, which is
-        // `memory` until `omh upgrade` refreshes it.
-        let manifest = base::Manifest::load_dir(&paths.base())?;
-        if let Some(server) = manifest
-            .entries
-            .iter()
-            .find(|e| e.kind == base::Kind::Mcp && e.feature == memory::tools::FEATURE)
-            .and_then(|e| own.servers.get(&e.name))
-        {
-            checks.extend(doctor::memory_checks(server));
-        }
+        let checks = sandbox_checks(
+            &paths, &catalogue, &adapter, &own, &repo, &sandbox, logged_in,
+        )?;
         if checks.is_empty() {
             ctx.say(
                 &report::Action::new(
@@ -775,6 +635,173 @@ pub(crate) fn doctor_cmd(
             Err(e)
         }
     }
+}
+
+/// What `omh doctor` says about the machine before any sandbox runs: the
+/// runtime and whether it answers, the stacks, the settings files a launch
+/// reads, what is left behind, which omh seeded the repo, the disk, git, and
+/// the catalogue's audit.
+fn host_rows(paths: &Paths, chosen: &Result<runtime::Backend>, ctx: &out::Ctx) -> doctor::HostRows {
+    // Not `?`. A stack definition omh cannot read is something to report, not
+    // a reason to print nothing — see `host_checks`.
+    // The same resolution `sandbox()` uses to decide what installs, so the row
+    // and the image cannot disagree about what a stack means here.
+    // Not `?`. This is one more thing that must not stop the host being
+    // reported; a policy omh cannot resolve just means the row cannot say
+    // whether a detected stack is switched on.
+    let provision = crate::settings::resolved(paths)
+        .map(|(_, repo)| repo.provision)
+        .unwrap_or_default();
+    let loaded = stack::load_all(&paths.stacks(), &paths.repo_stacks());
+    let stacks = match &loaded {
+        Ok(defs) => Ok((defs.as_slice(), stack::detected(defs, &paths.repo))),
+        Err(e) => Err(format!("{e:#}")),
+    };
+    // **Asked, not assumed.** `runtime::installed` only proved a binary is on
+    // PATH. This is a real round-trip to whatever is on the other end.
+    //
+    // Through the trait's `running_args` so each runtime is asked in its own
+    // spelling — though today `Sbx::running_args` is still docker's, by its
+    // own admission ("PROVISIONAL … assumed rather than measured"). So for sbx
+    // this probe inherits that assumption, and a wrong spelling would report a
+    // working sbx as not answering. The trait is the right seam; the sbx
+    // measurement is the thing still owed, and its doc names `omh doctor` as
+    // where it lands.
+    let answering = chosen.as_ref().map(|b| (b.program(), daemon_answering(b)));
+    // **The two layers that actually resolve.** `omh settings` already makes
+    // this comparison for `Layer::Personal`, the template — these are the
+    // files a launch reads, and nothing has ever checked them. Not `?`: a file
+    // omh cannot parse is the single most valuable thing this row can say.
+    let held: doctor::SettingsHeld = config::Layer::SETTINGS
+        .iter()
+        .map(|layer| {
+            let at = layer.file(paths);
+            let name = at
+                .strip_prefix(&paths.repo)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| at.display().to_string());
+            let values = config::values(paths, *layer)
+                .map(|m| m.into_iter().collect::<Vec<_>>())
+                .map_err(|e| format!("{e:#}"));
+            (name, values)
+        })
+        .collect();
+    let files: doctor::SettingsRead = held.iter().map(|(n, h)| (n.as_str(), h.clone())).collect();
+    let known: Vec<&str> = key::KEYS.iter().map(|k| k.name).collect();
+
+    // Volumes are read once and then attributed, rather than counted. `repo_id`
+    // is a one-way digest, so until the registry landed omh could see that
+    // these existed and never whose they were — which is what the row used to
+    // say, accurately. The name carries the id: `omh-cache-<repo_id>`.
+    let volumes = volumes_on_this_machine(paths, chosen.as_ref().ok());
+    let split = match &volumes {
+        Ok(names) => doctor::attributed(names, &|name| match name.strip_prefix("omh-cache-") {
+            Some(id) => crate::paths::attribution_of(
+                &paths.root,
+                id,
+                // A diagnostic that writes what a delete command later acts on
+                // is not read-only. `omh doctor` reports; it does not decide.
+                crate::paths::Backfill::DoNot,
+            ),
+            // A name omh does not key that way is not something it may reason
+            // about at all.
+            None => crate::paths::Attribution::Unknown(
+                "omh does not recognise this name's shape".into(),
+            ),
+        }),
+        Err(_) => doctor::Attributed::default(),
+    };
+
+    // **Both halves, not one or the other.** This was a `match` collapsing the
+    // pair into a `Result`, so a single failed read discarded every leftover the
+    // other two reads had already found — the failure made omh report *less*
+    // than it knew, in the row whose whole job is to notice what is left behind.
+    let orphans = crate::leftovers::leftovers(
+        paths,
+        chosen.as_ref().map_err(|e| format!("{e:#}")),
+        crate::leftovers::Unchecked::new(ctx),
+    );
+
+    let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
+        .into_iter()
+        .chain(doctor::settings_checks(&files, &known))
+        .chain(std::iter::once(doctor::leftovers_from(
+            orphans, volumes, split,
+        )))
+        .chain(std::iter::once(doctor::seeded_from(
+            std::fs::read_to_string(paths.repo.join(".omh").join(crate::cmd::init::SEEDED_BY))
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            env!("CARGO_PKG_VERSION"),
+        )))
+        .chain(std::iter::once(doctor::disk_from(
+            &paths.root,
+            doctor::free_space,
+        )))
+        // Absent on a healthy repo: a row saying "you have a commit" on every
+        // run is a line nobody reads.
+        .chain(doctor::commit_from(
+            crate::git::users()
+                .arg("-C")
+                .arg(&paths.repo)
+                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                .output(),
+        ))
+        .chain(doctor::git_checks())
+        .chain(doctor::audit(paths))
+        .collect::<Vec<_>>();
+    doctor::HostRows(host)
+}
+
+/// What `omh doctor` asks the sandbox, in the order it asks: whether the
+/// harness and the image's git work at all, then each capability the launch
+/// mounts, the login when there is one to probe, the root omh embedded, and the
+/// memory server as omh generates it.
+fn sandbox_checks(
+    paths: &Paths,
+    catalogue: &Catalogue,
+    adapter: &Adapter,
+    own: &base::Own,
+    repo: &crate::settings::RepoPolicy,
+    sandbox: &crate::provision::Sandbox,
+    logged_in: bool,
+) -> Result<Vec<crate::probe::Check>> {
+    // The harness first, then the image's own git: both are about whether
+    // the sandbox can work at all, and neither depends on what omh mounted.
+    let mut checks = vec![doctor::start_check(adapter), doctor::sandbox_git_check()];
+    checks.extend(doctor::checks(
+        catalogue,
+        adapter,
+        own,
+        repo,
+        &sandbox.resolves,
+    )?);
+    if logged_in {
+        checks.extend(doctor::credential_checks(adapter));
+    }
+    // The one claim about this image no test can settle: whether the root
+    // omh embedded actually got into the store the toolchains read.
+    checks.extend(doctor::ca_check(sandbox.ca.as_ref().map(image::Root::pem)));
+    // The memory server as omh generates it, with the arguments that say
+    // which directory it reads — the whole point of the check. Absent only
+    // when this repo switched the feature off: the server is left out of
+    // the document on purpose, and checking for it would check a claim omh
+    // deliberately did not make.
+    //
+    // Found by the name the base set in `~/.omh/base` gives it, which is
+    // `memory` until `omh upgrade` refreshes it.
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    if let Some(server) = manifest
+        .entries
+        .iter()
+        .find(|e| e.kind == base::Kind::Mcp && e.feature == memory::tools::FEATURE)
+        .and_then(|e| own.servers.get(&e.name))
+    {
+        checks.extend(doctor::memory_checks(server));
+    }
+    Ok(checks)
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.
