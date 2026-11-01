@@ -62,15 +62,13 @@ pub(crate) fn memory_remember(
 /// used to enforce by vigilance is enforced by the type. This function is the
 /// exception that still owns its own stdout, because what it writes there is
 /// not a report at all.
-pub(crate) fn memory_serve(notes: std::path::PathBuf, session: Option<String>) -> Result<()> {
+pub(crate) fn memory_serve(notes: std::path::PathBuf) -> Result<()> {
     let mut server = memory::tools::Server {
         notes_dir: notes,
         templates: memory::shipped_templates(),
         // omh already sets `OMH_SESSION` in the sandbox, so the base set can
         // declare static arguments and still record real provenance.
-        session: session
-            .or_else(|| std::env::var("OMH_SESSION").ok())
-            .unwrap_or_else(|| "unknown".into()),
+        session: std::env::var("OMH_SESSION").unwrap_or_else(|_| "unknown".into()),
         client: None,
         today: memory::today,
         // Told, never worked out. This process runs inside the sandbox, where

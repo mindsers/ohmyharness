@@ -18451,13 +18451,24 @@ fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
     }
 }
 
+/// What `--help` does not list, walked by name.
+///
+/// A hidden command needed no run: the surface is read from `--help`, which
+/// leaves it out, so its flags were never asked for either. `omh memory
+/// serve` is the harness's entry point to the memory server, and it declared a
+/// `--session` that the global `--session` always caught first — refused on
+/// every use, and nothing ran it to find out. Its own `--help` still answers,
+/// so it is read the same way as the rest. `the_hidden_commands_are_the_ones_
+/// clap_hides` holds this list to the definition.
+const HIDDEN: &[&[&str]] = &[&["memory", "serve"]];
+
 fn surface() -> Surface {
     let mut out = Surface::default();
-    surface_under(
-        std::path::Path::new(env!("CARGO_BIN_EXE_omh")),
-        &[],
-        &mut out,
-    );
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_omh"));
+    surface_under(bin, &[], &mut out);
+    for path in HIDDEN {
+        surface_under(bin, path, &mut out);
+    }
     out
 }
 
@@ -18941,6 +18952,13 @@ const EXERCISES: &[Exercise] = &[
     },
     Exercise {
         argv: &["memory", "lint"],
+        needs: Needs::Store,
+        expect: Expect::Ok,
+        runtime: false,
+    },
+    // Hidden, and run: with nothing on stdin the server reads EOF and ends.
+    Exercise {
+        argv: &["memory", "serve", "--notes", "."],
         needs: Needs::Store,
         expect: Expect::Ok,
         runtime: false,

@@ -831,16 +831,16 @@ pub(crate) enum MemoryCmd {
     /// frames and waits, which is indistinguishable from a hang if you run it
     /// by hand. Paths arrive as arguments because this runs inside the
     /// sandbox, where there is no repo to discover.
+    ///
+    /// The session it serves is `$OMH_SESSION`, which omh sets in every
+    /// sandbox, so the base set declares static arguments and still records
+    /// real provenance. It had a `--session` of its own too, which the global
+    /// `--session` caught first: every use was refused.
     #[command(hide = true)]
     Serve {
         /// The note store's directory, as mounted in the sandbox.
         #[arg(long)]
         notes: std::path::PathBuf,
-        /// The session this server serves. Defaults to `$OMH_SESSION`, which
-        /// omh already sets in the sandbox — so the base set can declare
-        /// static arguments and still record real provenance.
-        #[arg(long)]
-        session: Option<String>,
     },
     /// Notes the world has moved on from. A join, never a judgement.
     Stale,

@@ -8644,3 +8644,69 @@ fn a_declared_name_is_checked_where_it_is_born() {
         "claude"
     );
 }
+
+/// `tests/cli.rs` reads omh's surface from `--help`, which leaves out what
+/// clap hides — so it walks a declared list of hidden commands by name, and
+/// that list is held here to the definition. A command hidden and not listed
+/// would need no run again, which is how `omh memory serve` kept a `--session`
+/// every use of which was refused.
+#[test]
+fn the_hidden_commands_are_the_ones_clap_hides() {
+    use clap::CommandFactory;
+    fn walk(cmd: &clap::Command, path: &mut Vec<String>, out: &mut Vec<String>) {
+        for arg in cmd.get_arguments() {
+            assert!(
+                !arg.is_hide_set() || arg.get_id() == "help" || arg.get_id() == "version",
+                "`omh {} --{}` is hidden, and nothing reads a hidden flag's \
+                 surface: walk it in tests/cli.rs, or show it",
+                path.join(" "),
+                arg.get_id()
+            );
+        }
+        for sub in cmd.get_subcommands() {
+            path.push(sub.get_name().to_string());
+            if sub.is_hide_set() {
+                out.push(path.join(" "));
+            }
+            walk(sub, path, out);
+            path.pop();
+        }
+    }
+    let mut hidden = Vec::new();
+    walk(&Cli::command(), &mut Vec::new(), &mut hidden);
+    hidden.sort();
+
+    let cli =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cli.rs")).unwrap();
+    let decl = cli
+        .lines()
+        .find(|l| l.starts_with("const HIDDEN: "))
+        .expect("tests/cli.rs declares HIDDEN on one line");
+    let mut listed: Vec<String> = decl
+        .split_once('=')
+        .expect("HIDDEN has a value")
+        .1
+        .split("&[")
+        .skip(2)
+        .map(|group| {
+            group
+                .split(']')
+                .next()
+                .unwrap()
+                .split(',')
+                .map(|w| w.trim().trim_matches('"'))
+                .filter(|w| !w.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    listed.sort();
+    assert!(
+        !hidden.is_empty(),
+        "the walk found no hidden command at all"
+    );
+    assert_eq!(
+        listed, hidden,
+        "tests/cli.rs's HIDDEN is not what clap hides"
+    );
+}
