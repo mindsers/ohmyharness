@@ -11,7 +11,7 @@ yours in the table, then follow it to its entry.
 | Command | What it does |
 |---|---|
 | **Set up** | |
-| [`omh init`](#omh-init) | Set this repo up, once. Decides everything, asks nothing. |
+| [`omh init`](#omh-init) | Set this repo up, once. Decides what it can; asks, at a terminal, only what it cannot. |
 | [`omh upgrade`](#omh-upgrade) | Apply a newer omh: refresh the catalogue, check again which provides apply, rebuild the images whose recipe moved. |
 | [`omh account`](#omh-account) | Your accounts, the one this repo uses, and the preferences each keeps. |
 | [`omh account login <harness>`](#omh-account-login-harness---name-account---import---provider-file) | Log a harness in once; repeat with `--name` for several accounts. |
@@ -245,8 +245,10 @@ which are prose for a person.
 
 ## `omh init`
 
-Sets up the current repo, once. Decides everything, asks nothing, reports all of
-it.
+Sets up the current repo, once. Decides what it can and reports all of it. At a
+terminal it asks only what it cannot detect — a toolchain marker no stack it
+knows claims, or a repo with no test command — and off a terminal it asks
+nothing.
 
 ```
 omh init

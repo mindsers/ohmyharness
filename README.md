@@ -56,7 +56,8 @@ Every pin moved — Claude Code 2.1.300, Codex 0.162.1, oh-my-pi 18.10.4,
 opencode 1.19.0 — so each harness image rebuilds on its first launch.
 `omh upgrade` now asks again which of a repo's provides apply before it builds.
 The docs are a site, at [docs.ohmyharness.sh](https://docs.ohmyharness.sh).
-And `cargo install omh` builds on Rust 1.85, the floor omh declares.
+And `cargo install omh` builds 0.15.0 on Rust 1.85; `main` has since moved
+the floor to 1.88.
 
 **0.14.1 fixed three things nobody could see.** No editor could attach to
 any session — sshd dropped every connection before authentication, because
@@ -323,6 +324,8 @@ omh upgrade                       apply a newer omh: refresh and rebuild
 omh new <harness> [-- args…]      start a session, run an agent in it
 omh account login <harness>       log in once; repeat with -n <name>
 omh account                       your accounts, and what each keeps
+omh account forget <harness> <key>
+                                  take one kept preference back
 
 omh set <key> <value>             a setting, or a feature on|off — this repo
 omh unset <key>                   drop it, or hand the feature back to omh
@@ -341,6 +344,7 @@ omh memory [remember|stale|lint|rm] …
 omh import <capability> <harness>
                                   bring a setup you already have into omh
 omh eject <harness> --to <dir>    write out the raw config and step aside
+omh prune                         remove what omh left behind and nothing claims
 ```
 
 ### Sessions

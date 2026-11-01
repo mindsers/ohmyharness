@@ -1356,8 +1356,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
         // + the omh upgrade command in the list, + `omh account` beside its
-        // `login` there
-        ("README.md", 58),
+        // `login` there, + `omh account forget` and `omh prune`, which the list
+        // left out
+        ("README.md", 60),
         ("docs/src/content/docs/concepts/sessions.md", 11),
         ("docs/src/content/docs/concepts/trust.md", 3), // + `omh use` in the commands table
         // Getting started was one page until it became two, and all fifteen

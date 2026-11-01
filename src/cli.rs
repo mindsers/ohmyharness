@@ -227,7 +227,7 @@ pub(crate) fn the_one_session(
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
-    /// Set this repo up. Decides everything; asks nothing.
+    /// Set this repo up. Decides what it can; asks, at a terminal, only what it cannot.
     Init,
     /// Remove what omh has left behind and nothing claims any more.
     ///
