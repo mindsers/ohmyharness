@@ -15,17 +15,6 @@ use crate::{auth, container, image, memory, persist, report, runtime};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
-struct NetworkCleanup<'a> {
-    backend: &'a runtime::Backend,
-    name: &'a str,
-}
-
-impl Drop for NetworkCleanup<'_> {
-    fn drop(&mut self) {
-        let _ = image::network_remove(self.backend, self.name);
-    }
-}
-
 /// Every harness's accounts, the one a launch here uses, and what each keeps.
 pub(crate) fn list(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -528,7 +517,7 @@ fn login_in_sandbox(
     }
     auth::drop_carried(adapter, account_dir)?;
     image::ensure_network(&backend, &plan.network)?;
-    let _network_cleanup = NetworkCleanup {
+    let _network_cleanup = image::NetworkCleanup {
         backend: &backend,
         name: &plan.network,
     };

@@ -1675,6 +1675,21 @@ pub fn ensure_network(backend: &Backend, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Removes a network when it goes out of scope: a scratch verb's — a login,
+/// doctor's probe — on every way out of the verb, an error included.
+/// Best-effort, as the scratch network is shared: one still in use by
+/// another verb refuses to go, and that is the right answer.
+pub(crate) struct NetworkCleanup<'a> {
+    pub(crate) backend: &'a Backend,
+    pub(crate) name: &'a str,
+}
+
+impl Drop for NetworkCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = network_remove(self.backend, self.name);
+    }
+}
+
 /// Remove the session's network once its container is gone.
 ///
 /// A network per session is an isolation boundary only while it goes with the

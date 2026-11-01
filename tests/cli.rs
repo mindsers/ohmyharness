@@ -3127,6 +3127,14 @@ fn an_idle_timeout_does_not_stop_a_session_whose_agent_is_still_working() {
         stopped("s02"),
         "the session whose harness had exited was reaped:\n{ran}"
     );
+    // And its network with it: the reaper removed the container only, and
+    // with `idle_timeout` set the leftovers walked toward the address-pool
+    // exhaustion AGENTS.md describes.
+    assert!(
+        ran.lines()
+            .any(|l| l.starts_with("network rm ") && l.contains(&sb.container("s02"))),
+        "the reaped session's network was left behind:\n{ran}"
+    );
 }
 
 /// A launch records what it launched, and a dry run records nothing.
@@ -11144,6 +11152,50 @@ fn a_down_of_a_session_that_does_not_exist_is_refused() {
         "{}",
         printed(&out)
     );
+}
+
+/// A session already stopped still has its network taken down by `down`:
+/// it `continue`d on *not running* before the network was reached, so a
+/// session the reaper or a crash had stopped kept one for good.
+#[test]
+fn down_takes_a_stopped_sessions_network_too() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.session("s01");
+    let out = sb.omh(&["s01", "down"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        sb.docker_calls(&log)
+            .iter()
+            .any(|c| c.starts_with("network rm ") && c.contains(&sb.container("s01"))),
+        "{:?}",
+        sb.docker_calls(&log)
+    );
+}
+
+/// The network `omh doctor`'s probe runs on goes when the probe is done, as
+/// `omh account login`'s does: doctor left it behind on every run.
+#[test]
+fn doctor_removes_the_network_its_probe_ran_on() {
+    let sb = sandbox();
+    sb.git_init();
+    let log = sb.fake_docker_answering_doctor(&[], &[]);
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _ = sb.omh(&["doctor", "--harness", "claude"]);
+    let calls = sb.docker_calls(&log);
+    let ran_on: Vec<&str> = calls
+        .iter()
+        .filter(|c| c.starts_with("run "))
+        .filter_map(|c| c.split(" --network ").nth(1))
+        .filter_map(|c| c.split_whitespace().next())
+        .collect();
+    assert!(!ran_on.is_empty(), "the probe ran on no network: {calls:?}");
+    for net in ran_on {
+        assert!(
+            calls.iter().any(|c| c == &format!("network rm {net}")),
+            "{net} outlived the run: {calls:?}"
+        );
+    }
 }
 
 /// `--all` is gone from `down` — absence already means all.
