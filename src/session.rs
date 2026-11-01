@@ -103,6 +103,51 @@ pub enum Dropped {
     Landed { commits: usize, by: Proof },
 }
 
+/// Remove `rel` from `root` and the directories it leaves empty, the way a
+/// checkout would — through held descriptors, one name at a time from `root`.
+///
+/// `remove_file(root.join(rel))`, then `remove_dir` up the tree, followed a
+/// link the agent planted at any directory on the way, and deleted outside
+/// the worktree as the user. A link on the way is refused here, naming it,
+/// whatever else stood in front of this. Emptied directories go best-effort:
+/// one holding anything else is not empty, which is the answer.
+fn remove_beneath(root: &Path, rel: &Path) -> Result<()> {
+    let names: Vec<&std::ffi::OsStr> = rel.iter().collect();
+    let Some((leaf, above)) = names.split_last() else {
+        return Ok(());
+    };
+    let mut dirs = vec![crate::held::Dir::open(root)
+        .with_context(|| format!("removing {} — trunk deleted it", rel.display()))?];
+    for name in above {
+        let held = dirs.last().expect("the root is first");
+        match held.sub(name) {
+            Ok(sub) => dirs.push(sub),
+            // Already gone: nothing below it to remove.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "removing {} — trunk deleted it — refused: {} on the way is a link \
+                         or not a directory, and omh does not remove through one",
+                        rel.display(),
+                        name.to_string_lossy()
+                    )
+                })
+            }
+        }
+    }
+    dirs.last()
+        .expect("the root is first")
+        .remove(leaf)
+        .with_context(|| format!("removing {} — trunk deleted it", rel.display()))?;
+    for (i, name) in above.iter().enumerate().rev() {
+        if dirs[i].remove_dir(name).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Delete `branch` at the tip `rm` decided on: `None`, or why it was not.
 ///
 /// `update-ref -d` with that tip as the old value, never `branch -D`, which
@@ -859,25 +904,7 @@ impl Session {
             if hidden.contains(&path) || ignored_here(&self.worktree, path)? {
                 continue;
             }
-            let at = self.worktree.join(rel);
-            match std::fs::remove_file(&at) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(e)
-                        .with_context(|| format!("removing {} — trunk deleted it", at.display()))
-                }
-            }
-            // The directories it leaves empty, up to the worktree, the way a
-            // checkout would. Best effort: a directory holding anything else
-            // is not empty and `remove_dir` refuses it, which is the answer.
-            let mut dir = at.parent();
-            while let Some(d) = dir {
-                if d == self.worktree || std::fs::remove_dir(d).is_err() {
-                    break;
-                }
-                dir = d.parent();
-            }
+            remove_beneath(&self.worktree, rel)?;
         }
         Ok(())
     }

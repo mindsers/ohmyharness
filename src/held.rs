@@ -388,6 +388,23 @@ impl Dir {
         }
     }
 
+    /// Remove the directory `name` here if it is empty — never a link, which
+    /// `unlinkat` with `AT_REMOVEDIR` refuses as not a directory. Not there is
+    /// done; not empty is said, as `ENOTEMPTY`.
+    pub(crate) fn remove_dir(&self, name: &OsStr) -> io::Result<()> {
+        let name = step(name)?;
+        // SAFETY: as `open_under` — an open descriptor and a C string, both
+        // outliving the call.
+        if unsafe { libc::unlinkat(self.fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
+            return Ok(());
+        }
+        let why = io::Error::last_os_error();
+        match why.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(why),
+        }
+    }
+
     /// An exclusive lock on `name` here, the file made if it is missing and
     /// never a link followed to one — held until the file is dropped.
     pub(crate) fn lock(&self, name: &OsStr) -> io::Result<File> {
