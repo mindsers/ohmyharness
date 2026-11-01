@@ -1272,7 +1272,7 @@ fn omp_one_hook(
                 crate::quote::js(field.var())
             ));
             if *field == crate::vocab::Field::ToolFile {
-                b.push_str(&hook::absolute_file_js("    ", true));
+                b.push_str(&hook::absolute_file_js("    ", hook::Plugin::Omp));
             }
         }
     }
@@ -1406,7 +1406,7 @@ fn one_hook(
                 crate::quote::js(field.var())
             ));
             if *field == crate::vocab::Field::ToolFile {
-                b.push_str(&hook::absolute_file_js("      ", false));
+                b.push_str(&hook::absolute_file_js("      ", hook::Plugin::Opencode));
             }
         }
     }
