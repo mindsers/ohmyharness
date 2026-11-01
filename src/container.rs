@@ -1427,7 +1427,7 @@ impl Stager<'_> {
                     std::fs::create_dir_all(stage)?;
                     // A document carrying the account's provider carries its
                     // token: the user's alone from its first byte.
-                    match provider.is_some() && binding.render == Render::CodexHooks {
+                    match provider.is_some() && binding.render.carries_provider() {
                         true => crate::held::Dir::open(stage)?
                             .replace_private(
                                 file.file_name().context("a staged file has a name")?,
@@ -1734,9 +1734,7 @@ pub(crate) fn carries(
                 || !own.hooks.is_empty()
                 // Codex's system config likewise carries the trust without
                 // which `/work` is prompted about and its rules skipped.
-                || adapter.supports(cap).is_some_and(|b| {
-                    matches!(b.render, Render::ClaudeSettings | Render::CodexHooks)
-                })
+                || adapter.supports(cap).is_some_and(|b| b.render.carries_trust())
         }
         Capability::Mcp => !sources.is_empty() || !own.servers.is_empty(),
         _ => !sources.is_empty(),

@@ -799,6 +799,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             &harness_image,
             &image::Kind::Harness(&adapter),
             true,
+            ctx,
         )
         .and_then(|tag| {
             let args = base::index_args(
@@ -931,7 +932,7 @@ fn build_and_ask(
             "building {} — first run only…",
             image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
         ));
-        image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
+        image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem), ctx)?;
         summary.image = Some(image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)));
     }
 
@@ -993,7 +994,7 @@ fn build_and_ask(
             // written it, and a `false` in `settings.local.toml` means *not
             // on this laptop*, which is the laptop building the image.
             let (own, repo) = crate::settings::resolved(paths)?;
-            let sandbox = sandbox(paths, &adapter, &repo, ca.clone())?;
+            let sandbox = sandbox(paths, &adapter, &repo, ca.clone(), ctx)?;
             image::ensure_stack(
                 &backend,
                 &adapter,
@@ -1002,6 +1003,7 @@ fn build_and_ask(
                 // was computed from it, and two reads of a file can differ.
                 sandbox.ca.as_ref().map(image::Root::pem),
                 &paths.repo,
+                ctx,
             )?;
             // `sandbox.ca`, not `ca` — the same reading `sandbox.tag`
             // was computed from. They are one value now, and comparing a

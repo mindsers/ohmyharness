@@ -66,7 +66,7 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
             .context("no adapters installed — run `omh init`")?;
         let adapter = Adapter::find(&paths.adapters(), &harness)?;
         let ca = image::ca_for(&paths)?;
-        image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
+        image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem), ctx)?;
 
         let out = backend.output(&base::ui_run_args(
             &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
@@ -372,7 +372,7 @@ pub(crate) fn doctor_cmd(
             true => container::Staging::Skip,
             false => container::Staging::Apply,
         };
-        let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca)?;
+        let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca, ctx)?;
         if let (true, Ok(backend)) = (staging.is_apply(), runtime::for_repo(&paths)) {
             sandbox.top_up(
                 &paths,
@@ -485,6 +485,7 @@ pub(crate) fn doctor_cmd(
                 &sandbox.tag,
                 &sandbox.kind(&adapter, &paths.repo),
                 true,
+                ctx,
             )?,
             resolves: sandbox.resolves.clone(),
             recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
@@ -553,6 +554,7 @@ pub(crate) fn doctor_cmd(
             // `ca_check` asserts against — came from the first.
             sandbox.ca.as_ref().map(image::Root::pem),
             &paths.repo,
+            ctx,
         )?;
         image::ensure_network(&backend, &plan.network)?;
         // Gone with the probe, as a login's is: doctor left it behind on

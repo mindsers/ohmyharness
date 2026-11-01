@@ -231,7 +231,7 @@ pub(crate) fn measure(
     wanted: &BTreeSet<String>,
     ctx: &out::Ctx,
 ) -> Result<Measured> {
-    let mut facts = facts::Facts::load(paths);
+    let mut facts = facts::Facts::load(paths, ctx);
     let unseen = facts.unseen(tag, wanted);
     if !unseen.is_empty() {
         let borrowed: Vec<&str> = unseen.iter().map(String::as_str).collect();
@@ -396,6 +396,7 @@ impl Sandbox {
             &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
             ca,
             &paths.repo,
+            ctx,
         )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
         let measured = measure(backend, paths, &self.tag, &wanted, ctx)?;
@@ -428,9 +429,10 @@ pub(crate) fn sandbox(
     adapter: &Adapter,
     repo: &settings::RepoPolicy,
     ca: Option<crate::image::Root>,
+    ctx: &out::Ctx,
 ) -> Result<Sandbox> {
     let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
-    sandbox_from(paths, adapter, repo, ca, &defs)
+    sandbox_from(paths, adapter, repo, ca, &defs, ctx)
 }
 
 /// [`sandbox`], over stack definitions the caller already holds.
@@ -444,6 +446,7 @@ pub(crate) fn sandbox_from(
     repo: &settings::RepoPolicy,
     ca: Option<crate::image::Root>,
     defs: &[stack::Definition],
+    ctx: &out::Ctx,
 ) -> Result<Sandbox> {
     let detected = stack::detected(defs, &paths.repo);
     let installs: Vec<String> = installs_for(&detected, &repo.provision)
@@ -461,7 +464,7 @@ pub(crate) fn sandbox_from(
         &installs.iter().map(String::as_str).collect::<Vec<_>>(),
         ca.as_ref().map(image::Root::pem),
     );
-    let resolves = facts::Facts::load(paths).about(&tag);
+    let resolves = facts::Facts::load(paths, ctx).about(&tag);
     let owed = needs_of(&detected, &repo.provision);
     Ok(Sandbox {
         installs,

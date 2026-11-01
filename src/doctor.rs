@@ -1710,7 +1710,14 @@ pub fn checks(
         let guest = match binding.render {
             // `concat` writes into the worktree, which is mounted at /work.
             Render::Concat => PathBuf::from(&binding.path),
-            _ => expand(&binding.path, GUEST_HOME),
+            Render::Dir
+            | Render::McpJson
+            | Render::CodexToml
+            | Render::OpencodeJson
+            | Render::ClaudeSettings
+            | Render::OpencodePlugin
+            | Render::OmpPlugin
+            | Render::CodexHooks => expand(&binding.path, GUEST_HOME),
         };
 
         let expect = match binding.render {

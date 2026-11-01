@@ -132,7 +132,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         current.insert(image::base_tag(ca.as_ref().map(Root::pem)));
         let mut harnesses = Vec::new();
         for adapter in &adapters {
-            let sandbox = sandbox_from(&paths, adapter, &repo, ca.clone(), &defs)?;
+            let sandbox = sandbox_from(&paths, adapter, &repo, ca.clone(), &defs, ctx)?;
             let pem = sandbox.ca.as_ref().map(Root::pem);
             let recipe = sandbox.recipe();
             let tags = vec![
@@ -157,7 +157,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
             }
             if !dry_run {
                 // Builds base/harness/stack as needed and reaps the superseded.
-                let tag = image::ensure_stack(&backend, adapter, &recipe, pem, &paths.repo)?;
+                let tag = image::ensure_stack(&backend, adapter, &recipe, pem, &paths.repo, ctx)?;
                 current.insert(tag);
             }
         }
@@ -308,7 +308,7 @@ fn reprovision(
             "building {} to ask what this repo needs…",
             image::tag_for(adapter, pem)
         ));
-        image::ensure(backend, adapter, pem)?;
+        image::ensure(backend, adapter, pem, ctx)?;
         image::tag_for(adapter, pem)
     };
 

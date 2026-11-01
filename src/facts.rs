@@ -59,24 +59,24 @@ impl Facts {
     /// ships. Reported to stderr rather than swallowed: silence here is a
     /// sandbox that quietly stops caching and re-probes on every launch, which
     /// looks exactly like working.
-    pub fn load(paths: &Paths) -> Self {
+    pub fn load(paths: &Paths, ctx: &crate::out::Ctx) -> Self {
         let path = paths.facts();
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(e) => {
-                eprintln!("omh: could not read {} — {e}", path.display());
+                ctx.warn(&format!("could not read {} — {e}", path.display()));
                 return Self::default();
             }
         };
         match serde_json::from_str(&raw) {
             Ok(facts) => facts,
             Err(e) => {
-                eprintln!(
-                    "omh: {} is not readable as measurements ({e}), so nothing is \
+                ctx.warn(&format!(
+                    "{} is not readable as measurements ({e}), so nothing is \
                      assumed about this image",
                     path.display()
-                );
+                ));
                 Self::default()
             }
         }
@@ -236,7 +236,7 @@ mod tests {
         facts.learn(tag, &[outcome("cargo", true), outcome("cc", false)]);
         facts.save(&paths).unwrap();
 
-        let read = Facts::load(&paths);
+        let read = Facts::load(&paths, &crate::out::Ctx::plain());
         assert_eq!(read, facts, "what was written is what comes back");
         assert_eq!(resolves(&read, tag, "cargo"), Some(true));
         assert_eq!(resolves(&read, tag, "cc"), Some(false));
@@ -289,7 +289,7 @@ mod tests {
         std::fs::create_dir_all(&paths.root).unwrap();
         std::fs::write(paths.facts(), "{ this is not json").unwrap();
 
-        let facts = Facts::load(&paths);
+        let facts = Facts::load(&paths, &crate::out::Ctx::plain());
         assert_eq!(
             resolves(&facts, "omh/claude:abc", "cargo"),
             None,

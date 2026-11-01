@@ -440,7 +440,7 @@ fn login_in_sandbox(
     let catalogue = Catalogue::resolve(paths);
     let backend = runtime::for_repo(paths)?;
     let ca = image::ca_for(paths)?;
-    image::ensure(&backend, adapter, ca.as_ref().map(image::Root::pem))?;
+    image::ensure(&backend, adapter, ca.as_ref().map(image::Root::pem), ctx)?;
 
     // A throwaway: logging in must not leave a branch behind.
     let session = Session::scratch(paths.scratch("auth"), "auth".into());
@@ -489,6 +489,7 @@ fn login_in_sandbox(
                 &image::tag_for(adapter, ca.as_ref().map(image::Root::pem)),
                 &image::Kind::Harness(adapter),
                 true,
+                ctx,
             )?,
             // So nothing has been measured about it here, and nothing is
             // suppressed. That is the safe direction — a login session running

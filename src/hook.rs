@@ -780,11 +780,23 @@ pub(crate) fn absolute_file_sh() -> String {
     .into()
 }
 
+/// Which harness a hook module is written for, where the two differ in what
+/// the bridge does with a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Plugin {
+    Opencode,
+    /// omp cleans a path up its own way before it is resolved.
+    Omp,
+}
+
 /// The same in the plugin renderers' JavaScript, through the bridge's
-/// `omh_file`, for an `env` object that already holds `OMH_TOOL_FILE`. `omp`
-/// adds omp's own clean-up of a path before it resolves one.
-pub(crate) fn absolute_file_js(indent: &str, omp: bool) -> String {
-    format!("{indent}env.OMH_TOOL_FILE = omh_file(env.OMH_TOOL_FILE, {omp})\n")
+/// `omh_file`, for an `env` object that already holds `OMH_TOOL_FILE`.
+pub(crate) fn absolute_file_js(indent: &str, plugin: Plugin) -> String {
+    let omp_first = match plugin {
+        Plugin::Omp => true,
+        Plugin::Opencode => false,
+    };
+    format!("{indent}env.OMH_TOOL_FILE = omh_file(env.OMH_TOOL_FILE, {omp_first})\n")
 }
 
 #[cfg(test)]

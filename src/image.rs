@@ -823,8 +823,9 @@ pub fn ensure_stack(
     installs: &[&str],
     ca: Option<&str>,
     repo: &Path,
+    ctx: &crate::out::Ctx,
 ) -> Result<String> {
-    ensure(backend, adapter, ca)?;
+    ensure(backend, adapter, ca, ctx)?;
     let tag = stack_tag(adapter, installs, ca);
     if tag != tag_for(adapter, ca) {
         provide(
@@ -834,6 +835,7 @@ pub fn ensure_stack(
             &Kind::Stack(adapter, repo),
             ca,
             &format!("building {tag} — this repo's toolchain, first run only"),
+            ctx,
         )?;
     }
     Ok(tag)
@@ -1030,9 +1032,14 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
     ]
 }
 
-/// Build the base and the harness layer if they are missing. Progress goes
-/// straight to the terminal: a multi-minute silent step reads as a hang.
-pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
+/// Build the base and the harness layer if they are missing. Each build is
+/// announced: a multi-minute silent step reads as a hang.
+pub fn ensure(
+    backend: &Backend,
+    adapter: &Adapter,
+    ca: Option<&str>,
+    ctx: &crate::out::Ctx,
+) -> Result<()> {
     let base = base_tag(ca);
     provide(
         backend,
@@ -1041,6 +1048,7 @@ pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<
         &Kind::Base,
         ca,
         &format!("building {base} (first run only)"),
+        ctx,
     )?;
     let t = tag_for(adapter, ca);
     provide(
@@ -1050,6 +1058,7 @@ pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<
         &Kind::Harness(adapter),
         ca,
         &format!("building {t}"),
+        ctx,
     )?;
     Ok(())
 }
@@ -1159,7 +1168,13 @@ pub(crate) fn with_owned(tags: &[String], owner: Option<(u32, u32)>) -> Vec<Stri
 /// what the host mounts, see [`agent_owner`] — `tag` with the agent moved to
 /// the host user, built once and kept beside it. With `build` false, the name
 /// it would have and nothing more, for a dry run.
-pub fn for_host(backend: &Backend, tag: &str, base: &Kind, build: bool) -> Result<String> {
+pub fn for_host(
+    backend: &Backend,
+    tag: &str,
+    base: &Kind,
+    build: bool,
+    ctx: &crate::out::Ctx,
+) -> Result<String> {
     let Some((uid, gid)) = host_owner(backend)? else {
         return Ok(tag.to_string());
     };
@@ -1171,6 +1186,7 @@ pub fn for_host(backend: &Backend, tag: &str, base: &Kind, build: bool) -> Resul
             &owner_dockerfile(tag, uid, gid),
             &Kind::Owner { base, uid, gid },
             None,
+            ctx,
         )?;
     }
     Ok(owned)
@@ -1192,13 +1208,14 @@ fn provide(
     kind: &Kind,
     ca: Option<&str>,
     note: &str,
+    ctx: &crate::out::Ctx,
 ) -> Result<()> {
     if backend.engine() == Engine::Sbx {
-        return provide_to_sbx(backend, tag, dockerfile, kind, ca, note);
+        return provide_to_sbx(backend, tag, dockerfile, kind, ca, note, ctx);
     }
     if !exists(backend, tag) {
-        eprintln!("omh: {note}");
-        build(backend, tag, dockerfile, kind, ca)?;
+        ctx.announce(note);
+        build(backend, tag, dockerfile, kind, ca, ctx)?;
     }
     Ok(())
 }
@@ -1214,6 +1231,7 @@ fn provide_to_sbx(
     kind: &Kind,
     ca: Option<&str>,
     note: &str,
+    ctx: &crate::out::Ctx,
 ) -> Result<()> {
     use anyhow::Context;
     if template_exists(sbx, tag) {
@@ -1224,8 +1242,8 @@ fn provide_to_sbx(
     // is a prerequisite `omh doctor` reports rather than a launch surprise.
     let docker = Backend::real(Box::new(crate::runtime::Docker));
     if !exists(&docker, tag) {
-        eprintln!("omh: {note}");
-        build(&docker, tag, dockerfile, kind, ca)?;
+        ctx.announce(note);
+        build(&docker, tag, dockerfile, kind, ca, ctx)?;
     }
     let staging = tempfile::tempdir().context("staging the template tar")?;
     let tar = staging.path().join("image.tar");
@@ -1242,7 +1260,7 @@ fn provide_to_sbx(
         "docker save {tag} failed: {}",
         String::from_utf8_lossy(&saved.stderr)
     );
-    eprintln!("omh: loading {tag} into the sbx template store");
+    ctx.announce(&format!("loading {tag} into the sbx template store"));
     let loaded = sbx
         .output(&crate::runtime::Sbx::template_load_args(&tar))
         .context("sbx template load")?;
@@ -1404,6 +1422,7 @@ fn build(
     dockerfile: &str,
     kind: &Kind,
     ca: Option<&str>,
+    ctx: &crate::out::Ctx,
 ) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
@@ -1489,7 +1508,7 @@ fn build(
         }
         anyhow::bail!("failed to build {tag}");
     }
-    reap(backend, tag, kind);
+    reap(backend, tag, kind, ctx);
     Ok(())
 }
 
@@ -1506,11 +1525,11 @@ fn build(
 /// failing on every build for months is indistinguishable from one that is
 /// working unless it says so — and that indistinguishability is the whole
 /// failure this feature exists to end.
-fn reap(backend: &Backend, built: &str, kind: &Kind) {
+fn reap(backend: &Backend, built: &str, kind: &Kind, ctx: &crate::out::Ctx) {
     let tags = match list_tags(backend, kind) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("omh: could not list images to reap: {e}");
+            ctx.warn(&format!("could not list images to reap: {e}"));
             return;
         }
     };
@@ -1518,7 +1537,7 @@ fn reap(backend: &Backend, built: &str, kind: &Kind) {
     let in_use = match images_in_use(backend) {
         Ok(in_use) => in_use,
         Err(e) => {
-            eprintln!("omh: could not list images to reap: {e:#}");
+            ctx.warn(&format!("could not list images to reap: {e:#}"));
             return;
         }
     };
@@ -1535,11 +1554,11 @@ fn reap(backend: &Backend, built: &str, kind: &Kind) {
             // counting exit codes would report a reclaim that did not happen:
             // the image is still there under its other name.
             Removal::Untagged => {}
-            Removal::Failed(why) => eprintln!("omh: could not remove {tag}: {why}"),
+            Removal::Failed(why) => ctx.warn(&format!("could not remove {tag}: {why}")),
         }
     }
     if !gone.is_empty() {
-        eprintln!("omh: removed {} this build replaced", gone.join(", "));
+        ctx.announce(&format!("removed {} this build replaced", gone.join(", ")));
     }
 }
 
@@ -2283,7 +2302,12 @@ mod tests {
                 (vec!["image", "rm"], answered(0, "Deleted: sha256:00\n", "")),
             ],
         );
-        reap(&backend, "omh/base:new", &Kind::Base);
+        reap(
+            &backend,
+            "omh/base:new",
+            &Kind::Base,
+            &crate::out::Ctx::plain(),
+        );
         let removed: Vec<_> = asked
             .borrow()
             .iter()
@@ -4302,6 +4326,7 @@ mod tests {
             "FROM alpine:3\nRUN echo built-fine\n",
             &Kind::Base,
             None,
+            &crate::out::Ctx::plain(),
         );
         assert!(ok.is_ok(), "a trivial build must succeed: {ok:?}");
 
@@ -4312,6 +4337,7 @@ mod tests {
             "FROM alpine:3\nRUN echo 'x509: certificate signed by unknown authority' >&2 && exit 1\n",
             &Kind::Base,
             None,
+            &crate::out::Ctx::plain(),
         )
         .expect_err("that recipe must fail");
         let said = format!("{said:#}");
@@ -4341,6 +4367,7 @@ mod tests {
             "FROM alpine:3\nRUN echo 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' >&2 && exit 1\n",
             &Kind::Harness(&adapter),
             Some(pem),
+            &crate::out::Ctx::plain(),
         )
         .expect_err("that recipe must fail");
         let already = format!("{already:#}");
@@ -4360,6 +4387,7 @@ mod tests {
             "FROM alpine:3\nRUN exit 1\n",
             &Kind::Base,
             None,
+            &crate::out::Ctx::plain(),
         )
         .expect_err("that recipe must fail");
         assert!(
@@ -4952,6 +4980,7 @@ mod tests {
             &Kind::Base,
             None,
             "note",
+            &crate::out::Ctx::plain(),
         )
         .expect("a loaded template needs no build");
 

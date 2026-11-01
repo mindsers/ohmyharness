@@ -1272,7 +1272,7 @@ fn omp_one_hook(
                 crate::quote::js(field.var())
             ));
             if *field == crate::vocab::Field::ToolFile {
-                b.push_str(&hook::absolute_file_js("    ", true));
+                b.push_str(&hook::absolute_file_js("    ", hook::Plugin::Omp));
             }
         }
     }
@@ -1406,7 +1406,7 @@ fn one_hook(
                 crate::quote::js(field.var())
             ));
             if *field == crate::vocab::Field::ToolFile {
-                b.push_str(&hook::absolute_file_js("      ", false));
+                b.push_str(&hook::absolute_file_js("      ", hook::Plugin::Opencode));
             }
         }
     }
@@ -1767,7 +1767,17 @@ pub fn parse_hooks_as(
             }
             parse_hooks(&serde_json::json!({ "hooks": json }).to_string(), vocab)
         }
-        _ => parse_hooks(raw, vocab),
+        Render::ClaudeSettings => parse_hooks(raw, vocab),
+        Render::OpencodePlugin | Render::OmpPlugin => anyhow::bail!(
+            "`{format:?}` hooks are a program omh writes, not a file it can read back"
+        ),
+        Render::Dir
+        | Render::Concat
+        | Render::McpJson
+        | Render::CodexToml
+        | Render::OpencodeJson => {
+            anyhow::bail!("`{format:?}` is not a hook format")
+        }
     }
 }
 
@@ -2653,6 +2663,34 @@ mod tests {
             .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
             .collect();
         assert_eq!(recovered, mine);
+    }
+
+    /// A hook module omh wrote is a program, and only the formats that are
+    /// hook files can be read back. `parse_hooks_as` read every format but
+    /// Codex's as Claude's JSON, so an omp module came back as "not JSON", and
+    /// a format added later would have been read the same way, in silence.
+    #[test]
+    fn only_a_hook_file_is_read_back_as_hooks() {
+        let adapter = omp();
+        let binding = adapter.supports(Capability::Hooks).unwrap();
+        let vocab = hook::Vocabulary::of(binding, &adapter.tools).unwrap();
+        for format in [Render::OmpPlugin, Render::OpencodePlugin] {
+            let e = format!(
+                "{:#}",
+                parse_hooks_as(format, "export default function () {}", &vocab).unwrap_err()
+            );
+            assert!(e.contains("a program omh writes"), "{format:?}: {e}");
+        }
+        for format in [
+            Render::Dir,
+            Render::Concat,
+            Render::McpJson,
+            Render::CodexToml,
+            Render::OpencodeJson,
+        ] {
+            let e = format!("{:#}", parse_hooks_as(format, "{}", &vocab).unwrap_err());
+            assert!(e.contains("not a hook format"), "{format:?}: {e}");
+        }
     }
 
     // ── reading a harness's hooks back ──────────────────────────────────────
