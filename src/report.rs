@@ -3741,6 +3741,7 @@ impl Report for Notes {
                 "recorded": n.recorded,
                 "invalidated_by": n.invalidated_by,
                 "path": n.path.display().to_string(),
+                "refs": crate::memory::refs(&self.notes, &n.key),
             })).collect::<Vec<_>>(),
         })
     }

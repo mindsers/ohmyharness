@@ -1420,6 +1420,15 @@ pub fn remove(paths: &Paths, key: &str, at: Option<&str>, dry_run: bool) -> Resu
 
 // ── listing and the review moment ───────────────────────────────────────────
 
+/// How many of `notes` link to `key`: what `omh memory` lists beside each
+/// note, and what its `--json` carries, from this one count.
+pub fn refs(notes: &[Note], key: &str) -> usize {
+    notes
+        .iter()
+        .filter(|n| links(&n.body).iter().any(|l| l == key))
+        .count()
+}
+
 /// `omh memory`'s output. Pure, and every line carries the note's own date: a
 /// note presented without its age cannot be judged.
 pub fn render_list(notes: &[Note]) -> String {
@@ -1429,10 +1438,7 @@ pub fn render_list(notes: &[Note]) -> String {
     let width = sorted.iter().map(|n| n.key.len()).max().unwrap_or(0);
     let mut out = String::new();
     for note in sorted {
-        let refs = notes
-            .iter()
-            .filter(|n| links(&n.body).contains(&note.key))
-            .count();
+        let refs = refs(notes, &note.key);
         out.push_str(&format!(
             "{:width$}  {}  {} ref{}\n",
             note.key,
