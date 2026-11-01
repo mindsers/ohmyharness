@@ -156,7 +156,7 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::SETTINGS {
         let path = layer.file(paths);
-        let Some(raw) = read_layer(&path)? else {
+        let Some(raw) = crate::fsx::read_or_absent(&path)? else {
             continue;
         };
         let table: toml::Table =
@@ -395,24 +395,6 @@ pub fn unset_account(paths: &Paths, harness: Option<&str>, layer: Layer) -> Resu
     Ok(changed)
 }
 
-/// Read a layer's file, distinguishing "this layer declares nothing" from
-/// "this layer could not be read".
-///
-/// `let Ok(..) else { continue }` conflated them, and the second case is
-/// unrecoverable from the outside: `chmod 000` on `mcp.json` made `omh why`
-/// answer "not installed here" about an installed server and advise `omh init`
-/// — which does nothing, because `write_if_absent` sees the file exists. A
-/// closed loop, exit 0, no error anywhere.
-fn read_layer(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => Ok(Some(raw)),
-        // Absent is a normal, expected state: most layers declare most things
-        // not at all.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
-}
-
 /// Every hook across all layers, resolved with provenance.
 ///
 /// Reported the same way as [`servers`] — `omh why` treats a server and a hook
@@ -465,7 +447,7 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
     // omh's servers are part of omh, never of your catalogue — a copy an
     // earlier omh seeded here is one `omh upgrade` takes out, not one of yours.
     let omhs = crate::base::server_names()?;
-    if let Some(raw) = read_layer(&path)? {
+    if let Some(raw) = crate::fsx::read_or_absent(&path)? {
         let doc: serde_json::Value =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         if let Some(servers) = doc.get("mcpServers").and_then(|v| v.as_object()) {
@@ -498,7 +480,7 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
 pub fn omhs_server_copies(paths: &Paths) -> Result<Vec<Setting>> {
     let omhs = crate::base::server_names()?;
     let path = mcp_path(paths);
-    let Some(raw) = read_layer(&path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(&path)? else {
         return Ok(Vec::new());
     };
     let doc: serde_json::Value =
@@ -726,7 +708,7 @@ pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Re
 /// would go on looking like one.
 pub fn values(paths: &Paths, layer: Layer) -> Result<BTreeMap<String, String>> {
     let path = layer.file(paths);
-    let Some(raw) = read_layer(&path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(&path)? else {
         return Ok(BTreeMap::new());
     };
     let table: toml::Table =
@@ -1077,7 +1059,7 @@ fn edit_layer(
 /// to take every `[omh]` switch and every `[mcp.<name>.env]` token with it, and
 /// print success.
 pub fn read_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
-    let Some(raw) = read_layer(path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(path)? else {
         return Ok(toml_edit::DocumentMut::new());
     };
     raw.parse()
@@ -1176,7 +1158,7 @@ pub fn remove_own_servers(
     dry_run: bool,
 ) -> Result<Vec<Removed>> {
     let path = mcp_path(paths);
-    let Some(raw) = read_layer(&path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(&path)? else {
         return Ok(Vec::new());
     };
     let mut doc: serde_json::Value =
@@ -1312,7 +1294,7 @@ pub fn mcp_path(paths: &Paths) -> PathBuf {
 /// hand" guard is built on `all.get(&name)`, so an empty map classifies every
 /// incoming server as new and overwrites without `--replace`.
 fn read_servers(path: &Path) -> Result<BTreeMap<String, Server>> {
-    let Some(raw) = read_layer(path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(path)? else {
         return Ok(BTreeMap::new());
     };
     crate::servers::parse(Render::McpJson, &raw)
