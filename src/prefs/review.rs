@@ -508,6 +508,15 @@ pub fn homes_of(run: &Path) -> Result<Vec<(String, Home)>> {
     let mut out = Vec::new();
     for entry in entries {
         let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        // A harness's home is a directory; a stray file beside them is not
+        // one, and read as one it failed `account_of` with `NotADirectory`, so
+        // `rm` refused over a file omh never wrote.
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("reading {}", entry.path().display()))?;
+        if !kind.is_dir() {
+            continue;
+        }
         out.push((
             entry.file_name().to_string_lossy().into_owned(),
             Home::Kept(entry.path()),
@@ -520,6 +529,20 @@ pub fn homes_of(run: &Path) -> Result<Vec<(String, Home)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stray_file_beside_the_homes_is_not_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefs = dir.path().join(".preferences");
+        std::fs::create_dir_all(prefs.join("claude")).unwrap();
+        std::fs::write(prefs.join(".DS_Store"), "").unwrap();
+        let homes: Vec<String> = homes_of(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(homes, vec!["claude".to_string()]);
+    }
     use std::collections::BTreeMap;
 
     fn claude() -> Adapter {

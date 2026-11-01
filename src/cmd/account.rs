@@ -30,6 +30,7 @@ impl Drop for NetworkCleanup<'_> {
 pub(crate) fn list(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let mut harnesses = Vec::new();
+    let mut unread = 0usize;
     for adapter in Adapter::load_dir(&paths.adapters())? {
         let names = auth::accounts(&paths, &adapter)?;
         let configured = auth::configured(&paths, &adapter)?;
@@ -42,12 +43,27 @@ pub(crate) fn list(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         };
         let mut accounts = Vec::new();
         for name in names {
-            let kept = crate::prefs::kept_by_file(&adapter, &auth::dir(&paths, &adapter, &name))?;
-            accounts.push(report::Account {
-                name,
-                keys: kept.iter().flat_map(|k| k.keys.clone()).collect(),
-                kept: kept.into_iter().map(|k| (k.file, k.doc)).collect(),
-            });
+            // One account omh could not read is said in its own row: `?` here
+            // stopped the listing, and every harness after it went unlisted.
+            let account =
+                match crate::prefs::kept_by_file(&adapter, &auth::dir(&paths, &adapter, &name)) {
+                    Ok(kept) => report::Account {
+                        name,
+                        keys: kept.iter().flat_map(|k| k.keys.clone()).collect(),
+                        kept: kept.into_iter().map(|k| (k.file, k.doc)).collect(),
+                        unread: None,
+                    },
+                    Err(e) => {
+                        unread += 1;
+                        report::Account {
+                            name,
+                            keys: Vec::new(),
+                            kept: Vec::new(),
+                            unread: Some(format!("{e:#}")),
+                        }
+                    }
+                };
+            accounts.push(account);
         }
         harnesses.push(report::HarnessAccounts {
             harness: adapter.name.to_string(),
@@ -57,6 +73,13 @@ pub(crate) fn list(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         });
     }
     ctx.say(&report::Accounts { harnesses });
+    // Listed whole, and still not a clean answer.
+    anyhow::ensure!(
+        unread == 0,
+        "omh could not read what {unread} account{} keep{} — named above",
+        if unread == 1 { "" } else { "s" },
+        if unread == 1 { "s" } else { "" }
+    );
     Ok(())
 }
 
