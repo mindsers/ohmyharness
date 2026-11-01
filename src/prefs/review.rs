@@ -225,14 +225,47 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
     }
     let before = kept.clone();
 
-    // Quiet keys, kept without asking: last writer wins.
-    for (_, sides) in &mut read {
-        for (f, side) in sides.iter_mut().enumerate() {
-            for key in side.declared.quiet.clone() {
-                let now = get(&side.live, &key).cloned();
-                if get(&side.reviewed, &key) != now.as_ref() {
+    // Quiet keys, kept without asking: last writer wins. Three limits on
+    // that, each because it was missing:
+    //
+    // - `rm --yes` keeps nothing, quiet keys included. They were kept before
+    //   the answer was read, so a session dropped whole still wrote into the
+    //   account that seeds every later session.
+    // - What is kept is named. It was kept unseen.
+    // - A value whose type changed is not the harness's bookkeeping — Codex
+    //   does not turn a table into a string — and is kept nowhere.
+    if !matches!(answers, Answers::DropAll) {
+        for (i, sides) in &mut read {
+            let id = sittings[*i].id.clone();
+            let mut quietly = Vec::new();
+            for (f, side) in sides.iter_mut().enumerate() {
+                for key in side.declared.quiet.clone() {
+                    let now = get(&side.live, &key).cloned();
+                    let was = get(&side.reviewed, &key);
+                    if was == now.as_ref() {
+                        continue;
+                    }
+                    if let (Some(was), Some(now)) = (was, now.as_ref()) {
+                        if kind(was) != kind(now) {
+                            outcome.notes.push(crate::out::untrusted(&format!(
+                                "{id}: {} not kept — it went from {} to {}, which is not \
+                                 bookkeeping the harness writes",
+                                super::dotted(&key),
+                                kind(was),
+                                kind(now)
+                            )));
+                            continue;
+                        }
+                    }
+                    quietly.push(super::dotted(&key));
                     keep(side, &mut kept[f], &key, now);
                 }
+            }
+            if !quietly.is_empty() {
+                outcome.notes.push(crate::out::untrusted(&format!(
+                    "{id}: kept without asking, as the harness's own bookkeeping — {}",
+                    quietly.join(", ")
+                )));
             }
         }
     }
@@ -524,6 +557,18 @@ pub fn homes_of(run: &Path) -> Result<Vec<(String, Home)>> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+/// A value's JSON type, as a word.
+fn kind(v: &super::Value) -> &'static str {
+    match v {
+        super::Value::Null => "null",
+        super::Value::Bool(_) => "a boolean",
+        super::Value::Number(_) => "a number",
+        super::Value::String(_) => "a string",
+        super::Value::Array(_) => "a list",
+        super::Value::Object(_) => "a table",
+    }
 }
 
 #[cfg(test)]
@@ -876,6 +921,125 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(account.join("preferences/config.toml")).unwrap(),
             "model = \"a\"\n\n[tui]\nmodel_availability_nux = 3\n"
+        );
+    }
+
+    /// A codex session seeded from `account` whose live config is `live`.
+    fn codex_sitting(account_toml: &str, live_toml: &str) -> (tempfile::TempDir, PathBuf, Sitting) {
+        let adapters = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+        let codex = Adapter::find(&adapters, "codex").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/codex/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(account.join("preferences/config.toml"), account_toml).unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let checked = super::super::check(&codex, &account).unwrap().unwrap();
+        checked.apply(&|| Ok(Vec::new())).unwrap();
+        checked
+            .seed(&codex, &home, &BTreeMap::new(), false)
+            .unwrap();
+        std::fs::write(super::super::live(&home).join("config.toml"), live_toml).unwrap();
+        let sitting = Sitting {
+            id: "s01".into(),
+            home,
+        };
+        (root, account, sitting)
+    }
+
+    fn codex() -> Adapter {
+        Adapter::find(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters"),
+            "codex",
+        )
+        .unwrap()
+    }
+
+    /// **`rm --yes` keeps nothing — quiet keys included.** Quiet keys were
+    /// kept before the answer was read, for every answer, so a session the
+    /// user dropped whole still wrote into the account that seeds every later
+    /// session — what the commands reference says `--yes` never does.
+    #[test]
+    fn rm_yes_keeps_no_quiet_key() {
+        let (_root, account, sitting) = codex_sitting(
+            "model = \"a\"\n",
+            "model = \"b\"\n[tui]\nmodel_availability_nux = 3\n",
+        );
+        review(&codex(), std::slice::from_ref(&sitting), Answers::DropAll).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(account.join("preferences/config.toml")).unwrap(),
+            "model = \"a\"\n"
+        );
+    }
+
+    /// A quiet key a review keeps is named in what it says, not kept unseen.
+    #[test]
+    fn a_quiet_key_kept_is_named() {
+        let (_root, _account, sitting) = codex_sitting(
+            "model = \"a\"\n",
+            "model = \"a\"\n[tui]\nmodel_availability_nux = 3\n",
+        );
+        let mut out = Vec::new();
+        let outcome = review(
+            &codex(),
+            std::slice::from_ref(&sitting),
+            Answers::Ask {
+                input: &mut "".as_bytes(),
+                out: &mut out,
+            },
+        )
+        .unwrap();
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("tui.model_availability_nux")),
+            "{:?}",
+            outcome.notes
+        );
+    }
+
+    /// A quiet key whose value changed type is the session's, not Codex's
+    /// bookkeeping: a string where a table was is kept nowhere.
+    #[test]
+    fn a_quiet_key_that_changed_type_is_not_kept() {
+        let (_root, account, sitting) = codex_sitting(
+            "model = \"a\"\n[tui.model_availability_nux]\nseen = 1\n",
+            "model = \"a\"\n[tui]\nmodel_availability_nux = \"not-a-table\"\n",
+        );
+        let mut out = Vec::new();
+        let outcome = review(
+            &codex(),
+            std::slice::from_ref(&sitting),
+            Answers::Ask {
+                input: &mut "".as_bytes(),
+                out: &mut out,
+            },
+        )
+        .unwrap();
+        let kept = std::fs::read_to_string(account.join("preferences/config.toml")).unwrap();
+        assert!(!kept.contains("not-a-table"), "{kept}");
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("model_availability_nux") && n.contains("not kept")),
+            "{:?}",
+            outcome.notes
+        );
+    }
+
+    /// `notice.model_migrations` maps a model to the one it migrated to — it
+    /// names models, so a session's change to it is reviewed like `model`,
+    /// never kept quietly as bookkeeping.
+    #[test]
+    fn a_model_migration_is_reviewed() {
+        let (_root, _account, sitting) = codex_sitting(
+            "model = \"a\"\n",
+            "model = \"a\"\n[notice.model_migrations]\n\"gpt-5\" = \"elsewhere\"\n",
+        );
+        assert_eq!(
+            unreviewed(&codex(), &sitting.home).unwrap(),
+            vec!["notice.model_migrations"]
         );
     }
 
