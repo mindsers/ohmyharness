@@ -391,6 +391,9 @@ impl Sandbox {
     /// have shipped a doctor that lists every volume on the machine.
     /// `<bin>/labels-<name>` is what `inspect -f` answers for that container
     /// — its labels as JSON — where the shim otherwise answers `true`.
+    /// `<bin>/on-<verb>` is a script run when the shim is called with that
+    /// verb, before it answers: an agent still writing as its container is
+    /// removed is `on-rm`.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
@@ -399,6 +402,7 @@ impl Sandbox {
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
+                 [ -f {bin}/on-\"$1\" ] && sh {bin}/on-\"$1\"\n\
                  if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
                  cat {exec_refuses} >&2; exit 1; fi\n\
                  if [ \"$1\" = exec ] && [ -f {check_fails} ]; then \
@@ -2151,6 +2155,36 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
     assert!(
         !gitdir.exists(),
         "…and so is the sandbox repository it was protecting"
+    );
+}
+
+/// What `rm` counts is what it removes. It counted the work, asked, and only
+/// then stopped the container — so what a live agent wrote meanwhile went
+/// with the worktree, uncounted. Counted again once the agent is down, a
+/// change is refused, with nothing more removed.
+#[test]
+fn work_written_while_rm_decided_is_counted_before_anything_of_it_goes() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    let _log = sb.fake_docker();
+    std::fs::write(
+        sb.bin.join("on-rm"),
+        format!(
+            "printf 'late\\n' > '{}'\n",
+            worktree.join("late.txt").display()
+        ),
+    )
+    .unwrap();
+    let out = sb.omh(&["s01", "rm"]);
+    let said = printed(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("s01's agent wrote more while omh decided"),
+        "{said}"
+    );
+    assert!(
+        worktree.join("late.txt").is_file(),
+        "the late work went: {said}"
     );
 }
 
