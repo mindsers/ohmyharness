@@ -6858,22 +6858,26 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
             .to_string();
         // Fixture and assertion text is not anything omh prints; the cut
         // is `testsrc`'s, the same one every scan in this crate makes.
-        for (i, line) in source.lines().enumerate() {
-            let line = line.trim();
-            // Only calls, never the word in a doc comment or a string that
-            // talks *about* the rule — this very comment mentions
-            // `println!`.
+        //
+        // Only calls, never the word in a doc comment or a string that talks
+        // *about* the rule — this very comment mentions `println!` — so the
+        // macro is looked for in the code with comments and literals blanked,
+        // **anywhere on the line**. It was looked for at the start of a
+        // trimmed line, which `Removal::Failed(why) => eprintln!(..)` in
+        // `image::reap` is not, and that write went unseen.
+        let code = crate::testsrc::code_of(source);
+        for (i, (code, line)) in code.lines().zip(source.lines()).enumerate() {
             if ["println!", "print!(", "eprintln!", "eprint!("]
                 .iter()
-                .any(|m| line.starts_with(m))
+                .any(|m| code.contains(m))
             {
-                offenders.push(format!("{name}:{}: {line}", i + 1));
+                offenders.push(format!("{name}:{}: {}", i + 1, line.trim()));
             }
         }
     }
 
     // **Declared, not counted.** Widening this scan from one file to the
-    // tree turned up ten sites, and the honest thing is to name every one
+    // tree turned up its sites, and the honest thing is to name every one
     // rather than assert a number that goes stale the first time somebody
     // moves a line.
     //
@@ -6882,10 +6886,10 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // renderer in `main` was a third; it writes through `out::put` now, which
     // is what ends omh quietly when the reader has gone.
     //
-    // The tenth is neither: it is a relay of a child's stream, listed
-    // separately below.
+    // The relays of a child's stream are neither, and are listed separately
+    // below.
     //
-    // The other seven are **owed a fix, not excused one**. They predate the
+    // The rest are **owed a fix, not excused one**. They predate the
     // scan reading their files at all, and every one writes an `omh: ` line
     // straight to stderr — no palette, and not suppressed under `--json`,
     // which is what `progress` and `announce` exist to do. Routing them
@@ -6893,7 +6897,7 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // path, roughly sixteen call sites, one of which (`sandbox`) has none
     // in scope. That is its own change; doing it inside a release fix would
     // be a large diff in the wrong week. The list is here so it cannot grow
-    // quietly in the meantime — an eighth entry fails this test.
+    // quietly in the meantime — the count below fails on another entry.
     // Named by what the line *is*, not by where it sits. The first draft
     // pinned `file:line` and went stale the moment anything above it grew,
     // which is a guard failing for a reason that has nothing to do with
@@ -6914,12 +6918,15 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
         ("src/image.rs", "loading {tag} into the sbx template store"),
         ("src/image.rs", "could not list images to reap"),
         ("src/image.rs", "this build replaced"),
+        // Not new: owed as long as the others, and unseen until the scan read
+        // past a line's first token.
+        ("src/image.rs", "could not remove {tag}"),
     ];
     // **A relay is not a message.** These do not write anything omh
     // composed — they hand a child process's stream back to the terminal
     // verbatim, which is what `Stdio::inherit` did before omh needed to
     // read the stream as well as show it. So they are not debts and are
-    // counted separately: the seven above stay seven, and this list may
+    // counted separately: the count above does not move, and this list may
     // not quietly become a second way in.
     //
     // `build` reads docker's stderr so it can say *why* a build failed —
@@ -6956,10 +6963,11 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     }
     assert_eq!(
         named.len(),
-        7,
-        "the debt register grew. The MCP exemption and six owed sites — the sbx \
-         delivery folded three build-note prints into `provide` (one text) and \
-         added the template-load note beside it. Another owed site is a fix, \
+        8,
+        "the debt register grew. The MCP exemption and seven owed sites — the \
+         sbx delivery folded three build-note prints into `provide` (one text) \
+         and added the template-load note beside it, and `reap`'s failed \
+         removal was always there, behind a `=>`. Another owed site is a fix, \
          not an entry"
     );
     // The comment above `relayed` says it "may not quietly become a second
