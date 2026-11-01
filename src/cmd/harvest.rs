@@ -1905,4 +1905,37 @@ mod tests {
             "a stat that failed must read as could-not-tell: {denied:?}"
         );
     }
+
+    /// The test above holds the helper; this holds the call. Putting
+    /// `session.worktree.is_dir()` back in `at_stake` left every test green,
+    /// because nothing drove a failing stat through it: a session with no
+    /// sandbox, whose worktree sits under a directory omh cannot search.
+    #[cfg(unix)]
+    #[test]
+    fn rm_asks_about_a_worktree_it_could_not_stat() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let worktrees = dir.path().join("worktrees");
+        let session = Session::new(&worktrees, "s01".into());
+        std::fs::create_dir_all(&session.worktree).unwrap();
+        std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let stat = std::fs::metadata(&session.worktree);
+        let got = at_stake(&paths, &session);
+        std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root searches any directory, so there the arm cannot be reached.
+        // Said, rather than passed silently.
+        if stat.is_ok() {
+            assert_eq!(unsafe { libc::geteuid() }, 0, "the stat should have failed");
+            eprintln!("skipped: running as root, which no permission refuses");
+            return;
+        }
+        assert!(
+            matches!(&got, AtStake::Unknown(why) if why.contains("could not be inspected")),
+            "a worktree omh could not stat is not one with nothing in it: {got:?}"
+        );
+    }
 }
