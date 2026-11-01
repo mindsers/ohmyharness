@@ -1537,6 +1537,40 @@ fn a_carried_path_is_excluded_as_itself() {
     assert!(status.contains("starling"), "{status:?}");
 }
 
+/// A sync's checkpoint reads the worktree, never the agent's index. The
+/// sandbox's index is the agent's to write: marking a changed file
+/// `skip-worktree` hid it from `status`, so the checkpoint found nothing,
+/// took none, and the sync then wrote over the change with nothing to take
+/// it back from.
+#[test]
+fn a_checkpoint_sees_what_the_agents_index_hides() {
+    let (_d, wt, shadow_dir) = fixture();
+    let s = Shadow::new(&shadow_dir, "s01");
+    s.ensure(&wt, &[]).unwrap();
+    std::fs::write(wt.join("f.txt"), "the agent's work\n").unwrap();
+    git(
+        &s.gitdir,
+        &wt,
+        &["update-index", "--skip-worktree", "f.txt"],
+    )
+    .unwrap();
+    assert!(
+        git(&s.gitdir, &wt, &["status", "--porcelain"])
+            .unwrap()
+            .trim()
+            .is_empty(),
+        "the fixture has to hide the change from the agent's index"
+    );
+    let taken = s
+        .checkpoint(&wt, "Before omh brought the base forward")
+        .unwrap();
+    let Some(commit) = taken else {
+        panic!("no checkpoint: the agent's index hid the change");
+    };
+    let body = git(&s.gitdir, &wt, &["show", &format!("{commit}:f.txt")]).unwrap();
+    assert_eq!(body, "the agent's work\n");
+}
+
 /// The one thing that stays walled. Everything else about this repo is
 /// meant to work, so the agent has no standing reason to think a push
 /// would — and `git push` reaching a real remote is the one mistake that

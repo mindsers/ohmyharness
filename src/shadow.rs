@@ -1281,25 +1281,39 @@ impl Shadow {
     /// case for a session whose agent has just committed its work — that is not
     /// a failure and must not read as one.
     pub fn checkpoint(&self, worktree: &Path, why: &str) -> Result<Option<String>> {
+        // Through a fresh index read from HEAD, never the agent's: the sandbox's
+        // index is the agent's to write, and a changed file it marked
+        // `skip-worktree` was hidden from `status` — no checkpoint was taken,
+        // and the sync then wrote over the change with nothing to take it back
+        // from.
+        let index = tempfile::NamedTempFile::new().context("staging a checkpoint index")?;
+        let index = index.path();
+        let with = |args: &[&str]| git_with_index(&self.gitdir, worktree, index, args, None);
+        with(&["read-tree", "HEAD"])?;
+        let held = || -> Result<Vec<String>> { Ok(pointers(&with(&["ls-files", "-s", "-z"])?)) };
         // Nothing changed *and* nothing nested. `status` is told to stay out
         // of a nested repository, so it is silent about a pointer that has not
         // moved — and a silent `status` used to end this function, which let a
         // sync merge, rewrite the worktree and move the branch before `stage`
         // refused at `record_base_moved`. This is the only point a sync can
         // stop with nothing done, so the pointer is asked about here.
-        if git(&self.gitdir, worktree, &["status", "--porcelain"])?
-            .trim()
-            .is_empty()
-            && nested(&self.gitdir, worktree)?.is_empty()
-        {
+        if with(&["status", "--porcelain"])?.trim().is_empty() && held()?.is_empty() {
             return Ok(None);
         }
-        stage(&self.gitdir, worktree, &["add", "-A", "."])?;
-        git(
-            &self.gitdir,
-            worktree,
-            &["commit", "-q", "--no-verify", "-m", why],
-        )?;
+        // `stage`, over this index.
+        let nested = held()?;
+        if !nested.is_empty() {
+            let mut drop = vec!["update-index", "--force-remove", "--"];
+            drop.extend(nested.iter().map(String::as_str));
+            with(&drop)?;
+        }
+        with(&["add", "-A", "."])?;
+        let nested = held()?;
+        anyhow::ensure!(nested.is_empty(), "{}", nested_refusal(&nested));
+        with(&["commit", "-q", "--no-verify", "-m", why])?;
+        // And the agent's index rebuilt from the checkpoint, rather than left
+        // holding what hid the change from everything after this.
+        git(&self.gitdir, worktree, &["read-tree", "HEAD"])?;
         Ok(Some(
             git(&self.gitdir, worktree, &["rev-parse", "HEAD"])?
                 .trim()
