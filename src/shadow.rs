@@ -594,7 +594,7 @@ impl Shadow {
         // as this once said, because the repository does not exist yet: `init`
         // through the wrapper is fine, and accepts a `--work-tree` naming a
         // path that is not there at all.
-        let made = Command::new("git")
+        let made = crate::git::agents()
             // `--template=` empty, because `git init` otherwise copies the
             // user's `init.templateDir` into this gitdir — and this gitdir is
             // mounted into the container. That is a host-to-sandbox copy of
@@ -1910,9 +1910,8 @@ impl Shadow {
             })?;
             let mut args = vec!["cherry-pick", "--empty=drop"];
             args.extend(ids.iter().map(String::as_str));
-            let out = Command::new("git")
+            let out = crate::git::agents()
                 .current_dir(at)
-                .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
                 .args(&args)
                 .output()
                 .context("running git cherry-pick")?;
@@ -1952,9 +1951,8 @@ impl Shadow {
         }
 
         if curate {
-            let ok = Command::new("git")
+            let ok = crate::git::agents()
                 .current_dir(at)
-                .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
                 .args(&args)
                 .status()
                 .context("running git rebase -i")?;
@@ -2978,7 +2976,7 @@ pub(crate) fn options_in(help: &str) -> BTreeSet<String> {
 /// git. The status is still ignored — 129 is the ordinary answer — and both
 /// streams are still read, since a shim may use either.
 pub fn git_supports(verb: &str, option: &str) -> Result<bool> {
-    let out = Command::new("git")
+    let out = crate::git::users()
         .args([verb, "-h"])
         .output()
         .with_context(|| format!("asking git whether `{verb}` takes `{option}`"))?;
@@ -3016,7 +3014,7 @@ fn user_pager(repo: &Path) -> String {
     // user whose pager is `delta` in `~/.gitconfig` got `delta` from
     // `omh sNN diff -p` and bare `less` from `omh sNN diff <n> -p`: the same
     // flag, two renderers, for no reason they could see.
-    Command::new("git")
+    crate::git::users()
         .current_dir(repo)
         .args(["var", "GIT_PAGER"])
         .output()
@@ -3053,63 +3051,6 @@ fn show_args(what: crate::session::What, id: &str, colour: &str) -> Vec<String> 
     .map(|a| a.to_string())
     .collect()
 }
-
-/// Config keys that turn `git` into "run whatever this repository says".
-///
-/// The gitdir is a read-write mount because the agent commits through it, and
-/// the `config` inside it is **not**: `write_config` rewrites that file to a
-/// ten-key allowlist on every launch and `container::plan` mounts it read-only
-/// (#52). So these keys are omh's second line, not its first — an earlier
-/// version of this comment called them all agent-writable, which stopped being
-/// true when the mount landed and was still being quoted as a premise
-/// afterwards.
-///
-/// What the agent *can* still write is everything else in the gitdir:
-/// `refs/replace/`, `info/grafts`, `info/attributes`. Those are the ones with
-/// no config key at all, and they are handled beside this list.
-///
-/// **These fire.** An earlier version of this comment said nothing host-side
-/// read an existing shadow, and that stopped being true twice: `harvest`
-/// fetches and replays those commits on the host as the user, and
-/// `checkpoints` reads the whole history on every `omh sNN log`. A reader who
-/// reached the old sentence first would have concluded the list was inert and
-/// could be relaxed.
-///
-/// Two of them are not about execution at all. `core.useReplaceRefs` and the
-/// `GIT_GRAFT_FILE` in `GUEST_ENV` are about the answer being *true*: both let
-/// the agent rewrite what a read prints without touching a commit, and the one
-/// command that exists to be believed about the agent's work is the one that
-/// reads this repository.
-const NEUTRALISED: [&str; 8] = [
-    // `ensure` has carried this since the seed commit and said why: a global
-    // `commit.gpgsign = true` fails with `gpg failed to sign the data`, over a
-    // commit the user never made in a repository they cannot see. The harvest
-    // then added three more commit sites and read none of that — the
-    // checkpoint, the replant and the stamp all died for anyone who signs by
-    // default. `--no-verify` covers hooks and nothing of signing.
-    "commit.gpgsign=false",
-    "core.hooksPath=",
-    "core.pager=cat",
-    "core.fsmonitor=",
-    "core.sshCommand=",
-    "protocol.file.allow=never",
-    // `git diff` runs an external driver by default; the log family will not
-    // without `--ext-diff`, which nothing here passes. Both are the agent's to
-    // name — this config lives in a read-write mount — so the key is closed
-    // rather than left to depend on which verb a future reader picks.
-    "diff.external=",
-    // A commit the agent replaced reads as whatever it replaced it with.
-    // Measured 2026-08-23 against git 2.55.0, in a gitdir the agent owns:
-    // `git replace -f <real> <forged>` and the log prints the forged subject
-    // and the forged (empty) numstat beside the *real* commit id, with no
-    // warning on either stream. `--no-replace-objects` and this key both stop
-    // it; the key is here because this list is the mechanism every host-side
-    // read already carries.
-    //
-    // This one is not about executing anything — it is about being believed.
-    // `omh sNN log` exists to tell you what the agent did.
-    "core.useReplaceRefs=false",
-];
 
 /// What a read has to be told to ignore that no `-c` flag can reach.
 ///
@@ -3212,10 +3153,9 @@ pub(crate) fn out_of_nested(args: &[&str]) -> Vec<String> {
 /// hands it came from the sandbox. A branch name carrying an escape sequence
 /// would otherwise repaint omh's own output on its way past.
 fn git_in(at: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = crate::git::agents()
         .current_dir(at)
         .envs(GUEST_ENV)
-        .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
         .args(before_the_verb(args))
         .args(guarded(args))
         .output()
@@ -3427,10 +3367,9 @@ fn git_over(
 /// **Not for `git_in`.** That one runs in the user's repository, and this
 /// variable there would point their own git at the sandbox's objects.
 fn host_git(gitdir: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git::agents();
     cmd.envs(GUEST_ENV)
         .env("GIT_COMMON_DIR", gitdir)
-        .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
         .arg("--git-dir")
         .arg(gitdir);
     cmd
@@ -3688,7 +3627,7 @@ fn nested_refusal(held: &[String]) -> String {
 /// config, never the sandbox repository's, which the agent writes — or git's
 /// default, `$XDG_CONFIG_HOME/git/ignore`.
 fn users_excludes_file() -> Option<PathBuf> {
-    let asked = std::process::Command::new("git")
+    let asked = crate::git::users()
         .args(["config", "--global", "--path", "--get", "core.excludesFile"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_CONFIG")

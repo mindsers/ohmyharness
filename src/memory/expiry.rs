@@ -435,7 +435,7 @@ pub fn gather(paths: &crate::catalogue::Paths, triggers: &[Trigger]) -> Facts {
 /// away unread.
 fn hash_file(repo: &Path, path: &str) -> Result<String> {
     use anyhow::Context;
-    let out = std::process::Command::new("git")
+    let out = crate::git::users()
         .arg("-C")
         .arg(repo)
         .args(["hash-object", "--"])

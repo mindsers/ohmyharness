@@ -32,7 +32,7 @@ pub struct Document {
 /// output and `node_modules` without a list of exclusions that goes stale, and
 /// it defers to the authority this repo already shells out to everywhere else.
 pub fn documents(repo: &Path) -> Result<Vec<Document>> {
-    let out = std::process::Command::new("git")
+    let out = crate::git::users()
         .arg("-C")
         .arg(repo)
         .args(["ls-files", "-z", "--", "*.md"])

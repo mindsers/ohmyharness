@@ -19,7 +19,6 @@ use crate::adapter::{Adapter, Binding, Capability};
 use crate::catalogue::Paths;
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::process::Command;
 
 /// The filename omh reads on the project's side. Harness-neutral on purpose:
 /// what the *container* sees is the adapter's business, and an adapter that
@@ -309,7 +308,7 @@ fn show(repo: &Path, base: &str, name: &str) -> Result<Option<Found>> {
     // translated under a non-English locale, so the classification silently
     // inverts on somebody else's machine.
     let git = |args: &[&str]| {
-        Command::new("git")
+        crate::git::users()
             .current_dir(repo)
             .args(args)
             .output()

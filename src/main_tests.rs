@@ -9367,3 +9367,34 @@ fn no_docker_run_omh_builds_can_pull_its_image() {
         );
     }
 }
+
+/// Every git omh starts is started from `git.rs`, by a builder that says whose
+/// tree it runs in. The rule — no hooks, no setting believed, where the agent
+/// writes — was held by naming: two runner families, `NO_HOOKS` in one module
+/// and `NEUTRALISED` in another, and twenty-nine `Command::new("git")` that
+/// each chose between them, or forgot to, where they stood.
+#[test]
+fn no_git_starts_outside_the_git_module() {
+    let mut found = Vec::new();
+    let mut files = 0;
+    for (path, body) in crate::testsrc::production() {
+        files += 1;
+        if path.ends_with("src/git.rs") {
+            continue;
+        }
+        for (n, line) in body.lines().enumerate() {
+            if line.contains("Command::new(\"git\")") {
+                found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        files > 40,
+        "the walk read {files} files — it is not reading src/"
+    );
+    assert!(
+        found.is_empty(),
+        "{} git spawns outside git.rs: {found:#?}",
+        found.len()
+    );
+}

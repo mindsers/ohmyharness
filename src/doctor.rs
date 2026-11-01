@@ -1071,7 +1071,7 @@ pub fn host_checks(
 /// `sync` ships and not before: a doctor that fails over a capability nothing
 /// calls is one people learn to ignore.
 pub fn git_checks() -> Vec<Outcome> {
-    match version_of(std::process::Command::new("git").arg("--version").output()) {
+    match version_of(crate::git::users().arg("--version").output()) {
         Ok(version) => git_checks_from(
             version,
             crate::shadow::git_supports("cherry-pick", "--empty"),

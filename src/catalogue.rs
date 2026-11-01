@@ -817,14 +817,14 @@ pub fn migrate(paths: &Paths, is_running: &dyn Fn(&str) -> bool) -> Result<Migra
                 .filter_map(|entry| entry.ok().map(|entry| entry.path()))
                 .filter(|path| path.is_dir() && path.join(".git").is_file())
                 .collect();
-            let repository_is_git = std::process::Command::new("git")
+            let repository_is_git = crate::git::users()
                 .current_dir(&paths.repo)
                 .args(["rev-parse", "--git-common-dir"])
                 .output()
                 .map(|out| out.status.success())
                 .unwrap_or(false);
             if repository_is_git && !worktrees.is_empty() {
-                let mut command = std::process::Command::new("git");
+                let mut command = crate::git::users();
                 command
                     .current_dir(&paths.repo)
                     .args(["worktree", "repair"]);

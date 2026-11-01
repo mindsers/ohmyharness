@@ -1032,11 +1032,10 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
         return match (answer, asked) {
             (AtStake::Nothing, Err(unknown)) => unknown,
             (AtStake::Nothing, Ok(true)) => {
-                let out = std::process::Command::new("git")
+                // A `status` can write the index, which runs
+                // `post-index-change`. See `session::Hooks`.
+                let out = crate::git::in_worktree()
                     .current_dir(&session.worktree)
-                    // A `status` can write the index, which runs
-                    // `post-index-change`. See `session::Hooks`.
-                    .args(session::NO_HOOKS)
                     // The worktree's files are the agent's, and a `status`
                     // asked about a repository nested among them answers by
                     // running git inside it. See `shadow::out_of_nested`.

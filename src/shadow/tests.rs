@@ -1,4 +1,5 @@
 use super::*;
+use crate::git::NEUTRALISED;
 
 /// A checkout with history, a worktree holding a session's starting tree,
 /// and a carried file the user never tracked.
