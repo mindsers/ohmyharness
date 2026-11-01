@@ -325,6 +325,35 @@ impl Dir {
         Ok(file)
     }
 
+    /// [`Dir::lock`], waiting at most `patience` for it: `None` if another
+    /// holder kept it that long.
+    ///
+    /// For a waiter that must not hang in silence on a holder that may never
+    /// let go — a review held open at its prompt — and that can say so when
+    /// it gives up.
+    pub(crate) fn lock_within(
+        &self,
+        name: &OsStr,
+        patience: std::time::Duration,
+    ) -> io::Result<Option<File>> {
+        let file = open_under_mode(&self.fd, &step(name)?, libc::O_RDWR | libc::O_CREAT, 0o600)?;
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            // SAFETY: the descriptor is the file's own, open for the call.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Some(file));
+            }
+            let why = io::Error::last_os_error();
+            if why.kind() != io::ErrorKind::WouldBlock {
+                return Err(why);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn replace_mode(&self, name: &OsStr, body: &[u8], mode: libc::c_uint) -> io::Result<()> {
         use std::io::Write as _;
         let name = step(name)?;

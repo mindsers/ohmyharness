@@ -914,6 +914,26 @@ impl Account {
             };
             rest_of.insert(f.declared.name.clone(), (rest, digest));
         }
+        // Under the account's lock — the one a review holds from its first
+        // reading to its last write — from here on: the guards below read what
+        // is left to review, and the clearing after them must not run while a
+        // review is about to write into the same directories. And what the
+        // account keeps is read again under it, so a seed never starts from a
+        // value a review was about to change.
+        //
+        // Waited for briefly, never indefinitely: a review holds it across its
+        // prompt, and a launch that blocked behind one hung with nothing said.
+        let (kept_dir, _) = make_parent(&self.dir, &format!("{KEPT}/{LOCK}"))?;
+        let _lock = kept_dir
+            .lock_within(OsStr::new(LOCK), std::time::Duration::from_secs(3))
+            .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?
+            .with_context(|| {
+                format!(
+                    "another omh is holding {}'s preferences — most likely a review waiting \
+                     for an answer in another terminal. Answer it, then launch again",
+                    self.dir.display()
+                )
+            })?;
         if let (Home::Kept(_), true, Some(_)) = (home, created, recorded.as_deref()) {
             let left = review::unreviewed(adapter, home)?;
             anyhow::ensure!(
@@ -957,13 +977,6 @@ impl Account {
             }
             std::fs::create_dir_all(&dir)?;
         }
-        // What the account keeps, read again under its lock — the one a
-        // review holds from its first reading to its last write — so a seed
-        // never starts from a value a review was about to change.
-        let (kept_dir, _) = make_parent(&self.dir, &format!("{KEPT}/{LOCK}"))?;
-        let _lock = kept_dir
-            .lock(OsStr::new(LOCK))
-            .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?;
         for f in &self.files {
             let name = OsStr::new(&f.declared.name);
             let format = f.declared.format();
@@ -1645,6 +1658,61 @@ base_url = "https://example.invalid"
     /// from its own copy; another account is refused while the session has a
     /// change to review — it belongs to the old one — and seeds from the new
     /// once it is reviewed.
+    /// **A launch never waits in silence for a review.** A review holds the
+    /// account's lock across its prompt, and `seed` blocked on it with nothing
+    /// said — for as long as nobody answered — after it had already cleared the
+    /// session's directories. It takes the lock first now, waits briefly for a
+    /// holder that is quick, and then refuses, saying who most likely holds it.
+    #[test]
+    fn a_launch_does_not_hang_on_a_review_waiting_for_an_answer() {
+        let (root, work, _) = account();
+        let personal = root.path().join("creds/codex/personal");
+        for acct in [&work, &personal] {
+            std::fs::create_dir_all(acct.join("preferences")).unwrap();
+            std::fs::write(acct.join("preferences/config.toml"), "model = \"m\"\n").unwrap();
+        }
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let checked = check(&codex(), &work).unwrap().unwrap();
+        checked.apply(&none_running).unwrap();
+        checked
+            .seed(&codex(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        let at_live = live(&home).join("config.toml");
+        let before = std::fs::read_to_string(&at_live).unwrap();
+
+        // What a review waiting at its prompt holds.
+        let kept = crate::held::Dir::open(&personal.join(KEPT)).unwrap();
+        let _held = kept.lock(OsStr::new(LOCK)).unwrap();
+
+        let other = check(&codex(), &personal).unwrap().unwrap();
+        let seeding = std::thread::spawn({
+            let home = Home::Kept(home.path().to_path_buf());
+            move || {
+                other
+                    .seed(&codex(), &home, &BTreeMap::new(), false)
+                    .map_err(|e| format!("{e:#}"))
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !seeding.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "seed waited on the review in silence"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let err = seeding
+            .join()
+            .unwrap()
+            .expect_err("a held lock was not said");
+        assert!(err.contains("review"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            before,
+            "and nothing of the session's was cleared before it found out"
+        );
+    }
+
     /// **An account record omh could not read is not a session never seeded.**
     /// It was `.ok()`, so an unreadable record skipped the guard that refuses to
     /// reseed over changes nobody reviewed — and the reseed wiped them.
