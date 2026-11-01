@@ -9489,3 +9489,19 @@ fn no_message_spells_a_worktree_git_by_hand() {
         .collect();
     assert!(found.is_empty(), "{found:#?}");
 }
+
+/// `omh why account` says what `account` takes: a login's name, or one per
+/// harness as `<harness>:<name>`. It said "one word or phrase", the answer
+/// `key::Shape` had already been changed to stop giving about a path.
+#[test]
+fn why_account_says_it_takes_a_login_or_one_per_harness() {
+    let d = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: d.path().join("home"),
+        repo: d.path().join("repo"),
+    };
+    let account = key::describes("account").unwrap();
+    let text = cmd::inspect::why_a_key(&paths, account);
+    assert!(text.contains("<harness>:<name>"), "{text}");
+    assert!(!text.contains("one word or phrase"), "{text}");
+}

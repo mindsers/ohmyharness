@@ -1008,7 +1008,7 @@ fn section(page: Page, title: &'static str) -> Section {
 /// What a value of this shape looks like, for the line it is typed into.
 fn hint(shape: &key::Shape) -> String {
     match shape {
-        key::Shape::Text => String::new(),
+        key::Shape::Account => String::new(),
         key::Shape::Paths => "a list of paths: [\".env\", \".env.local\"]".into(),
         key::Shape::Path => "an absolute path".into(),
         key::Shape::Duration => "a duration: 90s, 30m, 2h, 1d".into(),
@@ -1042,7 +1042,7 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             // The logins omh has captured, by name and by one harness's — and
             // only those, since a launch takes nothing else: `another…` let a
             // name be typed, which was for `codex:work`, and that is here.
-            ("account", _) => {
+            (_, key::Shape::Account) => {
                 let typed = Edit::Text {
                     hint: "a login's name, as `omh account login <harness> -n <name>` captured it"
                         .into(),
