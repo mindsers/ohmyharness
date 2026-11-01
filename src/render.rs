@@ -214,6 +214,14 @@ pub fn servers(
     Ok(servers)
 }
 
+/// What a hook whose guard could not run says as it blocks the call, as a
+/// JavaScript string: both plugin renderers fail closed with these words.
+fn unevaluated_refusal(name: &str) -> String {
+    crate::quote::js(&format!(
+        "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
+    ))
+}
+
 /// [`mcp_approving`] with nothing approved — how the round-trip tests render.
 #[cfg(test)]
 fn mcp(render: Render, servers: &BTreeMap<String, Server>) -> Result<String> {
@@ -1303,12 +1311,7 @@ fn omp_one_hook(
             b.push_str(&format!(
                 "    if (!p.ran) {{ {}{} }}\n",
                 log_call(log, name, ledger::Decision::Unevaluated),
-                t.template.replace(
-                    "{{text}}",
-                    &crate::quote::js(&format!(
-                        "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
-                    )),
-                ),
+                t.template.replace("{{text}}", &unevaluated_refusal(name),),
             ));
         }
         b.push_str(&format!(
@@ -1438,12 +1441,7 @@ fn one_hook(
                 "      if (!p.ran) {{ {}{} }}\n",
                 log_call(log, name, ledger::Decision::Unevaluated),
                 t.template
-                    .replace(
-                        "{{text}}",
-                        &crate::quote::js(&format!(
-                            "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
-                        )),
-                    )
+                    .replace("{{text}}", &unevaluated_refusal(name),)
                     .replace("{{event}}", wired.event),
             ));
         }
