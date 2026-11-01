@@ -170,13 +170,16 @@ pub trait Runtime: std::fmt::Debug {
     /// list overrides this: `sbx ls --json` returns every sandbox with a
     /// `status`, so `Sbx` parses the JSON and keeps only the running ones,
     /// where a plain line split would read a stopped sandbox as up.
-    fn running_names(&self, stdout: &str) -> Vec<String> {
-        stdout
+    ///
+    /// `Err` is *could not tell*, never *none running*: an empty list is what
+    /// clears a container away, so a listing omh cannot read must not be one.
+    fn running_names(&self, stdout: &str) -> Result<Vec<String>, String> {
+        Ok(stdout
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(str::to_string)
-            .collect()
+            .collect())
     }
 
     /// Detached exec into a running session: something that must outlive the
@@ -622,17 +625,27 @@ impl Runtime for Sbx {
     /// running ones count — `ls -q` would list stopped sandboxes too, and a
     /// stopped one read as up ends in the `rm -f` `Running::Unknown` exists to
     /// prevent. Measured against sbx 0.39.0.
-    fn running_names(&self, stdout: &str) -> Vec<String> {
-        let Ok(doc) = serde_json::from_str::<serde_json::Value>(stdout) else {
-            return Vec::new();
+    ///
+    /// Output that is not that shape is an error. It read as no sandboxes, so
+    /// `running_in` said `No` — not the `Unknown` its test claimed — and
+    /// `container_clear_stopped` ran `sbx rm --force` on one that was up.
+    fn running_names(&self, stdout: &str) -> Result<Vec<String>, String> {
+        let unread = || {
+            format!(
+                "`sbx ls --json` printed something omh cannot read: {}",
+                stdout.chars().take(120).collect::<String>()
+            )
         };
-        doc.get("sandboxes")
+        let doc = serde_json::from_str::<serde_json::Value>(stdout).map_err(|_| unread())?;
+        let sandboxes = doc
+            .get("sandboxes")
             .and_then(|s| s.as_array())
-            .into_iter()
-            .flatten()
+            .ok_or_else(unread)?;
+        Ok(sandboxes
+            .iter()
             .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("running"))
             .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
-            .collect()
+            .collect())
     }
 
     fn program(&self) -> &'static str {
@@ -1528,18 +1541,27 @@ mod tests {
             {"name":"omh-s02","status":"stopped"},
             {"name":"omh-s03","status":"running"}
         ]}"#;
-        let mut names = Sbx.running_names(json);
+        let mut names = Sbx.running_names(json).unwrap();
         names.sort();
         assert_eq!(names, vec!["omh-s01".to_string(), "omh-s03".to_string()]);
     }
 
-    /// Output sbx cannot be parsed as its documented JSON yields no names, not
-    /// a panic and not a phantom running set — `running_in` reads the empty
-    /// result as `Unknown`, never as "none running".
+    /// Output sbx cannot be parsed as its documented JSON is *could not tell*,
+    /// never *none running*. This test's doc said `running_in` read the empty
+    /// result as `Unknown`; it read it as `No`, and `container_clear_stopped`
+    /// then ran `sbx rm --force` on a sandbox that was up.
     #[test]
-    fn unparseable_sbx_output_names_nothing() {
-        assert!(Sbx.running_names("not json at all").is_empty());
-        assert!(Sbx.running_names("{\"other\":1}").is_empty());
+    fn unparseable_sbx_output_is_could_not_tell() {
+        use std::os::unix::process::ExitStatusExt;
+        for stdout in ["not json at all", "{\"other\":1}"] {
+            let asked = Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            });
+            let listed = crate::image::listed_from(asked, |s| Sbx.running_names(s));
+            assert!(listed.is_err(), "{stdout}: read as {listed:?}");
+        }
     }
 
     /// sbx cannot build, so omh delivers the docker-built image as a template

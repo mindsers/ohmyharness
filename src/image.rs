@@ -1767,11 +1767,11 @@ pub enum Running {
 pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) -> Running {
     running_in(
         &listed_from(asked, |s| {
-            s.lines()
+            Ok(s.lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .map(str::to_string)
-                .collect()
+                .collect())
         }),
         name,
     )
@@ -1789,7 +1789,7 @@ pub type Listed = std::result::Result<std::collections::BTreeSet<String>, String
 
 pub fn listed_from(
     asked: std::io::Result<std::process::Output>,
-    names: impl Fn(&str) -> Vec<String>,
+    names: impl Fn(&str) -> Result<Vec<String>, String>,
 ) -> Listed {
     let out = match asked {
         Ok(out) => out,
@@ -1809,7 +1809,10 @@ pub fn listed_from(
             &out.status,
         ));
     }
+    // A listing the backend could not read is *could not tell*, as a failed
+    // exit is: never an empty set, which reads as nothing running.
     Ok(names(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| crate::out::untrusted(&e))?
         .into_iter()
         .collect())
 }
@@ -2629,10 +2632,10 @@ mod tests {
     #[test]
     fn a_runtime_that_will_not_list_containers_is_never_read_as_none() {
         let lines = |s: &str| {
-            s.lines()
+            Ok(s.lines()
                 .filter(|l| !l.is_empty())
                 .map(str::to_string)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>())
         };
         let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""), lines);
         assert_eq!(running_in(&listed, "omh-repo-s01"), Running::Yes);
