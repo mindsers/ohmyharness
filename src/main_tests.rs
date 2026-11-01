@@ -5681,6 +5681,11 @@ fn what_the_report_says_seeds_a_repo_is_what_init_seeds() {
 /// set it there: it showed `# carry_in = [".env.local", "certs/"]` to
 /// uncomment, in the file git carries, while `omh set carry_in` and `init`
 /// keep the key in the gitignored one.
+///
+/// Read by the key a line assigns, not by whether the line parses alone. Each
+/// line was parsed on its own with a failure read as empty, so an example
+/// spread over lines — `# carry_in = [`, then the paths, then `# ]` — parsed as
+/// nothing and passed.
 #[test]
 fn the_committed_header_teaches_carry_in_without_a_line_to_uncomment() {
     let dir = tempfile::tempdir().unwrap();
@@ -5692,9 +5697,12 @@ fn the_committed_header_teaches_carry_in_without_a_line_to_uncomment() {
     let shared = cmd::init::seed_settings(&paths).unwrap().shared;
     for line in shared.lines().filter(|l| l.starts_with('#')) {
         let uncommented = line.trim_start_matches('#').trim();
-        let parsed = uncommented.parse::<toml::Table>().unwrap_or_default();
-        assert!(
-            !parsed.contains_key("carry_in"),
+        let assigns = uncommented
+            .split_once('=')
+            .map(|(key, _)| key.trim().trim_matches('"'));
+        assert_ne!(
+            assigns,
+            Some("carry_in"),
             "uncommented, `{line}` commits it"
         );
     }
