@@ -1950,8 +1950,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/auth.rs", 8),
         ("src/base.rs", 3),
         // + the retired --force, --file and server-rm sentences, + the retired
-        // `auth`'s three
-        ("src/cli.rs", 28),
+        // `auth`'s three, + `omh new` and `omh new <harness>` in each of the
+        // four bare-name launches' sentences
+        ("src/cli.rs", 36),
         // + `omh account`, where `forget` names an account no login answers to
         ("src/cmd/account.rs", 4),
         // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as

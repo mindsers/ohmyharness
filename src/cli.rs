@@ -913,6 +913,29 @@ pub(crate) const RETIRED: &[Retired] = &[
         at: At::Verb,
         said: "`config` is gone — it is `omh settings` now:\n  omh settings              your defaults\n  omh settings set <key> <value>\n  omh settings edit         $EDITOR on them\n  omh settings mcp ls       your MCP servers",
     },
+    // The bare-name launch: `omh <harness>` started a session before
+    // `omh new <harness>` did. One entry a harness, so the sentence names the
+    // line to type rather than a placeholder.
+    Retired {
+        spellings: &["claude"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new claude   start one and run claude in it",
+    },
+    Retired {
+        spellings: &["codex"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new codex   start one and run codex in it",
+    },
+    Retired {
+        spellings: &["omp"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new omp   start one and run omp in it",
+    },
+    Retired {
+        spellings: &["opencode"], // types the retired verb on purpose
+        at: At::Verb,
+        said: "a session starts with `omh new` now:\n  omh new opencode   start one and run opencode in it",
+    },
     Retired {
         spellings: &["auth"], // types the retired verb on purpose
         at: At::Verb,
