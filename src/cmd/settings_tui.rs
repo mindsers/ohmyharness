@@ -86,6 +86,12 @@ fn what_ran(ran: &[(String, bool)]) -> Option<crate::report::Action> {
 fn refusal(name: &str, value: &str) -> Option<String> {
     match key::describes(name) {
         Some(k) => key::quarrel(k, value),
+        // A feature switch is `set`'s too, on or off. Read as a key, an undo
+        // of one ran as `set --anyway`.
+        None if settings::shipped_features().is_ok_and(|f| f.contains(name)) => {
+            (!matches!(value, "on" | "off"))
+                .then(|| format!("`{name}` is one of omh's features, so it is on or off"))
+        }
         None => Some(format!("nothing in omh reads `{name}`")),
     }
 }
@@ -2585,6 +2591,20 @@ mod tests {
             "{:?}",
             row.about
         );
+    }
+
+    /// A feature switch is something `set` takes, on or off. The check the
+    /// screen puts a value back through — `u`, after a switch — knew only
+    /// keys, so it called every feature "nothing in omh reads", and each undo
+    /// of a switch ran as `omh settings set --anyway codegraph on`.
+    #[test]
+    fn a_feature_switch_is_put_back_without_anyway() {
+        for feature in settings::shipped_features().unwrap() {
+            assert_eq!(refusal(&feature, "on"), None, "{feature}");
+            assert_eq!(refusal(&feature, "off"), None, "{feature}");
+            let said = refusal(&feature, "maybe").unwrap_or_default();
+            assert!(said.contains("on or off"), "{feature}: {said:?}");
+        }
     }
 
     /// A table `omh init` refuses — one omh reads nowhere, or `[mcp]`, which
