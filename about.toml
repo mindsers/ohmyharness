@@ -1,0 +1,23 @@
+# cargo-about, run by release.yml to write THIRD-PARTY-NOTICES into every
+# tarball: each crate the binary links, under the licence omh takes it under,
+# with that licence's text. The same list deny.toml allows.
+accepted = [
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+# Only what reaches the shipped binary: not dev-dependencies, not build tools
+# for platforms omh does not release on.
+ignore-dev-dependencies = true
+ignore-build-dependencies = false
+targets = [
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]

@@ -22,7 +22,13 @@ env:
 #
 # Unlike release, these are the required status checks on main: renaming one
 # means updating branch protection in the same breath, or the rule waits on a
-# name nothing produces and every pull request blocks without saying why.
+# name nothing produces. That happened: `build (msrv 1.85)` became `build (msrv
+# 1.88)` with the bump, nothing produced the old name, and every merge after it
+# went through the admin bypass with no required check enforced. So no name
+# here carries a version (tests/workflows.rs holds that).
+#
+# Every action is pinned to a commit, with its version in a trailing comment
+# for Dependabot, and every job has a timeout: the default is six hours.
 jobs:
   # `--include-ignored` below opts back in to the tests that need something the
   # default run cannot assume: the ones in tests/cli.rs that build the base
@@ -31,38 +37,46 @@ jobs:
   test-linux:
     name: run tests (linux, with docker)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: run every test
         run: cargo test --locked -- --include-ignored
 
   # GitHub's macOS runners have no Docker daemon. This runs the same command a
-  # contributor runs, and the one Docker test reports itself as ignored rather
-  # than being excluded by target — so a new integration test is covered here
-  # by default instead of silently dropping off macOS, and nothing has to
-  # remember to update a skip list.
+  # contributor runs, and the tests that need Docker report themselves as
+  # ignored rather than being excluded by target — so a new integration test is
+  # covered here by default instead of silently dropping off macOS, and nothing
+  # has to remember to update a skip list.
   test-macos:
     name: run tests (macos)
     runs-on: macos-latest
+    timeout-minutes: 40
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: run every test that does not need a container runtime
         run: cargo test --locked
+      # Ignored for the network it needs, not for Docker, and its real arm is
+      # macOS-only: Linux merges shipped and installed roots, so there it only
+      # checks the refusal. Without this step that arm ran in no job.
+      - name: run the TLS check's macOS arm, against a real handshake
+        run: cargo test --locked --bin omh -- --include-ignored --exact doctor::tests::a_private_root_reads_as_private_and_a_public_one_does_not
 
   lint:
     name: check formatting and lints
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: check formatting
         run: cargo fmt --check
       # `--features e2e`: tests/e2e is `required-features`, so `--all-targets`
@@ -79,11 +93,12 @@ jobs:
   installer:
     name: check installer (shellcheck and tests)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: shellcheck it
         run: shellcheck install.sh scripts/test-install.sh scripts/check.sh scripts/test-check.sh
       - name: exercise check.sh's toolchain guard
@@ -101,20 +116,26 @@ jobs:
   docs:
     name: build (documentation site)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: docs
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # each page shows when it last changed, read from git
       - name: install node and pnpm, at the versions docs/mise.toml pins
-        uses: jdx/mise-action@v5
+        uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
         with:
           working_directory: docs
       - name: install the site's dependencies, exactly as locked
         run: pnpm install --frozen-lockfile
+      # GitHub's dependency graph reads only the first document of
+      # pnpm-lock.yaml — the pnpm binaries — so Dependabot raises no alert for
+      # anything the site actually installs. This is what does.
+      - name: check the site's dependencies for advisories
+        run: pnpm audit
       - name: check the site's types
         run: pnpm typecheck
       - name: build the site
@@ -123,20 +144,36 @@ jobs:
   # The MSRV in Cargo.toml is a claim about who can build this, and an unchecked
   # claim is the thing this repo distrusts most. `build` rather than `check`,
   # because the job says "builds" and `cargo check` stops before codegen.
+  #
+  # Named without the version: the name is a required check, and one that said
+  # `1.88` was renamed by the bump that moved the floor.
   msrv:
-    name: build (msrv 1.88)
+    name: build (msrv)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # Overrides rust-toolchain.toml, which otherwise pins this job to stable.
       RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - name: check out the repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: install rust 1.88
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88"
+        run: rustup toolchain install 1.88 --profile minimal
       - name: restore the cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: build on the floor omh declares
         run: cargo build --locked --all-targets --features e2e
+
+  # Every RustSec advisory that names a crate in Cargo.lock, every licence, and
+  # where each crate comes from, against deny.toml. Not a required check: an
+  # advisory published overnight would otherwise block every pull request,
+  # including the one that fixes it.
+  deny:
+    name: check dependencies (advisories and licences)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: check every crate in the lock
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

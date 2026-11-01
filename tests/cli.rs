@@ -182,20 +182,8 @@ impl Sandbox {
     /// and the one a guard has to refuse.
     fn omh_with_stdin(&self, args: &[&str], input: &str) -> Output {
         use std::io::Write;
-        let path = match std::env::var("PATH") {
-            Ok(rest) => format!("{}:{rest}", self.bin.display()),
-            Err(_) => self.bin.display().to_string(),
-        };
-        let mut child = Command::new(env!("CARGO_BIN_EXE_omh"))
-            .args(args)
-            .current_dir(&self.repo)
-            .env("HOME", &self.home)
-            .env("PATH", path)
-            .env("EDITOR", self.bin.join("fake-editor"))
-            // Read before `$EDITOR`, so one in the environment running the
-            // suite would open a real editor: taken out, and set where a test
-            // means it.
-            .env_remove("VISUAL")
+        let mut child = self
+            .command(&self.repo, args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -213,21 +201,7 @@ impl Sandbox {
     /// Run with these variables set over the sandbox's own — an `$EDITOR`
     /// that writes, say, where the default one only records.
     fn omh_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        let path = match std::env::var("PATH") {
-            Ok(rest) => format!("{}:{rest}", self.bin.display()),
-            Err(_) => self.bin.display().to_string(),
-        };
-        let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
-        command
-            .args(args)
-            .current_dir(&self.repo)
-            .env("HOME", &self.home)
-            .env("PATH", path)
-            .env("EDITOR", self.bin.join("fake-editor"))
-            // Read before `$EDITOR`, so one in the environment running the
-            // suite would open a real editor: taken out, and set where a test
-            // means it.
-            .env_remove("VISUAL");
+        let mut command = self.command(&self.repo, args);
         for (k, v) in env {
             command.env(k, v);
         }
@@ -254,11 +228,21 @@ impl Sandbox {
     /// Run somewhere other than the sandbox repo — outside one, for the
     /// commands whose subject is a file that does not live in a repository.
     fn omh_in(&self, cwd: &Path, args: &[&str]) -> Output {
+        self.command(cwd, args)
+            .output()
+            .expect("the binary under test must run")
+    }
+
+    /// The one place a run's environment is made, so every way of running omh
+    /// here sees the same one — whatever the environment running the suite
+    /// holds.
+    fn command(&self, cwd: &Path, args: &[&str]) -> Command {
         let path = match std::env::var("PATH") {
             Ok(rest) => format!("{}:{rest}", self.bin.display()),
             Err(_) => self.bin.display().to_string(),
         };
-        Command::new(env!("CARGO_BIN_EXE_omh"))
+        let mut command = omh_binary();
+        command
             .args(args)
             .current_dir(cwd)
             .env("HOME", &self.home)
@@ -267,9 +251,8 @@ impl Sandbox {
             // Read before `$EDITOR`, so one in the environment running the
             // suite would open a real editor: taken out, and set where a test
             // means it.
-            .env_remove("VISUAL")
-            .output()
-            .expect("the binary under test must run")
+            .env_remove("VISUAL");
+        command
     }
 
     /// An editor on the sandbox's PATH that records the argv it was given.
@@ -513,12 +496,11 @@ exit 0
                  \"image rm\") echo \"Untagged: $3\"; echo 'Deleted: sha256:00'; exit 0 ;;\n\
                  esac\n\
                  # omh sends the Dockerfile on stdin (`-f -`) so nothing is\n\
-                 # written to disk. A shim that exits without reading it leaves\n\
-                 # omh writing into a pipe with no reader, and omh sets SIGPIPE\n\
-                 # to SIG_DFL on purpose — so it dies of signal 13, silently,\n\
-                 # whenever the Dockerfile loses the race with this exit. That\n\
-                 # is what failed this test on the linux runner three times\n\
-                 # across three branches, each time saying only `init failed`.\n\
+                 # written to disk, and this keeps it. A shim that exited\n\
+                 # without reading once killed omh by SIGPIPE, silently — that\n\
+                 # failed this test on the linux runner three times before omh\n\
+                 # stopped dying of it: see a_builder_that_never_reads_its_\n\
+                 # recipe_is_a_failed_build_not_a_silent_exit.\n\
                  if [ \"$1\" = build ]; then cat >> {recipes}; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers}; fi\n\
@@ -8294,7 +8276,7 @@ impl Sandbox {
             Err(_) => self.bin.display().to_string(),
         };
         let child = {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_omh"));
+            let mut command = omh_binary();
             command
                 .args(args)
                 .current_dir(&self.repo)
@@ -8625,7 +8607,7 @@ fn settings_typed_at_a_terminal_into_a_pipe_is_the_report() {
     let sb = sandbox();
     sb.seed_base();
     let (_keys, slave) = pty();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let mut child = omh_binary()
         .arg("settings")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -10181,7 +10163,7 @@ fn init_installs_every_directory_this_repo_ships() {
     let sb = sandbox();
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("init")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -10244,7 +10226,7 @@ fn a_missing_container_runtime_records_no_resolution() {
     let sb = sandbox();
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("init")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -10285,7 +10267,7 @@ fn a_missing_container_runtime_still_leaves_the_repo_configured() {
 
     // Nothing on PATH, so `runtime::select` can find no backend. Whether init
     // reports failure is not what is asserted — what it left behind is.
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("init")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -11227,21 +11209,27 @@ fn doctor_json_is_one_document() {
     )
     .unwrap();
     let out = sb.omh(&["doctor", "--json"]);
+    // On Linux this has gone red with an empty stdout, and the message that
+    // reported it named neither the exit status nor stderr — which is where
+    // the reason is. Every failure below carries all three.
+    let ran = || {
+        format!(
+            "exit: {}\n--- stdout\n{}\n--- stderr\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
     let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&out.stdout)
         .into_iter::<serde_json::Value>()
         .collect::<Result<_, _>>()
-        .unwrap_or_else(|e| {
-            panic!(
-                "stdout is not JSON: {e}\n{}",
-                String::from_utf8_lossy(&out.stdout)
-            )
-        });
+        .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{}", ran()));
     assert_eq!(
         documents.len(),
         1,
         "omh doctor --json printed {} documents:\n{}",
         documents.len(),
-        String::from_utf8_lossy(&out.stdout)
+        ran()
     );
     // And the one document still says the check did not run: a consumer of
     // the JSON must not read "could not tell" as "measured and fine".
@@ -11256,8 +11244,8 @@ fn doctor_json_is_one_document() {
         });
     assert!(
         said_so,
-        "the report does not say the TLS check could not run: {}",
-        documents[0]
+        "the report does not say the TLS check could not run:\n{}",
+        ran()
     );
 }
 
@@ -11404,7 +11392,7 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
     sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
     std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .arg("doctor")
         .current_dir(&sb.repo)
         .env("HOME", &sb.home)
@@ -14984,6 +14972,93 @@ fn init_refuses_a_ca_cert_it_cannot_read_and_names_the_file() {
     );
 }
 
+/// **A reader that has gone ends omh as it always has: by SIGPIPE, with
+/// nothing said.** `omh info | head` closes the pipe early, and the next write
+/// fails. `main` once reset SIGPIPE to its default for the whole process to get
+/// this, which also killed omh at any write to a child that had exited; the
+/// output layer raises it itself now, at the user's reader only. This holds
+/// the half that must not change: no panic, no message, the shell's 141.
+///
+/// The read end is closed before omh starts, so the first write fails — no
+/// race with how fast omh prints.
+#[cfg(unix)]
+#[test]
+fn a_reader_that_closes_the_pipe_ends_omh_by_sigpipe_and_says_nothing() {
+    use std::os::unix::process::ExitStatusExt;
+    let sb = sandbox();
+    sb.git_init();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = sb
+        .command(&sb.repo, &["info"])
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.signal(),
+        Some(13),
+        "a closed stdout ends omh by SIGPIPE: {} — {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "and says nothing about it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// **A builder that fails before reading its recipe is a failed build, said
+/// with the builder's reason — not an omh that vanishes.** omh writes the
+/// recipe to `docker build -f -` on a pipe, and `main` reset SIGPIPE to its
+/// default so `omh info | head` would end quietly. So a builder that exited
+/// before reading — a daemon that is down, a flag it refuses — killed omh
+/// outright, mid-write, with nothing on either stream. In the suite that was
+/// `doctor_json_is_one_document` going red on Linux now and then: the
+/// stand-in `docker` refuses `build` without reading, and only sometimes did
+/// it exit before the write landed in the pipe's buffer.
+///
+/// A recipe bigger than any pipe buffer takes the race out: the write can only
+/// complete if the builder reads, and the stand-in never does.
+#[test]
+fn a_builder_that_never_reads_its_recipe_is_a_failed_build_not_a_silent_exit() {
+    let sb = sandbox();
+    let pem = sb.repo.join("corp.pem");
+    let body = "A".repeat(64);
+    let lines: Vec<&str> = std::iter::repeat_n(body.as_str(), 4096).collect();
+    std::fs::write(
+        &pem,
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            lines.join("\n")
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        format!("runtime = \"docker\"\nca_cert = \"{}\"\n", pem.display()),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["init"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.code().is_some(),
+        "omh was killed ({}) rather than reporting the build that failed:\n{stderr}",
+        out.status
+    );
+    assert!(
+        !out.status.success(),
+        "the build failed, so init did: {stderr}"
+    );
+    assert!(
+        stderr.contains("failed to build") && stderr.contains("the suite's stand-in holds nothing"),
+        "the failure names the build and passes the builder's own reason: {stderr}"
+    );
+}
+
 /// **The recipe omh hands the builder is the one carrying the certificate.**
 ///
 /// The argv log cannot see this: the Dockerfile goes on stdin, so every
@@ -16859,7 +16934,7 @@ fn a_provider_authored_for_an_account_reaches_its_launches() {
     let kept = sb.home.join(".omh/creds/codex/default/provider.toml");
     assert!(!kept.exists(), "a refused provider was kept");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .args([
             "account",
             "login",
@@ -16948,7 +17023,7 @@ fn an_omp_provider_authored_for_an_account_reaches_its_launches() {
     let kept = account.join("provider.yml");
     assert!(!kept.exists(), "a refused provider was kept");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .args([
             "account",
             "login",
@@ -17203,7 +17278,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
         ("omp", &omp, "provider.yml"),
         ("codex", &codex, "provider.toml"),
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        let out = omh_binary()
             .args([
                 "account",
                 "login",
@@ -17249,7 +17324,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     // latter and refuses a link there before this rule is ever asked.
     let link = omp.with_extension("yaml");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+    let out = omh_binary()
         .args([
             "account",
             "login",
@@ -18213,6 +18288,37 @@ struct Surface {
 /// output layer, so there is nothing per command to classify.
 const GLOBAL_FLAGS: [&str; 4] = ["--json", "--dry-run", "--session", "--color"];
 
+/// The binary under test, run with none of the caller's colour settings.
+///
+/// Colour is decided from these, and a developer who exports
+/// `CLICOLOR_FORCE=1` failed three tests that compare plain text: the suite
+/// asserts what omh prints, not what one shell asks of it. Every run here goes
+/// through this, and `every_run_goes_through_omh_binary` holds that.
+fn omh_binary() -> Command {
+    plain(Command::new(env!("CARGO_BIN_EXE_omh")))
+}
+
+/// `command`, with the colour variables taken out.
+fn plain(mut command: Command) -> Command {
+    for colour in ["CLICOLOR_FORCE", "CLICOLOR", "NO_COLOR", "FORCE_COLOR"] {
+        command.env_remove(colour);
+    }
+    command
+}
+
+#[test]
+fn every_run_goes_through_omh_binary() {
+    let me = std::fs::read_to_string(file!()).unwrap();
+    let direct = me
+        .lines()
+        .filter(|l| l.contains(concat!("Command::new(env!(", "\"CARGO_BIN_EXE_omh\"))")))
+        .count();
+    assert_eq!(
+        direct, 1,
+        "a run that builds its own Command inherits the caller's colour settings"
+    );
+}
+
 /// Everything omh accepts, asked of the binary — a map from `omh <path>` to
 /// what that path takes.
 ///
@@ -18220,7 +18326,7 @@ const GLOBAL_FLAGS: [&str; 4] = ["--json", "--dry-run", "--session", "--color"];
 /// drives the real binary and a list maintained by hand would be a second
 /// place to forget, which is the defect this exists to catch.
 fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
-    let help = Command::new(bin)
+    let help = plain(Command::new(bin))
         .args(path)
         .arg("--help")
         .output()

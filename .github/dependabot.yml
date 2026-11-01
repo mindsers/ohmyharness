@@ -26,14 +26,11 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
-  # The workflows pin actions by major tag and this is what moves them — except
-  # dtolnay/rust-toolchain, which publishes no tags, so it is pinned to a branch
-  # and floats. Nothing here can bump that one.
-  #
-  # And except every action in release.yml and docs.yml, which are pinned by
-  # commit with the version in a trailing comment: those workflows build what
-  # ships and what readers are served, and tests/workflows.rs holds them to it.
-  # This moves those too, as a pull request that shows the new commit.
+  # Every workflow pins every action by commit, with the version in a trailing
+  # comment, and tests/workflows.rs holds them to it: ci.yml decides what
+  # merges, release.yml and docs.yml build what ships and what readers are
+  # served. Dependabot reads the comment and moves the pin as a pull request
+  # that shows the new commit.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

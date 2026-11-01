@@ -139,6 +139,39 @@ mv "$lying/$TAG" "$lying/v1.2.3"
 expect_fail "refuses a tarball whose binary is not the tagged version" "does not match" \
   "$(attempt env OMH_VERSION=v1.2.3 OMH_BASE_URL="file://$lying" OMH_BIN_DIR="$work/bin-l")"
 
+# A tag that is a prefix of what the binary reports is not its version: a
+# substring check took `v0.14.1` for a binary reporting `0.14.10`.
+version="${TAG#v}"
+prefix="v${version%.*}"
+short="$work/short"; mkrelease "$short"
+mv "$short/$TAG" "$short/$prefix"
+( cd "$short/$prefix" && sums ./*.tar.gz | sed 's|\./||' > SHA256SUMS )
+expect_fail "refuses a binary whose version only contains the tag's" "does not match" \
+  "$(attempt env OMH_VERSION="$prefix" OMH_BASE_URL="file://$short" OMH_BIN_DIR="$work/bin-s")"
+
+# --- where it fetches from --------------------------------------------------
+# Over plain http anyone on the path chooses the tarball and the SHA256SUMS that
+# vouches for it. Refused by name before anything is fetched, rather than as a
+# download that happened to fail.
+expect_fail "refuses a base URL that is not https" "https" \
+  "$(attempt env OMH_VERSION="$TAG" OMH_BASE_URL="http://127.0.0.1:9/releases" OMH_BIN_DIR="$work/bin-h")"
+
+# --- a download cut short runs nothing --------------------------------------
+# `curl | sh` runs what has arrived so far. A connection dropped halfway must
+# not leave the first half of the script having run: everything is inside one
+# function called on the last line, so a truncated file is a syntax error.
+half="$(( $(wc -l < "$script") * 2 / 3 ))"
+set +e
+cut_short="$(head -n "$half" "$script" | env OMH_VERSION="$TAG" OMH_BASE_URL="file://$good" OMH_BIN_DIR="$work/bin-cut" sh 2>&1)"
+set -e
+if printf '%s' "$cut_short" | grep -qF "omh $TAG"; then
+  bad "a truncated download runs nothing" "it got as far as: $cut_short"
+elif [ -e "$work/bin-cut" ]; then
+  bad "a truncated download runs nothing" "it created $work/bin-cut"
+else
+  ok "a truncated download runs nothing"
+fi
+
 # --- tools it needs but never checked for -----------------------------------
 # A PATH holding everything except the tool under test. Without the check, the
 # script dies at the call site instead, blaming whatever that line was about.
