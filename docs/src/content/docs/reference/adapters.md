@@ -127,6 +127,7 @@ ready  = "Connected"           # what that answer calls a server it loaded
 | `token` | the file(s) whose contents prove a login — see [below](#token-or-token-probe-never-both) | none |
 | `[token-probe]` | `run` and `ready`: ask the harness whether it is logged in, where no file can say | none |
 | `login` | what you have to do once the harness opens, to log in | none |
+| `mask-dirs` | directories strictly inside one of `creds`' directories, each ending in `/`, with no `..` and none inside another, that a session could write and the harness loads code from on its next start. Each is hidden behind an empty read-only directory holding only what omh mounts into it — omp's `hooks/pre/`, `hooks/post/`, `tools/` and `extensions/` | none |
 | `transcripts` | where the harness writes its transcripts. omh mounts a per-session directory over it, so `omh sNN` can read what the agent did and what it cost | none, and omh says *not recorded* rather than showing an empty session |
 | `[tools]` | how the harness names `edit`, `read`, `shell` and `search` — see [Hooks](#hooks-three-maps-and-a-template) | none |
 | `[capabilities.<class>]` | one binding per capability the harness can express | none |
@@ -232,7 +233,9 @@ launch and by `omh doctor`. `omh eject` writes the policy itself under
   source), and a pinned `chatgpt_base_url`. An enterprise account's cloud
   bundle cache is masked, so Codex fetches the bundle at every start — and, by
   Codex's source, offline it does not start; no enterprise account has been
-  run. The account's model provider, `provider.toml` at the account's root,
+  run. So are `AGENTS.md` and `AGENTS.override.md` in the account's
+  `~/.codex/`, the instructions every repo on the account would read
+  (`tests/e2e`). The account's model provider, `provider.toml` at the account's root,
   is rendered into the system layer beside omh's hooks, held to
   `model_provider` and the fields of `[model_providers.*]` — declared by
   [`[provider]`](#provider-the-accounts-model-provider), not here; see
@@ -247,7 +250,8 @@ launch and by `omh doctor`. `omh eject` writes the policy itself under
   its own server there. An organisation's own managed list replaces omh's
   (Claude Code's docs; not measured). `.config.json`, in the account's shared
   `~/.claude/`, is masked: Claude reads it *instead of* `~/.claude.json` when
-  it is not empty. `settings.json` beside it, user settings, is each session's
+  it is not empty. So is `CLAUDE.md` there, the personal memory every repo on
+  the account would read (`tests/e2e`). `settings.json` beside it, user settings, is each session's
   own [preferences file](#preferences-what-a-session-keeps); omh's own
   settings reach Claude another way:
   [Claude's settings document](#claudes-settings-document).
@@ -374,6 +378,7 @@ omh enforces each of these, with an error naming the adapter:
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
 - a `[provider]` `path` or `drop` entry not strictly inside a `creds` directory, or with a `..`; an `omp-models` with no `path` or a `codex-config` with one; an `import` outside `$HOME`
 - a `[policy]` `mask` entry that is a capability's own path — two mounts at one path
+- a `mask-dirs` entry not strictly inside a `creds` directory, not ending in `/`, with a `..`, or inside another entry
 - a `[preferences]` file outside where its `mount` puts it, in a format other than TOML, JSON or YAML, with a `..`, masked, or named like another; a key that is not a dotted key, declared twice, inside another, or at, inside or around one the harness's never-list names; a `fallback` for a file that is not declared, for a `file` mount, outside a credential directory, not beside its file, in another format, or that is a preferences file itself; a `dir` mount with no `root`, a `root` for any other mount, outside the home, with a `..`, or inside or around a credential path, and a `dir` file that is not a name
 - a `flag` that is not a long option (`--` and letters, digits, dashes), on anything but a `claude-settings` render, with a `path` not under `/etc/`, or with no `eject`; an `eject` outside `$HOME`, with a `..`, or without a `flag`
 

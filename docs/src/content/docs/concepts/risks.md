@@ -196,19 +196,32 @@ keys the adapter declares as preferences — see
 not a preference beside the model, and asserts the turn runs on the model and
 omp reads the other setting as never set — red with the shared file as before.
 
+**Closed across sessions for instructions and modules** (10-18 §5.1).
+Claude Code's personal memory, `~/.claude/CLAUDE.md`, and Codex's user
+instructions, `~/.codex/AGENTS.md` and the `AGENTS.override.md` it reads
+instead, are in the account; omp imports every module in its `hooks/pre/`,
+`hooks/post/`, `tools/` and `extensions/` there (read in its binary,
+18.10.4). Each is now hidden behind an empty read-only file or directory —
+omp's `hooks/pre/` holding only omh's own module — so what one session leaves
+there reaches no other. `tests/e2e` plants each in the account and asserts no
+planted phrase reaches the model and no planted module leaves its marker; red
+with the account's own mounted, as before. Nothing omh does puts your own
+there: your personal memory reaches a session as a rule you import into your
+catalogue. The cost is that a session cannot save to Claude's personal memory.
+
 **Still open:**
 
 - an enterprise account's cloud bundle composes above omh's requirements: its
   allowlist is the union of both, and an organisation's
   `allow_managed_hooks_only = false` wins over omh's (read in Codex's source);
-- the instruction files and omp's hook directory above. The mitigation for
-  those is read-only overlays inside the account directory, the way omh
-  already mounts its own files there;
 - omp's logins, `agent.db` in the account: an API key stored there that
   starts with `!` runs through `/bin/sh` the way one in `models.yml` did (read
-  in omp's source, `ai/src/auth/cascade.ts`; not measured). It reaches what the
-  hook directory does — code one session leaves runs in the next — and closes
-  with it;
+  in omp's source, `ai/src/auth/cascade.ts`; not measured) — code one session
+  leaves runs in the next. The database holds the logins themselves, so it
+  cannot be masked; it needs a check of its keys that omh does not make;
+- omp's plugins, commands and prompts, discovered from the same directory as
+  its modules (read in its binary): not measured, not masked. Nor were the
+  other directories in Claude Code's and Codex's accounts surveyed;
 - omp's model cache between two sessions running at once on one account:
   omh removes it only when a session starts.
 
