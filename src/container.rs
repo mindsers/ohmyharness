@@ -542,7 +542,7 @@ pub fn plan(
         crate::carry::to_mount(
             &paths.repo,
             &stage.join("carried"),
-            &crate::config::policy_list(paths, "carry_in"),
+            &crate::config::policy_list(paths, "carry_in")?,
         )?
     } else {
         Vec::new()
@@ -597,7 +597,7 @@ pub fn plan(
         let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
 
         let workdir = crate::container_workdir();
-        let mut excluded = crate::config::policy_list(paths, "carry_in");
+        let mut excluded = crate::config::policy_list(paths, "carry_in")?;
         excluded.extend(mounts.iter().filter_map(|m| {
             m.guest
                 .strip_prefix(workdir)
@@ -876,7 +876,7 @@ pub fn plan(
         //   which holds nothing.
         let worktree =
             session.branch.is_some() && !matches!(session.worktree.try_exists(), Ok(false));
-        let carried = crate::config::policy_list(paths, "carry_in")
+        let carried = crate::config::policy_list(paths, "carry_in")?
             .iter()
             .any(|p| {
                 let p = p.trim().trim_start_matches("./").trim_end_matches('/');
@@ -939,8 +939,8 @@ pub fn plan(
         // must read the same as no key, or it would stamp differently and read
         // as drift against a session launched without it.
         limits: Limits {
-            memory: crate::policy_value(paths, "sandbox_memory").filter(|s| !s.is_empty()),
-            cpus: crate::policy_value(paths, "sandbox_cpus").filter(|s| !s.is_empty()),
+            memory: crate::policy_value(paths, "sandbox_memory")?.filter(|s| !s.is_empty()),
+            cpus: crate::policy_value(paths, "sandbox_cpus")?.filter(|s| !s.is_empty()),
         },
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),

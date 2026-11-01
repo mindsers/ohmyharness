@@ -217,7 +217,7 @@ pub(crate) fn stop_before_syncing(
     // sync is also not something that machine was going to do usefully. The
     // message says which it is and `--down` is not the way past — the way past
     // is a runtime.
-    let backend = runtime::select(&crate::runtime_preference(paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(paths)?, &|p| {
         runtime::installed(p)
     })
     .with_context(|| {
@@ -1201,7 +1201,7 @@ pub(crate) fn commit(
                 .as_deref()
                 .context("a scratch session has no branch to commit to")?;
             let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
-            let carried = config::policy_list(&paths, "carry_in");
+            let carried = config::policy_list(&paths, "carry_in")?;
             let keep = what_to_keep(
                 &shadow,
                 &session,
@@ -1288,7 +1288,7 @@ pub(crate) fn commit(
 
     // The same list the launcher copies from, so what `commit` refuses to
     // publish and what omh put there cannot disagree.
-    let carried = config::policy_list(&paths, "carry_in");
+    let carried = config::policy_list(&paths, "carry_in")?;
     let policy = if skip_carried {
         session::Carried::skipping(&carried)
     } else {
@@ -1519,9 +1519,11 @@ fn decide_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::C
     if the_checks.is_empty() {
         return Checked::NotRun("this repo declares no turn-end checks".into());
     }
-    let Ok(backend) = runtime::select(&crate::runtime_preference(paths), &|p| {
-        runtime::installed(p)
-    }) else {
+    let preference = match crate::runtime_preference(paths) {
+        Ok(preference) => preference,
+        Err(e) => return Checked::NotRun(format!("{e:#}")),
+    };
+    let Ok(backend) = runtime::select(&preference, &|p| runtime::installed(p)) else {
         return Checked::NotRun("no container runtime to run them in".into());
     };
     let container = paths.container(&session.id);

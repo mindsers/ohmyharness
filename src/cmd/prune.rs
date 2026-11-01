@@ -873,7 +873,7 @@ pub fn prune_cmd(
     out: &mut dyn std::io::Write,
 ) -> anyhow::Result<()> {
     let paths = crate::catalogue::Paths::discover(cwd)?;
-    let backend = crate::runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = crate::runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         crate::runtime::installed(p)
     })
     .ok();

@@ -719,7 +719,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // fail below return an empty answer and read as ordinary — the reason
         // has to be true from the moment it stops being the previous one.
         hooks = report::Hooks::Unchecked("the sandbox could not be asked".into());
-        let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
@@ -941,7 +941,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // The index lives in a container volume, so it has to be built inside the
     // sandbox — one built on the host would land where no session can read it.
     if let Some(h) = &harness {
-        let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;

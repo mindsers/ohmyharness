@@ -449,7 +449,7 @@ pub(crate) fn attach(
     let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     // Selected once, here, and handed down: `session_up` used to select its
     // own, so a launch chose a runtime twice and a test could inject neither.
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     })?;
     sandbox.top_up(
@@ -633,8 +633,15 @@ pub(crate) fn attach(
 /// Best-effort by design: this runs on the way to starting a session, and a
 /// failure to reap must never stop you working.
 pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
-    let Some(raw) = crate::policy_value(paths, "idle_timeout") else {
-        return;
+    let raw = match crate::policy_value(paths, "idle_timeout") {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
+        // Said, not skipped as though unset: the settings the launch is about
+        // to read are the ones that could not be.
+        Err(e) => {
+            ctx.warn(&format!("not stopping idle sessions — {e:#}"));
+            return;
+        }
     };
     let Some(timeout) = idle::parse_duration(&raw) else {
         // Say so rather than ignoring silently — a setting that resolves with
@@ -644,9 +651,9 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         ));
         return;
     };
-    let Ok(backend) = runtime::select(&crate::runtime_preference(paths), &|p| {
-        runtime::installed(p)
-    }) else {
+    let Ok(backend) = crate::runtime_preference(paths)
+        .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)))
+    else {
         return;
     };
 
@@ -702,7 +709,7 @@ pub(crate) fn down(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     })?;
     let ids = match id {
@@ -1299,7 +1306,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // Said once, about the machine, rather than once per row. The `running`
     // column renders a `None` as an absence — nobody asked — and *why* nobody
     // asked is one fact, not N.
-    let backend = match runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = match runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     }) {
         Ok(backend) => Ok(backend),
@@ -2285,7 +2292,7 @@ pub(crate) fn remember_hooks(record: Option<notice::Record>, ctx: &out::Ctx) {
 pub(crate) fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
     // Nothing here for omh's own placeholders: the host reads in `session.rs`
     // leave them out, so your checkout's `info/exclude` is not asked to.
-    let patterns = config::policy_list(paths, "carry_in");
+    let patterns = config::policy_list(paths, "carry_in")?;
     if patterns.is_empty() {
         return Ok(());
     }
@@ -2418,7 +2425,7 @@ pub(crate) fn run(
     // validation, and to `session_up`, which used to select its own. A dry run
     // selects too: the plan it prints is validated against the backend's
     // capabilities and spelled in the backend's argv.
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     })?;
     // A write guard, so it is spelled like the other write guards. It was
@@ -2439,7 +2446,7 @@ pub(crate) fn run(
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
         staging,
-        persist: crate::policy_value(&paths, "persistence")
+        persist: crate::policy_value(&paths, "persistence")?
             .as_deref()
             .unwrap_or("dtach")
             .parse()?,
@@ -2793,7 +2800,7 @@ pub(crate) fn rm(
     // opposite two lines earlier.
     let mut went: Vec<String> = Vec::new();
     let mut unreached: Vec<String> = Vec::new();
-    match runtime::select(&crate::runtime_preference(&paths), &|p| {
+    match runtime::select(&crate::runtime_preference(&paths)?, &|p| {
         runtime::installed(p)
     }) {
         Err(e) => {

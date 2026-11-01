@@ -203,7 +203,11 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
     // and `omh why` forked two shells to answer a question almost no run asks.
     let running = |legacy: &str| {
         let dir = paths.root.join("worktrees").join(legacy);
-        let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
+        // Unreadable settings are no backend too, and no backend reads as
+        // running below: the migration waits rather than guessing.
+        let backend = runtime_preference(&paths)
+            .ok()
+            .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)).ok());
         // **And the same defect through the other door.** The paragraph above
         // is about a backend omh could not resolve reading as *not running*;
         // this is the listing omh could not read doing it. `Vec::new()` makes
@@ -849,16 +853,21 @@ pub(crate) fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -
 }
 
 /// Read one policy key through the usual layer merge.
-pub(crate) fn policy_value(paths: &Paths, key: &str) -> Option<String> {
-    config::policy(paths)
-        .ok()?
+///
+/// **Unset is `None`; unreadable is an error.** This was `.ok()?`, so a
+/// settings file omh could not read answered every key as unset — `runtime`
+/// as `auto`, `persistence` as its default, the sandbox limits as none — and
+/// a launch went ahead on settings nobody chose.
+pub(crate) fn policy_value(paths: &Paths, key: &str) -> Result<Option<String>> {
+    Ok(config::policy(paths)
+        .context("reading this repo's settings")?
         .into_iter()
         .find(|s| s.key == key)
-        .map(|s| s.value)
+        .map(|s| s.value))
 }
 
-pub(crate) fn runtime_preference(paths: &Paths) -> String {
-    policy_value(paths, "runtime").unwrap_or_else(|| "auto".into())
+pub(crate) fn runtime_preference(paths: &Paths) -> Result<String> {
+    Ok(policy_value(paths, "runtime")?.unwrap_or_else(|| "auto".into()))
 }
 
 /// The agent's working directory inside the sandbox. Named once, so the note

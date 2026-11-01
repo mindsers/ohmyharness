@@ -1312,8 +1312,13 @@ fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> 
 
 /// A policy value that is a list. `policy()` renders values for display, so an
 /// array arrives as its TOML text and has to be parsed back.
-pub fn policy_list(paths: &Paths, key: &str) -> Vec<String> {
-    policy_list_checked(paths, key).unwrap_or_default()
+///
+/// Settings omh could not read are an error. A declared value that is not a
+/// list reads as nothing here, as it always has — `omh doctor`'s `carry_in` row
+/// is where that is said, through [`policy_list_checked`].
+pub fn policy_list(paths: &Paths, key: &str) -> Result<Vec<String>> {
+    let settings = policy(paths).context("reading this repo's settings")?;
+    Ok(list_of(&settings, key).unwrap_or_default())
 }
 
 /// The same read, with the one failure that is worth a word kept separate
@@ -1334,10 +1339,16 @@ pub fn policy_list(paths: &Paths, key: &str) -> Vec<String> {
 /// one bad entry beside good ones, and `carry_in`'s own row is better placed
 /// to say which patterns it could not use than this reader is.
 pub fn policy_list_checked(paths: &Paths, key: &str) -> Result<Vec<String>, String> {
-    let Some(repr) = policy(paths)
-        .ok()
-        .and_then(|s| s.into_iter().find(|s| s.key == key))
-    else {
+    // Unreadable is not undeclared: it was `.ok()`, and `omh doctor` said
+    // there was nothing to carry about settings it never read.
+    let settings = policy(paths)
+        .map_err(|e| format!("omh could not read the settings that would declare {key}: {e:#}"))?;
+    list_of(&settings, key)
+}
+
+/// `key` among `settings`, as a list of strings.
+fn list_of(settings: &[Setting], key: &str) -> Result<Vec<String>, String> {
+    let Some(repr) = settings.iter().find(|s| s.key == key) else {
         return Ok(Vec::new());
     };
     let parsed = toml::from_str::<toml::Table>(&format!("v = {}", repr.value))
@@ -2436,13 +2447,44 @@ mod tests {
     fn a_list_setting_comes_back_as_a_list() {
         let (_d, paths) = fixture();
         settings(&paths, Layer::Shared, "carry_in = [\".env\", \"certs/\"]");
-        assert_eq!(policy_list(&paths, "carry_in"), vec![".env", "certs/"]);
+        assert_eq!(
+            policy_list(&paths, "carry_in").unwrap(),
+            vec![".env", "certs/"]
+        );
     }
 
     #[test]
     fn an_absent_list_is_empty_not_an_error() {
         let (_d, paths) = fixture();
-        assert!(policy_list(&paths, "carry_in").is_empty());
+        assert!(policy_list(&paths, "carry_in").unwrap().is_empty());
+    }
+
+    /// **Settings omh could not read are not settings nobody set.** Every
+    /// reader did `policy(paths).ok()`, so an unreadable `settings.toml`
+    /// answered `carry_in` as nothing to carry, `runtime` as `auto` and the
+    /// sandbox limits as none — and a launch went ahead on all of it.
+    #[test]
+    fn settings_omh_could_not_read_are_an_error_from_every_reader() {
+        let (_d, paths) = fixture();
+        settings(
+            &paths,
+            Layer::Shared,
+            "runtime = \"podman\"\ncarry_in = [\".env\"]",
+        );
+        let file = Layer::Shared.file(&paths);
+        // Not valid UTF-8, so the read fails the same way for root.
+        std::fs::write(&file, b"runtime = \"podman\"\n\xff\n").unwrap();
+        assert!(
+            crate::policy_value(&paths, "runtime").is_err(),
+            "policy_value"
+        );
+        assert!(
+            crate::runtime_preference(&paths).is_err(),
+            "runtime_preference"
+        );
+        assert!(policy_list(&paths, "carry_in").is_err(), "policy_list");
+        let checked = policy_list_checked(&paths, "carry_in").unwrap_err();
+        assert!(checked.contains("could not read"), "{checked}");
     }
 
     /// Layers merge as usual, so a project can narrow or widen what a personal
@@ -2452,6 +2494,6 @@ mod tests {
         let (_d, paths) = fixture();
         settings(&paths, Layer::Personal, "carry_in = [\".env\"]");
         settings(&paths, Layer::Local, "carry_in = [\".env.local\"]");
-        assert_eq!(policy_list(&paths, "carry_in"), vec![".env.local"]);
+        assert_eq!(policy_list(&paths, "carry_in").unwrap(), vec![".env.local"]);
     }
 }
