@@ -17332,8 +17332,8 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     }
 
     // Named under `~/.omh` and a link out of it: the link is the session's to
-    // swap between the read and any look at where it leads, so where it was
-    // named decides, whatever it resolves to.
+    // swap between the read and any look at where it leads, so it is never
+    // read through at all.
     let outside = sb.home.join("outside-models.yml");
     std::fs::write(
         &outside,
@@ -17359,8 +17359,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
         .output()
         .unwrap();
     assert!(
-        !out.status.success()
-            && printed(&out).contains("so nothing in it is read from your environment"),
+        !out.status.success() && printed(&out).contains("which omh does not follow"),
         "a link out of ~/.omh: {}",
         printed(&out)
     );
@@ -19602,4 +19601,85 @@ fn a_harness_name_as_the_verb_names_omh_new() {
             "`omh {harness}` does not name `omh new {harness}`: {said}"
         );
     }
+}
+
+/// **A provider file named under `~/.omh` is read the way omh reads what a
+/// session could have written.** The launch's refusal offers to adopt an
+/// account's own `models.yaml`, which sits where the agent can write, and the
+/// adoption read it with `read_to_string`: through a link a session swapped in,
+/// and with nothing said when it succeeded. A link is refused; a regular file
+/// is kept, and the keeping says where it came from.
+#[cfg(unix)]
+#[test]
+fn a_provider_under_omh_is_never_read_through_a_link_and_is_named_when_kept() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let agent = sb.home.join(".omh/creds/omp/default/.omp/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let elsewhere = sb.home.join("elsewhere.yml");
+    std::fs::write(
+        &elsewhere,
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let linked = agent.join("models.yaml");
+    std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+    let login = |file: &std::path::Path| {
+        sb.omh(&[
+            "account",
+            "login",
+            "omp",
+            "--name",
+            "default",
+            "--provider",
+            file.to_str().unwrap(),
+        ])
+    };
+    let out = login(&linked);
+    assert!(
+        !out.status.success(),
+        "a link under ~/.omh was read: {}",
+        printed(&out)
+    );
+    assert!(printed(&out).contains("link"), "{}", printed(&out));
+
+    std::fs::remove_file(&linked).unwrap();
+    std::fs::copy(&elsewhere, &linked).unwrap();
+
+    // Nor through a link at any directory above it: each in turn is moved
+    // aside and a link to it put in its place. What refuses differs by level —
+    // the mountpoint `.omp/agent` is refused before the read is reached — so
+    // what is asserted is the outcome: refused, and nothing kept.
+    let root = sb.home.join(".omh");
+    let mut levels: Vec<_> = linked
+        .ancestors()
+        .skip(1)
+        .take_while(|a| *a != root)
+        .collect();
+    levels.reverse();
+    assert_eq!(levels.len(), 5, "{levels:?}");
+    for level in levels {
+        let aside = level.with_extension("aside");
+        std::fs::rename(level, &aside).unwrap();
+        std::os::unix::fs::symlink(&aside, level).unwrap();
+        let out = login(&linked);
+        let kept = root.join("creds/omp/default/provider.yml");
+        assert!(
+            !out.status.success() && !kept.exists(),
+            "read through a link at {}: {}",
+            level.display(),
+            printed(&out)
+        );
+        std::fs::remove_file(level).unwrap();
+        std::fs::rename(&aside, level).unwrap();
+    }
+
+    let out = login(&linked);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("a session could have written"),
+        "keeping it said nothing about where it came from: {}",
+        printed(&out)
+    );
 }

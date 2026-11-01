@@ -110,11 +110,20 @@ pub(crate) fn read_under(dir: &Path, rel: &str, cap: u64) -> anyhow::Result<Stri
         Err(e) if gone(&e) => return Ok(String::new()),
         Err(e) => return Err(e.into()),
     };
+    // A link at a directory is `ELOOP` on macOS and `ENOTDIR` on Linux, so
+    // either is said as what it most likely is.
     for name in above {
         held = match held.sub(name) {
             Ok(d) => d,
             Err(e) if gone(&e) => return Ok(String::new()),
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "{name:?} on the way to it is a link or not a directory, which omh \
+                         does not follow where a session could have written"
+                    )
+                })
+            }
         };
     }
     let file = match held.file(leaf) {
@@ -629,5 +638,21 @@ mod tests {
         );
         assert!(held.file(name("ns")).is_err(), "a directory is not a file");
         assert!(ns.sub(name("note.md")).is_err(), "nor a file a directory");
+    }
+
+    /// A link at a directory on the way is refused as a link, on Linux as on
+    /// macOS: Linux says `ENOTDIR` for it, which named no link at all.
+    #[test]
+    fn a_read_under_a_link_on_the_way_names_the_link() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("real/agent")).unwrap();
+        std::fs::write(d.path().join("real/agent/models.yml"), "x").unwrap();
+        std::fs::create_dir(d.path().join("acct")).unwrap();
+        symlink(d.path().join("real/agent"), d.path().join("acct/agent")).unwrap();
+        let err = read_under(d.path(), "acct/agent/models.yml", 64).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("\"agent\" on the way to it is a link"),
+            "{err:#}"
+        );
     }
 }

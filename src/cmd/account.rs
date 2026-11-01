@@ -176,8 +176,29 @@ pub(crate) fn login(
     let format = adapter.provider.as_ref().map(|p| p.format);
     let provided = match (provider, import, source, format) {
         (Some(file), _, Some(_), Some(format)) => {
-            let raw = std::fs::read_to_string(file)
-                .with_context(|| format!("reading {}", file.display()))?;
+            // Named under `~/.omh`, it is read the way omh reads what a session
+            // could have written: a name at a time from `~/.omh` down, never
+            // through a link at any of them, and capped. It was
+            // `read_to_string`, which a session could steer with a link swapped
+            // in after the refusal that offered the file was printed — at the
+            // file, or at any directory above it. Named anywhere else, it is
+            // yours, read as you named it.
+            let at = std::path::absolute(file).ok();
+            let rel = at.as_deref().and_then(|f| f.strip_prefix(&paths.root).ok());
+            let named = rel.is_some();
+            let raw = match rel {
+                Some(rel) => {
+                    let rel = rel
+                        .to_str()
+                        .with_context(|| format!("{} is not UTF-8", file.display()))?;
+                    let raw = crate::held::read_under(&paths.root, rel, 1 << 20)
+                        .with_context(|| format!("reading {}", file.display()))?;
+                    anyhow::ensure!(!raw.is_empty(), "{} is empty, or not there", file.display());
+                    raw
+                }
+                None => std::fs::read_to_string(file)
+                    .with_context(|| format!("reading {}", file.display()))?,
+            };
             // A file under `~/.omh` — an account's own models file, which a
             // launch's refusal offers to keep, or anything in a session's
             // reach — could be a session's, so nothing is read from the
@@ -188,7 +209,6 @@ pub(crate) fn login(
             // under `~/.omh` is a session's to swap between the read above and
             // any look at its target. And a path omh cannot resolve is not
             // taken for one outside.
-            let named = std::path::absolute(file).is_ok_and(|f| f.starts_with(&paths.root));
             let leads = match (
                 std::fs::canonicalize(file),
                 std::fs::canonicalize(&paths.root),
@@ -209,7 +229,19 @@ pub(crate) fn login(
                 }),
             }
             .with_context(|| format!("{}", file.display()))?;
-            Some(doc.with_context(|| format!("{} defines no model provider", file.display()))?)
+            let doc =
+                doc.with_context(|| format!("{} defines no model provider", file.display()))?;
+            // Kept, and said where it came from: a successful adoption of a
+            // file a session could have written was silent.
+            if ours {
+                ctx.warn(&format!(
+                    "kept the providers in {} — it is under {}, where a session could have \
+                     written it: check them with `omh account` before you launch",
+                    file.display(),
+                    paths.root.display()
+                ));
+            }
+            Some(doc)
         }
         (None, true, Some(source), Some(format)) => {
             let host = crate::adapter::expand_host(source, &home, &paths.repo);
