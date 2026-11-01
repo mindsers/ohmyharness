@@ -914,7 +914,7 @@ pub(crate) fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let mine = Catalogue::resolve(&paths);
     let mut catalogue = Vec::new();
     for cap in adapter::Capability::ALL {
-        catalogue.push(report::Catalogue {
+        catalogue.push(report::CatalogueSlice {
             capability: cap.to_string(),
             entries: mine.entries(cap)?,
         });
