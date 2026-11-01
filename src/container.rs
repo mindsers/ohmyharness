@@ -639,7 +639,10 @@ pub fn plan(
             // is one whose gitdir never mounted, not one whose hooks were
             // quiet. That distinction only holds if this never silently
             // skips a launch.
-            let _ = crate::shadow::replace_record(&crate::shadow::events_file(&shadow.gitdir), "");
+            let events = crate::shadow::events_file(&shadow.gitdir);
+            crate::shadow::replace_record(&events, "").with_context(|| {
+                format!("starting the session's events file at {}", events.display())
+            })?;
         }
 
         mounts.push(Mount {
@@ -2032,6 +2035,19 @@ mod tests {
     /// resolved to the running executable — so the absent case could not be
     /// constructed there at all.
     fn plan_with_memory_bin(fx: &Fx, harness: &str, memory_bin: Option<PathBuf>) -> Plan {
+        try_plan_with_memory_bin(fx, harness, memory_bin).unwrap()
+    }
+
+    /// [`plan_for`], with the error a launch would see.
+    fn try_plan_for(fx: &Fx, harness: &str) -> anyhow::Result<Plan> {
+        try_plan_with_memory_bin(fx, harness, None)
+    }
+
+    fn try_plan_with_memory_bin(
+        fx: &Fx,
+        harness: &str,
+        memory_bin: Option<PathBuf>,
+    ) -> anyhow::Result<Plan> {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
         let (own, repo) = decided_from(fx);
         plan(
@@ -2055,7 +2071,6 @@ mod tests {
                 recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
-        .unwrap()
     }
 
     /// A repo with every hook off still gets the settings document, because
@@ -4095,6 +4110,27 @@ mod tests {
             std::fs::read_to_string(&events).expect("the events file must survive a relaunch"),
             "",
             "a relaunch must not inherit the previous launch's observations"
+        );
+    }
+
+    /// **A launch that could not start its observed half empty says so.** Its
+    /// absence is what tells `read_hooks` the gitdir never mounted, so the
+    /// comment beside the write says it must never silently skip one — and it
+    /// was `let _ =`. A launch that cannot write it fails, naming it.
+    #[test]
+    fn a_launch_that_could_not_start_the_events_file_fails() {
+        let fx = fixture();
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        shadow.ensure(&fx.session.worktree, &[]).unwrap();
+        let events = crate::shadow::events_file(&shadow.gitdir);
+        let _ = std::fs::remove_file(&events);
+        // A directory with something in it: nothing can replace it with a file.
+        std::fs::create_dir_all(events.join("stuck")).unwrap();
+        let err = try_plan_for(&fx, "claude")
+            .expect_err("a launch whose events file could not be started went ahead");
+        assert!(
+            format!("{err:#}").contains("events"),
+            "the error names what it could not write: {err:#}"
         );
     }
 
