@@ -3995,10 +3995,15 @@ mod tests {
     /// "already been refused upstream", and none of them could be true of a
     /// function taking `&str`. A second constructor — or a `pub` field, or a
     /// `Root { .. }` literal anywhere else — would quietly restore that.
+    ///
+    /// Three ways in were invisible to the first version of this, which
+    /// counted `Root {` and one exact spelling of the construction: a second
+    /// `Self { .. }` inside `impl Root` under other names, and a derived
+    /// `Default`, which builds one out of nothing.
     #[test]
     fn nothing_builds_a_root_except_its_one_constructor() {
         let src = std::fs::read_to_string(file!()).unwrap();
-        let body = crate::testsrc::production_of(&src);
+        let body = crate::testsrc::code_of(&crate::testsrc::production_of(&src));
         // `Root {` also opens the `struct` and its `impl`; neither builds one.
         let literals = body.matches("Root {").count()
             - body.matches("struct Root {").count()
@@ -4008,10 +4013,28 @@ mod tests {
             "a `Root {{ .. }}` literal outside `read` is a way to build one \
              that skipped the refusals"
         );
+        // Every `Self {` inside `impl Root`, under whatever names.
+        let start = body.find("impl Root {").expect("impl Root");
+        let end = start
+            + body[start..]
+                .find("\n}\n")
+                .expect("impl Root closes at column zero");
+        // A signature's `-> Self {` returns one; it does not build one.
+        let block = &body[start..end];
         assert_eq!(
-            body.matches("Self { path: at, pem }").count(),
+            block.matches("Self {").count() - block.matches("-> Self {").count(),
             1,
             "and one construction, inside `read`"
+        );
+        assert!(
+            body.contains("Self { path: at, pem }"),
+            "and that one is `read`'s"
+        );
+        let struct_at = body.find("pub struct Root {").expect("struct Root");
+        let derives = body[..struct_at].lines().next_back().unwrap_or_default();
+        assert!(
+            derives.contains("derive(") && !derives.contains("Default"),
+            "a derived `Default` builds a Root from nothing: {derives}"
         );
         assert!(
             !body.contains("pub path:") && !body.contains("pub pem:"),
@@ -4554,8 +4577,15 @@ mod tests {
         let mut declarations = Vec::new();
         for (path, body) in crate::testsrc::production() {
             for line in body.lines() {
+                // Whatever its visibility, and a `static` as much as a
+                // `const`: `pub(crate) const` was invisible to this.
                 let l = line.trim();
-                let is_const = l.starts_with("const ") || l.starts_with("pub const ");
+                let bare = l
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| l.strip_prefix("pub(super) "))
+                    .or_else(|| l.strip_prefix("pub "))
+                    .unwrap_or(l);
+                let is_const = bare.starts_with("const ") || bare.starts_with("static ");
                 if is_const && l.contains("= \"/home/agent\"") {
                     declarations.push(format!("{}: {l}", path.display()));
                 }
