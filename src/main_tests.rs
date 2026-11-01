@@ -2089,7 +2089,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/prefs.rs", 7),
         // `omh s down`, in the refusal when a live sandbox blocks the move
         // off the pre-2026.08 repo key.
-        ("src/catalogue.rs", 1),
+        ("src/paths.rs", 1),
         // `omh account login codex --provider <file>`, in a provider field's refusal.
         ("src/provider.rs", 1),
         // `omh account login omp --name <account> --provider <file>`, when the

@@ -26,7 +26,7 @@
 //! The sandbox is what makes this a disclosure rather than a hole. A repo hook
 //! cannot reach your checkout, your home directory or your credentials.
 
-use crate::catalogue::Paths;
+use crate::paths::Paths;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -7,8 +7,9 @@
 //! because both work on the same lists in `<repo>/.omh/settings.toml`.
 
 use crate::adapter::{self, Adapter};
-use crate::catalogue::{Catalogue, Paths};
+use crate::catalogue::Catalogue;
 use crate::out;
+use crate::paths::Paths;
 use crate::{base, config, hook, render, report, selection, settings, stack};
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};

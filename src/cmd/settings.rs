@@ -8,8 +8,9 @@
 //! trade and is recorded on the decisions page.
 
 use crate::adapter::{self, Adapter};
-use crate::catalogue::{Catalogue, Paths};
+use crate::catalogue::Catalogue;
 use crate::out;
+use crate::paths::Paths;
 use crate::{auth, base, config, key, notice, report, selection, settings};
 use anyhow::{Context, Result};
 use std::process::Command;

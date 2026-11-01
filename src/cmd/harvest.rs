@@ -6,9 +6,9 @@
 //! to do next, and says why when the answer is no.
 
 use crate::catalogue::Catalogue;
-use crate::catalogue::Paths;
 use crate::landing::{Holding, Settling};
 use crate::out;
+use crate::paths::Paths;
 use crate::session::{self, Session};
 use crate::{adapter, config, doctor, image, render, report, runtime, shadow, stack};
 use anyhow::{Context, Result};
@@ -447,7 +447,7 @@ pub(crate) fn diff_report(
     // could not stat, and that told the user the agent had committed nothing,
     // about a repository omh could not look at.
     let there = |at: &std::path::Path| {
-        session::still_there(at).map_err(|e| {
+        crate::fsx::still_there(at).map_err(|e| {
             anyhow::anyhow!("omh could not tell whether {} is there: {e}", at.display())
         })
     };

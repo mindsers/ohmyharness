@@ -12,7 +12,7 @@
 //! a directory whose purpose was content — folded into it.
 
 use crate::adapter::Render;
-use crate::catalogue::Paths;
+use crate::paths::Paths;
 use crate::render::Server;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;

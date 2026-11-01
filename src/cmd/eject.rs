@@ -18,8 +18,9 @@
 //! tree by default would be the opposite of reassuring.
 
 use crate::adapter::{Adapter, Binding, Capability, Render};
-use crate::catalogue::{settled, Catalogue, Paths};
+use crate::catalogue::Catalogue;
 use crate::out;
+use crate::paths::{settled, Paths};
 use crate::{render, report};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};

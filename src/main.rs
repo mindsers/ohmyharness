@@ -22,6 +22,7 @@ mod detect;
 mod doctor;
 mod editor;
 mod facts;
+mod fsx;
 mod git;
 mod guard;
 mod hash;
@@ -37,6 +38,7 @@ mod mcp_server;
 mod memory;
 mod notice;
 mod out;
+mod paths;
 mod persist;
 mod prefs;
 mod provider;
@@ -60,9 +62,9 @@ mod why;
 use adapter::Adapter;
 use anyhow::Context;
 use anyhow::Result;
-use catalogue::Paths;
 use clap::Parser;
 use cli::{AccountCmd, Cli, Cmd, MemoryCmd, SessionsCmd, SettingsCmd};
+use paths::Paths;
 
 fn main() -> std::process::ExitCode {
     // SIGPIPE stays ignored, Rust's default. A closed pipe (`omh info | head`)
@@ -230,9 +232,9 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
         })
     };
 
-    match catalogue::migrate(&paths, &running) {
-        Ok(catalogue::Migration::NothingToDo) => {}
-        Ok(catalogue::Migration::Moved {
+    match paths::migrate(&paths, &running) {
+        Ok(paths::Migration::NothingToDo) => {}
+        Ok(paths::Migration::Moved {
             from,
             kinds,
             stranded,
@@ -251,10 +253,10 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
                 ctx.warn(&say_what_was_stranded(&paths, &from, &stranded));
             }
         }
-        Ok(catalogue::Migration::Stranded { from, kinds }) => {
+        Ok(paths::Migration::Stranded { from, kinds }) => {
             ctx.warn(&say_what_was_stranded(&paths, &from, &kinds))
         }
-        Ok(catalogue::Migration::Refused(why)) => ctx.warn(&why),
+        Ok(paths::Migration::Refused(why)) => ctx.warn(&why),
         Err(e) => ctx.warn(&format!(
             "omh could not move this checkout's state off its old location, so \
              anything under it is invisible to omh until this is resolved: {e}"

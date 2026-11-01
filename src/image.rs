@@ -147,7 +147,7 @@ pub fn recipe_digest(recipe: &str) -> Result<String> {
 /// `ca_for` and `ca_path`. `ca_path` used to call `ca_for` for its refusals and
 /// then read the settings again for the value, so the path it handed to
 /// `docker run -v` was not the path whose PEM had been validated.
-fn ca_setting(paths: &crate::catalogue::Paths) -> Result<Option<std::path::PathBuf>> {
+fn ca_setting(paths: &crate::paths::Paths) -> Result<Option<std::path::PathBuf>> {
     // `config::policy` rather than `policy_value`, which answers `Option` and
     // so spells "this repo sets no certificate" and "omh could not read this
     // repo's settings" the same way. `config::read_layer` deliberately
@@ -345,7 +345,7 @@ impl Root {
     }
 }
 
-pub fn ca_for(paths: &crate::catalogue::Paths) -> Result<Option<Root>> {
+pub fn ca_for(paths: &crate::paths::Paths) -> Result<Option<Root>> {
     let Some(at) = ca_setting(paths)? else {
         return Ok(None);
     };
@@ -3591,9 +3591,9 @@ mod tests {
     }
 
     /// A repo whose settings say what this fixture wants them to say.
-    fn ca_fixture(setting: Option<&str>) -> (tempfile::TempDir, crate::catalogue::Paths) {
+    fn ca_fixture(setting: Option<&str>) -> (tempfile::TempDir, crate::paths::Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::catalogue::Paths {
+        let paths = crate::paths::Paths {
             root: dir.path().join("home"),
             repo: dir.path().join("repo"),
         };

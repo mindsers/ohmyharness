@@ -6,8 +6,9 @@
 //! what happened.
 
 use crate::adapter::{self, Adapter};
-use crate::catalogue::{Catalogue, Paths};
+use crate::catalogue::Catalogue;
 use crate::out;
+use crate::paths::Paths;
 use crate::session::{self, Session};
 use crate::{
     ask, auth, base, carry, config, container, detect, editor, idle, image, memory, notice,

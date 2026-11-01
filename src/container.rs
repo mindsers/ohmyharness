@@ -8,7 +8,8 @@
 //! and nothing to clean up.
 
 use crate::adapter::{expand, Adapter, Capability, Render};
-use crate::catalogue::{Catalogue, Paths};
+use crate::catalogue::Catalogue;
+use crate::paths::Paths;
 use crate::session::Session;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;

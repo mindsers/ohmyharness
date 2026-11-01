@@ -174,7 +174,7 @@ pub fn target_arch(host_arch: &str) -> Result<&'static str> {
 /// session — but both say so first. Discarding them silently leaves a session
 /// with no memory server and no explanation, including under `omh doctor`,
 /// which is the one command whose job is to notice.
-pub fn available(paths: &crate::catalogue::Paths, ctx: &crate::out::Ctx) -> Option<PathBuf> {
+pub fn available(paths: &crate::paths::Paths, ctx: &crate::out::Ctx) -> Option<PathBuf> {
     let arch = match target_arch(std::env::consts::ARCH) {
         Ok(a) => a,
         Err(e) => {
@@ -214,7 +214,7 @@ pub fn available(paths: &crate::catalogue::Paths, ctx: &crate::out::Ctx) -> Opti
 /// with. Resolved again in here, a launch read the setting twice.
 pub fn ensure(
     program: &str,
-    paths: &crate::catalogue::Paths,
+    paths: &crate::paths::Paths,
     sources: Option<&Path>,
     ca: Option<&crate::image::Root>,
     fetch: &dyn Fn(&Urls, &Path) -> Result<()>,
@@ -982,7 +982,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::catalogue::Paths {
+        let paths = crate::paths::Paths {
             root: dir.path().join("home"),
             repo: dir.path().join("repo"),
         };
@@ -1016,7 +1016,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::catalogue::Paths {
+        let paths = crate::paths::Paths {
             root: dir.path().join("home"),
             repo: dir.path().join("repo"),
         };
@@ -1057,7 +1057,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::catalogue::Paths {
+        let paths = crate::paths::Paths {
             root: dir.path().join("home"),
             repo: dir.path().join("repo"),
         };
