@@ -122,7 +122,7 @@ ready  = "Connected"           # what that answer calls a server it loaded
 | `bin` | the executable to run inside the sandbox | required |
 | `install` | the command that installs `bin` into the image; it may interpolate the pin as `{{version}}` | required |
 | `version` | the harness version this adapter pins. `install` must interpolate it | no pin |
-| `checksums` | SHA-256 sums keyed by `uname -m` (`x86_64`, `aarch64`), for a harness delivered as a release binary rather than an npm package | none |
+| `checksums` | SHA-256 sums keyed by `uname -m` (`x86_64`, `aarch64`), for a harness delivered as a release binary rather than an npm package. Each must appear in `install`, which checks it | none |
 | `creds` | the paths holding credentials, captured by `omh account login` and remounted on every launch. **A trailing `/` declares a directory** | none |
 | `token` | the file(s) whose contents prove a login — see [below](#token-or-token-probe-never-both) | none |
 | `[token-probe]` | `run` and `ready`: ask the harness whether it is logged in, where no file can say | none |
@@ -367,7 +367,7 @@ omh enforces each of these, with an error naming the adapter:
 - a key it does not know — see [Unknown fields are rejected](#unknown-fields-are-rejected)
 - a `name` that is anything but letters, digits, `-` and `_`
 - a `version` that `install` never interpolates, or a `{{version}}` with no `version` to fill it
-- an `install` that runs `sha256sum -c` while declaring no `checksums`
+- an `install` that runs `sha256sum -c` while declaring no `checksums`, or a declared sum `install` never checks
 - `token` and `token-probe` together
 - no capabilities at all — it would launch a harness that can see none of your catalogue
 - `hooks` with no `[tools]`, `[tools]` with no `hooks`, `hooks` with no `events`, and a hook map on any capability but `hooks`
