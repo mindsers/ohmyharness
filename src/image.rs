@@ -510,8 +510,13 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     let ca_layer = ca_layer(ca);
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
+    //
+    // By digest: the tag is one its publisher moves, so the image every
+    // session runs in changed under an unchanged omh. The multi-arch index,
+    // read 2026-11-01 with `docker buildx imagetools inspect
+    // node:22-trixie-slim`; moved by hand, as nothing else reads this recipe.
     format!(
-        r#"FROM node:22-trixie-slim
+        r#"FROM node:22-trixie-slim@sha256:2117f713a417f3aff682ac8f5bc2ebbdf1beed51f36e67ab1e0fd3866b6d2d8f
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
@@ -3182,9 +3187,27 @@ mod tests {
     #[test]
     fn the_base_image_ships_a_git_that_can_merge() {
         assert!(
-            base_dockerfile(None).starts_with("FROM node:22-trixie-slim\n"),
+            base_dockerfile(None).starts_with("FROM node:22-trixie-slim@"),
             "{}",
             base_dockerfile(None).lines().next().unwrap_or_default()
+        );
+    }
+
+    /// The base is pinned by digest, not by tag alone: `node:22-trixie-slim`
+    /// is a tag its publisher moves, so the image every session runs in could
+    /// change under an unchanged omh, and nothing would say so. The digest
+    /// moves only when omh's source moves it.
+    #[test]
+    fn the_base_image_is_pinned_by_digest() {
+        let from = base_dockerfile(None)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let digest = from.split_once("@sha256:").map(|(_, d)| d).unwrap_or("");
+        assert!(
+            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{from}"
         );
     }
 
