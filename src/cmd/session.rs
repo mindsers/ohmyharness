@@ -31,7 +31,7 @@ use std::process::Command;
 pub(crate) fn reuse_decision(
     backend: &runtime::Backend,
     name: &str,
-    plan: &container::Plan,
+    plan: &crate::plan::Plan,
     session: &Session,
     // Where a label-less runtime (sbx) recorded this session's stamp. Unused by
     // docker and podman, which read the stamp off the container's labels.
@@ -71,7 +71,7 @@ pub(crate) enum Disposition {
 pub(crate) fn reuse_or_replace(
     backend: &runtime::Backend,
     name: &str,
-    plan: &container::Plan,
+    plan: &crate::plan::Plan,
     session: &Session,
     harness: &str,
     stamp_path: &std::path::Path,
@@ -128,7 +128,7 @@ pub(crate) fn reuse_or_replace(
 /// said with the runtime's own reason.
 pub(crate) fn start(
     backend: &runtime::Backend,
-    plan: &container::Plan,
+    plan: &crate::plan::Plan,
     name: &str,
     port: u16,
     pubkey: &str,
@@ -1736,7 +1736,7 @@ pub(crate) fn chosen_by_the_repository(
 /// `doctor` compose the same document, and a fallback announced on one path in
 /// three is the same silence the notice exists to break. Only when there is
 /// something to say — a line printed every launch is a line nobody reads.
-pub(crate) fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
+pub(crate) fn say_rules(plan: &crate::plan::Plan, ctx: &out::Ctx) {
     for notice in plan.rules.notices() {
         ctx.warn(&notice.to_string());
     }
@@ -1749,7 +1749,7 @@ pub(crate) fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
 /// each path says it once — `session_up` for a launch that starts the
 /// container (a reattach to a running one says nothing new), `run`'s dry run,
 /// and `omh doctor`.
-pub(crate) fn say_policy(plan: &container::Plan, ctx: &out::Ctx) {
+pub(crate) fn say_policy(plan: &crate::plan::Plan, ctx: &out::Ctx) {
     for note in &plan.policy {
         ctx.warn(note);
     }
@@ -3194,7 +3194,7 @@ mod tests {
 
     /// What `docker inspect -f '{{json .Config.Labels}}'` prints for a
     /// container launched from this plan.
-    fn stamped_from(plan: &container::Plan) -> String {
+    fn stamped_from(plan: &crate::plan::Plan) -> String {
         let labels: std::collections::BTreeMap<String, String> =
             plan.labels().into_iter().collect();
         serde_json::to_string(&labels).unwrap()

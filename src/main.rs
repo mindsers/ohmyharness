@@ -44,6 +44,7 @@ mod notice;
 mod out;
 mod paths;
 mod persist;
+mod plan;
 mod prefs;
 mod probe;
 mod provider;

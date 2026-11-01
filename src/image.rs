@@ -2123,7 +2123,7 @@ pub fn stamp_from(asked: std::io::Result<std::process::Output>) -> Stamp {
 
 /// The plan stamp as a JSON object — the same `omh.*` facts `Plan::labels`
 /// stamps onto a docker container, for a runtime that cannot carry labels.
-pub fn stamp_json(plan: &crate::container::Plan) -> String {
+pub fn stamp_json(plan: &crate::plan::Plan) -> String {
     let map: std::collections::BTreeMap<String, String> = plan.labels().into_iter().collect();
     serde_json::to_string(&map).unwrap_or_default()
 }
@@ -2132,7 +2132,7 @@ pub fn stamp_json(plan: &crate::container::Plan) -> String {
 /// parent directory. Written after the sandbox is created, so the next launch
 /// can read back what this one was built from — the role labels play for
 /// docker.
-pub fn write_stamp(path: &Path, plan: &crate::container::Plan) -> std::io::Result<()> {
+pub fn write_stamp(path: &Path, plan: &crate::plan::Plan) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -4865,7 +4865,7 @@ mod tests {
     /// plan reads back as changed, exactly as a docker label would.
     #[test]
     fn a_recorded_stamp_reads_back_as_the_plan_that_wrote_it() {
-        use crate::container::Plan;
+        use crate::plan::Plan;
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("s01").join("stamp.json");
 

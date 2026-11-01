@@ -857,11 +857,7 @@ impl Ctx {
     /// is a hierarchy and this asserts it stays one.
     #[test]
     fn the_modules_form_no_cycle_beyond_the_known_ones() {
-        const KNOWN_CYCLES: &[&[&str]] = &[
-            &["adapter", "hook"],
-            &["container", "image", "memory", "runtime"],
-            &["session", "shadow"],
-        ];
+        const KNOWN_CYCLES: &[&[&str]] = &[&["adapter", "hook"], &["session", "shadow"]];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let graph = module_graph(&root);
 
@@ -908,7 +904,7 @@ impl Ctx {
         // added six inside the big one with this test green. Counted rather
         // than listed — a refactor moves dozens — and printed whole when the
         // count moves, so a diff of two runs names the edge.
-        const KNOWN_EDGES_INSIDE: usize = 11;
+        const KNOWN_EDGES_INSIDE: usize = 4;
         let inside: Vec<String> = found
             .iter()
             .flat_map(|cycle| {
