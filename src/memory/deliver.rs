@@ -7,9 +7,11 @@
 //! image would rebuild it on every edit.
 //!
 //! So: cross-build once into `~/.omh/bin`, bind-mount it read-only. The build
-//! is a `cargo build` inside a throwaway `rust` container, cached by a digest
-//! of the sources, which means it reruns exactly when the code changes and not
-//! otherwise.
+//! is a `cargo build` inside a throwaway `rust` container, cached by version,
+//! as a fetch is: a dev tree whose sources change under one version reuses
+//! the server it built first, and `rm ~/.omh/bin/omh-linux-*` builds it again.
+//! A digest of the sources would rebuild on every edit, which is minutes per
+//! launch.
 //!
 //! A macOS omh installed from a release carries no sources to cross-build
 //! from. It fetches instead: the static musl linux binary its own version
@@ -500,10 +502,14 @@ fn build_script(out_name: &str) -> String {
             .iter()
             .map(|kind| format!("/src/{}", kind.dir())),
     );
+    // Beside the cache name, then renamed onto it: copied straight there, a
+    // copy cut short left a truncated binary under the name `plan_delivery`
+    // reads as built, and every launch after mounted it.
     format!(
         "set -e; cp -r {} /build/; \
          cd /build && cargo build --release --locked \
-         && cp \"$CARGO_TARGET_DIR\"/release/omh /out/{out_name}",
+         && cp \"$CARGO_TARGET_DIR\"/release/omh /out/.{out_name}.part \
+         && mv /out/.{out_name}.part /out/{out_name}",
         sources.join(" ")
     )
 }
@@ -677,6 +683,26 @@ mod tests {
         assert!(
             !script.contains("2>/dev/null"),
             "a swallowed cp error is what made this take a week to find: {script}"
+        );
+    }
+
+    /// The cache name only ever holds a whole binary. The build copied
+    /// straight onto it, so a copy cut short — a full disk, a Ctrl-C — left a
+    /// truncated file under the name `plan_delivery` reads as built, and every
+    /// launch after mounted it. It is written beside and renamed into place.
+    #[test]
+    fn the_cross_build_never_writes_the_cache_name_but_by_a_rename() {
+        let script = build_script("omh-linux-aarch64-0.15.0");
+        let cache = "/out/omh-linux-aarch64-0.15.0";
+        let written: Vec<&str> = script
+            .split("&&")
+            .filter(|step| step.contains(cache))
+            .map(str::trim)
+            .collect();
+        assert_eq!(written.len(), 1, "{script}");
+        assert!(
+            written[0].starts_with("mv ") && written[0].ends_with(cache),
+            "only a rename may put a file at {cache}: {script}"
         );
     }
 
