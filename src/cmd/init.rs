@@ -675,26 +675,6 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         }
     }
 
-    // **After the ignore line, and after everything that can fail.** This was
-    // written ~140 lines earlier, beside the other seeds — which broke this
-    // file's own rule, stated one screen up: *make sure the gitignored layer
-    // is actually gitignored before writing it*. Between the two sat
-    // `questions`, which is **interactive**, so a Ctrl-C at that prompt left an
-    // untracked, un-ignored `seeded-by` for the next `git add .` to commit.
-    //
-    // Placement also decides what the stamp means. Written early it says
-    // *init started*; the row that reads it asks whether there is anything
-    // left to do, and only *init finished* answers that.
-    //
-    // **Not `write_if_absent`**: the stamp has to move when omh does, or it
-    // records the version that first set the checkout up and then lies about
-    // every upgrade after it.
-    std::fs::write(
-        repo_omh.join(SEEDED_BY),
-        format!("{}\n", env!("CARGO_PKG_VERSION")),
-    )
-    .with_context(|| format!("writing {}", repo_omh.join(SEEDED_BY).display()))?;
-
     // Where this checkout is, filed under the id everything else is keyed by.
     // `repo_id` is a one-way digest, so without this the caches, containers
     // and state directories omh creates are disk it can describe and never
@@ -1045,6 +1025,28 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             .problems
             .push(format!("the selection could not be checked ({e:#})")),
     }
+
+    // **Last, after everything that can fail** — the ignore line, and the
+    // image. It was written ~140 lines earlier, beside the other seeds, which
+    // broke this file's own rule: *make sure the gitignored layer is actually
+    // gitignored before writing it*. Between the two sat `questions`, which is
+    // **interactive**, so a Ctrl-C at that prompt left an untracked,
+    // un-ignored `seeded-by` for the next `git add .` to commit. Then it sat
+    // above the image, so a first run whose build failed was refused on every
+    // re-run as a checkout already set up, and the image was never built.
+    //
+    // Placement also decides what the stamp means. Written early it says
+    // *init started*; the row that reads it asks whether there is anything
+    // left to do, and only *init finished* answers that.
+    //
+    // **Not `write_if_absent`**: the stamp has to move when omh does, or it
+    // records the version that first set the checkout up and then lies about
+    // every upgrade after it.
+    std::fs::write(
+        repo_omh.join(SEEDED_BY),
+        format!("{}\n", env!("CARGO_PKG_VERSION")),
+    )
+    .with_context(|| format!("writing {}", repo_omh.join(SEEDED_BY).display()))?;
 
     ctx.say(&summary);
     Ok(())

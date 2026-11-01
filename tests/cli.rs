@@ -2807,6 +2807,26 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
     );
 }
 
+/// A first `omh init` that fails at the image runs again. The stamp that
+/// says a checkout is set up was written before the image was built, so
+/// after a build that failed, every `omh init` said "this project already
+/// uses omh — run `omh upgrade`", and the image was never built.
+#[test]
+fn a_first_init_that_failed_at_the_image_runs_again() {
+    let sb = sandbox();
+    sb.git_init();
+    let _log = sb.fake_docker();
+    std::fs::write(sb.bin.join("docker-refuses"), "").unwrap();
+    let first = sb.omh(&["init"]);
+    assert!(!first.status.success(), "{}", printed(&first));
+    let again = sb.omh(&["init"]);
+    assert!(
+        !printed(&again).contains("already uses omh"),
+        "a failed first run was taken for a finished one: {}",
+        printed(&again)
+    );
+}
+
 /// A value `omh init` seeds that this omh cannot read — one written to your
 /// defaults with `--anyway`, for a newer omh — is named as it is seeded. It
 /// went into the repo's committed file without a word.
