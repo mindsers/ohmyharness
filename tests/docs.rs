@@ -151,11 +151,26 @@ fn routes() -> BTreeMap<String, PathBuf> {
     pages().into_iter().map(|p| (route(&p), p)).collect()
 }
 
-/// Inline markdown links: `[text](target)`. Deliberately not a full parser —
-/// it needs to find link targets, and anything it cannot parse it must skip
-/// rather than guess at, since a false failure trains people to ignore it.
+/// Markdown link targets: inline, `[text](target)`, and reference
+/// definitions, `[label]: target` on a line of their own. Deliberately not a
+/// full parser — it needs to find link targets, and anything it cannot parse
+/// it must skip rather than guess at, since a false failure trains people to
+/// ignore it.
 fn links(body: &str) -> Vec<String> {
     let mut out = Vec::new();
+    // In the order they appear, inline first: a definition is a line of its
+    // own, so it is read as one.
+    let definitions: Vec<String> = body
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix('[')?;
+            let (label, after) = rest.split_once("]:")?;
+            if label.is_empty() || label.contains(']') {
+                return None;
+            }
+            after.split_whitespace().next().map(str::to_string)
+        })
+        .collect();
     let bytes: Vec<char> = body.chars().collect();
     let mut i = 0;
     while i < bytes.len() {
@@ -186,6 +201,7 @@ fn links(body: &str) -> Vec<String> {
         }
         i += 1;
     }
+    out.extend(definitions);
     out
 }
 
@@ -979,4 +995,24 @@ fn only_a_link_pinned_to_a_commit_may_name_a_path_that_is_gone() {
     ] {
         assert_eq!(without_pinned_links(&line), kept, "for the line {line}");
     }
+}
+
+/// A reference-style link keeps its target on a line of its own —
+/// `[label]: /reference/commands/` — and the reader found only `](`, so such a
+/// target was never checked at all. Both kinds are read now.
+#[test]
+fn the_link_reader_finds_inline_and_reference_targets() {
+    let body = "See [the commands](/reference/commands/) and [risks][r].\n\
+                \n\
+                [r]: /concepts/risks/#still-open \"Risks\"\n\
+                  [indented]: ../sessions/\n\
+                Not a definition: [x] : nothing.\n";
+    assert_eq!(
+        links(body),
+        vec![
+            "/reference/commands/".to_string(),
+            "/concepts/risks/#still-open".to_string(),
+            "../sessions/".to_string(),
+        ]
+    );
 }
