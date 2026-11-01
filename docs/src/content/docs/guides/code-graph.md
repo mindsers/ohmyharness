@@ -22,9 +22,9 @@ Open every session's graph for this repository in your browser.
 
    ```console
    $ omh graph
-   omh: graph at http://127.0.0.1:56286
-     every session's graph for this repo, in one place
-     stop with: omh graph --stop
+   graph at http://127.0.0.1:59328
+     omh graph --stop
+   every session's graph for this repo, in one place
    ```
 
 2. Open the address it prints.

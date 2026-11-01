@@ -1866,9 +1866,9 @@ $ omh graph
 ```
 
 ```text title="omh graph"
-omh: graph at http://127.0.0.1:56286
-  every session's graph for this repo, in one place
-  stop with: omh graph --stop
+graph at http://127.0.0.1:59328
+  omh graph --stop
+every session's graph for this repo, in one place
 ```
 
 **One service per repo, not per session**, and it needs no session to exist.

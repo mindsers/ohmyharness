@@ -1365,7 +1365,8 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // of its lines are on this half: installing omh runs no omh.
         ("docs/src/content/docs/getting-started/first-session.md", 15),
         ("docs/src/content/docs/guides/accounts.md", 14), // + `omh account forget`
-        ("docs/src/content/docs/guides/code-graph.md", 1),
+        // + `omh graph --stop`, the next step `omh graph` really prints
+        ("docs/src/content/docs/guides/code-graph.md", 2),
         ("docs/src/content/docs/guides/editors.md", 4),
         ("docs/src/content/docs/guides/troubleshooting.md", 17),
         ("docs/src/content/docs/project/decisions.md", 1),
@@ -1378,8 +1379,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         // the server's own `rm`. + the header of the settings screen's drawing,
         // + the command its status line names. + `omh settings set <feature>`,
         // `use`, `unuse` and `use --all` in the synopsis. + `omh account forget`'s
-        // console example.
-        ("docs/src/content/docs/reference/commands.md", 153),
+        // console example. + `omh graph --stop`, the next step `omh graph`
+        // really prints.
+        ("docs/src/content/docs/reference/commands.md", 154),
         // + `omh use hooks tdd-guard`; + the refused `omh set persistence tmux`,
         // the `--anyway` line it prints, and the run with it. + the same two for
         // a key nothing reads: the `--anyway` line it prints, and the run.
