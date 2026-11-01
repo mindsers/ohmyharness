@@ -11227,21 +11227,27 @@ fn doctor_json_is_one_document() {
     )
     .unwrap();
     let out = sb.omh(&["doctor", "--json"]);
+    // On Linux this has gone red with an empty stdout, and the message that
+    // reported it named neither the exit status nor stderr — which is where
+    // the reason is. Every failure below carries all three.
+    let ran = || {
+        format!(
+            "exit: {}\n--- stdout\n{}\n--- stderr\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
     let documents: Vec<serde_json::Value> = serde_json::Deserializer::from_slice(&out.stdout)
         .into_iter::<serde_json::Value>()
         .collect::<Result<_, _>>()
-        .unwrap_or_else(|e| {
-            panic!(
-                "stdout is not JSON: {e}\n{}",
-                String::from_utf8_lossy(&out.stdout)
-            )
-        });
+        .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{}", ran()));
     assert_eq!(
         documents.len(),
         1,
         "omh doctor --json printed {} documents:\n{}",
         documents.len(),
-        String::from_utf8_lossy(&out.stdout)
+        ran()
     );
     // And the one document still says the check did not run: a consumer of
     // the JSON must not read "could not tell" as "measured and fine".
@@ -11256,8 +11262,8 @@ fn doctor_json_is_one_document() {
         });
     assert!(
         said_so,
-        "the report does not say the TLS check could not run: {}",
-        documents[0]
+        "the report does not say the TLS check could not run:\n{}",
+        ran()
     );
 }
 
