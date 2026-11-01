@@ -349,19 +349,6 @@ fn show(repo: &Path, base: &str, name: &str) -> Result<Option<Found>> {
     }))
 }
 
-/// Absent and unreadable are different answers.
-///
-/// `config::read_layer` exists for this reason: `let Ok(..) else { continue }`
-/// made a `chmod 000` file report as "not declared", and the resulting advice
-/// was a closed loop that exited 0.
-fn read(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(body) => Ok(Some(body)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
-}
-
 /// How much of a rules file omh composes.
 const RULES_CAP: u64 = 1 << 20;
 
@@ -465,7 +452,7 @@ fn catalogue(
         if !crate::catalogue::is_rule_file(&path) {
             continue;
         }
-        let Some(body) = read(&path)?.filter(|b| !b.trim().is_empty()) else {
+        let Some(body) = crate::fsx::read_or_absent(&path)?.filter(|b| !b.trim().is_empty()) else {
             continue;
         };
         let name = crate::catalogue::entry_name(path.file_name().unwrap_or_default());

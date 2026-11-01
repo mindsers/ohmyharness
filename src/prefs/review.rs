@@ -29,12 +29,7 @@ use std::path::PathBuf;
 /// The account a session's preferences were seeded from, or `None` for one
 /// never seeded.
 pub fn account_of(home: &Home) -> Result<Option<PathBuf>> {
-    let at = home.path().join(RECORD);
-    match std::fs::read_to_string(&at) {
-        Ok(a) => Ok(Some(PathBuf::from(a))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", at.display())),
-    }
+    Ok(crate::fsx::read_or_absent(&home.path().join(RECORD))?.map(PathBuf::from))
 }
 
 /// The declared keys a session changed that no decision has answered yet,

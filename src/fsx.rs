@@ -1,4 +1,5 @@
-//! Filesystem questions answered without folding "could not tell" into "no".
+//! Filesystem questions answered without folding "could not tell" into "no",
+//! or "could not read" into "nothing there".
 
 use std::path::Path;
 
@@ -33,9 +34,45 @@ pub enum Gone {
     No(String),
 }
 
+/// `path`'s text, or `None` when there is nothing at it. Only `NotFound` is
+/// absence: a file omh could not read — a `chmod 000` one, a directory where a
+/// file belongs — is an error naming it, never a file that declares nothing.
+/// Reading it as nothing is how a closed loop once advised a user into the
+/// state they were already in, and exited 0.
+pub(crate) fn read_or_absent(path: &Path) -> anyhow::Result<Option<String>> {
+    use anyhow::Context as _;
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Absent, present, and there but unreadable are three answers. A
+    /// directory where the file belongs is the uid-independent way to make
+    /// the third, since CI runs as root and root reads through any mode.
+    #[test]
+    fn a_file_omh_cannot_read_is_an_error_naming_it_never_nothing_there() {
+        let d = tempfile::tempdir().unwrap();
+        let at = d.path().join("settings.toml");
+        assert_eq!(read_or_absent(&at).unwrap(), None, "nothing there");
+        std::fs::write(&at, "x = 1\n").unwrap();
+        assert_eq!(read_or_absent(&at).unwrap().as_deref(), Some("x = 1\n"));
+        std::fs::remove_file(&at).unwrap();
+        std::fs::create_dir(&at).unwrap();
+        let err = format!(
+            "{:#}",
+            read_or_absent(&at).expect_err("a directory read as absent")
+        );
+        assert!(
+            err.contains("settings.toml"),
+            "the error names the file: {err}"
+        );
+    }
 
     /// Absent, present, and unanswerable are three answers, and `Path::exists`
     /// collapses the third into the first.

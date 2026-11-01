@@ -5,9 +5,9 @@
 //! Its children are named after harnesses where they are a harness's staged
 //! catalogue (`<harness>/`), so what else omh keeps here carries a `.`, which
 //! no adapter name can: `.harness` beside an adapter called `harness` would be
-//! a file where a directory is about to go. `transcripts` and `last-used` are
-//! the two that do not, and an adapter given either name would collide with
-//! them.
+//! a file where a directory is about to go. `transcripts`, `last-used` and
+//! `port` are the ones that do not, and an adapter given one of those names
+//! would collide with it.
 
 use std::path::{Path, PathBuf};
 
@@ -69,6 +69,11 @@ impl Run {
     pub fn harness(&self) -> PathBuf {
         self.0.join(".harness")
     }
+
+    /// The host port the session's ssh answers on, chosen at its first launch.
+    pub fn port(&self) -> PathBuf {
+        self.0.join("port")
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +92,8 @@ mod tests {
             "\".preferences\"",
             "\"last-used\"",
             "\".harness\"",
+            // A JSON key elsewhere is also called `port`; the file is a join.
+            "join(\"port\")",
         ];
         for name in names {
             let mut at = Vec::new();

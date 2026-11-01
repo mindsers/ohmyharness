@@ -68,7 +68,7 @@ pub fn assigned_port(
             candidate + 1
         };
     }
-    let file = runs.join(session).join("port");
+    let file = crate::rundir::Run::at(runs, session).port();
     std::fs::create_dir_all(file.parent().unwrap())?;
     std::fs::write(&file, candidate.to_string())?;
     Ok(candidate)
@@ -82,11 +82,9 @@ pub fn assigned_port(
 /// Absent is `None`; a file omh could not read or parse is an error, never
 /// `None` — that chose a port again and wrote it over the old one.
 pub fn recorded_port(runs: &Path, session: &str) -> Result<Option<u16>> {
-    let at = runs.join(session).join("port");
-    let raw = match std::fs::read_to_string(&at) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", at.display())),
+    let at = crate::rundir::Run::at(runs, session).port();
+    let Some(raw) = crate::fsx::read_or_absent(&at)? else {
+        return Ok(None);
     };
     raw.trim().parse().map(Some).with_context(|| {
         format!(

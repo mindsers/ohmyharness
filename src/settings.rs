@@ -95,7 +95,7 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         .remove(&crate::adapter::Capability::Mcp)
         .unwrap_or_default();
     for path in layers(paths) {
-        let Some(raw) = read(&path)? else {
+        let Some(raw) = crate::fsx::read_or_absent(&path)? else {
             continue;
         };
         let file: File =
@@ -287,17 +287,6 @@ fn validate(key: &str, manifest: &Manifest, path: &Path) -> Result<()> {
         path.display(),
         features.into_iter().collect::<Vec<_>>().join(", ")
     )
-}
-
-/// Absent is not unreadable. `config::read_layer` records what conflating them
-/// cost: a `chmod 000` file reported as "not declared", advice that could not
-/// help, and a closed loop exiting 0.
-fn read(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => Ok(Some(raw)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
 }
 
 /// The two things a launch needs from outside the plan: what omh contributes,
