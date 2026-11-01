@@ -445,355 +445,23 @@ pub fn plan(
         rendered_hooks.extend(staged.rendered_hooks);
     }
 
-    // What `carry_in` names, mounted rather than copied.
-    //
-    // `carry::apply` has already put a copy in the worktree and told the user
-    // what it did; this stages a second copy outside `/work` and mounts it over
-    // the first. The mount is what the agent meets, and it is what survives
-    // `git clean -fdx` — an untracked file is removed by `-x` whether or not
-    // `info/exclude` names it, and a mountpoint cannot be unlinked.
-    //
-    // Read-write, because a carried file is config the agent may legitimately
-    // edit, and from a staged copy so those edits cannot reach the checkout.
-    //
-    // Before the shadow block for consistency with the "derive the exclude list
-    // from the mounts" rule that block states, and for nothing else. The
-    // ordering is not load-bearing and this used to claim it was: the shadow
-    // seeds `excluded` from the `carry_in` policy *first* and only then extends
-    // it from the mounts, so a carried path is excluded either way — it just
-    // ends up in the list twice. What the mount-derived entry does add is the
-    // normalised form, so a pattern written `./.env` or `certs/` reaches git as
-    // something it can match.
-    // `branch.is_some()` as well as `Apply`, and the first is the one that
-    // matters. `omh doctor` and `omh account login` borrow a writable `/work` for one
-    // command through `Session::scratch`, and neither calls `carry_in` — that
-    // runs in `run` and `attach` only. Keyed on `Apply` alone this staged a
-    // plaintext copy of the user's `.env` and mounted it read-write into the
-    // doctor probe and into the OAuth container, with nothing printed, because
-    // `carry_in`'s whole reporting surface lives in a launcher neither reaches.
-    // `omh doctor --dry-run` wrote the copy to disk on its way past.
-    //
-    // The same test the shadow block makes below, for a version of the same
-    // reason: a session with no branch is not doing work, so it needs neither a
-    // repository of its own nor anything of the user's to do it with.
-    // Decided for every plan, written only for a real one. A dry run has to
-    // name the mounts a launch would make — `skipped_staging_still_reports_the_
-    // real_mounts` says so and went red when this staged and named in one step,
-    // leaving `--dry-run` printing a plan missing the mount that holds the
-    // user's secret. Deciding is reads of the checkout and is safe either way.
-    let carried = if session.branch.is_some() {
-        crate::carry::to_mount(
-            &paths.repo,
-            &stage.join("carried"),
-            &crate::config::policy_list(paths, "carry_in")?,
-        )?
-    } else {
-        Vec::new()
-    };
-    if staging == Staging::Apply {
-        crate::carry::materialise(&paths.repo, &carried)?;
-    }
-    for item in &carried {
-        // A bind mount needs its destination to exist, and docker creates a
-        // *directory* when it does not — the same reason the rules placeholders
-        // are placed.
-        //
-        // A backstop with no reachable case today: `run` and `attach` both call
-        // `carry_in` before this, so `apply` has always left the real file here,
-        // and the `branch.is_some()` test above is what keeps the paths that do
-        // not out. Kept for the reason `Session::commit` keeps its twin — the
-        // guarantee is about what is on disk when docker looks, and that is not
-        // this function's to assume.
-        if staging == Staging::Apply {
-            place_destination(&session.worktree.join(&item.rel))?;
-        }
-        mounts.push(Mount {
-            host: item.host.clone(),
-            guest: PathBuf::from(crate::guest::WORKDIR).join(&item.rel),
-            read_only: false,
-            file: true,
-        });
-    }
+    carry_mounts(paths, session, &stage, staging, &mut mounts)?;
 
-    // The repository the sandbox is allowed to have.
-    //
-    // Seeded *after* the capability loop, not before, and that ordering is the
-    // whole correctness of it. omh mounts its own documents over paths inside
-    // `/work` — `.mcp.json` among them, which this repo tracks — and a shadow
-    // seeded earlier captures the project's real file, then has omh's rendered
-    // one mounted on top. The agent then opens on `M .mcp.json`, a change it
-    // did not make; `git reset --hard` dies on `unable to unlink old
-    // '.mcp.json': Resource busy`, because a bind mount cannot be unlinked, so
-    // the one recovery this feature exists to give is the one thing that fails;
-    // and `git add -A` reads *through* the mount, committing omh's rendered
-    // document — credentials included — into the history a harvest replays.
-    //
-    // So the exclude list is built from the mounts themselves rather than
-    // guessed at: whatever omh put inside `/work`, the sandbox's repository
-    // does not track. Deriving it from `mounts` means a capability added later
-    // is covered without anyone remembering to come back here.
-    //
-    // Only for a session that has a branch: a scratch session is `omh account login` or
-    // `omh doctor` borrowing a writable `/work` for one command, with no work
-    // to check point and nothing that could ever be harvested from it.
     if session.branch.is_some() {
-        let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
-
-        let workdir = crate::guest::WORKDIR;
-        let mut excluded = crate::config::policy_list(paths, "carry_in")?;
-        excluded.extend(mounts.iter().filter_map(|m| {
-            m.guest
-                .strip_prefix(workdir)
-                .ok()
-                .map(|rel| rel.display().to_string())
-                .filter(|rel| !rel.is_empty())
-        }));
-
-        // Both writes are `Apply`-only, for the reason the mode exists: a
-        // `--dry-run` reports the plan a launch *would* carry out, and creating
-        // a repository is not reporting. The mounts are named either way, so
-        // what a dry run prints is still the truth about the launch.
-        if staging == Staging::Apply {
-            shadow.ensure(&session.worktree, &excluded)?;
-
-            // The trusted half of the ledger, written before the container
-            // ever starts — see `ledger.rs`'s module doc and `shadow.rs`'s
-            // doc on `events_ledger`. Best-effort: a launch must not fail
-            // over a record nothing downstream requires to run correctly,
-            // only to be read back later by `omh sNN`.
-            let record = crate::ledger::Ledger {
-                hooks: rendered_hooks.clone(),
-            };
-            if let Ok(json) = serde_json::to_string(&record) {
-                let _ = crate::shadow::replace_record(&shadow.events_ledger, json);
-            }
-
-            // The observed half, started empty in the same breath as the
-            // trusted one so the two describe the same window. `ensure`
-            // above leaves an existing gitdir exactly as it is — which is
-            // what makes relaunching safe — so without this the events file
-            // accumulates across every launch of the session while the
-            // ledger beside it is rewritten, and `Summary::of` compares this
-            // launch's hooks against every launch's observations.
-            //
-            // Truncating and creating are the same call here on purpose.
-            // The file's *absence* is a fact `read_hooks` depends on: the
-            // host writes it, so a session with a ledger and no events file
-            // is one whose gitdir never mounted, not one whose hooks were
-            // quiet. That distinction only holds if this never silently
-            // skips a launch.
-            let events = crate::shadow::events_file(&shadow.gitdir);
-            crate::shadow::replace_record(&events, "").with_context(|| {
-                format!("starting the session's events file at {}", events.display())
-            })?;
-        }
-
-        mounts.push(Mount {
-            host: shadow.gitdir.clone(),
-            guest: crate::shadow::GUEST_GITDIR.into(),
-            read_only: false,
-            file: false,
-        });
-
-        // Staged rather than written into the worktree: `/work` is the user's
-        // branch, and a `.git` file omh wrote there would be a file the
-        // worktree's own git has to explain. Here it exists only as something
-        // to mount, and the mount is what the container sees.
-        let pointer = stage.join("shadow-gitdir");
-        if staging == Staging::Apply {
-            if let Some(dir) = pointer.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            std::fs::write(&pointer, crate::shadow::pointer_file())?;
-        }
-        mounts.push(Mount {
-            host: pointer,
-            guest: format!("{workdir}/.git").into(),
-            read_only: true,
-            file: true,
-        });
-
-        // The push hook, mounted read-only over the copy `ensure` wrote.
-        //
-        // The gitdir has to be writable — the agent commits into it — so
-        // everything in it is the agent's to delete, including the one hook
-        // that speaks up when it reaches for a remote. Mounted, it cannot be
-        // removed, rewritten or chmod-ed away. It can still be *bypassed*, by
-        // `--no-verify` and by `core.hooksPath`; see `shadow::GUEST_PRE_PUSH`
-        // for what that does and does not buy.
-        let hook = stage.join("shadow-pre-push");
-        if staging == Staging::Apply {
-            std::fs::write(&hook, crate::shadow::pre_push_hook())?;
-        }
-        mounts.push(Mount {
-            host: hook,
-            guest: crate::shadow::GUEST_PRE_PUSH.into(),
-            read_only: true,
-            file: true,
-        });
-
-        // The config, mounted read-only over the copy `ensure` just wrote.
-        //
-        // Staged as a *copy of what is on disk* rather than composed here: git
-        // records `repositoryformatversion` and `filemode` when it creates the
-        // repository, and a file assembled from omh's idea of the keys would be
-        // a repository git reads differently from the one it made. `ensure` has
-        // already put it in the state omh wants; this carries those bytes in.
-        let config = stage.join("shadow-config");
-        if staging == Staging::Apply {
-            std::fs::copy(shadow.gitdir.join("config"), &config)
-                .with_context(|| format!("staging the sandbox's config for {}", session.id))?;
-        }
-        mounts.push(Mount {
-            host: config,
-            guest: crate::shadow::GUEST_CONFIG.into(),
-            read_only: true,
-            file: true,
-        });
+        shadow_mounts(
+            paths,
+            session,
+            &stage,
+            staging,
+            &rendered_hooks,
+            &mut mounts,
+        )?;
     }
 
-    // A feature is all or nothing, and that has to reach the mounts rather
-    // than stopping at the documents. With `memory` off the agent was still
-    // given a writable store it is never told about and a server binary
-    // nothing spawns — the half-configured state the design calls
-    // unrepresentable. `codegraph` kept its index volume the same way.
-    let graph_on = !opts.repo.off.contains(crate::base::GRAPH_FEATURE);
-    let memory_on = !opts.repo.off.contains(crate::memory::tools::FEATURE);
+    feature_mounts(paths, opts, &mut mounts);
 
-    // The graph index, keyed by repo rather than harness — that is what lets
-    // it survive a container rebuild and a switch from Claude Code to opencode.
-    // The volume is not removed when the feature is off, only not mounted, so
-    // switching it back on finds the index where it was.
-    if graph_on {
-        mounts.push(Mount {
-            host: PathBuf::from(paths.cache_volume()),
-            guest: PathBuf::from(crate::base::GRAPH_CACHE),
-            read_only: false,
-            file: false,
-        });
-    }
-
-    // The local note store, keyed by repo like the graph cache and for the
-    // same reason: it must survive a container rebuild, a harness switch and
-    // — unlike anything under /work — the removal of the session that wrote
-    // it. Writable, because `remember` writes here.
-    if memory_on {
-        mounts.push(Mount {
-            host: paths.memory(),
-            guest: PathBuf::from(crate::guest::GUEST_MEMORY),
-            read_only: false,
-            file: false,
-        });
-    }
-
-    // The memory server is `omh` itself, and the harness spawns MCP servers
-    // inside the sandbox — so the base set's `command = "omh"` resolves to
-    // nothing unless a binary is put there. Read-only: a program the agent
-    // could rewrite is not a sandbox.
-    //
-    // Only when one exists. A bind mount of a missing host path makes docker
-    // create a *directory*, and the failure then arrives as a permission error
-    // about something nobody created.
-    if let Some(bin) = opts.memory_bin.clone().filter(|_| memory_on) {
-        mounts.push(Mount {
-            host: bin,
-            guest: PathBuf::from(crate::guest::GUEST_BIN),
-            read_only: true,
-            file: true,
-        });
-    }
-
-    // Credentials mount at the paths the harness itself reads — anywhere else
-    // and the session starts logged out no matter what was captured. Writable,
-    // because OAuth tokens refresh in place.
-    //
-    // A credential file the policy copies is the session's own copy instead,
-    // seeded from the account by `auth::Seeds::write` — or by
-    // `prefs::Account::seed`, for one that is a preferences file too — never
-    // by `plan`, which runs before the reuse decision and would rewrite a
-    // file bind-mounted into a running container.
     if let Some(account) = &opts.account_dir {
-        let copied: Vec<PathBuf> = match opts.launch {
-            Launch::Session => adapter
-                .policy
-                .iter()
-                .flat_map(|p| p.copy.iter())
-                .map(|c| expand(c, GUEST_HOME))
-                .collect(),
-            Launch::Login => Vec::new(),
-        };
-        // A `file` adapter's preferences files are the session's own copies,
-        // mounted below — a credential file among them too, except in a login,
-        // which writes the account's identity into the account's own.
-        let own: Vec<(PathBuf, String)> = match &adapter.preferences {
-            Some(prefs) if prefs.mount.mounts_each_file() => prefs
-                .declared()
-                .into_iter()
-                .filter(|d| opts.launch == Launch::Session || !adapter.creds.contains(&d.path))
-                .map(|d| (expand(&d.path, GUEST_HOME), d.name))
-                .collect(),
-            _ => Vec::new(),
-        };
-        let home = session_home(paths, session, adapter.name.as_str());
-        for cred in crate::auth::mounts(adapter, account, GUEST_HOME) {
-            if own.iter().any(|(guest, _)| *guest == cred.guest) {
-                continue;
-            }
-            let host = match copied.contains(&cred.guest) {
-                // `check_policy` holds every copy under `$HOME`; never fall back
-                // to the account's own file, which is what a copy replaces.
-                true => match cred.guest.strip_prefix(GUEST_HOME) {
-                    Ok(rel) => home.path().join(rel),
-                    Err(_) => anyhow::bail!(
-                        "{} is copied per session but is not under {GUEST_HOME}",
-                        cred.guest.display()
-                    ),
-                },
-                false => cred.host,
-            };
-            mounts.push(Mount {
-                host,
-                guest: cred.guest,
-                read_only: false,
-                file: cred.file,
-            });
-        }
-        // The harness's preferences, the session's own copy — seeded by
-        // `prefs::Account::seed` after the reuse decision, never by `plan`:
-        // for `link`, the directory the account's file links into; for
-        // `file`, each file where the harness reads it, after the account's
-        // directories, which they land inside; for `dir`, the whole directory
-        // at its `root`, which no account path is inside or around.
-        let live = crate::prefs::live(&prefs_home(paths, session, adapter.name.as_str()));
-        match adapter.preferences.as_ref().map(|p| p.mount) {
-            Some(crate::adapter::PrefMount::Link) => mounts.push(Mount {
-                host: live,
-                guest: PathBuf::from(crate::prefs::GUEST),
-                read_only: false,
-                file: false,
-            }),
-            Some(crate::adapter::PrefMount::Dir) => {
-                if let Some(root) = adapter.preferences.as_ref().and_then(|p| p.root.as_deref()) {
-                    mounts.push(Mount {
-                        host: live,
-                        guest: expand(root, GUEST_HOME),
-                        read_only: false,
-                        file: false,
-                    });
-                }
-            }
-            Some(crate::adapter::PrefMount::File) => {
-                for (guest, name) in own {
-                    mounts.push(Mount {
-                        host: live.join(name),
-                        guest,
-                        read_only: false,
-                        file: true,
-                    });
-                }
-            }
-            None => {}
-        }
+        account_mounts(paths, session, adapter, opts, account, &mut mounts)?;
     }
 
     // The harness's policy layer, and the files masked behind it. After the
@@ -865,28 +533,8 @@ pub fn plan(
         }
     }
 
-    // The harness's transcripts, over a per-session directory omh owns, so a
-    // review can read what the agent did without reaching into the container.
-    // Writable — the harness writes here — and only for a real session (a
-    // scratch verb records nothing worth keeping). A harness that declares no
-    // transcript path gets no mount, and `omh sNN` says so rather than
-    // inventing an empty history.
     if let Some(template) = &adapter.transcripts {
-        let host = paths.run(&session.id).transcripts();
-        // The directory is created only when staging — a preview writes
-        // nothing — but the mount itself is part of the plan in either mode,
-        // so `Staging::Skip` and `Staging::Apply` describe the same container.
-        if staging == Staging::Apply {
-            std::fs::create_dir_all(&host).with_context(|| {
-                format!("creating the transcripts directory {}", host.display())
-            })?;
-        }
-        mounts.push(Mount {
-            host,
-            guest: crate::adapter::expand(template, GUEST_HOME),
-            read_only: false,
-            file: false,
-        });
+        transcripts_mount(paths, session, template, staging, &mut mounts)?;
     }
 
     Ok(Plan {
@@ -947,6 +595,414 @@ pub fn plan(
         policy: policy_notes,
         tty: opts.tty,
     })
+}
+
+/// What `carry_in` names, mounted rather than copied.
+///
+/// `carry::apply` has already put a copy in the worktree and told the user
+/// what it did; this stages a second copy outside `/work` and mounts it over
+/// the first. The mount is what the agent meets, and it is what survives
+/// `git clean -fdx` — an untracked file is removed by `-x` whether or not
+/// `info/exclude` names it, and a mountpoint cannot be unlinked.
+///
+/// Read-write, because a carried file is config the agent may legitimately
+/// edit, and from a staged copy so those edits cannot reach the checkout.
+///
+/// Called before [`shadow_mounts`] for consistency with the "derive the exclude list
+/// from the mounts" rule that block states, and for nothing else. The
+/// ordering is not load-bearing and this used to claim it was: the shadow
+/// seeds `excluded` from the `carry_in` policy *first* and only then extends
+/// it from the mounts, so a carried path is excluded either way — it just
+/// ends up in the list twice. What the mount-derived entry does add is the
+/// normalised form, so a pattern written `./.env` or `certs/` reaches git as
+/// something it can match.
+/// `branch.is_some()` as well as `Apply`, and the first is the one that
+/// matters. `omh doctor` and `omh account login` borrow a writable `/work` for one
+/// command through `Session::scratch`, and neither calls `carry_in` — that
+/// runs in `run` and `attach` only. Keyed on `Apply` alone this staged a
+/// plaintext copy of the user's `.env` and mounted it read-write into the
+/// doctor probe and into the OAuth container, with nothing printed, because
+/// `carry_in`'s whole reporting surface lives in a launcher neither reaches.
+/// `omh doctor --dry-run` wrote the copy to disk on its way past.
+///
+/// The same test `plan` makes before [`shadow_mounts`], for a version of the same
+/// reason: a session with no branch is not doing work, so it needs neither a
+/// repository of its own nor anything of the user's to do it with.
+/// Decided for every plan, written only for a real one. A dry run has to
+/// name the mounts a launch would make — `skipped_staging_still_reports_the_
+/// real_mounts` says so and went red when this staged and named in one step,
+/// leaving `--dry-run` printing a plan missing the mount that holds the
+/// user's secret. Deciding is reads of the checkout and is safe either way.
+fn carry_mounts(
+    paths: &Paths,
+    session: &Session,
+    stage: &Path,
+    staging: Staging,
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    let carried = if session.branch.is_some() {
+        crate::carry::to_mount(
+            &paths.repo,
+            &stage.join("carried"),
+            &crate::config::policy_list(paths, "carry_in")?,
+        )?
+    } else {
+        Vec::new()
+    };
+    if staging == Staging::Apply {
+        crate::carry::materialise(&paths.repo, &carried)?;
+    }
+    for item in &carried {
+        // A bind mount needs its destination to exist, and docker creates a
+        // *directory* when it does not — the same reason the rules placeholders
+        // are placed.
+        //
+        // A backstop with no reachable case today: `run` and `attach` both call
+        // `carry_in` before this, so `apply` has always left the real file here,
+        // and the `branch.is_some()` test above is what keeps the paths that do
+        // not out. Kept for the reason `Session::commit` keeps its twin — the
+        // guarantee is about what is on disk when docker looks, and that is not
+        // this function's to assume.
+        if staging == Staging::Apply {
+            place_destination(&session.worktree.join(&item.rel))?;
+        }
+        mounts.push(Mount {
+            host: item.host.clone(),
+            guest: PathBuf::from(crate::guest::WORKDIR).join(&item.rel),
+            read_only: false,
+            file: true,
+        });
+    }
+    Ok(())
+}
+
+/// The repository the sandbox is allowed to have.
+///
+/// Seeded *after* the capability loop, not before, and that ordering is the
+/// whole correctness of it. omh mounts its own documents over paths inside
+/// `/work` — `.mcp.json` among them, which this repo tracks — and a shadow
+/// seeded earlier captures the project's real file, then has omh's rendered
+/// one mounted on top. The agent then opens on `M .mcp.json`, a change it
+/// did not make; `git reset --hard` dies on `unable to unlink old
+/// '.mcp.json': Resource busy`, because a bind mount cannot be unlinked, so
+/// the one recovery this feature exists to give is the one thing that fails;
+/// and `git add -A` reads *through* the mount, committing omh's rendered
+/// document — credentials included — into the history a harvest replays.
+///
+/// So the exclude list is built from the mounts themselves rather than
+/// guessed at: whatever omh put inside `/work`, the sandbox's repository
+/// does not track. Deriving it from `mounts` means a capability added later
+/// is covered without anyone remembering to come back here.
+///
+/// Only for a session that has a branch: a scratch session is `omh account login` or
+/// `omh doctor` borrowing a writable `/work` for one command, with no work
+/// to check point and nothing that could ever be harvested from it.
+fn shadow_mounts(
+    paths: &Paths,
+    session: &Session,
+    stage: &Path,
+    staging: Staging,
+    rendered_hooks: &[String],
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
+
+    let workdir = crate::guest::WORKDIR;
+    let mut excluded = crate::config::policy_list(paths, "carry_in")?;
+    excluded.extend(mounts.iter().filter_map(|m| {
+        m.guest
+            .strip_prefix(workdir)
+            .ok()
+            .map(|rel| rel.display().to_string())
+            .filter(|rel| !rel.is_empty())
+    }));
+
+    // Both writes are `Apply`-only, for the reason the mode exists: a
+    // `--dry-run` reports the plan a launch *would* carry out, and creating
+    // a repository is not reporting. The mounts are named either way, so
+    // what a dry run prints is still the truth about the launch.
+    if staging == Staging::Apply {
+        shadow.ensure(&session.worktree, &excluded)?;
+
+        // The trusted half of the ledger, written before the container
+        // ever starts — see `ledger.rs`'s module doc and `shadow.rs`'s
+        // doc on `events_ledger`. Best-effort: a launch must not fail
+        // over a record nothing downstream requires to run correctly,
+        // only to be read back later by `omh sNN`.
+        let record = crate::ledger::Ledger {
+            hooks: rendered_hooks.to_vec(),
+        };
+        if let Ok(json) = serde_json::to_string(&record) {
+            let _ = crate::shadow::replace_record(&shadow.events_ledger, json);
+        }
+
+        // The observed half, started empty in the same breath as the
+        // trusted one so the two describe the same window. `ensure`
+        // above leaves an existing gitdir exactly as it is — which is
+        // what makes relaunching safe — so without this the events file
+        // accumulates across every launch of the session while the
+        // ledger beside it is rewritten, and `Summary::of` compares this
+        // launch's hooks against every launch's observations.
+        //
+        // Truncating and creating are the same call here on purpose.
+        // The file's *absence* is a fact `read_hooks` depends on: the
+        // host writes it, so a session with a ledger and no events file
+        // is one whose gitdir never mounted, not one whose hooks were
+        // quiet. That distinction only holds if this never silently
+        // skips a launch.
+        let events = crate::shadow::events_file(&shadow.gitdir);
+        crate::shadow::replace_record(&events, "").with_context(|| {
+            format!("starting the session's events file at {}", events.display())
+        })?;
+    }
+
+    mounts.push(Mount {
+        host: shadow.gitdir.clone(),
+        guest: crate::shadow::GUEST_GITDIR.into(),
+        read_only: false,
+        file: false,
+    });
+
+    // Staged rather than written into the worktree: `/work` is the user's
+    // branch, and a `.git` file omh wrote there would be a file the
+    // worktree's own git has to explain. Here it exists only as something
+    // to mount, and the mount is what the container sees.
+    let pointer = stage.join("shadow-gitdir");
+    if staging == Staging::Apply {
+        if let Some(dir) = pointer.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&pointer, crate::shadow::pointer_file())?;
+    }
+    mounts.push(Mount {
+        host: pointer,
+        guest: format!("{workdir}/.git").into(),
+        read_only: true,
+        file: true,
+    });
+
+    // The push hook, mounted read-only over the copy `ensure` wrote.
+    //
+    // The gitdir has to be writable — the agent commits into it — so
+    // everything in it is the agent's to delete, including the one hook
+    // that speaks up when it reaches for a remote. Mounted, it cannot be
+    // removed, rewritten or chmod-ed away. It can still be *bypassed*, by
+    // `--no-verify` and by `core.hooksPath`; see `shadow::GUEST_PRE_PUSH`
+    // for what that does and does not buy.
+    let hook = stage.join("shadow-pre-push");
+    if staging == Staging::Apply {
+        std::fs::write(&hook, crate::shadow::pre_push_hook())?;
+    }
+    mounts.push(Mount {
+        host: hook,
+        guest: crate::shadow::GUEST_PRE_PUSH.into(),
+        read_only: true,
+        file: true,
+    });
+
+    // The config, mounted read-only over the copy `ensure` just wrote.
+    //
+    // Staged as a *copy of what is on disk* rather than composed here: git
+    // records `repositoryformatversion` and `filemode` when it creates the
+    // repository, and a file assembled from omh's idea of the keys would be
+    // a repository git reads differently from the one it made. `ensure` has
+    // already put it in the state omh wants; this carries those bytes in.
+    let config = stage.join("shadow-config");
+    if staging == Staging::Apply {
+        std::fs::copy(shadow.gitdir.join("config"), &config)
+            .with_context(|| format!("staging the sandbox's config for {}", session.id))?;
+    }
+    mounts.push(Mount {
+        host: config,
+        guest: crate::shadow::GUEST_CONFIG.into(),
+        read_only: true,
+        file: true,
+    });
+    Ok(())
+}
+
+/// A feature is all or nothing, and that has to reach the mounts rather
+/// than stopping at the documents. With `memory` off the agent was still
+/// given a writable store it is never told about and a server binary
+/// nothing spawns — the half-configured state the design calls
+/// unrepresentable. `codegraph` kept its index volume the same way.
+fn feature_mounts(paths: &Paths, opts: &Options, mounts: &mut Vec<Mount>) {
+    let graph_on = !opts.repo.off.contains(crate::base::GRAPH_FEATURE);
+    let memory_on = !opts.repo.off.contains(crate::memory::tools::FEATURE);
+
+    // The graph index, keyed by repo rather than harness — that is what lets
+    // it survive a container rebuild and a switch from Claude Code to opencode.
+    // The volume is not removed when the feature is off, only not mounted, so
+    // switching it back on finds the index where it was.
+    if graph_on {
+        mounts.push(Mount {
+            host: PathBuf::from(paths.cache_volume()),
+            guest: PathBuf::from(crate::base::GRAPH_CACHE),
+            read_only: false,
+            file: false,
+        });
+    }
+
+    // The local note store, keyed by repo like the graph cache and for the
+    // same reason: it must survive a container rebuild, a harness switch and
+    // — unlike anything under /work — the removal of the session that wrote
+    // it. Writable, because `remember` writes here.
+    if memory_on {
+        mounts.push(Mount {
+            host: paths.memory(),
+            guest: PathBuf::from(crate::guest::GUEST_MEMORY),
+            read_only: false,
+            file: false,
+        });
+    }
+
+    // The memory server is `omh` itself, and the harness spawns MCP servers
+    // inside the sandbox — so the base set's `command = "omh"` resolves to
+    // nothing unless a binary is put there. Read-only: a program the agent
+    // could rewrite is not a sandbox.
+    //
+    // Only when one exists. A bind mount of a missing host path makes docker
+    // create a *directory*, and the failure then arrives as a permission error
+    // about something nobody created.
+    if let Some(bin) = opts.memory_bin.clone().filter(|_| memory_on) {
+        mounts.push(Mount {
+            host: bin,
+            guest: PathBuf::from(crate::guest::GUEST_BIN),
+            read_only: true,
+            file: true,
+        });
+    }
+}
+
+/// Credentials mount at the paths the harness itself reads — anywhere else
+/// and the session starts logged out no matter what was captured. Writable,
+/// because OAuth tokens refresh in place.
+///
+/// A credential file the policy copies is the session's own copy instead,
+/// seeded from the account by `auth::Seeds::write` — or by
+/// `prefs::Account::seed`, for one that is a preferences file too — never
+/// by `plan`, which runs before the reuse decision and would rewrite a
+/// file bind-mounted into a running container.
+fn account_mounts(
+    paths: &Paths,
+    session: &Session,
+    adapter: &Adapter,
+    opts: &Options,
+    account: &Path,
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    let copied: Vec<PathBuf> = match opts.launch {
+        Launch::Session => adapter
+            .policy
+            .iter()
+            .flat_map(|p| p.copy.iter())
+            .map(|c| expand(c, GUEST_HOME))
+            .collect(),
+        Launch::Login => Vec::new(),
+    };
+    // A `file` adapter's preferences files are the session's own copies,
+    // mounted below — a credential file among them too, except in a login,
+    // which writes the account's identity into the account's own.
+    let own: Vec<(PathBuf, String)> = match &adapter.preferences {
+        Some(prefs) if prefs.mount.mounts_each_file() => prefs
+            .declared()
+            .into_iter()
+            .filter(|d| opts.launch == Launch::Session || !adapter.creds.contains(&d.path))
+            .map(|d| (expand(&d.path, GUEST_HOME), d.name))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let home = session_home(paths, session, adapter.name.as_str());
+    for cred in crate::auth::mounts(adapter, account, GUEST_HOME) {
+        if own.iter().any(|(guest, _)| *guest == cred.guest) {
+            continue;
+        }
+        let host = match copied.contains(&cred.guest) {
+            // `check_policy` holds every copy under `$HOME`; never fall back
+            // to the account's own file, which is what a copy replaces.
+            true => match cred.guest.strip_prefix(GUEST_HOME) {
+                Ok(rel) => home.path().join(rel),
+                Err(_) => anyhow::bail!(
+                    "{} is copied per session but is not under {GUEST_HOME}",
+                    cred.guest.display()
+                ),
+            },
+            false => cred.host,
+        };
+        mounts.push(Mount {
+            host,
+            guest: cred.guest,
+            read_only: false,
+            file: cred.file,
+        });
+    }
+    // The harness's preferences, the session's own copy — seeded by
+    // `prefs::Account::seed` after the reuse decision, never by `plan`:
+    // for `link`, the directory the account's file links into; for
+    // `file`, each file where the harness reads it, after the account's
+    // directories, which they land inside; for `dir`, the whole directory
+    // at its `root`, which no account path is inside or around.
+    let live = crate::prefs::live(&prefs_home(paths, session, adapter.name.as_str()));
+    match adapter.preferences.as_ref().map(|p| p.mount) {
+        Some(crate::adapter::PrefMount::Link) => mounts.push(Mount {
+            host: live,
+            guest: PathBuf::from(crate::prefs::GUEST),
+            read_only: false,
+            file: false,
+        }),
+        Some(crate::adapter::PrefMount::Dir) => {
+            if let Some(root) = adapter.preferences.as_ref().and_then(|p| p.root.as_deref()) {
+                mounts.push(Mount {
+                    host: live,
+                    guest: expand(root, GUEST_HOME),
+                    read_only: false,
+                    file: false,
+                });
+            }
+        }
+        Some(crate::adapter::PrefMount::File) => {
+            for (guest, name) in own {
+                mounts.push(Mount {
+                    host: live.join(name),
+                    guest,
+                    read_only: false,
+                    file: true,
+                });
+            }
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// The harness's transcripts, over a per-session directory omh owns, so a
+/// review can read what the agent did without reaching into the container.
+/// Writable — the harness writes here — and only for a real session (a
+/// scratch verb records nothing worth keeping). A harness that declares no
+/// transcript path gets no mount, and `omh sNN` says so rather than
+/// inventing an empty history.
+fn transcripts_mount(
+    paths: &Paths,
+    session: &Session,
+    template: &str,
+    staging: Staging,
+    mounts: &mut Vec<Mount>,
+) -> Result<()> {
+    let host = paths.run(&session.id).transcripts();
+    // The directory is created only when staging — a preview writes
+    // nothing — but the mount itself is part of the plan in either mode,
+    // so `Staging::Skip` and `Staging::Apply` describe the same container.
+    if staging == Staging::Apply {
+        std::fs::create_dir_all(&host)
+            .with_context(|| format!("creating the transcripts directory {}", host.display()))?;
+    }
+    mounts.push(Mount {
+        host,
+        guest: crate::adapter::expand(template, GUEST_HOME),
+        read_only: false,
+        file: false,
+    });
+    Ok(())
 }
 
 /// Stage the policy and mount it read-only where the harness reads it, then
