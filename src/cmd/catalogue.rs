@@ -12,7 +12,7 @@ use crate::out;
 use crate::paths::Paths;
 use crate::{base, config, hook, render, report, selection, settings, stack};
 use anyhow::{Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Select a catalogue entry for this repo, or resync the whole list.
 ///
@@ -73,7 +73,7 @@ pub(crate) fn use_cmd(
     // A name nothing answers to is a typo far more often than a plan, and the
     // launcher would only report it later. `omh settings edit` is how you create
     // the entry first.
-    let available = catalogue_names(&paths, cap)?;
+    let available = crate::catalogue::names(&paths, cap)?;
     if !available.iter().any(|n| n == name) {
         // **Two states, and only one of them is absence.** `catalogue_names`
         // narrows hooks to the ecosystems this repo actually is, so in a rust
@@ -926,7 +926,7 @@ pub(crate) fn current_list(
         Some(names) => Ok((cap, names.to_vec(), false)),
         // No list: this capability follows the whole catalogue, so the list
         // that keeps that true is the catalogue itself.
-        None => Ok((cap, catalogue_names(paths, cap)?, true)),
+        None => Ok((cap, crate::catalogue::names(paths, cap)?, true)),
     }
 }
 
@@ -946,7 +946,7 @@ pub(crate) fn catalogue_lists(
 ) -> Result<std::collections::BTreeMap<adapter::Capability, Vec<String>>> {
     let mut out = std::collections::BTreeMap::new();
     for cap in adapter::Capability::ALL {
-        let mut names = catalogue_names(paths, cap)?;
+        let mut names = crate::catalogue::names(paths, cap)?;
         if cap == adapter::Capability::Hooks {
             let guards = guard_hooks(paths)?;
             names.retain(|name| !guards.contains(name));
@@ -1067,63 +1067,6 @@ pub(crate) fn covered_here(
     Ok(out)
 }
 
-pub(crate) fn applicable_hooks(
-    names: Vec<String>,
-    declared: &BTreeMap<String, Option<String>>,
-    detected: &BTreeSet<String>,
-) -> Vec<String> {
-    names
-        .into_iter()
-        .filter(|n| match declared.get(n) {
-            Some(Some(stack)) => detected.contains(stack),
-            _ => true,
-        })
-        .collect()
-}
-
-/// The names a `[use]` list may hold for `cap`: what the catalogue and this
-/// repo declare, minus omh's own, which `[omh]` governs and `[use]` refuses.
-pub(crate) fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String>> {
-    let names = catalogue_names_unfiltered(paths, cap)?;
-    if cap != adapter::Capability::Hooks {
-        return Ok(names);
-    }
-    // Hooks alone can belong to an ecosystem, and omh now ships one set per
-    // ecosystem. Offering a rust repo `go-test` would put every stack omh
-    // knows into the list `init` writes and the launcher reports.
-    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
-    let detected: BTreeSet<String> = stack::detected(&defs, &paths.repo)
-        .into_iter()
-        .map(|d| d.name.clone())
-        .collect();
-    let catalogue = Catalogue::resolve(paths);
-    let declared = render::declared_stacks(&catalogue.sources(cap)?)?;
-    Ok(applicable_hooks(names, &declared, &detected))
-}
-
-/// `catalogue_names`, before the hooks-only stack filter — every name the
-/// catalogue holds for `cap`, whether or not this checkout's detected stacks
-/// would offer it. `doctor::use_row` needs this half on its own: a `[use]`
-/// name naming a hook a different stack owns is not the same fact as one
-/// naming nothing in the catalogue at all, and reporting both as "not in the
-/// catalogue" sends the reader to `omh info --repo`, which would show the
-/// hook right there.
-pub(crate) fn catalogue_names_unfiltered(
-    paths: &Paths,
-    cap: adapter::Capability,
-) -> Result<Vec<String>> {
-    let manifest = base::Manifest::load_dir(&paths.base())?;
-    // Reserved, not merely owned: a name omh's server used to have is never
-    // yours to list, and a list naming one is a list `[use]` refuses.
-    let reserved = manifest.reserved();
-    let catalogue = Catalogue::resolve(paths);
-    Ok(catalogue
-        .entries(cap)?
-        .into_iter()
-        .filter(|n| !reserved.get(&cap).is_some_and(|o| o.contains_key(n)))
-        .collect())
-}
-
 /// What a new repo gets of one kind, from your defaults.
 ///
 /// **One answer, read by `omh init` and by the settings screen**, because the
@@ -1160,8 +1103,8 @@ pub(crate) fn new_repo_takes(
         // python's into a rust repo. A name the catalogue does not have stays,
         // for `init` to warn about.
         if in_repo && cap == adapter::Capability::Hooks {
-            let known = catalogue_names_unfiltered(paths, cap)?;
-            let applicable = catalogue_names(paths, cap)?;
+            let known = crate::catalogue::names_unfiltered(paths, cap)?;
+            let applicable = crate::catalogue::names(paths, cap)?;
             takes.retain(|n| !known.contains(n) || applicable.contains(n));
         }
         return Ok(NewRepo {
@@ -1173,7 +1116,7 @@ pub(crate) fn new_repo_takes(
     }
     let left_out = config::list_in(paths, layer, config::UNUSE, cap)?.unwrap_or_default();
     let every = match in_repo {
-        true => catalogue_names(paths, cap)?,
+        true => crate::catalogue::names(paths, cap)?,
         false => defaults_catalogue(paths, cap)?,
     };
     Ok(NewRepo {

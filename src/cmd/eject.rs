@@ -43,7 +43,7 @@ pub(crate) fn eject(
 
     refuse_the_checkout(cwd, &paths, to)?;
 
-    let (own, repo) = crate::cmd::session::resolved(&paths)?;
+    let (own, repo) = crate::settings::resolved(&paths)?;
 
     // The model provider a launch on this checkout's account would render —
     // redacted, since an eject is handed to the user to read and keep.

@@ -875,6 +875,7 @@ impl Ctx {
                 "idle",
                 "image",
                 "key",
+                "leftovers",
                 "main",
                 "memory",
                 "notice",
@@ -936,7 +937,7 @@ impl Ctx {
         // added six inside the big one with this test green. Counted rather
         // than listed — a refactor moves dozens — and printed whole when the
         // count moves, so a diff of two runs names the edge.
-        const KNOWN_EDGES_INSIDE: usize = 125;
+        const KNOWN_EDGES_INSIDE: usize = 130;
         let inside: Vec<String> = found
             .iter()
             .flat_map(|cycle| {

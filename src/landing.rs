@@ -135,7 +135,7 @@ pub struct SeenTree {
 
 /// Where the facts come from, so the decision can be tested without a repo.
 ///
-/// The same shape as `cmd::session::Entry`, and for the same reason: the states
+/// The same shape as `leftovers::Entry`, and for the same reason: the states
 /// worth testing are the ones a fixture cannot produce.
 pub trait History {
     fn exists(&self, branch: &str) -> Result<bool>;

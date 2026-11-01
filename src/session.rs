@@ -1901,7 +1901,7 @@ fn session_number(name: &str) -> Option<u32> {
 /// It was left alone once deliberately, on the argument that "its other callers
 /// reap and render, and emptiness is the right answer for them". That is true
 /// of reaping and false of rendering: a rendered emptiness is a claim, which is
-/// the whole of what [`crate::cmd::session::Leftovers`] exists to keep out of a
+/// the whole of what [`crate::leftovers::Leftovers`] exists to keep out of a
 /// report. Seven of the nine take the error now. The two that still swallow it
 /// say why where they do it — `reap_idle`, which prints nothing and feeds no
 /// report, and `omh s`, which has to answer with a document whatever happened

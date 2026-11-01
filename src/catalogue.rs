@@ -32,6 +32,7 @@
 use crate::adapter::Capability;
 use crate::paths::Paths;
 use anyhow::{Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub struct Catalogue {
@@ -185,6 +186,60 @@ pub fn entry_name(file_name: &std::ffi::OsStr) -> String {
         .unwrap_or(file_name)
         .to_string_lossy()
         .into_owned()
+}
+
+pub(crate) fn applicable_hooks(
+    names: Vec<String>,
+    declared: &BTreeMap<String, Option<String>>,
+    detected: &BTreeSet<String>,
+) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|n| match declared.get(n) {
+            Some(Some(stack)) => detected.contains(stack),
+            _ => true,
+        })
+        .collect()
+}
+
+/// The names a `[use]` list may hold for `cap`: what the catalogue and this
+/// repo declare, minus omh's own, which `[omh]` governs and `[use]` refuses.
+pub(crate) fn names(paths: &Paths, cap: Capability) -> Result<Vec<String>> {
+    let names = names_unfiltered(paths, cap)?;
+    if cap != Capability::Hooks {
+        return Ok(names);
+    }
+    // Hooks alone can belong to an ecosystem, and omh now ships one set per
+    // ecosystem. Offering a rust repo `go-test` would put every stack omh
+    // knows into the list `init` writes and the launcher reports.
+    let defs = crate::stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let detected: BTreeSet<String> = crate::stack::detected(&defs, &paths.repo)
+        .into_iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let catalogue = Catalogue::resolve(paths);
+    let declared = crate::render::declared_stacks(&catalogue.sources(cap)?)?;
+    Ok(applicable_hooks(names, &declared, &detected))
+}
+
+/// [`names`], before the hooks-only stack filter — every name the
+/// catalogue holds for `cap`, whether or not this checkout's detected stacks
+/// would offer it. `doctor::use_row` needs this half on its own: a `[use]`
+/// name naming a hook a different stack owns is not the same fact as one
+/// naming nothing in the catalogue at all, and reporting both as "not in the
+/// catalogue" sends the reader to `omh info --repo`, which would show the
+/// hook right there.
+pub(crate) fn names_unfiltered(paths: &Paths, cap: Capability) -> Result<Vec<String>> {
+    let manifest = crate::base::Manifest::load_dir(&paths.base())?;
+    // Reserved, not merely owned: a name omh's server used to have is never
+    // yours to list, and a list naming one is a list `[use]` refuses.
+    let reserved = manifest.reserved();
+    let catalogue = Catalogue::resolve(paths);
+    Ok(catalogue
+        .entries(cap)?
+        .into_iter()
+        .filter(|n| !reserved.get(&cap).is_some_and(|o| o.contains_key(n)))
+        .collect())
 }
 
 #[cfg(test)]

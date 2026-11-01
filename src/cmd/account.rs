@@ -454,7 +454,7 @@ fn login_in_sandbox(
     // by the daemon, as root, on Linux.
     crate::ssh::ensure_host_key(&paths.keys())?;
 
-    let (own, repo) = crate::cmd::session::resolved(paths)?;
+    let (own, repo) = crate::settings::resolved(paths)?;
     // The account's preferences, as a session has them: checked before
     // anything starts, then migrated and seeded — into the login's own copy,
     // under `scratch/` — before the login does.

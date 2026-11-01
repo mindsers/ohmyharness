@@ -174,7 +174,7 @@ pub(crate) fn doctor_cmd(
     // Not `?`. This is one more thing that must not stop the host being
     // reported; a policy omh cannot resolve just means the row cannot say
     // whether a detected stack is switched on.
-    let provision = crate::cmd::session::resolved(&paths)
+    let provision = crate::settings::resolved(&paths)
         .map(|(_, repo)| repo.provision)
         .unwrap_or_default();
     let loaded = stack::load_all(&paths.stacks(), &paths.repo_stacks());
@@ -241,10 +241,10 @@ pub(crate) fn doctor_cmd(
     // pair into a `Result`, so a single failed read discarded every leftover the
     // other two reads had already found — the failure made omh report *less*
     // than it knew, in the row whose whole job is to notice what is left behind.
-    let orphans = crate::cmd::session::leftovers(
+    let orphans = crate::leftovers::leftovers(
         &paths,
         chosen.as_ref().map_err(|e| format!("{e:#}")),
-        crate::cmd::session::Unchecked::new(ctx),
+        crate::leftovers::Unchecked::new(ctx),
     );
 
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
@@ -412,7 +412,7 @@ pub(crate) fn doctor_cmd(
 
         // Resolved once and used for both the checks and the plan below, so the
         // probe cannot check a session different from the one it launches.
-        let (own, repo) = crate::cmd::session::resolved(&paths)?;
+        let (own, repo) = crate::settings::resolved(&paths)?;
         // The one reading this command makes. `ensure_stack` below takes
         // `sandbox.ca`, and `ca_check` asserts against the same value.
         let ca = image::ca_for(&paths)?;
@@ -836,7 +836,7 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
     let mut derived = std::collections::BTreeMap::new();
     let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected = stack::detected(&stack_defs, &paths.repo);
-    let (own, repo_policy) = crate::cmd::session::resolved(&paths)?;
+    let (own, repo_policy) = crate::settings::resolved(&paths)?;
     let merged = render::merge_hooks(
         &Catalogue::resolve(&paths).sources(adapter::Capability::Hooks)?,
         &own,

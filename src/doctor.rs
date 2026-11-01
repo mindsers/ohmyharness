@@ -200,11 +200,11 @@ pub fn attributed(
 /// name that may confuse you later. A doctor that fails over it is one people
 /// stop running, and the exit code stops meaning *you cannot work*.
 pub fn leftovers_from(
-    sessions: crate::cmd::session::Leftovers,
+    sessions: crate::leftovers::Leftovers,
     volumes: Result<Vec<String>, String>,
     split: Attributed,
 ) -> Outcome {
-    let crate::cmd::session::Leftovers {
+    let crate::leftovers::Leftovers {
         found: sessions,
         unchecked,
     } = sessions;
@@ -606,7 +606,7 @@ pub struct HostRows(pub Vec<Outcome>);
 /// a `[use]` name a rename left behind, a `carry_in` path that moved, a
 /// hand-edited repo hook that does not parse.
 pub fn audit(paths: &crate::paths::Paths) -> Vec<Outcome> {
-    let (_, repo) = match crate::cmd::session::resolved(paths) {
+    let (_, repo) = match crate::settings::resolved(paths) {
         Ok(pair) => pair,
         // Every check below reads the resolved policy, so a repo whose
         // settings do not even resolve gets one named row instead of a
@@ -656,7 +656,7 @@ fn use_row(paths: &crate::paths::Paths, repo: &crate::settings::RepoPolicy) -> O
         // `inapplicable` already found for the capabilities before it — the
         // user fixed the catalogue, reran `omh doctor`, and only then met
         // the rest of the drift. One audit should cost one round trip.
-        let available = match crate::cmd::catalogue::catalogue_names(paths, cap) {
+        let available = match crate::catalogue::names(paths, cap) {
             Ok(names) => names,
             Err(e) => {
                 unreadable.push(format!("could not read the catalogue for {cap}: {e:#}"));
@@ -666,8 +666,7 @@ fn use_row(paths: &crate::paths::Paths, repo: &crate::settings::RepoPolicy) -> O
         // Not a second fallible call: `catalogue_names` above starts by
         // calling this and returns its error, so reaching here at all means
         // this cannot fail. It is the same read, without the stack filter.
-        let unfiltered =
-            crate::cmd::catalogue::catalogue_names_unfiltered(paths, cap).unwrap_or_default();
+        let unfiltered = crate::catalogue::names_unfiltered(paths, cap).unwrap_or_default();
         for name in names {
             if available.iter().any(|a| a == name) {
                 continue;
@@ -3251,8 +3250,8 @@ mod tests {
     }
 
     /// `Leftovers` for a test, in the order the fields read.
-    fn seen(found: &[&str], unchecked: &[&str]) -> crate::cmd::session::Leftovers {
-        crate::cmd::session::Leftovers {
+    fn seen(found: &[&str], unchecked: &[&str]) -> crate::leftovers::Leftovers {
+        crate::leftovers::Leftovers {
             found: found.iter().map(|s| s.to_string()).collect(),
             unchecked: unchecked.iter().map(|s| s.to_string()).collect(),
         }

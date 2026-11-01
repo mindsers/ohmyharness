@@ -309,6 +309,23 @@ fn read(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// The two things a launch needs from outside the plan: what omh contributes,
+/// and what this repo decided.
+///
+/// Resolved by the caller of `container::plan` rather than inside it, the rule
+/// `memory_bin` and `base` already follow — the manifest is a file, and a probe
+/// inside `plan` is a probe no test can reach.
+///
+/// Returned as a pair rather than merged. They arrive together and travel
+/// together, which is exactly what made one struct tempting, but "omh generated
+/// this" and "this repo asked for this" are the two answers `omh why` exists to
+/// keep apart — and a type that holds both cannot help blurring them.
+pub(crate) fn resolved(paths: &Paths) -> Result<(crate::base::Own, RepoPolicy)> {
+    let manifest = Manifest::load_dir(&paths.base())?;
+    let repo = resolve(paths, &manifest)?;
+    Ok((crate::base::own(&manifest, &repo.off)?, repo))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

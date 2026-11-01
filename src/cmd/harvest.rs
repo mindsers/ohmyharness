@@ -1546,7 +1546,7 @@ fn checks_for(paths: &Paths, ctx: &out::Ctx) -> std::result::Result<Vec<(String,
         .iter()
         .map(|d| d.name.clone())
         .collect();
-    let (own, repo) = crate::cmd::session::resolved(paths)
+    let (own, repo) = crate::settings::resolved(paths)
         .map_err(|e| format!("could not read this repo's setup — {e:#}"))?;
     let dirs = Catalogue::resolve(paths)
         .sources(adapter::Capability::Hooks)

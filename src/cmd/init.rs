@@ -808,7 +808,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // is the committed table alone: `record_resolution` has just
                 // written it, and a `false` in `settings.local.toml` means *not
                 // on this laptop*, which is the laptop building the image.
-                let (own, repo) = crate::cmd::session::resolved(&paths)?;
+                let (own, repo) = crate::settings::resolved(&paths)?;
                 let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
                 image::ensure_stack(
                     &backend,

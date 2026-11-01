@@ -35,6 +35,7 @@ mod image;
 mod key;
 mod landing;
 mod ledger;
+mod leftovers;
 mod mcp_server;
 mod memory;
 mod notice;
