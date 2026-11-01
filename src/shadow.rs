@@ -1221,18 +1221,32 @@ impl Shadow {
         // agent's, whatever it points at. `--show-scope` says whose each value
         // is: `--local` alone reads neither `config.worktree` nor an
         // `include`.
-        let agents: Vec<String> = git(
+        //
+        // `-z`, read as `scope NUL value NUL` pairs and never trimmed: a value
+        // is the agent's to write, newlines and all, and `check-ignore` names
+        // the source exactly as configured.
+        let listed = git(
             &self.gitdir,
             worktree,
-            &["config", "--show-scope", "--get-all", "core.excludesFile"],
+            &[
+                "config",
+                "-z",
+                "--show-scope",
+                "--get-all",
+                "core.excludesFile",
+            ],
         )
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .filter(|(scope, _)| !matches!(*scope, "global" | "system"))
-        .map(|(_, value)| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect();
+        .unwrap_or_default();
+        let scoped: Vec<&str> = listed.split('\0').collect();
+        let agents: Vec<String> = scoped
+            .chunks(2)
+            .filter_map(|pair| match pair {
+                [scope, value] if !matches!(*scope, "global" | "system") && !value.is_empty() => {
+                    Some(value.to_string())
+                }
+                _ => None,
+            })
+            .collect();
         let mut believed: Vec<&str> = Vec::new();
         // `source NUL line NUL pattern NUL path NUL`, one per path.
         for &[source, _line, pattern, path] in fields.as_chunks::<4>().0 {
@@ -1254,10 +1268,17 @@ impl Shadow {
                 // named `.gitignore`: any tracked file was believed, so a
                 // tracked `.dockerignore` holding `*`, named as the excludes
                 // file by the sandbox's config, hid everything new.
-                std::path::Path::new(source)
-                    .file_name()
-                    .is_some_and(|n| n == ".gitignore")
+                //
+                // And only where git reads one: beside or above the ignored
+                // path. A tracked `sub/.gitignore` that hides a file at the
+                // root is acting as an excludes file someone named, however
+                // the naming was hidden from the lookup above.
+                let rule = std::path::Path::new(source);
+                rule.file_name().is_some_and(|n| n == ".gitignore")
                     && tracked.iter().any(|t| t == source)
+                    && rule
+                        .parent()
+                        .is_some_and(|dir| std::path::Path::new(path).starts_with(dir))
             };
             if trusted {
                 believed.push(path);
