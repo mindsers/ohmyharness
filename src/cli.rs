@@ -496,8 +496,9 @@ pub(crate) enum McpCmd {
 /// `sessions_ls` learning a scope; retiring the verb is a separate and
 /// smaller call, so that one thing has one spelling rather than two.
 ///
-/// It survives below as a hidden tombstone rather than being deleted
-/// outright, though not for the reason first recorded here. That reason was
+/// It survives as an entry in `RETIRED`, scoped to `sessions`, rather than
+/// being forgotten outright — once as a hidden variant here, and not for the
+/// reason first recorded. That reason was
 /// that deleting it left the line *unrefusable*: the sessions reading failed,
 /// the as-written reading was a live top-level `ls`, and `session_prefix`
 /// handed the launch to a command that never reads `cli.session` — so the
@@ -507,7 +508,7 @@ pub(crate) enum McpCmd {
 /// as-written reading no longer parses either and the `(Err, Err)` arm keeps
 /// the sessions grammar.
 ///
-/// What is left is smaller and still worth the variant: clap would say
+/// What is left is smaller and still worth the entry: clap would say
 /// *unrecognized subcommand*, and this says which word replaced it. A better
 /// sentence, not a prevented harm — and the spelling everyone still has
 /// in their fingers gets somewhere to point.
@@ -669,9 +670,9 @@ pub(crate) enum SessionsCmd {
 /// env and must not be committable by accident. Two commands, so neither has
 /// to be told which it meant.
 ///
-/// The five verbs are the ones that act on `~/.omh`: two that write a default,
-/// one that opens the file or an entry, one that removes an entry, and the MCP
-/// catalogue. With no verb it is the report, or at a terminal a screen over
+/// The verbs act on `~/.omh`: two that write a default, two that choose what
+/// new repos get from your catalogue, one that opens the file or an entry, one
+/// that removes an entry, and the MCP catalogue. With no verb it is the report, or at a terminal a screen over
 /// your defaults and every catalogue entry — which is the catalogue listed
 /// for changing, while `omh info` is where the machine is described.
 #[derive(Subcommand)]

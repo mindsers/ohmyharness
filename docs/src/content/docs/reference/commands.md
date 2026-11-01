@@ -62,7 +62,7 @@ file is left alone.
 
 | Previews | Refuses `--dry-run` |
 |---|---|
-| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `rm` and `mcp` verbs, `memory rm`, `account forget` | `init`, `account` and `account login`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
+| `new`, `sNN resume`, `upgrade`, `doctor`, `prune`, `set`, `unset`, `use`, `unuse`, `import`, `eject`, `settings` and its `set`, `unset`, `use`, `unuse`, `rm` and `mcp` verbs, `memory rm`, `account forget` | `init`, `account` and `account login`, `graph`, `info`, `why`, `settings edit`, the session listing and every session verb but `resume`, `memory` and its other verbs |
 
 <details>
 <summary>Why a command refuses the flag rather than guessing, or ignoring it</summary>
@@ -590,7 +590,7 @@ ambiguous:
 
 ```console
 $ omh --dry-run new claude       # omh's
-$ omh new claude --json          # omh's, reported as JSON
+$ omh new claude --json          # omh's, and refused: new prints nothing to parse
 $ omh new claude -- --resume x   # claude's
 $ omh new claude -- --json       # claude's, even though omh has one too
 $ omh new claude -- -s work      # claude's, short flags included
@@ -2453,7 +2453,7 @@ is committed. It already has a home — `omh settings mcp add <name> <command>
 live in your catalogue; a repo overrides a server's environment without
 redeclaring it. See [Configuration](/reference/configuration/).
 
-**Your defaults and your catalogue.** The five verbs above all act on `~/.omh`;
+**Your defaults and your catalogue.** The verbs above all act on `~/.omh`;
 the screen is that catalogue listed for changing it. `omh info` is where the
 machine is described, and what you have in `~/.omh` is part of what it means
 by *what you have here*.
