@@ -126,6 +126,10 @@ pub fn host_key_dir(keys: &Path) -> PathBuf {
 /// justified by "host keys are regenerated whenever the image is rebuilt" —
 /// whatever did was trusted. The key is omh's now, per repo, and does not
 /// change when the image does.
+///
+/// No agent and no X11: an ssh config or an editor that forwards by default
+/// would otherwise offer the sandbox a socket that signs as you. The session's
+/// sshd refuses both too, which is the half that holds against a `-A`.
 pub fn config_block(alias: &str, port: u16, key: &Path, known_hosts: &Path) -> String {
     format!(
         "Host {alias}\n  \
@@ -137,6 +141,8 @@ pub fn config_block(alias: &str, port: u16, key: &Path, known_hosts: &Path) -> S
          HostKeyAlias {alias}\n  \
          StrictHostKeyChecking yes\n  \
          UserKnownHostsFile {}\n  \
+         ForwardAgent no\n  \
+         ForwardX11 no\n  \
          LogLevel ERROR\n",
         config_path(key),
         config_path(known_hosts)
@@ -452,6 +458,21 @@ mod tests {
         assert!(block.contains("Port 49200"));
         assert!(block.contains("User agent"));
         assert!(block.contains("/k/id_ed25519"));
+    }
+
+    /// The block asks for no agent and no X11, so an `ssh` or an editor that
+    /// forwards by default does not offer either to the sandbox. The sshd
+    /// refuses both as well; this is the client's half.
+    #[test]
+    fn the_host_block_forwards_neither_agent_nor_x11() {
+        let block = config_block(
+            "omh-x-s01",
+            49200,
+            Path::new("/k/id_ed25519"),
+            Path::new("/k/known_hosts"),
+        );
+        assert!(block.contains("\n  ForwardAgent no\n"), "got: {block}");
+        assert!(block.contains("\n  ForwardX11 no\n"), "got: {block}");
     }
 
     /// Container host keys change on every rebuild; without this every

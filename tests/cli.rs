@@ -3606,11 +3606,51 @@ fn a_launched_session_answers_ssh() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+
+    // An ssh agent of the user's, forwarded as hard as a client can ask: `-A`
+    // on the command line outranks the block's `ForwardAgent no`, so the
+    // sshd's refusal is all that keeps a socket that signs as the user out of
+    // the sandbox.
+    let sock = sb._dir.path().join("agent.sock");
+    let mut agent = Command::new("ssh-agent")
+        .arg("-D")
+        .arg("-a")
+        .arg(&sock)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("ssh-agent must be installed to run this test");
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let forwarded = Command::new("ssh")
+        .env("HOME", &sb.home)
+        .env("SSH_AUTH_SOCK", &sock)
+        .arg("-F")
+        .arg(&config)
+        .args(["-A", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
+        .arg(sb.container("s01"))
+        .arg("printf '%s' \"${SSH_AUTH_SOCK:-}\"")
+        .output()
+        .expect("ssh must be installed to run this test");
+    let _ = agent.kill();
+    let _ = agent.wait();
     let _ = sb.omh(&["s01", "down"]);
 
     assert!(
         out.status.success(),
         "a session nobody can ssh into cannot be attached to: {said}"
+    );
+    assert!(
+        sock.exists() && forwarded.status.success(),
+        "the forwarding probe did not run: {forwarded:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&forwarded.stdout),
+        "",
+        "the user's ssh agent was forwarded into the sandbox"
     );
 }
 
