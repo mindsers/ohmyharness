@@ -557,6 +557,15 @@ impl Paths {
     }
 }
 
+/// The name an account directory answers to in `omh account`: the last
+/// component of `creds/<harness>/<name>`, the directory `auth::dir` builds
+/// from that name.
+pub fn account_name(dir: &Path) -> String {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// The canonical form of a path, whether or not all of it exists yet.
 ///
 /// A plain `canonicalize()` here was wrong in a way worth recording, because

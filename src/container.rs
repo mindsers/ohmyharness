@@ -1200,10 +1200,7 @@ fn stage_omp_models(
              the provider render would hide",
         )?;
         if let Some(own) = own {
-            let name = account
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let name = crate::paths::account_name(&account);
             anyhow::bail!("{}", own.refusal(&name));
         }
     }

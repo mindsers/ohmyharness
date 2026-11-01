@@ -1273,10 +1273,7 @@ pub fn provider_check(adapter: &Adapter, account: Option<&std::path::Path>) -> O
                     match own {
                         Ok(None | Some(None)) => return None,
                         Ok(Some(Some(own))) => {
-                            let name = account
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default();
+                            let name = crate::paths::account_name(&account);
                             (false, own.refusal(&name))
                         }
                         Err(e) => (

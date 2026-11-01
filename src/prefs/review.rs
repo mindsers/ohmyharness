@@ -18,7 +18,7 @@
 //! gave leaves the change to review, at the next `down` or `rm`.
 
 use super::{dotted, get, place, read_doc, set, undeclared, Doc, Value};
-use super::{KEPT, LOCK, RECORD, REST};
+use super::{RECORD, REST};
 use crate::adapter::{Adapter, Declared, KeyPath, PrefMount};
 use crate::home::Home;
 use anyhow::{Context, Result};
@@ -190,14 +190,8 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
     let Some(account) = account else {
         return Ok(outcome);
     };
-    let shown_account = account
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (kept_dir, _) = super::make_parent(&account, &format!("{KEPT}/{LOCK}"))?;
-    let _lock = kept_dir
-        .lock(OsStr::new(LOCK))
-        .with_context(|| format!("locking {}", account.join(KEPT).display()))?;
+    let shown_account = crate::paths::account_name(&account);
+    let (kept_dir, _lock) = super::lock_kept(&account)?;
     let mut read: Vec<(usize, Vec<Side>)> = Vec::new();
     for i in on {
         let s = &sittings[i];
