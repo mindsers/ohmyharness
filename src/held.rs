@@ -175,6 +175,38 @@ impl Dir {
         Ok(Self { fd })
     }
 
+    /// [`Dir::open`], for a directory of omh's own at a name something else
+    /// can write: made if absent, and anything else at that name — a file, a
+    /// link — removed rather than followed, then opened.
+    ///
+    /// `O_NOFOLLOW` is what makes the open itself the check. Twice at most —
+    /// once to find something that is not a directory and clear it, once to
+    /// open what replaced it. A name that is wrong a second time is being
+    /// changed under this, and that is a refusal, not a third try. Once open,
+    /// every write resolves against what was opened: if the name is moved
+    /// aside and a link left in its place, a write lands in the directory
+    /// that was checked, wherever it now is, and nowhere else.
+    pub(crate) fn open_or_reset(path: &Path) -> io::Result<Self> {
+        for _ in 0..2 {
+            match Self::open(path) {
+                Ok(dir) => return Ok(dir),
+                Err(e) => match std::fs::symlink_metadata(path) {
+                    Err(m) if m.kind() == io::ErrorKind::NotFound => std::fs::create_dir(path)?,
+                    Ok(meta) if !meta.is_dir() => {
+                        std::fs::remove_file(path)?;
+                        std::fs::create_dir(path)?;
+                    }
+                    // A real directory that would not open, or a name omh
+                    // could not even look at: the open's own reason.
+                    _ => return Err(e),
+                },
+            }
+        }
+        Err(io::Error::other(
+            "it kept changing while omh was opening it",
+        ))
+    }
+
     /// A directory inside this one. Never a link to one.
     pub(crate) fn sub(&self, name: &OsStr) -> io::Result<Dir> {
         let fd = open_under(&self.fd, &step(name)?, libc::O_RDONLY | libc::O_DIRECTORY)?;
