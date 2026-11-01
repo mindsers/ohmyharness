@@ -637,7 +637,7 @@ fn refuse_a_lost_provider(
         .and_then(|u| u.as_str())
         .map(|u| format!(", at {}", crate::provider::redacted_url(u)))
         .unwrap_or_default();
-    let name = crate::paths::account_name(&account);
+    let name = crate::paths::account_name(account);
     anyhow::bail!(
         "{} selects `model_provider = {}`{url}, and sessions no longer read it from there — \
          this launch would go to OpenAI instead. Keep it as the account's provider:\n\n    \

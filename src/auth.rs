@@ -570,7 +570,7 @@ fn unusable(
     rel: &str,
     why: anyhow::Error,
 ) -> anyhow::Error {
-    let name = crate::paths::account_name(&account_dir);
+    let name = crate::paths::account_name(account_dir);
     anyhow::anyhow!(
         "{} cannot seed a session: {why:#}. A session before this omh could have \
          written it — `omh account login {} --name {name}` sets it aside and captures the \

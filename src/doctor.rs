@@ -1271,7 +1271,7 @@ pub fn provider_check(adapter: &Adapter, account: Option<&std::path::Path>) -> O
                     match own {
                         Ok(None | Some(None)) => return None,
                         Ok(Some(Some(own))) => {
-                            let name = crate::paths::account_name(&account);
+                            let name = crate::paths::account_name(account);
                             (false, own.refusal(&name))
                         }
                         Err(e) => (

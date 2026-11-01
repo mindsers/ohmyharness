@@ -1206,7 +1206,7 @@ fn stage_omp_models(
              the provider render would hide",
         )?;
         if let Some(own) = own {
-            let name = crate::paths::account_name(&account);
+            let name = crate::paths::account_name(account);
             anyhow::bail!("{}", own.refusal(&name));
         }
     }
