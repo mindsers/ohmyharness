@@ -134,38 +134,15 @@ pub(crate) fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
     let dir = paths.repo.join(".omh");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let ignore = dir.join(".gitignore");
-    let existing = std::fs::read_to_string(&ignore).unwrap_or_default();
     // **Each name checked on its own.** This guarded one filename with an
     // early return, so a `.gitignore` that already had it could never gain a
     // second — and `seeded-by` is per-checkout, so committing it is churn
     // between teammates on different omh versions. The security argument is
     // unchanged: `settings::LOCAL` is still ensured, and still first.
-    let missing: Vec<&str> = IGNORED
-        .iter()
-        .copied()
-        .filter(|name| !existing.lines().any(|l| l.trim() == *name))
-        .collect();
+    let missing = append_missing(&ignore, IGNORED)?;
     if missing.is_empty() {
         return Ok(());
     }
-    let mut next = existing;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    for name in &missing {
-        next.push_str(name);
-        next.push('\n');
-    }
-    // **Replaced, not truncated in place.** `fs::write` opens with `O_TRUNC`
-    // and then writes, so a failure between the two leaves the file empty —
-    // and the old early return meant an existing checkout never took this path
-    // at all, while now every one does on its way to gaining `seeded-by`. An
-    // ENOSPC in that window would empty the file that keeps credentials out of
-    // `git add .`, and the error omh reports would be about disk space. The
-    // rename is atomic, so the file is either the old content or the new.
-    let staged = ignore.with_extension("gitignore.omh-new");
-    std::fs::write(&staged, next).with_context(|| format!("writing {}", staged.display()))?;
-    std::fs::rename(&staged, &ignore).with_context(|| format!("replacing {}", ignore.display()))?;
     // **What was actually added, not the first name in the list.** This
     // hardcoded `settings::LOCAL` while `missing` is computed per name — so
     // every existing checkout, which already ignores that file and is only
@@ -1309,19 +1286,56 @@ pub(crate) fn install_bundled(
 
 /// Append a line if absent. Rewriting the file would eat anything you added.
 pub(crate) fn ensure_line(path: &std::path::Path, line: &str) -> Result<()> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == line) {
-        return Ok(());
+    append_missing(path, &[line]).map(|_| ())
+}
+
+/// Append each of `lines` that `path` does not already have, and say which.
+///
+/// **Appended, never rewritten, and never read as empty unless it is.** Both
+/// callers read the file with `unwrap_or_default()` and wrote the whole of it
+/// back, so one they could not read as text — a byte that is not UTF-8, a mode
+/// they could not open — came back holding only omh's lines, and every rule
+/// the user had kept there was gone. It is read as bytes now, absent only when
+/// it is absent, and only appended to: an append never empties a file, even
+/// one cut short by a full disk, which is what the old atomic replace was for.
+pub(crate) fn append_missing<'a>(
+    path: &std::path::Path,
+    lines: &[&'a str],
+) -> Result<Vec<&'a str>> {
+    use std::io::Write;
+    let existing = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let text = String::from_utf8_lossy(&existing);
+    let missing: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !text.lines().any(|l| l.trim() == *line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(missing);
     }
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    let mut out = existing;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
-    out.push_str(line);
-    out.push('\n');
-    std::fs::write(path, out)?;
-    Ok(())
+    let mut add = String::new();
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        add.push('\n');
+    }
+    for line in &missing {
+        add.push_str(line);
+        add.push('\n');
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(add.as_bytes()))
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(missing)
 }
 
 pub(crate) fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<bool> {

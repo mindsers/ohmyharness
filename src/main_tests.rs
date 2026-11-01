@@ -8967,3 +8967,62 @@ fn no_message_breaks_a_line_without_a_backslash() {
         found.join("\n")
     );
 }
+
+/// **A file omh could not read as text is not an empty one.** `ensure_ignored`
+/// and `ensure_line` read with `unwrap_or_default()` and then wrote the whole
+/// file back — so a `.omh/.gitignore` holding one non-UTF-8 byte came back
+/// holding only omh's lines, and every rule the user had put there was gone.
+/// The file that keeps credentials out of `git add .` is the last one to lose.
+#[test]
+fn a_gitignore_omh_cannot_read_as_text_keeps_every_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home"),
+        repo: dir.path().join("repo"),
+    };
+    let ignore = paths.repo.join(".omh/.gitignore");
+    std::fs::create_dir_all(ignore.parent().unwrap()).unwrap();
+    let mine: &[u8] = b"secret.env\nlegacy-\xff\xfe\n";
+    std::fs::write(&ignore, mine).unwrap();
+    let _ = cmd::init::ensure_ignored(&paths, &out::Ctx::plain());
+    let now = std::fs::read(&ignore).unwrap();
+    assert!(
+        now.starts_with(mine),
+        "the user's rules were lost: {:?}",
+        String::from_utf8_lossy(&now)
+    );
+
+    let other = paths.repo.join("elsewhere/.gitignore");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, mine).unwrap();
+    let _ = cmd::init::ensure_line(&other, "seeded-by");
+    let now = std::fs::read(&other).unwrap();
+    assert!(
+        now.starts_with(mine),
+        "ensure_line lost them too: {:?}",
+        String::from_utf8_lossy(&now)
+    );
+}
+
+/// And one it could not read at all is refused, never replaced.
+#[cfg(unix)]
+#[test]
+fn a_gitignore_omh_cannot_read_is_refused_and_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads through 0o000: nothing here would be tested
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home"),
+        repo: dir.path().join("repo"),
+    };
+    let ignore = paths.repo.join(".omh/.gitignore");
+    std::fs::create_dir_all(ignore.parent().unwrap()).unwrap();
+    std::fs::write(&ignore, "secret.env\n").unwrap();
+    std::fs::set_permissions(&ignore, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let got = cmd::init::ensure_ignored(&paths, &out::Ctx::plain());
+    std::fs::set_permissions(&ignore, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(got.is_err(), "an unreadable .gitignore was read as empty");
+    assert_eq!(std::fs::read_to_string(&ignore).unwrap(), "secret.env\n");
+}
