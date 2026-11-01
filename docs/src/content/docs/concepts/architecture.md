@@ -282,7 +282,7 @@ do** rather than failing mysteriously.
 backend's declared capabilities and fails **loudly** if it needs something the
 backend lacks. Running that validation against `sbx`'s conservative
 capabilities, before staging existed, was instructive — **every single mount omh
-made was rejected**:
+made was rejected**. As it printed then, before omh's errors said `omh:`:
 
 ```
 Error: the selected runtime cannot honour this plan:
