@@ -196,18 +196,25 @@ keys the adapter declares as preferences — see
 not a preference beside the model, and asserts the turn runs on the model and
 omp reads the other setting as never set — red with the shared file as before.
 
-**Closed across sessions for instructions and modules** (10-18 §5.1).
-Claude Code's personal memory, `~/.claude/CLAUDE.md`, and Codex's user
-instructions, `~/.codex/AGENTS.md` and the `AGENTS.override.md` it reads
-instead, are in the account; omp imports every module in its `hooks/pre/`,
-`hooks/post/`, `tools/` and `extensions/` there (read in its binary,
-18.10.4). Each is now hidden behind an empty read-only file or directory —
-omp's `hooks/pre/` holding only omh's own module — so what one session leaves
-there reaches no other. `tests/e2e` plants each in the account and asserts no
-planted phrase reaches the model and no planted module leaves its marker; red
-with the account's own mounted, as before. Nothing omh does puts your own
-there: your personal memory reaches a session as a rule you import into your
-catalogue. The cost is that a session cannot save to Claude's personal memory.
+**Closed across sessions for instructions and modules** (10-18 §5.1). Each
+harness reads text for the model from its account at every start, and omp
+imports code from it too:
+- Claude Code: `~/.claude/CLAUDE.md`, the personal memory, and `rules/`;
+- Codex: `~/.codex/AGENTS.md`, the `AGENTS.override.md` it reads instead, and
+  `skills/`;
+- omp: `AGENTS.md`, `RULES.md` and `SYSTEM.md` under `~/.omp/agent`, and every
+  module in its `hooks/pre/`, `hooks/post/`, `tools/` and `extensions/` (read
+  in its binary, 18.10.4).
+
+Each is now hidden behind an empty read-only file or directory — omp's
+`hooks/pre/` holding only omh's own module — so what one session leaves there
+reaches no other. `tests/e2e` plants each in the account, along with the places
+the harness does not read from (`skills/`, `agents/`, `commands/`, prompts and
+output styles), and asserts that no planted phrase reaches the model and no
+planted module leaves its marker. It is red with the account's own mounted, as
+before. Nothing omh does puts your own there: your personal memory reaches a
+session as a rule you import into your catalogue. The cost is that a session
+cannot write Claude's personal memory.
 
 **Still open:**
 
@@ -219,9 +226,10 @@ catalogue. The cost is that a session cannot save to Claude's personal memory.
   in omp's source, `ai/src/auth/cascade.ts`; not measured) — code one session
   leaves runs in the next. The database holds the logins themselves, so it
   cannot be masked; it needs a check of its keys that omh does not make;
-- omp's plugins, commands and prompts, discovered from the same directory as
-  its modules (read in its binary): not measured, not masked. Nor were the
-  other directories in Claude Code's and Codex's accounts surveyed;
+- omp's plugins, discovered from the same directory as its modules (read in
+  its binary): not measured, not masked;
+- Codex's `~/.codex/rules/`, which decides which commands need approval rather
+  than reaching the model, so nothing here measures it: not masked;
 - omp's model cache between two sessions running at once on one account:
   omh removes it only when a session starts.
 
