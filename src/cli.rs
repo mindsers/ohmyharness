@@ -413,7 +413,8 @@ pub(crate) enum Cmd {
 
     /// Bring a setup you already have into omh.
     Import {
-        /// What to bring over: `hooks`, `skills`, `mcp`, `rules`.
+        /// What to bring over: `rules`, `skills`, `commands`, `subagents` or
+        /// `hooks`. MCP servers are `omh settings mcp import`.
         capability: String,
         /// Which installed harness to read it out of.
         harness: String,

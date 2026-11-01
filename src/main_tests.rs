@@ -8745,3 +8745,29 @@ fn the_hidden_commands_are_the_ones_clap_hides() {
         "tests/cli.rs's HIDDEN is not what clap hides"
     );
 }
+
+/// `omh import --help` names what import takes: every capability but MCP,
+/// which is `omh settings mcp import`. It offered `mcp`, which import refuses,
+/// and left out `commands` and `subagents`, which it takes.
+#[test]
+fn import_help_names_what_import_takes() {
+    use clap::CommandFactory;
+    let cli = Cli::command();
+    let import = cli.find_subcommand("import").expect("omh import");
+    let help = import
+        .get_arguments()
+        .find(|a| a.get_id() == "capability")
+        .and_then(|a| a.get_help())
+        .expect("the capability argument has help")
+        .to_string();
+    for cap in adapter::Capability::ALL {
+        let named = help.contains(&format!("`{}`", cap.key()));
+        match cap {
+            adapter::Capability::Mcp => assert!(
+                !named || help.contains("omh settings mcp import"),
+                "`mcp` is offered, and import refuses it: {help}"
+            ),
+            _ => assert!(named, "`{}` is not named: {help}", cap.key()),
+        }
+    }
+}
