@@ -410,7 +410,7 @@ fn harness_for_attach(
     on_host: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
     match recorded {
-        session::Ran::Harness(name) => Ok(name),
+        session::Ran::Harness(name) => Ok(name.to_string()),
         session::Ran::NeverRecorded => detect::preferred_harness(installed, on_host)
             .context("no adapters installed — run `omh init`"),
         session::Ran::CouldNotTell(why) => anyhow::bail!(
@@ -1045,7 +1045,7 @@ pub(crate) fn review_preferences(
 /// when unrecorded — the activity is then "not recorded", not guessed.
 fn adapter_of(paths: &Paths, id: &str) -> Option<crate::adapter::Adapter> {
     let harness = match session::harness_of(&paths.runs(), id) {
-        session::Ran::Harness(name) => name,
+        session::Ran::Harness(name) => name.to_string(),
         _ => return None,
     };
     crate::adapter::Adapter::find(&paths.adapters(), &harness).ok()
@@ -3314,7 +3314,12 @@ mod tests {
         let none = |_: &str| false;
 
         assert_eq!(
-            harness_for_attach(Ran::Harness("opencode".into()), &names, &none).unwrap(),
+            harness_for_attach(
+                Ran::Harness(crate::adapter::Name::parse("opencode").unwrap()),
+                &names,
+                &none
+            )
+            .unwrap(),
             "opencode",
             "the session's own record is taken as is, not the host preference"
         );
