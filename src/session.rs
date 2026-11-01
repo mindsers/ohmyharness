@@ -2593,9 +2593,11 @@ mod tests {
     use super::*;
 
     /// Somewhere for `remove` to reap a shadow from. The tests that use it are
-    /// not about shadows; they just may not silently skip the reaping.
-    fn d_shadows() -> PathBuf {
-        std::env::temp_dir().join("omh-test-shadows")
+    /// not about shadows; they just may not silently skip the reaping. Beside
+    /// the test's own repository: one fixed directory under `$TMPDIR`, shared
+    /// by every test at once, let one test's `remove` reap another's `s01`.
+    fn d_shadows(root: &Path) -> PathBuf {
+        root.parent().unwrap().join("shadows")
     }
 
     fn repo() -> (tempfile::TempDir, PathBuf) {
@@ -3011,7 +3013,7 @@ mod tests {
         let s = Session::new(&dir.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows(&root)).unwrap();
         let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchDropped(Dropped::Empty));
@@ -3033,7 +3035,7 @@ mod tests {
         git(&s.worktree, &["add", "."]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows(&root)).unwrap();
         let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchKept(Kept::Commits(1)));
@@ -3075,7 +3077,7 @@ mod tests {
             "the precondition is that git cannot answer; it just did"
         );
 
-        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows(&root)).unwrap();
         let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert!(
@@ -3122,7 +3124,7 @@ mod tests {
         let s = session_with_a_commit(&root, &dir.path().join("wt"), "work.rs");
         let landed = squash_onto_main(&root, "omh/s01");
 
-        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows(&root)).unwrap();
         match done.branch {
             Removed::BranchDropped(Dropped::Landed { commits, by }) => {
                 assert_eq!(commits, 1);
@@ -3162,7 +3164,7 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "trunk moves"]).unwrap();
         let landed = squash_onto_main(&root, "omh/s01");
 
-        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+        match s.remove(&root, "main", &d_shadows(&root)).unwrap().branch {
             Removed::BranchDropped(Dropped::Landed { commits, by }) => {
                 assert_eq!(commits, 2);
                 assert_eq!(by, Proof::SamePatch { at: landed });
@@ -3205,7 +3207,7 @@ mod tests {
         git(&root, &["add", "-A"]).unwrap();
         git(&root, &["commit", "-q", "-m", "resolved by hand"]).unwrap();
 
-        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+        match s.remove(&root, "main", &d_shadows(&root)).unwrap().branch {
             Removed::BranchKept(Kept::Commits(1)) => {}
             other => panic!("what landed is not what this branch holds: {other:?}"),
         }
@@ -3236,7 +3238,7 @@ mod tests {
         git(&root, &["add", "-A"]).unwrap();
         git(&root, &["commit", "-q", "-m", "different bytes, same path"]).unwrap();
 
-        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+        match s.remove(&root, "main", &d_shadows(&root)).unwrap().branch {
             Removed::BranchKept(Kept::Commits(1)) => {}
             other => panic!("different bytes are not the same work: {other:?}"),
         }
@@ -3369,7 +3371,7 @@ mod tests {
         let refs = root.join(".git/refs/heads/omh");
         let was = std::fs::metadata(&refs).unwrap().permissions();
         std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows(&root)).unwrap();
         std::fs::set_permissions(&refs, was).unwrap();
 
         assert!(
@@ -3421,7 +3423,7 @@ mod tests {
         git(&root, &["add", "-A"]).unwrap();
         git(&root, &["commit", "-q", "-m", "spaces"]).unwrap();
 
-        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+        match s.remove(&root, "main", &d_shadows(&root)).unwrap().branch {
             Removed::BranchKept(Kept::Commits(1)) => {}
             other => panic!("a tab is not four spaces, and this branch holds the tab: {other:?}"),
         }
@@ -3451,7 +3453,7 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "trunk moves"]).unwrap();
         let landed = squash_onto_main(&root, "omh/s01");
 
-        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+        match s.remove(&root, "main", &d_shadows(&root)).unwrap().branch {
             Removed::BranchDropped(Dropped::Landed { by, .. }) => assert_eq!(
                 by.at(),
                 landed,
@@ -3475,7 +3477,7 @@ mod tests {
         let s = session_with_a_commit(&root, &dir.path().join("wt"), "work.rs");
         git(&root, &["tag", "omh/s01", "main"]).unwrap();
 
-        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+        match s.remove(&root, "main", &d_shadows(&root)).unwrap().branch {
             Removed::BranchKept(Kept::Commits(1)) => {}
             other => panic!("the branch holds a commit whatever the tag says: {other:?}"),
         }
@@ -3513,7 +3515,7 @@ mod tests {
         s.commit(Some("do it again"), Carried::refusing(&[]))
             .unwrap();
 
-        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+        match s.remove(&root, "main", &d_shadows(&root)).unwrap().branch {
             Removed::BranchKept(Kept::Commits(1)) => {}
             other => panic!("trunk reverted this work; it does not hold it: {other:?}"),
         }
@@ -3570,7 +3572,7 @@ mod tests {
         s.branch = None;
         s.ensure(&root, "main").unwrap();
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap().branch,
+            s.remove(&root, "main", &d_shadows(&root)).unwrap().branch,
             Removed::NoBranch
         );
     }
@@ -3622,7 +3624,7 @@ mod tests {
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        s.remove(&root, "main", &d_shadows()).unwrap();
+        s.remove(&root, "main", &d_shadows(&root)).unwrap();
         assert!(!s.worktree.exists(), "worktree gone");
         assert_eq!(s.branch_exists(&root), Ok(true), "branch must survive rm");
 
@@ -4874,7 +4876,7 @@ mod tests {
         std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
-        s.remove(&root, "main", &d_shadows()).unwrap();
+        s.remove(&root, "main", &d_shadows(&root)).unwrap();
 
         // the repo renames its trunk while the session is put away
         git(&root, &["branch", "-m", "main", "trunk"]).unwrap();
@@ -5190,7 +5192,7 @@ mod tests {
             &["commit", "-q", "--allow-empty", "-m", "trunk moved on"],
         )
         .unwrap();
-        s.remove(&root, "master", &d_shadows()).unwrap();
+        s.remove(&root, "master", &d_shadows(&root)).unwrap();
         s.ensure(&root, "master").unwrap();
 
         assert_eq!(
@@ -5425,7 +5427,7 @@ mod tests {
         std::fs::remove_dir_all(root.join(".git/worktrees")).unwrap();
         assert!(s.worktree.exists());
 
-        s.remove(&root, "main", &d_shadows())
+        s.remove(&root, "main", &d_shadows(&root))
             .expect("must clean up what is actually there");
         assert!(!s.worktree.exists(), "the directory must be gone");
         assert_eq!(
@@ -5439,7 +5441,7 @@ mod tests {
     fn removing_a_session_that_was_never_created_is_not_an_error() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s09".into());
-        s.remove(&root, "main", &d_shadows())
+        s.remove(&root, "main", &d_shadows(&root))
             .expect("nothing to do is not a failure");
     }
 
@@ -5492,7 +5494,7 @@ mod tests {
         );
 
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap().branch,
+            s.remove(&root, "main", &d_shadows(&root)).unwrap().branch,
             Removed::NoBranch,
             "a branch that does not exist was neither kept nor dropped"
         );
@@ -5541,7 +5543,7 @@ mod tests {
         let (d, root) = repo();
         let s = Session::scratch(d.path().join("scratch/doctor"), "doctor".into());
         s.ensure(&root, "main").unwrap();
-        s.remove(&root, "main", &d_shadows()).unwrap();
+        s.remove(&root, "main", &d_shadows(&root)).unwrap();
 
         assert!(!s.worktree.exists());
         assert_eq!(
@@ -5984,6 +5986,29 @@ mod tests {
         std::fs::read_to_string(ran).unwrap_or_default()
     }
 
+    /// The positive control every "runs no hook" test stands on: git, asked
+    /// from `worktree` with hooks on, finds and runs what was planted. Without
+    /// it those tests passed with hooks git could never have run — planted
+    /// `0644`, or under a `core.hooksPath` that resolved elsewhere — so they
+    /// proved nothing about omh. `git hook run` resolves hooks exactly as a
+    /// commit would and changes nothing else; `ran` is cleared after.
+    #[cfg(unix)]
+    fn hooks_are_live(worktree: &Path, ran: &Path) {
+        let out = std::process::Command::new("git")
+            .current_dir(worktree)
+            .args(["hook", "run", "pre-commit"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git hook run: {out:?}");
+        assert_eq!(
+            fired(ran),
+            "pre-commit\n",
+            "git, with hooks on, did not run the planted pre-commit — so no \
+             test built on these hooks can show omh kept them off"
+        );
+        std::fs::remove_file(ran).unwrap();
+    }
+
     /// A session of `repo`, whose config points `core.hooksPath` at `.husky/_`
     /// — what husky v9 writes — and a worktree holding the hooks an agent
     /// would plant there. git resolves a relative `core.hooksPath` against the
@@ -5997,6 +6022,7 @@ mod tests {
         plant_hooks(&s.worktree.join(".husky/_"), &ran);
         // As husky's own does: the directory is not part of the work.
         std::fs::write(s.worktree.join(".husky/_/.gitignore"), "*\n").unwrap();
+        hooks_are_live(&s.worktree, &ran);
         (s, ran)
     }
 
@@ -6088,6 +6114,7 @@ mod tests {
         let ran = d.path().join("ran");
         plant_hooks(&s.worktree.join(".husky/_"), &ran);
         std::fs::write(s.worktree.join(".husky/_/.gitignore"), "*\n").unwrap();
+        hooks_are_live(&s.worktree, &ran);
 
         s.push(Some("feature")).unwrap();
 
