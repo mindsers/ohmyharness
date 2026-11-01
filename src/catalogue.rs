@@ -1117,6 +1117,14 @@ impl Catalogue {
     }
 }
 
+/// Whether a file in `rules/` is a rule: a `.md`, in any case. The listing
+/// and the composition both ask this, so what one offers the other composes —
+/// `.MD` was listed and then skipped, the extension compared by case.
+pub fn is_rule_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+}
+
 /// One catalogue directory's entries, by name and by where each one is.
 ///
 /// `entries`' reading of a directory, lifted out for the screen `omh settings`
@@ -1146,6 +1154,11 @@ pub fn listed(source: &Path, cap: Capability) -> Result<Vec<(String, PathBuf)>> 
         // launch refuses over it: skipped here, the listing never showed the
         // one thing stopping them.
         if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // A rule is a `.md` file, the one shape `rules` composes: a `.txt`
+        // was listed and selectable and never composed, with nothing said.
+        if cap == Capability::Rules && !is_rule_file(&entry.path()) {
             continue;
         }
         crate::selection::validate_entry_name(&name, cap, source)?;
