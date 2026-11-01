@@ -2908,8 +2908,9 @@ pub(crate) fn rm(
         let now = crate::cmd::harvest::at_stake(&paths, &session);
         anyhow::ensure!(
             now == counted,
-            "{id}'s agent wrote more while omh decided — {}. It is down, and nothing else \
-             was removed: `omh {id} rm` asks about it as it is now",
+            "{id}'s agent wrote more while omh decided — {}. Its container is down; its \
+             worktree, branch and run directory are kept: `omh {id} rm` asks about it as it \
+             is now",
             out::untrusted(&now.said())
         );
     }

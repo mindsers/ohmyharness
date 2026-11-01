@@ -1017,7 +1017,11 @@ fn write_table(
         // settings go at the top level, and a key added under it landed in the
         // table. They go on the new table's front instead.
         let lead = match doc.as_table().is_empty() {
-            true => doc.trailing().as_str().map(String::from),
+            true => doc
+                .trailing()
+                .as_str()
+                .filter(|t| !t.trim().is_empty())
+                .map(String::from),
             false => None,
         };
         if lead.is_some() {
@@ -2238,6 +2242,18 @@ mod tests {
         let added = format!("{head}\nsandbox_memory = \"4g\"\n{rest}");
         let parsed: toml::Table = toml::from_str(&added).unwrap();
         assert_eq!(parsed["sandbox_memory"].as_str(), Some("4g"), "{added}");
+
+        // A file with nothing in it has no header to keep, and gains no blank
+        // line above its first table.
+        std::fs::write(&file, "").unwrap();
+        write_selection(
+            &paths,
+            Layer::Shared,
+            &BTreeMap::from([(crate::adapter::Capability::Skills, vec![])]),
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.starts_with("[use]"), "{written:?}");
     }
 
     /// A scalar must not land where a table lives.
