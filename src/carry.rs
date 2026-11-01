@@ -73,16 +73,12 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
     let mut out = Vec::new();
     for pattern in patterns {
         let rel = pattern.trim().trim_end_matches('/');
-        let src = repo.join(rel);
         let dst = worktree.join(rel);
-        let action = if !src.exists() {
-            Action::Missing
-        } else if tracked(repo, rel) {
-            Action::AlreadyTracked
-        } else if src.is_dir() {
-            copy_dir(worktree, &src, &dst)?
-        } else {
-            copy_file(worktree, &src, &dst)?
+        let action = match source(repo, rel)? {
+            None => Action::Missing,
+            Some(_) if tracked(repo, rel) => Action::AlreadyTracked,
+            Some(src) if src.is_dir() => copy_dir(worktree, &src, &dst)?,
+            Some(src) => copy_file(worktree, &src, &dst)?,
         };
         out.push(Carried {
             path: pattern.clone(),
@@ -92,6 +88,32 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
 
     exclude(worktree, patterns)?;
     Ok(out)
+}
+
+/// Where a carried path is in the checkout, if it is there — reached without
+/// following a link at it or at any directory above it.
+///
+/// `validate_pattern` keeps a pattern lexically inside the repository, and
+/// that is where it stopped: a link at a carried name, or above one, was
+/// followed, and what it pointed at was copied into the agent's worktree. Risk
+/// §4 says a teammate's commit cannot copy your `~/.ssh` into a sandbox; a
+/// committed `secrets -> ~/.ssh` under a carried `secrets/id_rsa` did.
+fn source(repo: &Path, rel: &str) -> Result<Option<PathBuf>> {
+    let mut at = repo.to_path_buf();
+    for part in Path::new(rel).components() {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => anyhow::bail!(
+                "carry_in does not follow links: `{rel}` is, or is under, {} — a link. \
+                 Carry what it points at by its own path, inside the repository",
+                at.display()
+            ),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", at.display())),
+        }
+    }
+    Ok(Some(at))
 }
 
 /// Stage the carried files for mounting, and say where each one landed.
@@ -142,11 +164,14 @@ pub fn to_mount(repo: &Path, into: &Path, patterns: &[String]) -> Result<Vec<Sta
     let mut out: Vec<Staged> = Vec::new();
     for pattern in patterns {
         let rel = pattern.trim().trim_end_matches('/');
-        let src = repo.join(rel);
         // Absent and already-tracked are `apply`'s to report — it runs first and
         // says so to the user. Silently skipped here so the two cannot disagree
-        // about what happened, only about what to do next.
-        if !src.exists() || tracked(repo, rel) || src.is_dir() {
+        // about what happened, only about what to do next. A link is refused,
+        // as `apply` refuses it.
+        let Some(src) = source(repo, rel)? else {
+            continue;
+        };
+        if tracked(repo, rel) || src.is_dir() {
             continue;
         }
         // One entry, one mount. `carry_in = [".env", ".env/"]` both normalise to
@@ -288,7 +313,17 @@ fn copy_dir(root: &Path, src: &Path, dst: &Path) -> Result<Action> {
         let entry = entry.with_context(|| format!("reading {}", src.display()))?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        let result = if from.is_dir() {
+        // Not `is_dir`, which follows: a link inside a carried directory is
+        // refused, as one at its name is.
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("reading {}", from.display()))?;
+        anyhow::ensure!(
+            !kind.is_symlink(),
+            "carry_in does not follow links: {} is one",
+            from.display()
+        );
+        let result = if kind.is_dir() {
             copy_dir(root, &from, &to)?
         } else {
             copy_file(root, &from, &to)?
@@ -429,6 +464,57 @@ fn missing_lines(body: &[u8], patterns: &[String]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The source side follows no link either. `carry_in` is validated
+    /// against escaping the repository — risk §4: a teammate's commit must
+    /// not be able to copy your `~/.ssh` into a sandbox — and the check was
+    /// lexical only: a link at a carried name, or above it, was followed, and
+    /// what it pointed at was copied into the agent's worktree. Refused, and
+    /// nothing copied.
+    #[cfg(unix)]
+    #[test]
+    fn a_carried_source_that_is_or_passes_through_a_link_is_refused() {
+        use std::os::unix::fs::symlink;
+        for carried in ["certs/", "secrets/id_rsa", "conf/"] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path().join("repo");
+            let worktree = dir.path().join("worktree");
+            let ssh = dir.path().join("ssh");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::create_dir_all(&ssh).unwrap();
+            std::fs::write(ssh.join("id_rsa"), "PRIVATE KEY\n").unwrap();
+            symlink(&ssh, repo.join("certs")).unwrap();
+            symlink(&ssh, repo.join("secrets")).unwrap();
+            // A real directory, holding a link: refused inside as at the top.
+            std::fs::create_dir_all(repo.join("conf")).unwrap();
+            symlink(ssh.join("id_rsa"), repo.join("conf/key")).unwrap();
+
+            let result = apply(&repo, &worktree, &[carried.into()]);
+            assert!(result.is_err(), "{carried}: a linked source was carried");
+            let copied = walk(&worktree)
+                .into_iter()
+                .any(|p| std::fs::read_to_string(&p).is_ok_and(|b| b.contains("PRIVATE KEY")));
+            assert!(!copied, "{carried}: the link's target reached the worktree");
+        }
+    }
+
+    /// Every file under `dir`.
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
 
     #[cfg(unix)]
     #[test]
