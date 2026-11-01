@@ -2270,20 +2270,26 @@ omh also reads
   ca_cert         A CA certificate the sandbox must trust, as a path to a PEM — for a network that inspects TLS and signs it with its own root.
   persistence     How a session's terminal survives detaching. Unset means `dtach`.
 
+omh's features, for new repos
+  codegraph   on (default)
+  git-notice  on (default)
+  memory      on (default)
+
 your catalogue
   rules        0
-  skills       1  new repos get all
+  skills       0
   servers      0
   commands     0
   subagents    0
-  hooks        0
+  hooks        8  new repos get all but the guards, by stack
 ```
 
 **The second list is the useful half**: every key omh reads, which no settings
-file can show. Then your catalogue, page by page, as the screen has it: how
-many, what new repos get, and every entry that is wrong — a link to nothing, a
-skill no harness loads — and, beside a key nothing reads, the one it probably
-meant. `--json` carries the same.
+file can show. Then which of omh's own features a new repo starts with, and
+your catalogue, page by page, as the screen has it: how many, what new repos
+get, and every entry that is wrong — a link to nothing, a skill no harness
+loads — and, beside a key nothing reads, the one it probably meant. `--json`
+carries the same.
 
 **At a terminal, `omh settings` is a screen** over the same `~/.omh`: your
 defaults, then one page per kind of catalogue entry — rules, skills, servers,
