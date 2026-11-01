@@ -9423,6 +9423,17 @@ fn no_git_starts_outside_the_git_module() {
         files > 40,
         "the walk read {files} files — it is not reading src/"
     );
+    // By name, not only by count: the two files that carried the constants and
+    // most of the spawns.
+    let sources = crate::testsrc::production();
+    for carried in ["src/session.rs", "src/shadow.rs"] {
+        assert!(
+            sources
+                .iter()
+                .any(|(path, body)| path.ends_with(carried) && !body.is_empty()),
+            "the scan no longer reads {carried}"
+        );
+    }
     assert!(
         found.is_empty(),
         "{} git spawns outside git.rs: {found:#?}",

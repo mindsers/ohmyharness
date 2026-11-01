@@ -660,8 +660,8 @@ impl Shadow {
         // and let a push through — verified by pushing to a reachable remote
         // and finding two commits on it.
         //
-        // If a host-side reader is ever added, it passes `-c core.hooksPath=`
-        // itself rather than recording anything here.
+        // A host-side reader goes through `git::agents()`, which closes the
+        // key on its own command line, rather than recording anything here.
 
         // Everything the worktree holds except what was just excluded. `add -A`
         // rather than a path list: the seed has to be the tree the session
