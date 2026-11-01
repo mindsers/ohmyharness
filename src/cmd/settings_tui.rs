@@ -1326,19 +1326,38 @@ fn unset_account(held: &[(String, Vec<String>)]) -> (String, Option<String>) {
 }
 
 /// A table of the defaults file on one line: `skills = ["tdd"] · hooks = []`.
+///
+/// However it is written — inline, or holding only tables, as
+/// `[mcp.linear.env]` does — each value under its dotted key: read as a
+/// standard table only, an inline one was "a table" and a nested one
+/// "linear = ". `[mcp]`'s values are held back: a server's environment can
+/// be a token, and the servers page does not show one either.
 fn table_summary(doc: &Result<toml_edit::DocumentMut>, name: &str) -> String {
+    fn flat(prefix: &str, table: &dyn toml_edit::TableLike, shown: bool, out: &mut Vec<String>) {
+        for (k, v) in table.iter() {
+            let at = match prefix {
+                "" => k.to_string(),
+                _ => format!("{prefix}.{k}"),
+            };
+            match v.as_table_like() {
+                Some(inner) => flat(&at, inner, shown, out),
+                None if shown => out.push(format!("{at} = {}", v.to_string().trim())),
+                None => out.push(format!("{at} = …")),
+            }
+        }
+    }
     let key = name.trim_start_matches('[').trim_end_matches(']');
     let Ok(doc) = doc else {
         return "a table".into();
     };
-    match doc.get(key).and_then(|item| item.as_table()) {
-        Some(table) if table.is_empty() => "empty".into(),
-        Some(table) => table
-            .iter()
-            .map(|(k, v)| format!("{k} = {}", v.to_string().trim()))
-            .collect::<Vec<_>>()
-            .join(" · "),
-        None => "a table".into(),
+    let Some(table) = doc.get(key).and_then(|item| item.as_table_like()) else {
+        return "a table".into();
+    };
+    let mut held = Vec::new();
+    flat("", table, key != "mcp", &mut held);
+    match held.is_empty() {
+        true => "empty".into(),
+        false => held.join(" · "),
     }
 }
 
@@ -2605,6 +2624,38 @@ mod tests {
             let said = refusal(&feature, "maybe").unwrap_or_default();
             assert!(said.contains("on or off"), "{feature}: {said:?}");
         }
+    }
+
+    /// A table says what it holds however it is written: inline, `use = {…}`,
+    /// was "a table", and one holding only tables, `[mcp.linear.env]`, was
+    /// "linear = " — `config::values` reads both as the tables they are. What
+    /// a server's environment holds can be a token, so `[mcp]`'s values are
+    /// not shown, as the servers page does not show them.
+    #[test]
+    fn a_table_says_what_it_holds_however_it_is_written() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("default.toml"),
+            "use = { skills = [\"tdd\"] }\n\n[mcp.linear.env]\nTOKEN = \"sk-secret\"\n",
+        );
+        let model = model(&paths);
+        let value = |name: &str| {
+            page(&model, "defaults")
+                .rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {name} row"))
+                .value
+                .clone()
+                .unwrap_or_default()
+        };
+        assert_eq!(value("[use]"), "skills = [\"tdd\"]");
+        let mcp = value("[mcp]");
+        assert!(mcp.contains("linear.env.TOKEN"), "{mcp}");
+        assert!(
+            !mcp.contains("sk-secret"),
+            "a server's value was shown: {mcp}"
+        );
     }
 
     /// A table `omh init` refuses — one omh reads nowhere, or `[mcp]`, which
