@@ -486,7 +486,7 @@ pub fn parse_rendered(rendered: &str) -> Result<Vec<Cite>> {
             bail!("`{line}` carries no provenance at all");
         };
         let recorded = rest.trim();
-        if !crate::memory::is_calendar_date(recorded) {
+        if !crate::date::is_calendar_date(recorded) {
             bail!("`{line}` carries `{recorded}`, which is not a date");
         }
         out.push(Cite {

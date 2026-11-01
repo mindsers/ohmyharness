@@ -70,7 +70,7 @@ pub(crate) fn memory_serve(notes: std::path::PathBuf) -> Result<()> {
         // declare static arguments and still record real provenance.
         session: std::env::var("OMH_SESSION").unwrap_or_else(|_| "unknown".into()),
         client: None,
-        today: memory::today,
+        today: crate::date::today,
         // Told, never worked out. This process runs inside the sandbox, where
         // the PEM `ca_cert` names is not mounted and the recipe cannot be
         // computed at all.

@@ -68,7 +68,7 @@ pub(crate) fn next_after_init(harness: Option<&str>) -> Vec<(String, String)> {
 /// from experience — it is the store's starting shape, seeded once.
 pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
     let templates = memory::templates(paths)?;
-    let today = memory::today();
+    let today = crate::date::today();
     let dir = paths.memory();
 
     let mut written = 0;

@@ -18,6 +18,7 @@ mod cmd;
 mod command;
 mod config;
 mod container;
+mod date;
 mod derive;
 mod detect;
 mod doc;
@@ -781,7 +782,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     relates_to: relates_to.clone(),
                     invalidated_by: invalidated_by.clone(),
                     source: source.clone().unwrap_or_default(),
-                    recorded: memory::today(),
+                    recorded: crate::date::today(),
                 },
                 *if_exists,
                 ctx,
