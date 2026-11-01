@@ -167,10 +167,17 @@ fn read_record(value: &serde_json::Value, s: &mut Summary) {
             .to_string();
         let entry = s.usage.entry(model).or_default();
         let tok = |name: &str| usage.get(name).and_then(|t| t.as_u64()).unwrap_or(0);
-        entry.input += tok("input_tokens");
-        entry.output += tok("output_tokens");
-        entry.cache_read += tok("cache_read_input_tokens");
-        entry.cache_write += tok("cache_creation_input_tokens");
+        // Saturating: the agent writes the transcript, so it writes these
+        // numbers too, and `+=` panicked a debug build and wrapped a release
+        // one to a small, believable total.
+        entry.input = entry.input.saturating_add(tok("input_tokens"));
+        entry.output = entry.output.saturating_add(tok("output_tokens"));
+        entry.cache_read = entry
+            .cache_read
+            .saturating_add(tok("cache_read_input_tokens"));
+        entry.cache_write = entry
+            .cache_write
+            .saturating_add(tok("cache_creation_input_tokens"));
     }
 
     let content = message
@@ -239,10 +246,15 @@ fn read_codex_record(
             let cached = tok("cached_input_tokens");
             // Codex's input count includes the cached part; Claude Code's does
             // not. Split here so a cached token is counted once, as a read.
-            entry.input += tok("input_tokens").saturating_sub(cached);
-            entry.cache_read += cached;
-            entry.cache_write += tok("cache_write_input_tokens");
-            entry.output += tok("output_tokens");
+            // Saturating, as `read_record` adds: these are the agent's numbers.
+            entry.input = entry
+                .input
+                .saturating_add(tok("input_tokens").saturating_sub(cached));
+            entry.cache_read = entry.cache_read.saturating_add(cached);
+            entry.cache_write = entry
+                .cache_write
+                .saturating_add(tok("cache_write_input_tokens"));
+            entry.output = entry.output.saturating_add(tok("output_tokens"));
         }
         (Some("response_item"), Some("function_call" | "custom_tool_call")) => {
             if let Some(name) = str_at(payload, "name") {
@@ -285,6 +297,28 @@ fn read_codex_record(
 
 #[cfg(test)]
 mod tests {
+
+    /// A transcript is the agent's to write, so its numbers are too: two
+    /// turns claiming `u64::MAX` tokens each panicked a debug build and
+    /// wrapped a release one to a small, believable total. They saturate.
+    #[test]
+    fn token_counts_an_agent_wrote_saturate_rather_than_wrap() {
+        let max = u64::MAX;
+        let claude_turn = format!(
+            r#"{{"type":"assistant","message":{{"model":"claude-x","usage":{{"input_tokens":{max},"output_tokens":{max},"cache_read_input_tokens":{max},"cache_creation_input_tokens":{max}}}}}}}"#
+        );
+        let codex_turn = format!(
+            r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{max},"cached_input_tokens":0,"output_tokens":{max}}}}}}}}}"#
+        );
+        let s = summarise(&format!(
+            "{claude_turn}\n{claude_turn}\n{codex_turn}\n{codex_turn}\n"
+        ));
+        for usage in s.usage.values() {
+            assert_eq!(usage.input, max, "{:?}", s.usage);
+            assert_eq!(usage.output, max, "{:?}", s.usage);
+        }
+    }
+
     use super::*;
 
     fn assistant(model: &str, input: u64, output: u64, tools: &[(&str, &str)]) -> String {
