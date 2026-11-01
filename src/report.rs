@@ -3502,7 +3502,7 @@ pub struct Diff {
     pub session: String,
     pub checkpoint: Option<usize>,
     pub base: String,
-    pub what: crate::session::What,
+    pub what: crate::git::What,
     /// The `--stat` or the patch, as `what` says.
     pub body: String,
 }
@@ -3559,8 +3559,8 @@ impl Report for Diff {
         // terminal, and a subject with a replacement character in it is one it
         // cannot match against git's own output.
         let key = match self.what {
-            crate::session::What::Summary => "summary",
-            crate::session::What::Patch => "patch",
+            crate::git::What::Summary => "summary",
+            crate::git::What::Patch => "patch",
         };
         v[key] = json!(self.body);
         v

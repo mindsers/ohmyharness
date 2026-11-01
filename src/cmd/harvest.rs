@@ -416,8 +416,8 @@ pub(crate) fn diff_report(
     ctx: &out::Ctx,
 ) -> Result<report::Diff> {
     let what = match patch {
-        true => session::What::Patch,
-        false => session::What::Summary,
+        true => crate::git::What::Patch,
+        false => crate::git::What::Summary,
     };
     let Some(number) = checkpoint else {
         let base = base
@@ -1593,13 +1593,13 @@ pub(crate) fn checks(
 ) -> Vec<(String, String)> {
     hooks
         .iter()
-        .filter(|(_, h)| h.on == crate::hook::Event::TurnEnd)
+        .filter(|(_, h)| h.on == crate::vocab::Event::TurnEnd)
         .filter(|(_, h)| match &h.stack {
             None => true,
             Some(stack) => detected.iter().any(|d| d == stack),
         })
         .filter_map(|(name, h)| match &h.action {
-            crate::hook::Action::Run(cmd) => Some((name.clone(), cmd.clone())),
+            crate::vocab::Action::Run(cmd) => Some((name.clone(), cmd.clone())),
             _ => None,
         })
         .collect()
@@ -1712,8 +1712,9 @@ mod tests {
         let got = record_check(&paths, "s01", &Checked::Passed(1));
         assert!(got.is_err(), "an outcome that was not recorded answered Ok");
     }
-    use crate::hook::{Action, Event, Hook};
+    use crate::hook::Hook;
     use crate::runtime::{answered, Backend, Docker};
+    use crate::vocab::{Action, Event};
     use std::collections::BTreeMap;
 
     fn hook(on: Event, stack: Option<&str>, action: Action) -> Hook {

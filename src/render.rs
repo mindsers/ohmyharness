@@ -58,7 +58,7 @@ pub struct RenderContext<'a> {
     /// feature is disabled here is still in your `mcp.json`, which is yours
     /// and is left exactly as you have it.
     pub repo: &'a crate::settings::RepoPolicy,
-    pub tools: &'a BTreeMap<hook::Tool, String>,
+    pub tools: &'a BTreeMap<crate::vocab::Tool, String>,
     /// What the image this session will run has been measured to contain,
     /// from `facts::Facts::about`. A program absent from it is one nobody
     /// probed, which suppresses nothing — see `suppressed_by_probe`.
@@ -128,8 +128,8 @@ pub fn document(
             // an injection there would reach nobody — and it is the binding's
             // one template, so the binding cannot say so itself.
             hooks.retain(|name, h| {
-                let speaks_at_turn_end =
-                    h.on == hook::Event::TurnEnd && matches!(h.action, hook::Action::Inject { .. });
+                let speaks_at_turn_end = h.on == crate::vocab::Event::TurnEnd
+                    && matches!(h.action, crate::vocab::Action::Inject { .. });
                 if speaks_at_turn_end {
                     dropped.push(hook::Dropped {
                         name: name.clone(),
@@ -629,7 +629,7 @@ fn suppressed_by_probe(
 fn translate(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
-    tools: &BTreeMap<hook::Tool, String>,
+    tools: &BTreeMap<crate::vocab::Tool, String>,
     log: Option<&str>,
 ) -> Result<(BTreeMap<String, hook::Rendered>, Vec<hook::Dropped>)> {
     let mut rendered = BTreeMap::new();
@@ -948,7 +948,7 @@ impl<'a> Slot<'a> {
 fn opencode_plugin(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
-    tools: &BTreeMap<hook::Tool, String>,
+    tools: &BTreeMap<crate::vocab::Tool, String>,
     log: Option<&str>,
 ) -> Result<Document> {
     let mut dropped = Vec::new();
@@ -991,9 +991,9 @@ fn opencode_plugin(
             let needs = match &hook.action {
                 _ if !wired.fields.is_empty() => Some("payload field"),
                 _ if !wired.tools.is_empty() => Some("way to narrow to a tool"),
-                hook::Action::Inject { .. } => Some("way to inject text"),
-                hook::Action::Refuse { .. } => Some("way to refuse a call"),
-                hook::Action::Run(_) => None,
+                crate::vocab::Action::Inject { .. } => Some("way to inject text"),
+                crate::vocab::Action::Refuse { .. } => Some("way to refuse a call"),
+                crate::vocab::Action::Run(_) => None,
             };
             if let Some(needs) = needs {
                 dropped.push(give_up(&format!("{needs} at `{}`", hook.on)));
@@ -1003,7 +1003,7 @@ fn opencode_plugin(
         // Advisory text has no channel before the call on this harness: the
         // only way to speak there is a throw, which blocks. Checked before the
         // binding is asked, because the binding *can* advise — just not here.
-        if matches!(hook.action, hook::Action::Inject { .. })
+        if matches!(hook.action, crate::vocab::Action::Inject { .. })
             && matches!(
                 slot,
                 Slot::Call {
@@ -1119,7 +1119,7 @@ impl Moment {
 fn omp_plugin(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
-    tools: &BTreeMap<hook::Tool, String>,
+    tools: &BTreeMap<crate::vocab::Tool, String>,
     log: Option<&str>,
 ) -> Result<Document> {
     let mut dropped = Vec::new();
@@ -1172,9 +1172,9 @@ fn omp_plugin(
             let needs = match &hook.action {
                 _ if !wired.fields.is_empty() => Some("payload field"),
                 _ if !wired.tools.is_empty() => Some("way to narrow to a tool"),
-                hook::Action::Inject { .. } => Some("way to inject text"),
-                hook::Action::Refuse { .. } => Some("way to refuse a call"),
-                hook::Action::Run(_) => None,
+                crate::vocab::Action::Inject { .. } => Some("way to inject text"),
+                crate::vocab::Action::Refuse { .. } => Some("way to refuse a call"),
+                crate::vocab::Action::Run(_) => None,
             };
             if let Some(needs) = needs {
                 dropped.push(give_up(&format!("{needs} at `{}`", hook.on)));
@@ -1185,7 +1185,7 @@ fn omp_plugin(
         // oh-my-pi's `tool_call` can return `additionalContext` since v18.3.1,
         // and omh does not use it yet. Checked before the binding is asked,
         // because the binding *can* advise — just not here.
-        if matches!(hook.action, hook::Action::Inject { .. }) && moment == Moment::Before {
+        if matches!(hook.action, crate::vocab::Action::Inject { .. }) && moment == Moment::Before {
             dropped.push(give_up("way to inject text before a tool runs"));
             continue;
         }
@@ -1248,7 +1248,7 @@ fn omp_one_hook(
     // omp calls an MCP tool by writing its arguments to
     // `xd://mcp__<server>_<tool>`: a write that resolves to no file is not an
     // edit, and a hook on edits leaves it alone.
-    if hook.tools.contains(&hook::Tool::Edit) {
+    if hook.tools.contains(&crate::vocab::Tool::Edit) {
         b.push_str(
             "    if (event.toolName === \"write\" && !omh_file(event.input?.path, true).startsWith(\"/\")) return\n",
         );
@@ -1271,12 +1271,12 @@ fn omp_one_hook(
                 "    env[{}] = String({expr} ?? \"\")\n",
                 crate::quote::js(field.var())
             ));
-            if *field == hook::Field::ToolFile {
+            if *field == crate::vocab::Field::ToolFile {
                 b.push_str(&hook::absolute_file_js("    ", true));
             }
         }
     }
-    if let hook::Action::Inject {
+    if let crate::vocab::Action::Inject {
         capture: Some(capture),
         ..
     } = &hook.action
@@ -1299,7 +1299,7 @@ fn omp_one_hook(
         // — so a refusal whose predicate could not run let the call through,
         // which is the one degradation this renderer must never make. An
         // `inject` or a `run` in the same state still falls through to silence.
-        if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
+        if let (crate::vocab::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
             b.push_str(&format!(
                 "    if (!p.ran) {{ {}{} }}\n",
                 log_call(log, name, ledger::Decision::Unevaluated),
@@ -1317,7 +1317,7 @@ fn omp_one_hook(
         ));
     }
     if log.is_some() {
-        let decision = if matches!(hook.action, hook::Action::Refuse { .. }) {
+        let decision = if matches!(hook.action, crate::vocab::Action::Refuse { .. }) {
             ledger::Decision::Refused
         } else {
             ledger::Decision::Fired
@@ -1325,12 +1325,12 @@ fn omp_one_hook(
         b.push_str(&format!("    {}\n", log_call(log, name, decision)));
     }
     match &hook.action {
-        hook::Action::Run(run) => b.push_str(&format!(
+        crate::vocab::Action::Run(run) => b.push_str(&format!(
             "    const r = sh({}, env)\n    if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
             crate::quote::js(run),
             crate::quote::js(name),
         )),
-        hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
+        crate::vocab::Action::Inject { text, .. } | crate::vocab::Action::Refuse { text } => {
             let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
             b.push_str(&format!(
                 "    {}\n",
@@ -1405,12 +1405,12 @@ fn one_hook(
                 "      env[{}] = String({expr} ?? \"\")\n",
                 crate::quote::js(field.var())
             ));
-            if *field == hook::Field::ToolFile {
+            if *field == crate::vocab::Field::ToolFile {
                 b.push_str(&hook::absolute_file_js("      ", false));
             }
         }
     }
-    if let hook::Action::Inject {
+    if let crate::vocab::Action::Inject {
         capture: Some(capture),
         ..
     } = &hook.action
@@ -1433,7 +1433,7 @@ fn one_hook(
         // declined, and returning from `tool.execute.before` lets the call
         // through. Only a refusal blocks; an `inject` or a `run` still falls
         // through to silence.
-        if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
+        if let (crate::vocab::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
             b.push_str(&format!(
                 "      if (!p.ran) {{ {}{} }}\n",
                 log_call(log, name, ledger::Decision::Unevaluated),
@@ -1456,7 +1456,7 @@ fn one_hook(
     // hook with no `when` always reaches its action, same reasoning as
     // `hook::render`'s own splice point.
     if log.is_some() {
-        let decision = if matches!(hook.action, hook::Action::Refuse { .. }) {
+        let decision = if matches!(hook.action, crate::vocab::Action::Refuse { .. }) {
             ledger::Decision::Refused
         } else {
             ledger::Decision::Fired
@@ -1467,7 +1467,7 @@ fn one_hook(
         // The exit code is not a decision — `graph-refresh` ends in `|| true`
         // deliberately — but a `run` that could not start, or died, is worth
         // saying rather than discarding.
-        hook::Action::Run(run) => b.push_str(&format!(
+        crate::vocab::Action::Run(run) => b.push_str(&format!(
             "      const r = sh({}, env)\n      if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
             crate::quote::js(run),
             crate::quote::js(name),
@@ -1476,7 +1476,7 @@ fn one_hook(
         // other render. `{{text}}` receives an expression evaluating to the
         // hook's text with its `$OMH_*` references expanded — which is what the
         // shell does for the same string on a config-shaped harness.
-        hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
+        crate::vocab::Action::Inject { text, .. } | crate::vocab::Action::Refuse { text } => {
             let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
             b.push_str(&format!(
                 "      {}\n",
@@ -1810,7 +1810,7 @@ fn codex_hooks(
     }
     let turn_end = binding
         .events
-        .get(&hook::Event::TurnEnd)
+        .get(&crate::vocab::Event::TurnEnd)
         .map(String::as_str);
     // The worktree, trusted. Unset, Codex's interactive app asks and saves the
     // answer to `~/.codex/config.toml`; untrusted, Codex was measured skipping
@@ -1967,7 +1967,7 @@ pub fn parse_hooks(
                                 stack: None,
                                 tools: tools.clone(),
                                 when: None,
-                                action: hook::Action::Run(command),
+                                action: crate::vocab::Action::Run(command),
                             },
                         );
                     }
@@ -1982,15 +1982,15 @@ pub fn parse_hooks(
 /// A matcher as a list of tools, or why it is not one.
 fn read_matcher(
     matcher: &str,
-    on: hook::Event,
+    on: crate::vocab::Event,
     vocab: &hook::Vocabulary,
-) -> std::result::Result<Vec<hook::Tool>, String> {
+) -> std::result::Result<Vec<crate::vocab::Tool>, String> {
     if matcher.trim().is_empty() {
         // Not a narrowing: every tool this moment has, which is what omh's own
         // empty `tools` means.
         return Ok(Vec::new());
     }
-    if on == hook::Event::SessionStart {
+    if on == crate::vocab::Event::SessionStart {
         return Err(format!(
             "`{matcher}` narrows a session start, which is not a tool — omh has \
              no word for that axis"
@@ -2055,7 +2055,11 @@ fn read_handler(handler: &serde_json::Value) -> std::result::Result<String, Stri
 /// scanning `.omh/hooks/` needs to recognise it by — `after-tool-prettier`
 /// rather than a number. `command::program` answers `None` for a command it
 /// cannot read, and a numbered fallback is better than a name built from shell.
-fn name_for(taken: &BTreeMap<String, hook::Hook>, on: hook::Event, command: &str) -> String {
+fn name_for(
+    taken: &BTreeMap<String, hook::Hook>,
+    on: crate::vocab::Event,
+    command: &str,
+) -> String {
     let base = match crate::command::program(command) {
         Some(p) => format!("{on}-{}", p.trim_start_matches("./").replace('/', "-")),
         None => format!("{on}-imported"),
@@ -2639,11 +2643,11 @@ mod tests {
                 .unwrap();
         let (back, residue) = parse_hooks_as(Render::CodexHooks, &doc.body, &vocab).unwrap();
         assert!(residue.is_empty(), "{residue:?}");
-        let recovered: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = back
+        let recovered: BTreeSet<(crate::vocab::Event, Vec<crate::vocab::Tool>, String)> = back
             .values()
             .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
             .collect();
-        let mine: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = hooks
+        let mine: BTreeSet<(crate::vocab::Event, Vec<crate::vocab::Tool>, String)> = hooks
             .iter()
             .map(|(n, b)| hook::Hook::parse(b, n).unwrap())
             .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
@@ -2659,7 +2663,7 @@ mod tests {
     /// The whole point of the round trip is that the vocabulary travels through
     /// data. A fixture using Claude's own words would be satisfied by a reader
     /// that had them hardcoded, which is the bug this pair exists to prevent.
-    fn foreign() -> (Binding, BTreeMap<hook::Tool, String>) {
+    fn foreign() -> (Binding, BTreeMap<crate::vocab::Tool, String>) {
         let binding: Binding = toml::from_str(
             "path = \"x\"\nrender = \"claude-settings\"\n\n\
              [events]\nturn-end = \"AfterTurn\"\nafter-tool = \"ToolFinished\"\n\
@@ -2667,8 +2671,8 @@ mod tests {
         )
         .unwrap();
         let tools = BTreeMap::from([
-            (hook::Tool::Edit, "Modify".to_string()),
-            (hook::Tool::Read, "Fetch".to_string()),
+            (crate::vocab::Tool::Edit, "Modify".to_string()),
+            (crate::vocab::Tool::Read, "Fetch".to_string()),
         ]);
         (binding, tools)
     }
@@ -2700,7 +2704,7 @@ mod tests {
         let (back, residue) = parse_hooks(&document, &vocab).unwrap();
         assert!(residue.is_empty(), "nothing should be residue: {residue:?}");
 
-        let recovered: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = back
+        let recovered: BTreeSet<(crate::vocab::Event, Vec<crate::vocab::Tool>, String)> = back
             .values()
             .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
             .collect();
@@ -2827,7 +2831,7 @@ mod tests {
         );
         assert_eq!(
             imported.values().next().unwrap().tools,
-            vec![hook::Tool::Edit]
+            vec![crate::vocab::Tool::Edit]
         );
 
         // Two of them, joined — still whole spellings, not six words.
@@ -2835,7 +2839,7 @@ mod tests {
         assert_eq!(imported.len(), 1, "got: {residue:?}");
         assert_eq!(
             imported.values().next().unwrap().tools,
-            vec![hook::Tool::Edit, hook::Tool::Read]
+            vec![crate::vocab::Tool::Edit, crate::vocab::Tool::Read]
         );
 
         // And a partial alternation is **not** that tool.
@@ -2864,7 +2868,7 @@ mod tests {
     #[test]
     fn a_session_start_matcher_is_never_read_as_a_tool() {
         let (binding, _) = foreign();
-        let colliding = BTreeMap::from([(hook::Tool::Edit, "startup".to_string())]);
+        let colliding = BTreeMap::from([(crate::vocab::Tool::Edit, "startup".to_string())]);
         let vocab = hook::Vocabulary::of(&binding, &colliding).unwrap();
 
         let doc = r#"{"hooks":{"Boot":[{"matcher":"startup","hooks":[{"type":"command","command":"x"}]}]}}"#;
@@ -3467,7 +3471,7 @@ mod tests {
         // and deleting `suppressed_by_probe` from that arm alone left the suite
         // green. This test's own doc predicts exactly that. And again with the
         // fourth: codex's arm was in neither list.
-        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 4] = [
+        let paths: [(&Binding, &BTreeMap<crate::vocab::Tool, String>); 4] = [
             (hooks_binding(&claude), &claude.tools),
             (codex.supports(Capability::Hooks).unwrap(), &codex.tools),
             (opencode_hooks(), &opencode().tools),
@@ -3543,7 +3547,7 @@ mod tests {
 
         let claude = claude_hooks();
         let codex = codex();
-        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 4] = [
+        let paths: [(&Binding, &BTreeMap<crate::vocab::Tool, String>); 4] = [
             (hooks_binding(&claude), &claude.tools),
             (codex.supports(Capability::Hooks).unwrap(), &codex.tools),
             (opencode_hooks(), &opencode().tools),
@@ -3657,7 +3661,7 @@ mod tests {
             )
             .unwrap(),
         )]);
-        let tools = BTreeMap::from([(hook::Tool::Shell, "sh\u{0}1".to_string())]);
+        let tools = BTreeMap::from([(crate::vocab::Tool::Shell, "sh\u{0}1".to_string())]);
         for body in [
             opencode_plugin(&hooks, opencode_hooks(), &tools, None)
                 .unwrap()
@@ -6026,7 +6030,7 @@ try {{
         );
         assert_eq!(
             imported.values().next().unwrap().on,
-            hook::Event::SessionStart
+            crate::vocab::Event::SessionStart
         );
     }
 
@@ -6038,8 +6042,8 @@ try {{
     fn the_longest_spelling_wins_so_a_prefix_cannot_strand_the_rest() {
         let (binding, _) = foreign();
         let overlapping = BTreeMap::from([
-            (hook::Tool::Edit, "Edit".to_string()),
-            (hook::Tool::Read, "Edit|Write".to_string()),
+            (crate::vocab::Tool::Edit, "Edit".to_string()),
+            (crate::vocab::Tool::Read, "Edit|Write".to_string()),
         ]);
         let vocab = hook::Vocabulary::of(&binding, &overlapping).unwrap();
         let doc = "{\"hooks\":{\"ToolFinished\":[{\"matcher\":\"Edit|Write\",\"hooks\":[\
@@ -6049,7 +6053,7 @@ try {{
         assert_eq!(imported.len(), 1, "got: {residue:?}");
         assert_eq!(
             imported.values().next().unwrap().tools,
-            vec![hook::Tool::Read],
+            vec![crate::vocab::Tool::Read],
             "`Edit|Write` is one spelling, not `Edit` followed by something"
         );
     }

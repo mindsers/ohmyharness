@@ -2535,15 +2535,15 @@ pub(crate) fn rm(
     let done = session.remove(&paths.repo, &base, &paths.shadows())?;
     let (removed, worktree) = (done.branch, done.worktree);
     match &done.shadow {
-        session::Gone::Yes => went.push("the sandbox repository".to_string()),
-        session::Gone::No(why) => unreached.push(format!("the sandbox repository ({why})")),
+        crate::fsx::Gone::Yes => went.push("the sandbox repository".to_string()),
+        crate::fsx::Gone::No(why) => unreached.push(format!("the sandbox repository ({why})")),
     }
     // **A worktree still on disk makes "removed session sNN" false**, and the
     // command used to print both — a warning saying it is there, then a
     // success line saying the session is gone, then exit 0. That is the shape
     // this whole change exists to remove, so the outcome is reported once and
     // the incomplete case is a failure rather than a footnote to a success.
-    if let session::Gone::No(why) = &worktree {
+    if let crate::fsx::Gone::No(why) = &worktree {
         // **What happened to the branch, not an assumption about it.** The
         // first version said "the branch is untouched", and `remove` drops a
         // commitless one *before* it returns — so for exactly the sessions

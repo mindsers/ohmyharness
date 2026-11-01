@@ -851,13 +851,13 @@ impl Ctx {
         );
     }
 
-    /// The modules that use each other, as they stand. A ratchet: a new cycle
-    /// fails, and so does breaking one without striking it here — the list is
-    /// exact, so it only ever shrinks on purpose. When it is empty, the graph
-    /// is a hierarchy and this asserts it stays one.
+    /// The modules form a hierarchy, and this keeps them one. It was a ratchet
+    /// over the cycles as they stood, an exact list that only shrank on
+    /// purpose, from one cycle of 28 modules to none. A new cycle fails here,
+    /// each edge in it named by the file and line it was read from: it is a
+    /// dependency to invert, or a type to move to a leaf.
     #[test]
-    fn the_modules_form_no_cycle_beyond_the_known_ones() {
-        const KNOWN_CYCLES: &[&[&str]] = &[&["adapter", "hook"], &["session", "shadow"]];
+    fn the_modules_form_no_cycle() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let graph = module_graph(&root);
 
@@ -872,10 +872,6 @@ impl Ctx {
         }
 
         let found = cycles(&graph);
-        let known: Vec<Vec<String>> = KNOWN_CYCLES
-            .iter()
-            .map(|c| c.iter().map(|m| m.to_string()).collect())
-            .collect();
         let rel = |p: &Path| p.strip_prefix(&root).unwrap_or(p).display().to_string();
         let explain = |cycle: &[String]| -> String {
             let mut out = String::new();
@@ -892,36 +888,10 @@ impl Ctx {
             .iter()
             .map(|c| format!("\n  {c:?}{}", explain(c)))
             .collect();
-        assert_eq!(
-            found, known,
-            "the cycles between modules changed. A new one is a dependency to \
-             invert; a broken one is progress — strike it from KNOWN_CYCLES.\
-             \nNow:{report}"
-        );
-
-        // **Inside a cycle, the edges are the ratchet.** A cycle that gained an
-        // edge has the same members, so the list above cannot see it: #197
-        // added six inside the big one with this test green. Counted rather
-        // than listed — a refactor moves dozens — and printed whole when the
-        // count moves, so a diff of two runs names the edge.
-        const KNOWN_EDGES_INSIDE: usize = 4;
-        let inside: Vec<String> = found
-            .iter()
-            .flat_map(|cycle| {
-                cycle.iter().flat_map(|from| {
-                    graph[from]
-                        .keys()
-                        .filter(|to| cycle.contains(to))
-                        .map(move |to| format!("{from} → {to}"))
-                })
-            })
-            .collect();
-        assert_eq!(
-            inside.len(),
-            KNOWN_EDGES_INSIDE,
-            "the edges inside the known cycles changed. One more is a dependency \
-             to invert; one fewer is progress — lower KNOWN_EDGES_INSIDE.\nNow:\n  {}",
-            inside.join("\n  ")
+        assert!(
+            found.is_empty(),
+            "the modules form a cycle. Each is a dependency to invert, or a type \
+             to move to a leaf:{report}"
         );
     }
 

@@ -64,6 +64,7 @@ mod stack;
 mod testsrc;
 mod transcript;
 mod tui;
+mod vocab;
 mod why;
 
 use anyhow::Context;

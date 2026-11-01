@@ -13,8 +13,8 @@
 //! The manifest is the single source of truth: every launch generates from it
 //! and `omh why` explains from it, so they cannot disagree.
 
-use crate::hook::Field;
 use crate::servers::Server;
+use crate::vocab::Field;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -741,7 +741,8 @@ pub fn grep_nudge(project: &str) -> String {
 /// they all did until the format landed: the interception is `when`, the text is
 /// `inject`, and how either reaches a particular harness is adapter data.
 pub fn hooks() -> Vec<Hook> {
-    use crate::hook::{Action, Event, Hook as Canonical, Tool};
+    use crate::hook::Hook as Canonical;
+    use crate::vocab::{Action, Event, Tool};
 
     // Every source extension worth not reading whole. A `case` arm rather than
     // a list omh iterates: it is evaluated by the shell inside the sandbox,
@@ -2214,7 +2215,7 @@ command = "c"
             .supports(crate::adapter::Capability::Hooks)
             .expect("claude has hooks");
         let mut tools = adapter.tools.clone();
-        tools.insert(crate::hook::Tool::Search, "Grep|Glob".into());
+        tools.insert(crate::vocab::Tool::Search, "Grep|Glob".into());
         match crate::hook::render(name, &hook(name).hook, binding, &tools, None).unwrap() {
             crate::hook::Outcome::Rendered(r) => r,
             crate::hook::Outcome::Dropped(d) => panic!("cannot express {d}"),
@@ -2248,7 +2249,7 @@ command = "c"
         }
         for adapter in crate::adapter::Adapter::load_dir(Path::new(ADAPTERS)).unwrap() {
             assert!(
-                !adapter.tools.contains_key(&crate::hook::Tool::Search),
+                !adapter.tools.contains_key(&crate::vocab::Tool::Search),
                 "{} spells search; the hooks in UNSPELLED reach it",
                 adapter.name
             );
@@ -2526,7 +2527,7 @@ command = "c"
                 .find(|h| h.name == name)
                 .unwrap_or_else(|| panic!("the base set ships {name}"));
             assert!(
-                matches!(h.hook.action, crate::hook::Action::Inject { .. }),
+                matches!(h.hook.action, crate::vocab::Action::Inject { .. }),
                 "{name} is a nudge and has to stay one: {:?}",
                 h.hook.action
             );

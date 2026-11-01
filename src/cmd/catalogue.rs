@@ -991,7 +991,10 @@ fn guard_hooks(paths: &Paths) -> Result<BTreeSet<String>> {
             let Ok(hook) = hook::Hook::parse(&raw, &path.display().to_string()) else {
                 continue;
             };
-            refuses.insert(name, matches!(hook.action, hook::Action::Refuse { .. }));
+            refuses.insert(
+                name,
+                matches!(hook.action, crate::vocab::Action::Refuse { .. }),
+            );
         }
     }
     Ok(refuses
@@ -1055,7 +1058,7 @@ pub(crate) fn covered_here(
             else {
                 continue;
             };
-            if !matches!(hook.action, hook::Action::Run(_)) {
+            if !matches!(hook.action, crate::vocab::Action::Run(_)) {
                 continue;
             }
             let Some(stack) = hook.stack else { continue };

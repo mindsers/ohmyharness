@@ -7663,7 +7663,7 @@ fn syncing_leaves_the_worktree_holding_exactly_the_merged_tree() {
     );
     // The invariant, not the two names: what the session now claims to
     // have changed against its moved base is nothing at all.
-    let claimed = session.diff("main", session::What::Summary).unwrap();
+    let claimed = session.diff("main", crate::git::What::Summary).unwrap();
     assert_eq!(
         claimed.trim(),
         "",
@@ -7898,7 +7898,7 @@ fn an_untouched_session_holds_nothing_but_omhs_placeholders() {
         Vec::<String>::new(),
         "`omh s` counts omh's placeholders as uncommitted work"
     );
-    let review = session.diff("main", session::What::Summary).unwrap();
+    let review = session.diff("main", crate::git::What::Summary).unwrap();
     for name in carry::hidden_in_the_worktree() {
         assert!(
             !review.contains(name),

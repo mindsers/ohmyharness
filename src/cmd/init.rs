@@ -10,8 +10,8 @@ use crate::catalogue::Catalogue;
 use crate::out;
 use crate::paths::Paths;
 use crate::{
-    ask, base, bundled, config, derive, detect, facts, hook, image, key, memory, render, report,
-    runtime, settings, stack,
+    ask, base, bundled, config, derive, detect, facts, image, key, memory, render, report, runtime,
+    settings, stack,
 };
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -592,7 +592,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let markers = stack::markers(&paths.markers())?;
     let unclaimed = stack::unclaimed(&markers, &stack_defs, &paths.repo);
     let has_test = covered.iter().any(|s| stacks.iter().any(|d| &d.name == s))
-        || derived.iter().any(|d| d.hook.on == hook::Event::TurnEnd)
+        || derived
+            .iter()
+            .any(|d| d.hook.on == crate::vocab::Event::TurnEnd)
         || repo_omh.join("hooks").join("test.json").exists();
     let (asked, answered) = questions(&repo_omh, &unclaimed, has_test, ctx)?;
 

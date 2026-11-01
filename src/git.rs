@@ -130,3 +130,21 @@ pub(crate) fn landing(hooks: &[&str]) -> Command {
     git.args(hooks);
     git
 }
+
+/// Which of the two answers a review wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum What {
+    /// The shape of the change: which files, how much.
+    Summary,
+    /// The change itself.
+    Patch,
+}
+
+impl What {
+    pub(crate) fn flag(self) -> &'static str {
+        match self {
+            What::Summary => "--stat",
+            What::Patch => "-p",
+        }
+    }
+}

@@ -1835,7 +1835,7 @@ fn hook_names(
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
     binding: &crate::adapter::Binding,
-    tools: &std::collections::BTreeMap<crate::hook::Tool, String>,
+    tools: &std::collections::BTreeMap<crate::vocab::Tool, String>,
     resolves: &std::collections::BTreeMap<String, bool>,
 ) -> Result<Vec<String>> {
     let doc = crate::render::document(

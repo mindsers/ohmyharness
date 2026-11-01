@@ -1558,9 +1558,11 @@ fn describe(cap: Capability, path: &std::path::Path) -> Described {
         return match hook::Hook::parse(&raw, &file.display().to_string()) {
             Ok(h) => {
                 let what = match &h.action {
-                    hook::Action::Run(cmd) => cmd.clone(),
-                    hook::Action::Refuse { text } => format!("refuses — {text}"),
-                    hook::Action::Inject { text, .. } => format!("tells the agent — {text}"),
+                    crate::vocab::Action::Run(cmd) => cmd.clone(),
+                    crate::vocab::Action::Refuse { text } => format!("refuses — {text}"),
+                    crate::vocab::Action::Inject { text, .. } => {
+                        format!("tells the agent — {text}")
+                    }
                 };
                 let tools = h
                     .tools

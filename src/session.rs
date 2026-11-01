@@ -5,23 +5,12 @@
 //! mounted, so an agent cannot touch uncommitted work or `main` — review is a
 //! plain `git diff`.
 
-use crate::fsx::still_there;
+use crate::fsx::{still_there, Gone};
+use crate::git::What;
 use crate::landing::{self, History, Holding, Proof, Reach, Standing, Survey};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Whether a thing this command is named for actually went.
-///
-/// **Not a bool.** `No` carries why, because a removal that did not happen and
-/// a removal nobody could explain are the same news to a caller that only has
-/// a flag — and this is the value `rm` prints to somebody deciding what to
-/// clean up by hand.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Gone {
-    Yes,
-    No(String),
-}
 
 /// What a removal actually did, part by part.
 ///
@@ -392,24 +381,6 @@ pub fn merge_three(repo: &Path, base: &str, theirs: &str, ours: &str) -> Result<
         }
     }
     Ok(Merged { tree, conflicted })
-}
-
-/// Which of the two answers a review wants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum What {
-    /// The shape of the change: which files, how much.
-    Summary,
-    /// The change itself.
-    Patch,
-}
-
-impl What {
-    pub(crate) fn flag(self) -> &'static str {
-        match self {
-            What::Summary => "--stat",
-            What::Patch => "-p",
-        }
-    }
 }
 
 impl Session {

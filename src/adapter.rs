@@ -85,7 +85,7 @@ pub struct Adapter {
     /// names in `allowed-tools` and subagent frontmatter carries them in
     /// `tools` — one vocabulary, one leak, and neither of those is a hook.
     #[serde(default)]
-    pub tools: BTreeMap<crate::hook::Tool, String>,
+    pub tools: BTreeMap<crate::vocab::Tool, String>,
     #[serde(default)]
     pub capabilities: BTreeMap<Capability, Binding>,
     /// The harness's own policy layer, filled by omh so a session cannot add a
@@ -752,7 +752,7 @@ pub struct Binding {
     /// means it has no such moment, so the hooks wanting it are dropped by name
     /// and the rest still ship.
     #[serde(default)]
-    pub events: BTreeMap<crate::hook::Event, String>,
+    pub events: BTreeMap<crate::vocab::Event, String>,
     /// Where each canonical payload field lives in this harness's payload.
     ///
     /// Read in the renderer's own language, never one syntax for all three:
@@ -761,7 +761,7 @@ pub struct Binding {
     /// object. Calling this "the stdin schema" was true of one harness and
     /// wrong about the other two.
     #[serde(default)]
-    pub fields: BTreeMap<crate::hook::Field, String>,
+    pub fields: BTreeMap<crate::vocab::Field, String>,
     /// The escape hatch `fields` cannot express: a field that lives
     /// somewhere else on one particular tool. omp's `edit` is the reason
     /// this exists — its path is not a property at all, but a substring of
@@ -775,7 +775,7 @@ pub struct Binding {
     /// `fields`, so this is additive: every binding that never needed it
     /// renders exactly as before.
     #[serde(default, rename = "fields-by-tool")]
-    pub tool_fields: BTreeMap<crate::hook::Tool, BTreeMap<crate::hook::Field, String>>,
+    pub tool_fields: BTreeMap<crate::vocab::Tool, BTreeMap<crate::vocab::Field, String>>,
     /// This harness's protocol for putting text in the agent's context.
     #[serde(default)]
     pub inject: Option<Template>,
@@ -814,14 +814,14 @@ impl Binding {
     /// protocol this harness lacks.
     pub fn protocol(
         &self,
-        action: &crate::hook::Action,
+        action: &crate::vocab::Action,
     ) -> std::result::Result<Option<&Template>, &'static str> {
         match action {
-            crate::hook::Action::Run(_) => Ok(None),
-            crate::hook::Action::Inject { .. } => {
+            crate::vocab::Action::Run(_) => Ok(None),
+            crate::vocab::Action::Inject { .. } => {
                 self.inject.as_ref().map(Some).ok_or("way to inject text")
             }
-            crate::hook::Action::Refuse { .. } => {
+            crate::vocab::Action::Refuse { .. } => {
                 self.refuse.as_ref().map(Some).ok_or("way to refuse a call")
             }
         }
@@ -1805,12 +1805,12 @@ mod tests {
         )
         .unwrap();
 
-        let inject = crate::hook::Action::Inject {
+        let inject = crate::vocab::Action::Inject {
             capture: None,
             text: "t".into(),
         };
-        let refuse = crate::hook::Action::Refuse { text: "t".into() };
-        let run = crate::hook::Action::Run("x".into());
+        let refuse = crate::vocab::Action::Refuse { text: "t".into() };
+        let run = crate::vocab::Action::Run("x".into());
 
         assert_eq!(
             advise_only.protocol(&inject).unwrap().unwrap().template,
@@ -2036,13 +2036,13 @@ mod tests {
     #[test]
     fn omp_spells_the_tools_it_has_and_no_others() {
         let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
-        assert_eq!(omp.tools[&crate::hook::Tool::Shell], "bash");
-        assert_eq!(omp.tools[&crate::hook::Tool::Read], "read");
+        assert_eq!(omp.tools[&crate::vocab::Tool::Shell], "bash");
+        assert_eq!(omp.tools[&crate::vocab::Tool::Read], "read");
         // `write` rewrites a file whole, so a guard on edits that a write walks
         // past guards nothing — `a_guard_on_edits_sees_a_write`.
-        assert_eq!(omp.tools[&crate::hook::Tool::Edit], "edit|write");
+        assert_eq!(omp.tools[&crate::vocab::Tool::Edit], "edit|write");
         assert!(
-            !omp.tools.contains_key(&crate::hook::Tool::Search),
+            !omp.tools.contains_key(&crate::vocab::Tool::Search),
             "omp has grep and glob as separate tools; half a claim is worse than none"
         );
     }
@@ -2058,7 +2058,7 @@ mod tests {
     fn claude_spells_no_search_tool_it_does_not_have() {
         let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
         assert!(
-            !claude.tools.contains_key(&crate::hook::Tool::Search),
+            !claude.tools.contains_key(&crate::vocab::Tool::Search),
             "native Claude Code searches through Bash; `Grep|Glob` never matches"
         );
     }
@@ -2233,9 +2233,9 @@ mod tests {
     #[test]
     fn the_tool_vocabulary_is_declared_once_for_the_harness() {
         let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
-        assert_eq!(claude.tools[&crate::hook::Tool::Shell], "Bash");
+        assert_eq!(claude.tools[&crate::vocab::Tool::Shell], "Bash");
         assert_eq!(
-            claude.tools[&crate::hook::Tool::Edit],
+            claude.tools[&crate::vocab::Tool::Edit],
             "Edit|Write|MultiEdit"
         );
     }
