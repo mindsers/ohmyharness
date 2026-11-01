@@ -255,6 +255,10 @@ mount = "link"
   "tui.fullscreen_transcript",
   "tui.agents_overview_grouping",
   "tui.pet",
+  # Reviewed, not quiet: its values name models — `gpt-5` = the model it
+  # migrated to — so a session's change to it is a change to which model a
+  # later session is pointed at, and the review is what asks about that.
+  "notice.model_migrations",
 ]
 
 # Notices Codex records once a prompt is dismissed, and its model-availability
@@ -268,5 +272,4 @@ mount = "link"
   "notice.hide_rate_limit_model_nudge",
   "notice.hide_gpt5_1_migration_prompt",
   'notice."hide_gpt-5.1-codex-max_migration_prompt"',
-  "notice.model_migrations",
 ]

@@ -133,6 +133,54 @@ pub(crate) fn forget(
     Ok(())
 }
 
+/// Where `file` is under `root`: the directory to walk from and the names
+/// below it, or `None` for a file elsewhere. Decided by where its spelling
+/// enters `root`, not by the spelling alone — a symlinked home spells
+/// `~/.omh` another way, and that path went to a read that follows links —
+/// and never by the file's directory resolved, which a link out of `root`
+/// leads elsewhere. So each directory above it is resolved from the top down:
+/// the first that is `root` is where the walk starts, and the names below it
+/// are handed over unresolved, for the read to refuse a link at any of them.
+/// The first that is inside `root` instead is a way in no walk from `root`
+/// takes, and is refused. A directory omh cannot resolve is said, not taken
+/// for one elsewhere; one that is not there holds nothing.
+fn under_root(
+    root: &std::path::Path,
+    file: &std::path::Path,
+) -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+    let at = std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?;
+    if let Ok(rel) = at.strip_prefix(root) {
+        return Ok(Some((root.to_path_buf(), rel.to_path_buf())));
+    }
+    let resolved = |dir: &std::path::Path| match std::fs::canonicalize(dir) {
+        Ok(dir) => Ok(Some(dir)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("resolving {}", dir.display())),
+    };
+    let Some(canonical) = resolved(root)? else {
+        return Ok(None);
+    };
+    let mut above: Vec<&std::path::Path> = at.ancestors().skip(1).collect();
+    above.reverse();
+    for dir in above {
+        let Some(is) = resolved(dir)? else {
+            return Ok(None);
+        };
+        if is == canonical {
+            return Ok(Some((canonical, at.strip_prefix(dir)?.to_path_buf())));
+        }
+        anyhow::ensure!(
+            !is.starts_with(&canonical),
+            "{} reaches {} through a link at {}: name it by its path under {}",
+            file.display(),
+            root.display(),
+            dir.display(),
+            root.display()
+        );
+    }
+    Ok(None)
+}
+
 /// Capture an account: run the harness's own login in a sandbox, or with
 /// `--import` copy the login this machine already holds.
 pub(crate) fn login(
@@ -176,8 +224,28 @@ pub(crate) fn login(
     let format = adapter.provider.as_ref().map(|p| p.format);
     let provided = match (provider, import, source, format) {
         (Some(file), _, Some(_), Some(format)) => {
-            let raw = std::fs::read_to_string(file)
-                .with_context(|| format!("reading {}", file.display()))?;
+            // Under `~/.omh`, it is read the way omh reads what a session
+            // could have written: a name at a time from `~/.omh` down, never
+            // through a link at any of them, and capped. It was
+            // `read_to_string`, which a session could steer with a link swapped
+            // in after the refusal that offered the file was printed — at the
+            // file, or at any directory above it. Anywhere else, it is yours,
+            // read as you named it.
+            let under = under_root(&paths.root, file)?;
+            let named = under.is_some();
+            let raw = match under {
+                Some((root, rel)) => {
+                    let rel = rel
+                        .to_str()
+                        .with_context(|| format!("{} is not UTF-8", file.display()))?;
+                    let raw = crate::held::read_under(&root, rel, 1 << 20)
+                        .with_context(|| format!("reading {}", file.display()))?;
+                    anyhow::ensure!(!raw.is_empty(), "{} is empty, or not there", file.display());
+                    raw
+                }
+                None => std::fs::read_to_string(file)
+                    .with_context(|| format!("reading {}", file.display()))?,
+            };
             // A file under `~/.omh` — an account's own models file, which a
             // launch's refusal offers to keep, or anything in a session's
             // reach — could be a session's, so nothing is read from the
@@ -188,7 +256,6 @@ pub(crate) fn login(
             // under `~/.omh` is a session's to swap between the read above and
             // any look at its target. And a path omh cannot resolve is not
             // taken for one outside.
-            let named = std::path::absolute(file).is_ok_and(|f| f.starts_with(&paths.root));
             let leads = match (
                 std::fs::canonicalize(file),
                 std::fs::canonicalize(&paths.root),
@@ -209,7 +276,19 @@ pub(crate) fn login(
                 }),
             }
             .with_context(|| format!("{}", file.display()))?;
-            Some(doc.with_context(|| format!("{} defines no model provider", file.display()))?)
+            let doc =
+                doc.with_context(|| format!("{} defines no model provider", file.display()))?;
+            // Kept, and said where it came from: a successful adoption of a
+            // file a session could have written was silent.
+            if ours {
+                ctx.warn(&format!(
+                    "kept the providers in {} — it is under {}, where a session could have \
+                     written it: check them with `omh account` before you launch",
+                    file.display(),
+                    paths.root.display()
+                ));
+            }
+            Some(doc)
         }
         (None, true, Some(source), Some(format)) => {
             let host = crate::adapter::expand_host(source, &home, &paths.repo);

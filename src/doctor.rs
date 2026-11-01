@@ -4186,6 +4186,9 @@ mod tests {
         let fx = fixture();
         let dir = tempfile::tempdir().unwrap();
         let real = std::fs::read_to_string(Path::new(ADAPTERS).join("opencode.toml")).unwrap();
+        // Up to `[preferences]`: `NEVER` has no row for a renamed harness, so
+        // it takes none.
+        let real = real.split("\n[preferences]").next().unwrap();
         let at = real
             .find("[capabilities.rules]")
             .expect("opencode has rules");

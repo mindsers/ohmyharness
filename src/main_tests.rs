@@ -1955,7 +1955,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // four bare-name launches' sentences
         ("src/cli.rs", 36),
         // + `omh account`, where `forget` names an account no login answers to
-        ("src/cmd/account.rs", 4),
+        // + `omh account`, in the warning a provider kept from under ~/.omh prints
+        ("src/cmd/account.rs", 5),
         // + `omh settings use`/`unuse`'s own: its synopsis twice, `--all` as
         // the way back from a guard's list, and `omh settings set <feature>
         // off` with its `omh init` for a name omh owns. + `omh settings rm`

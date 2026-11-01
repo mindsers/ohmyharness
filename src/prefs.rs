@@ -914,6 +914,26 @@ impl Account {
             };
             rest_of.insert(f.declared.name.clone(), (rest, digest));
         }
+        // Under the account's lock — the one a review holds from its first
+        // reading to its last write — from here on: the guards below read what
+        // is left to review, and the clearing after them must not run while a
+        // review is about to write into the same directories. And what the
+        // account keeps is read again under it, so a seed never starts from a
+        // value a review was about to change.
+        //
+        // Waited for briefly, never indefinitely: a review holds it across its
+        // prompt, and a launch that blocked behind one hung with nothing said.
+        let (kept_dir, _) = make_parent(&self.dir, &format!("{KEPT}/{LOCK}"))?;
+        let _lock = kept_dir
+            .lock_within(OsStr::new(LOCK), std::time::Duration::from_secs(3))
+            .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?
+            .with_context(|| {
+                format!(
+                    "another omh is holding {}'s preferences — most likely a review waiting \
+                     for an answer in another terminal. Answer it, then launch again",
+                    self.dir.display()
+                )
+            })?;
         if let (Home::Kept(_), true, Some(_)) = (home, created, recorded.as_deref()) {
             let left = review::unreviewed(adapter, home)?;
             anyhow::ensure!(
@@ -948,8 +968,29 @@ impl Account {
                 None => {}
             }
         }
+        // A directory mount's `live` is the harness's whole state directory:
+        // besides the files declared here it holds what lasts a session's
+        // relaunches — opencode's prompt history, its stash, `session.json`.
+        // Seeding a session that exists from another account replaces the
+        // declared files below and leaves the rest; it was cleared whole, and
+        // all of it went. A new session — an id coming round again — still
+        // starts from nothing.
+        //
+        // Only a session's own home, already seeded: a scratch home — a login,
+        // doctor's probe — is shared by every account that uses it and starts
+        // clean every time, or one account's state would reach the next. And
+        // the record is a seed's last write, so a home without one holds a
+        // seed that stopped partway, which no review has seen.
+        let keep_state = matches!(home, Home::Kept(_))
+            && self.mount == PrefMount::Dir
+            && !created
+            && recorded.is_some();
         for part in ["base", "reviewed", "live", REST] {
             let dir = root.join(part);
+            if part == "live" && keep_state {
+                std::fs::create_dir_all(&dir)?;
+                continue;
+            }
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -957,13 +998,6 @@ impl Account {
             }
             std::fs::create_dir_all(&dir)?;
         }
-        // What the account keeps, read again under its lock — the one a
-        // review holds from its first reading to its last write — so a seed
-        // never starts from a value a review was about to change.
-        let (kept_dir, _) = make_parent(&self.dir, &format!("{KEPT}/{LOCK}"))?;
-        let _lock = kept_dir
-            .lock(OsStr::new(LOCK))
-            .with_context(|| format!("locking {}", self.dir.join(KEPT).display()))?;
         for f in &self.files {
             let name = OsStr::new(&f.declared.name);
             let format = f.declared.format();
@@ -1645,6 +1679,61 @@ base_url = "https://example.invalid"
     /// from its own copy; another account is refused while the session has a
     /// change to review — it belongs to the old one — and seeds from the new
     /// once it is reviewed.
+    /// **A launch never waits in silence for a review.** A review holds the
+    /// account's lock across its prompt, and `seed` blocked on it with nothing
+    /// said — for as long as nobody answered — after it had already cleared the
+    /// session's directories. It takes the lock first now, waits briefly for a
+    /// holder that is quick, and then refuses, saying who most likely holds it.
+    #[test]
+    fn a_launch_does_not_hang_on_a_review_waiting_for_an_answer() {
+        let (root, work, _) = account();
+        let personal = root.path().join("creds/codex/personal");
+        for acct in [&work, &personal] {
+            std::fs::create_dir_all(acct.join("preferences")).unwrap();
+            std::fs::write(acct.join("preferences/config.toml"), "model = \"m\"\n").unwrap();
+        }
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/codex"));
+        let checked = check(&codex(), &work).unwrap().unwrap();
+        checked.apply(&none_running).unwrap();
+        checked
+            .seed(&codex(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        let at_live = live(&home).join("config.toml");
+        let before = std::fs::read_to_string(&at_live).unwrap();
+
+        // What a review waiting at its prompt holds.
+        let kept = crate::held::Dir::open(&personal.join(KEPT)).unwrap();
+        let _held = kept.lock(OsStr::new(LOCK)).unwrap();
+
+        let other = check(&codex(), &personal).unwrap().unwrap();
+        let seeding = std::thread::spawn({
+            let home = Home::Kept(home.path().to_path_buf());
+            move || {
+                other
+                    .seed(&codex(), &home, &BTreeMap::new(), false)
+                    .map_err(|e| format!("{e:#}"))
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !seeding.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "seed waited on the review in silence"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let err = seeding
+            .join()
+            .unwrap()
+            .expect_err("a held lock was not said");
+        assert!(err.contains("review"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&at_live).unwrap(),
+            before,
+            "and nothing of the session's was cleared before it found out"
+        );
+    }
+
     /// **An account record omh could not read is not a session never seeded.**
     /// It was `.ok()`, so an unreadable record skipped the guard that refuses to
     /// reseed over changes nobody reviewed — and the reseed wiped them.
@@ -2072,6 +2161,99 @@ base_url = "https://example.invalid"
             .seed(&opencode(), &home, &BTreeMap::new(), false)
             .unwrap();
         assert!(live(&home).join("prompt-history.jsonl").is_file());
+    }
+
+    /// **An opencode session relaunched on another account keeps its own
+    /// state.** Its whole state directory is the session's copy, and besides
+    /// the two preference files it holds what lasts a session's relaunches —
+    /// prompt history, stash, `session.json`. Seeding from another account
+    /// replaced the directory whole, and all of that went with it, under a note
+    /// that said only that preferences were seeded again.
+    #[test]
+    fn an_opencode_session_on_another_account_keeps_its_history() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("creds/opencode/work");
+        let personal = root.path().join("creds/opencode/personal");
+        for (acct, model) in [(&work, "w"), (&personal, "p")] {
+            std::fs::create_dir_all(acct.join("preferences")).unwrap();
+            std::fs::write(
+                acct.join("preferences/model.json"),
+                format!(r#"{{"recent":[{{"providerID":"fake","modelID":"{model}"}}]}}"#),
+            )
+            .unwrap();
+        }
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/opencode"));
+        let seed = |acct: &Path, created: bool| {
+            let checked = check(&opencode(), acct).unwrap().unwrap();
+            checked
+                .seed(&opencode(), &home, &BTreeMap::new(), created)
+                .unwrap()
+        };
+        seed(&work, true);
+        std::fs::write(
+            live(&home).join("prompt-history.jsonl"),
+            "{\"t\":\"mine\"}\n",
+        )
+        .unwrap();
+        seed(&personal, false);
+        assert_eq!(
+            std::fs::read_to_string(live(&home).join("prompt-history.jsonl")).unwrap(),
+            "{\"t\":\"mine\"}\n",
+            "the session's history went with the account switch"
+        );
+        assert!(
+            std::fs::read_to_string(live(&home).join("model.json"))
+                .unwrap()
+                .contains("\"p\""),
+            "and the preferences are the new account's"
+        );
+    }
+
+    /// The other half: a scratch home — a login, doctor's probe — is shared by
+    /// every account that uses it, and starts clean every time, so nothing of
+    /// one account's reaches the next.
+    #[test]
+    fn a_scratch_home_keeps_nothing_between_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("creds/opencode/work");
+        let personal = root.path().join("creds/opencode/personal");
+        for acct in [&work, &personal] {
+            std::fs::create_dir_all(acct.join("preferences")).unwrap();
+        }
+        let home = Home::Scratch(root.path().join("run/repo/doctor/.preferences/opencode"));
+        let seed = |acct: &Path| {
+            let checked = check(&opencode(), acct).unwrap().unwrap();
+            checked
+                .seed(&opencode(), &home, &BTreeMap::new(), false)
+                .unwrap()
+        };
+        seed(&work);
+        std::fs::write(live(&home).join("prompt-history.jsonl"), "{}\n").unwrap();
+        seed(&personal);
+        assert!(
+            !live(&home).join("prompt-history.jsonl").exists(),
+            "one account's state reached the next through a scratch home"
+        );
+    }
+
+    /// And a session's home a seed never finished — no record — is not one
+    /// to keep: whatever its `live` holds, no account put it there whole.
+    #[test]
+    fn a_home_no_seed_finished_keeps_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("creds/opencode/work");
+        std::fs::create_dir_all(work.join("preferences")).unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/opencode"));
+        std::fs::create_dir_all(live(&home)).unwrap();
+        std::fs::write(live(&home).join("prompt-history.jsonl"), "{}\n").unwrap();
+        let checked = check(&opencode(), &work).unwrap().unwrap();
+        checked
+            .seed(&opencode(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        assert!(
+            !live(&home).join("prompt-history.jsonl").exists(),
+            "a home no seed finished was kept as a session's own"
+        );
     }
 
     /// Every path under `dir`, sorted — what a launch must leave as it was.

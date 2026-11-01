@@ -208,6 +208,42 @@ impl Sandbox {
         child.wait_with_output().expect("wait")
     }
 
+    /// Run with a **terminal** on stdin, `input` already typed into it, and
+    /// stdout and stderr captured: the shape `omh_with_stdin` cannot give. A
+    /// question omh asks only at a terminal — the review at a session's exit —
+    /// is reachable from a test no other way. Typed before omh starts, the
+    /// input waits in the terminal's line buffer until it is read.
+    #[cfg(unix)]
+    fn omh_at_a_terminal(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: two out-pointers to live locals; the rest may be null.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: `openpty` just returned both, and nothing else holds them.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        std::fs::File::from(master.try_clone().unwrap())
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = self
+            .command(&self.repo, args)
+            .stdin(slave)
+            .output()
+            .expect("the binary under test must run");
+        drop(master);
+        out
+    }
+
     /// Run with these variables set over the sandbox's own — an `$EDITOR`
     /// that writes, say, where the default one only records.
     fn omh_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -17332,8 +17368,8 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
     }
 
     // Named under `~/.omh` and a link out of it: the link is the session's to
-    // swap between the read and any look at where it leads, so where it was
-    // named decides, whatever it resolves to.
+    // swap between the read and any look at where it leads, so it is never
+    // read through at all.
     let outside = sb.home.join("outside-models.yml");
     std::fs::write(
         &outside,
@@ -17359,8 +17395,7 @@ fn a_provider_a_session_could_have_written_reads_nothing_from_the_environment() 
         .output()
         .unwrap();
     assert!(
-        !out.status.success()
-            && printed(&out).contains("so nothing in it is read from your environment"),
+        !out.status.success() && printed(&out).contains("which omh does not follow"),
         "a link out of ~/.omh: {}",
         printed(&out)
     );
@@ -17654,6 +17689,56 @@ fn a_codex_sessions_config_is_its_own_and_only_preferences_come_back() {
     assert_eq!(
         std::fs::read_to_string(&kept).unwrap(),
         "model = \"gpt-5.5\"\n"
+    );
+}
+
+/// **The review at a session's exit asks at a terminal, and only there.** An
+/// exit is when a session's changed preferences are reviewed, and only
+/// somebody at a keyboard can answer. From a pipe, a `k` waiting to be read is
+/// never taken for one, and the change is left to review. At a terminal, the
+/// question is asked and the answer reaches the account. Untested until a
+/// terminal could be put on stdin here: a known limitation of #207.
+#[cfg(unix)]
+#[test]
+fn the_review_at_a_sessions_exit_asks_at_a_terminal_and_only_there() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    repo_declaring_a_codex_server(&sb, true);
+    let account = codex_account_with_a_shared_config(&sb, "model = \"gpt-5.5\"\n");
+    let kept = account.join("preferences/config.toml");
+    let out = sb.omh(&["new", "codex"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let live = mounted_at(&seen, "/omh/prefs")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("nothing at /omh/prefs: {seen}"));
+    std::fs::write(live.join("config.toml"), "model = \"gpt-5.5-mini\"\n").unwrap();
+
+    let out = sb.omh_with_stdin(&["s01", "resume"], "k\n");
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        !printed(&out).contains("[k]eep all"),
+        "asked with nobody at a terminal: {}",
+        printed(&out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "model = \"gpt-5.5\"\n",
+        "an answer was read from a pipe"
+    );
+
+    let out = sb.omh_at_a_terminal(&["s01", "resume"], "k\n");
+    let said = printed(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("s01 changed 1 codex preference on account `default`:")
+            && said.contains("[k]eep all"),
+        "not asked at a terminal: {said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&kept).unwrap(),
+        "model = \"gpt-5.5-mini\"\n",
+        "{said}"
     );
 }
 
@@ -19602,4 +19687,130 @@ fn a_harness_name_as_the_verb_names_omh_new() {
             "`omh {harness}` does not name `omh new {harness}`: {said}"
         );
     }
+}
+
+/// **A provider file named under `~/.omh` is read the way omh reads what a
+/// session could have written.** The launch's refusal offers to adopt an
+/// account's own `models.yaml`, which sits where the agent can write, and the
+/// adoption read it with `read_to_string`: through a link a session swapped in,
+/// and with nothing said when it succeeded. A link is refused; a regular file
+/// is kept, and the keeping says where it came from.
+#[cfg(unix)]
+#[test]
+fn a_provider_under_omh_is_never_read_through_a_link_and_is_named_when_kept() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let agent = sb.home.join(".omh/creds/omp/default/.omp/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let elsewhere = sb.home.join("elsewhere.yml");
+    std::fs::write(
+        &elsewhere,
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    api: openai-completions\n",
+    )
+    .unwrap();
+    let linked = agent.join("models.yaml");
+    std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+    let login = |file: &std::path::Path| {
+        sb.omh(&[
+            "account",
+            "login",
+            "omp",
+            "--name",
+            "default",
+            "--provider",
+            file.to_str().unwrap(),
+        ])
+    };
+    let out = login(&linked);
+    assert!(
+        !out.status.success(),
+        "a link under ~/.omh was read: {}",
+        printed(&out)
+    );
+    assert!(printed(&out).contains("link"), "{}", printed(&out));
+
+    std::fs::remove_file(&linked).unwrap();
+    std::fs::copy(&elsewhere, &linked).unwrap();
+
+    // Nor through a link at any directory above it: each in turn is moved
+    // aside and a link to it put in its place. What refuses differs by level —
+    // the mountpoint `.omp/agent` is refused before the read is reached — so
+    // what is asserted is the outcome: refused, and nothing kept.
+    let root = sb.home.join(".omh");
+    let mut levels: Vec<_> = linked
+        .ancestors()
+        .skip(1)
+        .take_while(|a| *a != root)
+        .collect();
+    levels.reverse();
+    assert_eq!(levels.len(), 5, "{levels:?}");
+    for level in levels {
+        let aside = level.with_extension("aside");
+        std::fs::rename(level, &aside).unwrap();
+        std::os::unix::fs::symlink(&aside, level).unwrap();
+        let out = login(&linked);
+        let kept = root.join("creds/omp/default/provider.yml");
+        assert!(
+            !out.status.success() && !kept.exists(),
+            "read through a link at {}: {}",
+            level.display(),
+            printed(&out)
+        );
+        std::fs::remove_file(level).unwrap();
+        std::fs::rename(&aside, level).unwrap();
+    }
+
+    // Nor when `~/.omh` is spelled another way — through a link to the home,
+    // as a symlinked home directory spells it: where the file is decides,
+    // not how it was written.
+    let alias = sb.home.parent().unwrap().join("alias");
+    std::os::unix::fs::symlink(&sb.home, &alias).unwrap();
+    let respelled = alias.join(linked.strip_prefix(&sb.home).unwrap());
+    std::fs::remove_file(&linked).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+    let out = login(&respelled);
+    assert!(
+        !out.status.success() && !root.join("creds/omp/default/provider.yml").exists(),
+        "read through a link under ~/.omh spelled another way: {}",
+        printed(&out)
+    );
+    std::fs::remove_file(&linked).unwrap();
+    std::fs::copy(&elsewhere, &linked).unwrap();
+
+    // Spelled that way, with a directory under `~/.omh` a link out of it:
+    // resolving the file's directory leads outside, which is no reason to
+    // follow the link there.
+    let creds = root.join("creds");
+    let outside = sb.home.join("outside-creds");
+    std::fs::rename(&creds, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &creds).unwrap();
+    let out = login(&respelled);
+    assert!(
+        !out.status.success() && !outside.join("omp/default/provider.yml").exists(),
+        "read through a link out of ~/.omh spelled another way: {}",
+        printed(&out)
+    );
+    std::fs::remove_file(&creds).unwrap();
+    std::fs::rename(&outside, &creds).unwrap();
+
+    // And a link of your own into a directory under `~/.omh` enters it
+    // somewhere no walk from `~/.omh` starts: refused, naming the way in.
+    let shortcut = sb.home.join("shortcut");
+    std::os::unix::fs::symlink(linked.parent().unwrap(), &shortcut).unwrap();
+    let out = login(&shortcut.join("models.yaml"));
+    assert!(
+        !out.status.success() && printed(&out).contains("through a link at"),
+        "entered ~/.omh below its top: {}",
+        printed(&out)
+    );
+    std::fs::remove_file(&shortcut).unwrap();
+
+    let out = login(&linked);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("a session could have written"),
+        "keeping it said nothing about where it came from: {}",
+        printed(&out)
+    );
 }
