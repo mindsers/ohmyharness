@@ -975,7 +975,16 @@ impl Account {
         // declared files below and leaves the rest; it was cleared whole, and
         // all of it went. A new session — an id coming round again — still
         // starts from nothing.
-        let keep_state = self.mount == PrefMount::Dir && !created;
+        //
+        // Only a session's own home, already seeded: a scratch home — a login,
+        // doctor's probe — is shared by every account that uses it and starts
+        // clean every time, or one account's state would reach the next. And
+        // the record is a seed's last write, so a home without one holds a
+        // seed that stopped partway, which no review has seen.
+        let keep_state = matches!(home, Home::Kept(_))
+            && self.mount == PrefMount::Dir
+            && !created
+            && recorded.is_some();
         for part in ["base", "reviewed", "live", REST] {
             let dir = root.join(part);
             if part == "live" && keep_state {
@@ -2197,6 +2206,53 @@ base_url = "https://example.invalid"
                 .unwrap()
                 .contains("\"p\""),
             "and the preferences are the new account's"
+        );
+    }
+
+    /// The other half: a scratch home — a login, doctor's probe — is shared by
+    /// every account that uses it, and starts clean every time, so nothing of
+    /// one account's reaches the next.
+    #[test]
+    fn a_scratch_home_keeps_nothing_between_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("creds/opencode/work");
+        let personal = root.path().join("creds/opencode/personal");
+        for acct in [&work, &personal] {
+            std::fs::create_dir_all(acct.join("preferences")).unwrap();
+        }
+        let home = Home::Scratch(root.path().join("run/repo/doctor/.preferences/opencode"));
+        let seed = |acct: &Path| {
+            let checked = check(&opencode(), acct).unwrap().unwrap();
+            checked
+                .seed(&opencode(), &home, &BTreeMap::new(), false)
+                .unwrap()
+        };
+        seed(&work);
+        std::fs::write(live(&home).join("prompt-history.jsonl"), "{}\n").unwrap();
+        seed(&personal);
+        assert!(
+            !live(&home).join("prompt-history.jsonl").exists(),
+            "one account's state reached the next through a scratch home"
+        );
+    }
+
+    /// And a session's home a seed never finished — no record — is not one
+    /// to keep: whatever its `live` holds, no account put it there whole.
+    #[test]
+    fn a_home_no_seed_finished_keeps_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("creds/opencode/work");
+        std::fs::create_dir_all(work.join("preferences")).unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/opencode"));
+        std::fs::create_dir_all(live(&home)).unwrap();
+        std::fs::write(live(&home).join("prompt-history.jsonl"), "{}\n").unwrap();
+        let checked = check(&opencode(), &work).unwrap().unwrap();
+        checked
+            .seed(&opencode(), &home, &BTreeMap::new(), false)
+            .unwrap();
+        assert!(
+            !live(&home).join("prompt-history.jsonl").exists(),
+            "a home no seed finished was kept as a session's own"
         );
     }
 
