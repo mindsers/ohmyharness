@@ -66,33 +66,42 @@ impl Summary {
     }
 }
 
-/// Per-model price in dollars per million tokens, `(input, output)`.
+/// Per-model price in dollars per million tokens, `(input, output, cache
+/// read)`.
 ///
-/// **Dated: read 2026-10 from Anthropic's pricing.** A model omh does not have
-/// a row for is not free — it reports tokens and no cost, so a new model reads
-/// as "cost unknown" rather than "cost zero". Update the table, do not guess.
+/// **Dated: read from the claude-api reference, cached 2026-10-06.** A model
+/// omh does not have a row for is not free — it reports tokens and no cost,
+/// so a new model reads as "cost unknown" rather than "cost zero". Update the
+/// table, do not guess.
+///
+/// The cache-read rate is the row's own: it is a tenth of input on most
+/// models, and not on the newest — 0.05x on Claude Opus 5.5, 0.025x on Claude
+/// Fable 5.1 and Claude Mythos 5.1. Billed at 0.1x for all, a session that
+/// mostly read its cache cost two to four times what it did there.
 ///
 /// A key names one generation wherever generations of a family differ in
 /// price, because the longest prefix wins and a family key would price every
 /// later generation as the first. `claude-haiku-5-5` has no row: its price
 /// depends on the prompt's length, which one rate per model cannot say.
-pub const PRICES: &[(&str, f64, f64)] = &[
-    ("claude-fable-5", 10.0, 50.0),
-    ("claude-mythos-5", 10.0, 50.0),
-    ("claude-opus-5", 5.0, 25.0),
-    ("claude-opus-5-5", 4.0, 20.0),
-    ("claude-opus-4-0", 15.0, 75.0),
-    ("claude-opus-4-2025", 15.0, 75.0),
-    ("claude-opus-4-1", 15.0, 75.0),
-    ("claude-opus-4-5", 5.0, 25.0),
-    ("claude-opus-4-6", 5.0, 25.0),
-    ("claude-opus-4-7", 5.0, 25.0),
-    ("claude-opus-4-8", 5.0, 25.0),
-    ("claude-sonnet-5", 2.0, 10.0),
-    ("claude-sonnet-4", 3.0, 15.0),
-    ("claude-haiku-4-5", 1.0, 5.0),
-    ("claude-3-5-haiku", 0.80, 4.0),
-    ("claude-3-5-sonnet", 3.0, 15.0),
+pub const PRICES: &[(&str, f64, f64, f64)] = &[
+    ("claude-fable-5", 10.0, 50.0, 1.0),
+    ("claude-fable-5-1", 10.0, 50.0, 0.25),
+    ("claude-mythos-5", 10.0, 50.0, 1.0),
+    ("claude-mythos-5-1", 10.0, 50.0, 0.25),
+    ("claude-opus-5", 5.0, 25.0, 0.50),
+    ("claude-opus-5-5", 4.0, 20.0, 0.20),
+    ("claude-opus-4-0", 15.0, 75.0, 1.50),
+    ("claude-opus-4-2025", 15.0, 75.0, 1.50),
+    ("claude-opus-4-1", 15.0, 75.0, 1.50),
+    ("claude-opus-4-5", 5.0, 25.0, 0.50),
+    ("claude-opus-4-6", 5.0, 25.0, 0.50),
+    ("claude-opus-4-7", 5.0, 25.0, 0.50),
+    ("claude-opus-4-8", 5.0, 25.0, 0.50),
+    ("claude-sonnet-5", 2.0, 10.0, 0.20),
+    ("claude-sonnet-4", 3.0, 15.0, 0.30),
+    ("claude-haiku-4-5", 1.0, 5.0, 0.10),
+    ("claude-3-5-haiku", 0.80, 4.0, 0.08),
+    ("claude-3-5-sonnet", 3.0, 15.0, 0.30),
 ];
 
 /// The price row whose key is a prefix of `model`, if any.
@@ -100,12 +109,12 @@ pub const PRICES: &[(&str, f64, f64)] = &[
 /// A prefix match, because a transcript writes the dated id
 /// (`claude-sonnet-4-20260514`) and the table keys the family. The longest
 /// matching key wins, so `claude-3-5-sonnet` is not shadowed by a shorter row.
-fn price_of(model: &str) -> Option<(f64, f64)> {
+fn price_of(model: &str) -> Option<(f64, f64, f64)> {
     PRICES
         .iter()
-        .filter(|(key, _, _)| model.starts_with(key))
-        .max_by_key(|(key, _, _)| key.len())
-        .map(|(_, input, output)| (*input, *output))
+        .filter(|(key, ..)| model.starts_with(key))
+        .max_by_key(|(key, ..)| key.len())
+        .map(|(_, input, output, read)| (*input, *output, *read))
 }
 
 /// Read a `.jsonl` transcript into a `Summary`.
@@ -133,13 +142,12 @@ pub fn summarise(jsonl: &str) -> Summary {
     }
     // Prices, applied once the tokens are summed.
     for (model, usage) in s.usage.iter_mut() {
-        usage.cost = price_of(model).map(|(input, output)| {
-            // Cache pricing relative to the base input rate, per Anthropic's
-            // published multipliers (read 2026-09): a cache read bills at 0.1x,
-            // a cache write at 1.25x.
+        usage.cost = price_of(model).map(|(input, output, read)| {
+            // A cache read at the row's own rate; a cache write at 1.25x
+            // input, the five-minute TTL's multiplier on every model.
             (usage.input as f64 / 1_000_000.0) * input
                 + (usage.output as f64 / 1_000_000.0) * output
-                + (usage.cache_read as f64 / 1_000_000.0) * input * 0.1
+                + (usage.cache_read as f64 / 1_000_000.0) * read
                 + (usage.cache_write as f64 / 1_000_000.0) * input * 1.25
         });
     }
@@ -297,6 +305,31 @@ fn read_codex_record(
 
 #[cfg(test)]
 mod tests {
+
+    /// A cache read bills at the model's own rate, not one tenth of input for
+    /// all: Claude Opus 5.5 reads at $0.20 (0.05x) and Claude Fable 5.1 at
+    /// $0.25 (0.025x), per the claude-api reference cached 2026-10-06. At
+    /// 0.1x a session that mostly reads its cache cost twice and four times
+    /// what it did. Fable 5.1 had no row of its own and was priced as Fable 5.
+    #[test]
+    fn a_cache_read_bills_at_the_models_own_rate() {
+        for (model, per_million) in [
+            ("claude-opus-5-5", 0.20),
+            ("claude-fable-5-1", 0.25),
+            ("claude-mythos-5-1", 0.25),
+            ("claude-fable-5", 1.0),
+            ("claude-sonnet-5-5", 0.20),
+        ] {
+            let turn = format!(
+                r#"{{"type":"assistant","message":{{"model":"{model}","usage":{{"cache_read_input_tokens":1000000}}}}}}"#
+            );
+            let cost = summarise(&turn).cost().unwrap();
+            assert!(
+                (cost - per_million).abs() < 1e-9,
+                "{model}: a million cache reads cost {cost}, not {per_million}"
+            );
+        }
+    }
 
     /// A transcript is the agent's to write, so its numbers are too: two
     /// turns claiming `u64::MAX` tokens each panicked a debug build and
@@ -501,7 +534,11 @@ mod tests {
             ("claude-sonnet-5-5", (2.0, 10.0)),
             ("claude-haiku-4-5-20251001", (1.0, 5.0)),
         ] {
-            assert_eq!(price_of(model), Some(price), "{model}");
+            assert_eq!(
+                price_of(model).map(|(i, o, _)| (i, o)),
+                Some(price),
+                "{model}"
+            );
         }
     }
 
