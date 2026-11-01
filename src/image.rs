@@ -1497,7 +1497,14 @@ fn reap(backend: &Backend, built: &str, kind: &Kind) {
             return;
         }
     };
-    let in_use = images_in_use(backend);
+    // What it cannot see in use, it does not touch.
+    let in_use = match images_in_use(backend) {
+        Ok(in_use) => in_use,
+        Err(e) => {
+            eprintln!("omh: could not list images to reap: {e:#}");
+            return;
+        }
+    };
     let mut gone = Vec::new();
     for tag in superseded(built, &tags, &in_use) {
         match remove_image(backend, &tag) {
@@ -1606,21 +1613,27 @@ fn list_tags(backend: &Backend, kind: &Kind) -> Result<Vec<String>> {
 /// that reference stops resolving — including when an earlier reap untagged it.
 /// The `omh.image` label is the tag omh itself launched, stamped by
 /// `Plan::labels`, and it does not degrade.
-fn images_in_use(backend: &Backend) -> Vec<String> {
-    let read = |args: &[&str]| -> Vec<String> {
-        backend
-            .output(args)
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
+///
+/// **Or why omh could not tell.** This read stdout whatever the status and
+/// answered `[]` for a spawn that failed, so a runtime that would not list its
+/// containers made every superseded tag look unused — and the reaper went on to
+/// remove them.
+fn images_in_use(backend: &Backend) -> Result<Vec<String>> {
+    let read = |args: &[&str]| -> Result<Vec<String>> {
+        let out = backend.output(args)?;
+        anyhow::ensure!(
+            out.status.success(),
+            "listing the containers: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
     };
-    let mut v = read(&["ps", "-a", "--format", "{{.Image}}"]);
+    let mut v = read(&["ps", "-a", "--format", "{{.Image}}"])?;
     v.extend(read(&[
         "ps",
         "-a",
@@ -1628,10 +1641,10 @@ fn images_in_use(backend: &Backend) -> Vec<String> {
         "label=omh.image",
         "--format",
         "{{.Label \"omh.image\"}}",
-    ]));
+    ])?);
     v.sort();
     v.dedup();
-    v
+    Ok(v)
 }
 
 /// The plan names a per-project network; something has to create it. Without
@@ -2183,6 +2196,41 @@ pub fn exists(backend: &Backend, tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A listing of what is in use that failed is not a listing of nothing.**
+    /// `images_in_use` read stdout whatever the status, and `[]` on a spawn
+    /// that failed — so a runtime that would not list its containers made
+    /// every superseded tag look unused, and the reaper went on to remove
+    /// them. What it cannot see in use it does not touch.
+    #[test]
+    fn a_reaper_that_could_not_see_what_is_in_use_removes_nothing() {
+        use crate::runtime::answered;
+        let (backend, asked) = crate::runtime::Backend::scripted(
+            Box::new(crate::runtime::Docker),
+            vec![
+                (
+                    vec!["images"],
+                    answered(0, "omh/base:new\nomh/base:old\n", ""),
+                ),
+                (
+                    vec!["ps"],
+                    answered(1, "", "Cannot connect to the Docker daemon"),
+                ),
+                (vec!["image", "rm"], answered(0, "Deleted: sha256:00\n", "")),
+            ],
+        );
+        reap(&backend, "omh/base:new", &Kind::Base);
+        let removed: Vec<_> = asked
+            .borrow()
+            .iter()
+            .filter(|a| a.starts_with(&["image".to_string(), "rm".to_string()]))
+            .cloned()
+            .collect();
+        assert!(
+            removed.is_empty(),
+            "removed without knowing what is in use: {removed:?}"
+        );
+    }
 
     fn output(code: i32, stdout: &str, stderr: &str) -> std::io::Result<std::process::Output> {
         use std::os::unix::process::ExitStatusExt;
