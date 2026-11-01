@@ -1164,7 +1164,7 @@ impl Adapter {
                 "adapter {shown}: `[provider]` format {format} takes no `path` — it is \
                  rendered into Codex's System layer"
             ),
-            (_, Some(at)) => {
+            (ProviderFormat::OmpModels, Some(at)) => {
                 anyhow::ensure!(
                     inside(at),
                     "adapter {shown}: `[provider] path = {at:?}` must be strictly inside one of \
@@ -1177,7 +1177,7 @@ impl Adapter {
                      into the account directory on the host"
                 );
             }
-            (_, None) => {}
+            (ProviderFormat::CodexConfig, None) => {}
         }
         let import = &provider.import;
         anyhow::ensure!(

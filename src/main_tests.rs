@@ -2091,7 +2091,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // off the pre-2026.08 repo key.
         ("src/paths.rs", 1),
         // `omh account login codex --provider <file>`, in a provider field's refusal.
-        ("src/provider.rs", 1),
+        ("src/provider/codex.rs", 1),
         // `omh account login omp --name <account> --provider <file>`, when the
         // account's own models file defines providers a launch would hide.
         ("src/provider/omp.rs", 1),

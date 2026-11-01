@@ -56,9 +56,13 @@ pub(crate) fn eject(
         None => None,
     };
     let provider = match (&adapter.provider, &account) {
-        (Some(p), Some(account)) if p.format == crate::adapter::ProviderFormat::CodexConfig => {
-            crate::provider::read(account)?.map(|p| crate::provider::redacted(&p))
-        }
+        (Some(p), Some(account)) => match p.format {
+            crate::adapter::ProviderFormat::CodexConfig => {
+                crate::provider::codex::read(account)?.map(|p| crate::provider::codex::redacted(&p))
+            }
+            // Its own file, written below.
+            crate::adapter::ProviderFormat::OmpModels => None,
+        },
         _ => None,
     };
 
@@ -188,12 +192,12 @@ pub(crate) fn eject(
 
     // omp's providers, in the `models.yml` a launch renders over the
     // account's own: a home path, so it lands under `home/`.
-    if let Some(path) = adapter
-        .provider
-        .as_ref()
-        .filter(|p| p.format == crate::adapter::ProviderFormat::OmpModels)
-        .and_then(|p| p.path.as_deref())
-    {
+    let omp_models = adapter.provider.as_ref().and_then(|p| match p.format {
+        crate::adapter::ProviderFormat::OmpModels => p.path.as_deref(),
+        // In the System layer, above.
+        crate::adapter::ProviderFormat::CodexConfig => None,
+    });
+    if let Some(path) = omp_models {
         use crate::provider::omp;
         let doc = match &account {
             Some(account) => omp::read(account)?.map(|d| omp::redacted(&d)),

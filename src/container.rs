@@ -454,9 +454,11 @@ pub fn plan(
     // so a file that would stop every start of the harness refuses the
     // launch instead, naming itself.
     let provider = match (&adapter.provider, &opts.account_dir) {
-        (Some(p), Some(account)) if p.format == crate::adapter::ProviderFormat::CodexConfig => {
-            crate::provider::read(account)?
-        }
+        (Some(p), Some(account)) => match p.format {
+            crate::adapter::ProviderFormat::CodexConfig => crate::provider::codex::read(account)?,
+            // A file of its own, staged below.
+            crate::adapter::ProviderFormat::OmpModels => None,
+        },
         _ => None,
     };
     // Built once, which is what the type is for. Constructed inside the loop it
@@ -925,10 +927,14 @@ pub fn plan(
     // file, read-only. After the credentials, because it lands inside the
     // account's directory.
     if let (Some(provider), Some(account)) = (&adapter.provider, &opts.account_dir) {
-        if let (crate::adapter::ProviderFormat::OmpModels, Some(path)) =
-            (provider.format, &provider.path)
-        {
-            stage_omp_models(path, account, &stage, staging, &mut mounts)?;
+        match (provider.format, &provider.path) {
+            (crate::adapter::ProviderFormat::OmpModels, Some(path)) => {
+                stage_omp_models(path, account, &stage, staging, &mut mounts)?;
+            }
+            // `check_provider` refuses an omp provider with no `path`.
+            (crate::adapter::ProviderFormat::OmpModels, None) => {}
+            // In the System layer, rendered above.
+            (crate::adapter::ProviderFormat::CodexConfig, _) => {}
         }
     }
 
@@ -2462,7 +2468,7 @@ mod tests {
                     .iter()
                     .any(|m| m.host == account.join(".claude.json")
                         || m.host.starts_with(account.join("preferences"))
-                        || m.host == account.join(crate::provider::FILE)
+                        || m.host == account.join(crate::provider::codex::FILE)
                         || m.host == account.join(crate::provider::omp::FILE)),
                 "{harness}: the account's own copied file, kept values or provider is mounted"
             );
@@ -3949,7 +3955,7 @@ mod tests {
         let account = fx.paths.root.join("creds/codex/default");
         std::fs::create_dir_all(&account).unwrap();
         std::fs::write(
-            account.join(crate::provider::FILE),
+            account.join(crate::provider::codex::FILE),
             "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n\
              base_url = \"https://example.invalid/openai\"\n\
              experimental_bearer_token = \"sk-secret\"\n",
@@ -3971,7 +3977,11 @@ mod tests {
             "a staged token is the user's alone: {mode:o}"
         );
 
-        std::fs::write(account.join(crate::provider::FILE), "notify = [\"x\"]\n").unwrap();
+        std::fs::write(
+            account.join(crate::provider::codex::FILE),
+            "notify = [\"x\"]\n",
+        )
+        .unwrap();
         let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
         let (own, repo) = decided_from(&fx);
         let err = plan(
@@ -4028,7 +4038,7 @@ mod tests {
                 0,
                 "a staged key is the user's alone: {mode:o}"
             );
-            crate::provider::omp::parse(&std::fs::read_to_string(&m.host).unwrap()).unwrap()
+            crate::doc::parse_yaml(&std::fs::read_to_string(&m.host).unwrap()).unwrap()
         };
 
         let p = plan_account(&fx, "omp", Some(account.clone()));

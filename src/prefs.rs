@@ -56,12 +56,12 @@ impl Format {
     pub fn parse(self, raw: &[u8]) -> Result<Doc> {
         let text = std::str::from_utf8(raw).context("it is not UTF-8")?;
         let value = match self {
-            Format::Toml => serde_json::to_value(crate::provider::parse(text)?)?,
+            Format::Toml => serde_json::to_value(crate::doc::parse_toml(text)?)?,
             Format::Json if text.trim().is_empty() => return Ok(Doc::new()),
             Format::Json => serde_json::from_str(text).context("it is not JSON")?,
             // As omp reads it: a file with no document is no settings.
             Format::Yaml => {
-                match crate::provider::omp::parse(text).map_err(|e| anyhow::anyhow!("it {e}"))? {
+                match crate::doc::parse_yaml(text).map_err(|e| anyhow::anyhow!("it {e}"))? {
                     Value::Null => return Ok(Doc::new()),
                     v => v,
                 }
@@ -623,11 +623,11 @@ fn refuse_a_lost_provider(
     let Some(selected) = doc.get("model_provider").and_then(|p| p.as_str()) else {
         return Ok(());
     };
-    let reads = adapter
-        .provider
-        .as_ref()
-        .is_some_and(|p| p.format == crate::adapter::ProviderFormat::CodexConfig);
-    if selected == "openai" || !reads || crate::provider::read(account)?.is_some() {
+    let reads = adapter.provider.as_ref().is_some_and(|p| match p.format {
+        crate::adapter::ProviderFormat::CodexConfig => true,
+        crate::adapter::ProviderFormat::OmpModels => false,
+    });
+    if selected == "openai" || !reads || crate::provider::codex::read(account)?.is_some() {
         return Ok(());
     }
     let url = doc
@@ -1558,7 +1558,7 @@ base_url = "https://example.invalid"
         assert_eq!(std::fs::read_to_string(&file).unwrap(), azure);
         assert!(!account.join("preferences").exists());
 
-        crate::provider::write(
+        crate::provider::codex::write(
             &account,
             &toml::from_str(
                 "model_provider = \"azure\"\n[model_providers.azure]\nname = \"Azure\"\n",

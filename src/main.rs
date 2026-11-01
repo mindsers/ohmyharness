@@ -19,6 +19,7 @@ mod config;
 mod container;
 mod derive;
 mod detect;
+mod doc;
 mod doctor;
 mod editor;
 mod facts;
