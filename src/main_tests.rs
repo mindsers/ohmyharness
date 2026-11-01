@@ -5198,7 +5198,9 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
-    let _ = sb.top_up(
+    // Kept, not dropped: on a Linux nightly the shim once heard nothing at
+    // all, and with this discarded the log could not say why.
+    let topped = sb.top_up(
         &paths,
         &runtime::Backend::shimmed(Box::new(runtime::Docker), &bin),
         &adapter,
@@ -5216,7 +5218,8 @@ fn a_probe_that_cannot_run_suppresses_nothing() {
     let said = std::fs::read_to_string(&asked).unwrap_or_default();
     assert!(
         said.lines().any(|l| l.starts_with("build ")),
-        "the build skipped the shim and ran the host's docker; the shim heard: {said:?}"
+        "the build skipped the shim and ran the host's docker; the shim heard: \
+         {said:?}, and top_up answered: {topped:?}"
     );
 
     assert_eq!(
