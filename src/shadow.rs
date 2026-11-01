@@ -1216,28 +1216,27 @@ impl Shadow {
         )?;
         let fields: Vec<&str> = answer.split('\0').collect();
         let users = users_excludes_file();
-        // What the sandbox's own config names as its excludes file is the
-        // agent's, whatever it points at.
-        let agents = git(
+        // Every excludes file a config other than the user's own names — the
+        // repository's, its `config.worktree`, anything they include — is the
+        // agent's, whatever it points at. `--show-scope` says whose each value
+        // is: `--local` alone reads neither `config.worktree` nor an
+        // `include`.
+        let agents: Vec<String> = git(
             &self.gitdir,
             worktree,
-            // `--includes`: off by default with `--local`, and an `include`
-            // in the agent's config is a way to name one out of sight.
-            &[
-                "config",
-                "--includes",
-                "--local",
-                "--get",
-                "core.excludesFile",
-            ],
+            &["config", "--show-scope", "--get-all", "core.excludesFile"],
         )
-        .ok()
-        .map(|named| named.trim().to_string())
-        .filter(|named| !named.is_empty());
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(scope, _)| !matches!(*scope, "global" | "system"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
         let mut believed: Vec<&str> = Vec::new();
         // `source NUL line NUL pattern NUL path NUL`, one per path.
         for &[source, _line, pattern, path] in fields.as_chunks::<4>().0 {
-            let trusted = if agents.as_deref() == Some(source) {
+            let trusted = if agents.iter().any(|a| a == source) {
                 false
             } else if std::path::Path::new(source) == exclude {
                 ours.as_ref()
