@@ -39,6 +39,7 @@ mod out;
 mod persist;
 mod prefs;
 mod provider;
+mod quote;
 mod render;
 mod report;
 mod rules;

@@ -839,17 +839,9 @@ fn log_statement(path: &str, name: &str, decision: crate::ledger::Decision) -> S
     // for every redirection the group performs, including the failing one.
     format!(
         "{{ printf '%s\\n' {} >>{}; }} 2>/dev/null || true",
-        shell_single_quote(&crate::ledger::line(name, decision)),
-        shell_single_quote(path),
+        crate::quote::sh(&crate::ledger::line(name, decision)),
+        crate::quote::sh(path),
     )
-}
-
-/// A single-quoted shell word — no interpolation of any kind, which a JSON
-/// line built from omh's own catalogue-validated hook names never needs.
-/// Embedded single quotes (none a shipped hook name or guest path can carry
-/// today) are still closed correctly rather than assumed absent.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// A double-quoted shell word: `$` stays live so a hook can name what it is

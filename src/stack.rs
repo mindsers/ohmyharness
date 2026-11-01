@@ -325,14 +325,14 @@ pub const BLIND: i32 = 96;
 pub fn predicate_script(markers: &[&str], candidates: &[(String, Option<&str>)]) -> String {
     let mut out = String::from("#!/bin/sh\n");
     for marker in markers {
-        let m = crate::doctor::single_quote(marker);
+        let m = crate::quote::sh(marker);
         out.push_str(&format!(
             "[ -e {m} ] || {{ printf 'the sandbox cannot see %s, which is in this repo — \
              the repo is not mounted where its conditions run\\n' {m} >&2; exit {BLIND}; }}\n"
         ));
     }
     for (key, when) in candidates {
-        let k = crate::doctor::single_quote(key);
+        let k = crate::quote::sh(key);
         match when {
             // No condition is not a failed condition.
             None => out.push_str(&format!("printf 'ok\\t%s\\tapplies\\n' {k}\n")),

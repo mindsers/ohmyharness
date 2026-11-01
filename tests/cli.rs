@@ -450,9 +450,11 @@ impl Sandbox {
     /// probe that *answered* can reach went untested. This one reads the check
     /// names out of the script it is handed (each check prints
     /// `ok<TAB>name<TAB>…` on success) and answers each, as `ok` unless it is
-    /// named in `failing`, and not at all if it is named in `silent`. The
-    /// program probe `top_up` runs (`printf 'ok\t%s…'`) gets no answer, which
-    /// is a sandbox that could not be measured, as under `fake_docker`.
+    /// named in `failing`, and not at all if it is named in `silent`. Each
+    /// check passes its name to `printf` as an argument, `printf 'ok\t%s…'
+    /// 'name'`. The program probe `top_up` runs, the one built of
+    /// `command -v`, gets no answer, which is a sandbox that could not be
+    /// measured, as under `fake_docker`.
     fn fake_docker_answering_doctor(&self, failing: &[&str], silent: &[&str]) -> PathBuf {
         let log = self.bin.join("docker.log");
         let answer = self.bin.join("doctor-answer");
@@ -463,7 +465,7 @@ impl Sandbox {
             &answer,
             format!(
                 r#"#!/bin/sh
-printf '%s\n' "$1" | sed -n "s/.*printf 'ok\\\\t\([^\\\\]*\)\\\\t.*/\1/p" |
+printf '%s\n' "$1" | sed -n "s/.*printf 'ok\\\\t%s\\\\t[^']*' '\([^']*\)'.*/\1/p" |
 while IFS= read -r name; do
   grep -qxF -- "$name" {silent} && continue
   if grep -qxF -- "$name" {failing}; then printf 'fail\t%s\tplanted by the test\n' "$name"
@@ -484,7 +486,7 @@ printf '%s\n' "$*" >> {log}
 if [ "$1" = inspect ]; then echo true; fi
 for a in "$@"; do
   case "$a" in
-    '#!/bin/sh'*) case "$a" in *"printf 'ok\t%s"*) ;; *) sh {answer} "$a" ;; esac ;;
+    '#!/bin/sh'*) case "$a" in *"command -v "*) ;; *) sh {answer} "$a" ;; esac ;;
   esac
 done
 exit 0

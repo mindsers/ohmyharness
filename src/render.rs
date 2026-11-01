@@ -1493,16 +1493,16 @@ fn omp_one_hook(
     {
         b.push_str(&format!(
             "    const cap = sh({}, env)\n    if (!cap.ran || cap.code !== 0) warn({}, \"capture\", cap)\n    env[{:?}] = cap.out\n",
-            js(capture),
-            js(name),
+            crate::quote::js(capture),
+            crate::quote::js(name),
             hook::CAPTURE_VAR,
         ));
     }
     if let Some(when) = &hook.when {
         b.push_str(&format!(
             "    const p = sh({}, env)\n    if (!p.ran || p.err) warn({}, \"its `when`\", p)\n",
-            js(when),
-            js(name),
+            crate::quote::js(when),
+            crate::quote::js(name),
         ));
         // A guard that could not be evaluated is not a guard that declined.
         // Both leave `p.code` at 1, and returning from `tool_call` means allow
@@ -1515,7 +1515,7 @@ fn omp_one_hook(
                 log_call(log, name, ledger::Decision::Unevaluated),
                 t.template.replace(
                     "{{text}}",
-                    &js(&format!(
+                    &crate::quote::js(&format!(
                         "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
                     )),
                 ),
@@ -1537,8 +1537,8 @@ fn omp_one_hook(
     match &hook.action {
         hook::Action::Run(run) => b.push_str(&format!(
             "    const r = sh({}, env)\n    if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
-            js(run),
-            js(name),
+            crate::quote::js(run),
+            crate::quote::js(name),
         )),
         hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
             let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
@@ -1549,9 +1549,9 @@ fn omp_one_hook(
                         "{{text}}",
                         &format!(
                             "t({}, {}, {}, env)",
-                            js(name),
-                            js(text),
-                            js(&hook::interpolating(text))
+                            crate::quote::js(name),
+                            crate::quote::js(text),
+                            crate::quote::js(&hook::interpolating(text))
                         ),
                     )
                     .replace("{{event}}", wired.event)
@@ -1626,16 +1626,16 @@ fn one_hook(
     {
         b.push_str(&format!(
             "      const cap = sh({}, env)\n      if (!cap.ran || cap.code !== 0) warn({}, \"capture\", cap)\n      env[{:?}] = cap.out\n",
-            js(capture),
-            js(name),
+            crate::quote::js(capture),
+            crate::quote::js(name),
             hook::CAPTURE_VAR,
         ));
     }
     if let Some(when) = &hook.when {
         b.push_str(&format!(
             "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n",
-            js(when),
-            js(name),
+            crate::quote::js(when),
+            crate::quote::js(name),
         ));
         // Fails closed, as `omp_one_hook` does and for its reason: a shell
         // that never started leaves `p.code` at 1, the same as a guard that
@@ -1649,7 +1649,7 @@ fn one_hook(
                 t.template
                     .replace(
                         "{{text}}",
-                        &js(&format!(
+                        &crate::quote::js(&format!(
                             "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
                         )),
                     )
@@ -1678,8 +1678,8 @@ fn one_hook(
         // saying rather than discarding.
         hook::Action::Run(run) => b.push_str(&format!(
             "      const r = sh({}, env)\n      if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
-            js(run),
-            js(name),
+            crate::quote::js(run),
+            crate::quote::js(name),
         )),
         // The harness's protocol comes from the adapter, as it does for every
         // other render. `{{text}}` receives an expression evaluating to the
@@ -1694,9 +1694,9 @@ fn one_hook(
                         "{{text}}",
                         &format!(
                             "t({}, {}, {}, env)",
-                            js(name),
-                            js(text),
-                            js(&hook::interpolating(text))
+                            crate::quote::js(name),
+                            crate::quote::js(text),
+                            crate::quote::js(&hook::interpolating(text))
                         ),
                     )
                     .replace("{{event}}", wired.event)
@@ -1715,27 +1715,12 @@ fn log_call(log: Option<&str>, name: &str, decision: ledger::Decision) -> String
     match log {
         Some(path) => format!(
             "omh_log({}, {}, {:?}); ",
-            js(path),
-            js(name),
+            crate::quote::js(path),
+            crate::quote::js(name),
             decision.wire()
         ),
         None => String::new(),
     }
-}
-
-/// A Rust string as a JavaScript string literal. Through `serde_json` because
-/// JSON string syntax is a subset of JavaScript's, and hand-rolling the escapes
-/// for a hook body — which holds quotes, backslashes and newlines by design —
-/// is how a generated program stops parsing.
-///
-/// U+2028 and U+2029 are escaped too. `serde_json` leaves them raw, which is
-/// legal inside a string literal since ES2019 — but they end a line anywhere
-/// else, so the literal is safe wherever it lands.
-fn js(s: &str) -> String {
-    serde_json::to_string(s)
-        .unwrap_or_else(|_| "\"\"".into())
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
 }
 
 /// A hook's name as the `//` comment labelling its handler.
@@ -1749,7 +1734,7 @@ fn label(name: &str) -> String {
         .chars()
         .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
     {
-        js(name)
+        crate::quote::js(name)
     } else {
         name.to_string()
     }
