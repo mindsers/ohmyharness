@@ -1291,22 +1291,49 @@ pub(crate) fn ensure_line(path: &std::path::Path, line: &str) -> Result<()> {
 
 /// Append each of `lines` that `path` does not already have, and say which.
 ///
-/// **Appended, never rewritten, and never read as empty unless it is.** Both
-/// callers read the file with `unwrap_or_default()` and wrote the whole of it
-/// back, so one they could not read as text — a byte that is not UTF-8, a mode
-/// they could not open — came back holding only omh's lines, and every rule
-/// the user had kept there was gone. It is read as bytes now, absent only when
-/// it is absent, and only appended to: an append never empties a file, even
-/// one cut short by a full disk, which is what the old atomic replace was for.
+/// **Never read as empty unless it is, and never written through a link.**
+/// Both callers read the file with `unwrap_or_default()` and wrote the whole of
+/// it back, so one they could not read as text — a byte that is not UTF-8, a
+/// mode they could not open — came back holding only omh's lines, and every
+/// rule the user had kept there was gone. It is read as bytes now, absent only
+/// when it is absent, and written back whole with what was missing added.
+///
+/// Through `held::Dir`: the directory and the file are opened without
+/// following a link, and the file is replaced by a rename, which replaces a
+/// link rather than writing through it. A cloned repo can commit
+/// `.omh/.gitignore` — or `.omh` itself — as a link to `~/.bashrc`; that is
+/// refused, naming the path, and nothing outside the repo is written.
 pub(crate) fn append_missing<'a>(
     path: &std::path::Path,
     lines: &[&'a str],
 ) -> Result<Vec<&'a str>> {
-    use std::io::Write;
-    let existing = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    use std::io::Read;
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        anyhow::bail!("{} names no file in a directory", path.display());
+    };
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let dir = crate::held::Dir::open(parent).with_context(|| {
+        format!(
+            "opening {} — omh writes there only if it is a directory, not a link to one",
+            parent.display()
+        )
+    })?;
+    let existing = match dir.file(name) {
+        Ok(mut file) => {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .with_context(|| format!("reading {}", path.display()))?;
+            bytes
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "reading {} — omh writes there only if it is a regular file, not a link",
+                    path.display()
+                )
+            });
+        }
     };
     let text = String::from_utf8_lossy(&existing);
     let missing: Vec<&str> = lines
@@ -1317,23 +1344,15 @@ pub(crate) fn append_missing<'a>(
     if missing.is_empty() {
         return Ok(missing);
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut add = String::new();
-    if !existing.is_empty() && !existing.ends_with(b"\n") {
-        add.push('\n');
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with(b"\n") {
+        next.push(b'\n');
     }
     for line in &missing {
-        add.push_str(line);
-        add.push('\n');
+        next.extend_from_slice(line.as_bytes());
+        next.push(b'\n');
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut f| f.write_all(add.as_bytes()))
+    dir.replace(name, &next)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(missing)
 }
