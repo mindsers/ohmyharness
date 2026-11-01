@@ -1595,6 +1595,13 @@ impl Plan {
             ("omh.mounts".into(), mounts.join("\n")),
             ("omh.env".into(), env.join("\n")),
             ("omh.limits".into(), self.limits.stamp()),
+            // What confines it, as the flags that do: a release that changes
+            // `SESSION_CAPS` or the pids limit alone read as no drift, and the
+            // running container kept the old ones.
+            (
+                "omh.confinement".into(),
+                crate::runtime::confinement(self).join("\n"),
+            ),
         ]
     }
 

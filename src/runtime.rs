@@ -241,7 +241,7 @@ pub const PIDS_LIMIT: u32 = 2048;
 ///
 /// Not `--security-opt=no-new-privileges`: the entrypoint's `sudo` needs to
 /// gain privilege, and the decision was to keep sudo. A test pins that reason.
-fn confinement(plan: &Plan) -> Vec<String> {
+pub(crate) fn confinement(plan: &Plan) -> Vec<String> {
     let mut a: Vec<String> = vec!["--cap-drop=ALL".into()];
     a.extend(SESSION_CAPS.iter().map(|c| format!("--cap-add={c}")));
     a.extend(["--pids-limit".into(), PIDS_LIMIT.to_string()]);
@@ -1983,6 +1983,27 @@ mod tests {
             assert!(
                 args[1..tag_at].iter().any(|a| a == "--pull=never"),
                 "a tag reaped out from under this launch must fail, not pull: {args:?}"
+            );
+        }
+    }
+
+    /// What confines a container is part of its stamp, so a release that
+    /// changes it reaches a session already running. The stamp named the
+    /// image, network, mounts, env and limits; a change to `SESSION_CAPS` or
+    /// the pids limit alone — 0.14.1 added `SYS_CHROOT` — read as no drift, and
+    /// `reuse` kept the old container.
+    #[test]
+    fn every_confinement_flag_is_in_the_stamp() {
+        let plan = sample_plan();
+        let stamp: String = plan
+            .labels()
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}\n"))
+            .collect();
+        for flag in confinement(&plan) {
+            assert!(
+                stamp.contains(&flag),
+                "`{flag}` is not in the stamp:\n{stamp}"
             );
         }
     }
