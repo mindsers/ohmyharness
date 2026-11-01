@@ -6846,10 +6846,10 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // rather than assert a number that goes stale the first time somebody
     // moves a line.
     //
-    // Three are the exemptions this rule has always had: the error renderer
-    // in `main`, which cannot report through the thing it is reporting
-    // about, and the two MCP sites, which speak protocol on stdout and have
-    // no `Ctx` to report through.
+    // Two are the exemptions this rule has always had: the MCP sites, which
+    // speak protocol on stdout and have no `Ctx` to report through. The error
+    // renderer in `main` was a third; it writes through `out::put` now, which
+    // is what ends omh quietly when the reader has gone.
     //
     // The tenth is neither: it is a relay of a child's stream, listed
     // separately below.
@@ -6868,8 +6868,7 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // which is a guard failing for a reason that has nothing to do with
     // what it guards.
     let named = [
-        // The three real exemptions.
-        ("src/main.rs", "out::problem"),
+        // The real exemptions.
         ("src/mcp.rs", "omh-mcp: ignoring unparseable line"),
         // Owed a `Ctx`. See above.
         ("src/facts.rs", "could not read"),
@@ -6926,10 +6925,10 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     }
     assert_eq!(
         named.len(),
-        8,
-        "the debt register grew. Three exemptions and five owed sites — the sbx \
+        7,
+        "the debt register grew. The MCP exemption and six owed sites — the sbx \
          delivery folded three build-note prints into `provide` (one text) and \
-         added the template-load note beside it. A seventh owed site is a fix, \
+         added the template-load note beside it. Another owed site is a fix, \
          not an entry"
     );
     // The comment above `relayed` says it "may not quietly become a second

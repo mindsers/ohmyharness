@@ -63,12 +63,11 @@ use clap::Parser;
 use cli::{AccountCmd, Cli, Cmd, MemoryCmd, SessionsCmd, SettingsCmd};
 
 fn main() -> std::process::ExitCode {
-    // A closed pipe (`omh info | head`) is not a crash. Without this, Rust's
-    // default panics on the failed write and prints a backtrace.
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+    // SIGPIPE stays ignored, Rust's default. A closed pipe (`omh info | head`)
+    // still ends omh quietly, by SIGPIPE, but `out::put` raises it at the write
+    // to the user's reader: reset here for the whole process, it also killed
+    // omh at any write to a child that had exited — a `docker build` that
+    // refused before reading its recipe, with nothing said on either stream.
 
     // One sink for every failure, including the ones that happen before there
     // is a `Cli` to ask about colour — `no_command_writes_to_a_stream_behind_
@@ -106,7 +105,7 @@ fn main() -> std::process::ExitCode {
     match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprint!("{}", out::problem(&palette, &e));
+            out::put(out::Stream::Stderr, &out::problem(&palette, &e));
             std::process::ExitCode::FAILURE
         }
     }
