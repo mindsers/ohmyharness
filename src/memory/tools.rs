@@ -181,7 +181,7 @@ impl Server {
         // sandbox, where the checkout is the workdir.
         match memory::remember_in(
             &self.notes_dir,
-            std::path::Path::new(crate::container_workdir()),
+            std::path::Path::new(crate::guest::WORKDIR),
             &self.templates,
             &input,
             IfExists::Error,

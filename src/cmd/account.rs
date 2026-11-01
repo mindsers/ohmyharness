@@ -547,16 +547,17 @@ fn login_in_sandbox(
 
     // Host paths, not guest ones: the guest path names a container that has
     // already been torn down and that the user cannot inspect.
-    let unfilled: Vec<std::path::PathBuf> = auth::unfilled(adapter, account_dir, auth::GUEST_HOME)
-        .iter()
-        .map(|guest| {
-            account_dir.join(
-                guest
-                    .strip_prefix(auth::GUEST_HOME)
-                    .unwrap_or(guest.as_path()),
-            )
-        })
-        .collect();
+    let unfilled: Vec<std::path::PathBuf> =
+        auth::unfilled(adapter, account_dir, crate::guest::GUEST_HOME)
+            .iter()
+            .map(|guest| {
+                account_dir.join(
+                    guest
+                        .strip_prefix(crate::guest::GUEST_HOME)
+                        .unwrap_or(guest.as_path()),
+                )
+            })
+            .collect();
     auth::login_outcome(status.success(), &unfilled).map_err(|e| {
         e.context(format!(
             "run `omh account login {harness} --name {account}` again"

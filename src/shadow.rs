@@ -225,11 +225,11 @@ pub fn turn_hook_command(gitdir: &str, worktree: &str) -> String {
 /// the trap this project keeps rediscovering: it proved the reimplementation
 /// worked, and would have passed against a hook that did nothing at all.
 pub fn turn_hook_for_the_sandbox() -> String {
-    // Through `container_workdir()` rather than a second literal — a test
+    // Through `guest::WORKDIR` rather than a second literal — a test
     // allows exactly one spelling of the guest workdir in the whole tree, and
     // it found the const the moment it was added. It reads comments too, so
     // this one does not quote the path either.
-    turn_hook_command(GUEST_GITDIR, crate::container_workdir())
+    turn_hook_command(GUEST_GITDIR, crate::guest::WORKDIR)
 }
 
 /// The test that stops the hook from running anywhere it would be nonsense.
@@ -2804,7 +2804,7 @@ pub fn unscannable(repo: &Path, carried: &[String]) -> Result<Vec<Unscanned>> {
 /// where the user can still act, and the harvest, where the count would
 /// otherwise read as a clean bill. Two sites wording this differently is how
 /// one of them ends up sounding like a note rather than a gap, and it is the
-/// same argument `image::GUEST_HOME` makes about consistency by copying.
+/// same argument `crate::guest::GUEST_HOME` makes about consistency by copying.
 ///
 /// Empty in, `None` out: nothing to say is said by saying nothing, not by
 /// printing a reassuring line about zero problems.

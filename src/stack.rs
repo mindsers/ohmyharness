@@ -379,7 +379,7 @@ pub fn predicate_args(tag: &str, repo: &Path, script: &str) -> Vec<String> {
     // Never the literal — `only_one_place_spells_the_container_workdir` counts
     // the spellings across the source, because asserting that two sides are
     // equal passes just as well when both hold the same hardcoded string.
-    let workdir = crate::container_workdir();
+    let workdir = crate::guest::WORKDIR;
     vec![
         "run".into(),
         "--rm".into(),
@@ -1512,7 +1512,7 @@ because = "cargo is how a rust project is built and tested"
         );
         assert!(
             args.windows(2)
-                .any(|w| w[0] == "-w" && w[1] == crate::container_workdir()),
+                .any(|w| w[0] == "-w" && w[1] == crate::guest::WORKDIR),
             "a predicate written `test -f pnpm-lock.yaml` needs the repo as its \
              working directory: {args:?}"
         );

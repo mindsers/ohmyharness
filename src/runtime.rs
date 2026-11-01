@@ -472,7 +472,7 @@ impl Runtime for Docker {
             "-u".into(),
             "agent".into(),
             "-w".into(),
-            crate::container_workdir().into(),
+            crate::guest::WORKDIR.into(),
         ];
         a.push(name.into());
         a.extend(argv.iter().cloned());
@@ -490,7 +490,7 @@ impl Runtime for Docker {
             "-u".into(),
             "agent".into(),
             "-w".into(),
-            crate::container_workdir().into(),
+            crate::guest::WORKDIR.into(),
         ]);
         a.push(name.into());
         a.extend(argv.iter().cloned());
@@ -2230,13 +2230,13 @@ mod tests {
 
 #[cfg(test)]
 mod workdir_tests {
-    /// `container_workdir`'s docstring says the path is named once, so the note
+    /// `guest::WORKDIR`'s docstring says the path is named once, so the note
     /// store and the launch plan cannot disagree about it. It was not: the plan
     /// spelled it twice and the note store's path folding a third time.
     ///
     /// Introspects the source, the way the dispatch guard introspects the CLI
     /// definition, because the obvious test cannot fail. Asserting that the
-    /// plan's workdir equals `container_workdir()` passes just as well when the
+    /// plan's workdir equals `guest::WORKDIR` passes just as well when the
     /// plan holds the literal — both sides are the same string, so it pins
     /// nothing. Only counting the spellings can tell them apart.
     ///
@@ -2263,7 +2263,7 @@ mod workdir_tests {
         assert_eq!(
             offenders.len(),
             1,
-            "exactly one place may spell it — `container_workdir` itself. Found: {offenders:?}"
+            "exactly one place may spell it — `guest::WORKDIR` itself. Found: {offenders:?}"
         );
     }
 }

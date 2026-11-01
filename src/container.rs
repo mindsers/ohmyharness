@@ -9,6 +9,7 @@
 
 use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::catalogue::Catalogue;
+use crate::guest::GUEST_HOME;
 use crate::paths::Paths;
 use crate::session::Session;
 use anyhow::{Context, Result};
@@ -246,7 +247,6 @@ pub struct Mount {
 }
 
 /// Home directory *inside* the container. Adapters template `$HOME` against it.
-use crate::image::GUEST_HOME;
 
 /// Where catalogue layer `i`'s copy of `cap` is mounted inside the container.
 fn guest_layer(i: usize, cap: Capability) -> PathBuf {
@@ -424,7 +424,7 @@ pub fn plan(
     // The agent's entire world. Never the host working tree.
     mounts.push(Mount {
         host: session.worktree.clone(),
-        guest: crate::container_workdir().into(),
+        guest: crate::guest::WORKDIR.into(),
         read_only: false,
         file: false,
     });
@@ -582,7 +582,7 @@ pub fn plan(
         }
         mounts.push(Mount {
             host: item.host.clone(),
-            guest: PathBuf::from(crate::container_workdir()).join(&item.rel),
+            guest: PathBuf::from(crate::guest::WORKDIR).join(&item.rel),
             read_only: false,
             file: true,
         });
@@ -612,7 +612,7 @@ pub fn plan(
     if session.branch.is_some() {
         let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
 
-        let workdir = crate::container_workdir();
+        let workdir = crate::guest::WORKDIR;
         let mut excluded = crate::config::policy_list(paths, "carry_in")?;
         excluded.extend(mounts.iter().filter_map(|m| {
             m.guest
@@ -753,7 +753,7 @@ pub fn plan(
     if memory_on {
         mounts.push(Mount {
             host: paths.memory(),
-            guest: PathBuf::from(crate::memory::GUEST_MEMORY),
+            guest: PathBuf::from(crate::guest::GUEST_MEMORY),
             read_only: false,
             file: false,
         });
@@ -770,7 +770,7 @@ pub fn plan(
     if let Some(bin) = opts.memory_bin.clone().filter(|_| memory_on) {
         mounts.push(Mount {
             host: bin,
-            guest: PathBuf::from(crate::memory::deliver::GUEST_BIN),
+            guest: PathBuf::from(crate::guest::GUEST_BIN),
             read_only: true,
             file: true,
         });
@@ -1005,7 +1005,7 @@ pub fn plan(
             true => paths.session_network(&session.id),
             false => paths.scratch_network(),
         },
-        workdir: crate::container_workdir().into(),
+        workdir: crate::guest::WORKDIR.into(),
         argv: crate::persist::wrap(
             opts.persist,
             &session.id,
@@ -2429,7 +2429,7 @@ mod tests {
         );
         assert!(guests.contains(&"/work".to_string()));
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
-        assert!(guests.iter().any(|g| g == crate::memory::GUEST_MEMORY));
+        assert!(guests.iter().any(|g| g == crate::guest::GUEST_MEMORY));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
         assert!(
             guests.iter().any(|g| g.contains(".claude/projects")),
@@ -3015,7 +3015,7 @@ mod tests {
         let notes = p
             .mounts
             .iter()
-            .find(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+            .find(|m| m.guest == Path::new(crate::guest::GUEST_MEMORY))
             .expect("the local note store must reach the sandbox");
 
         assert!(!notes.read_only, "`remember` writes there");
@@ -3052,7 +3052,7 @@ mod tests {
         let mount = p
             .mounts
             .iter()
-            .find(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN))
+            .find(|m| m.guest == Path::new(crate::guest::GUEST_BIN))
             .expect("the server binary must be mounted");
 
         assert_eq!(mount.host, host);
@@ -3074,7 +3074,7 @@ mod tests {
         assert!(
             !p.mounts
                 .iter()
-                .any(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN)),
+                .any(|m| m.guest == Path::new(crate::guest::GUEST_BIN)),
             "nothing is mounted where nothing exists"
         );
     }
@@ -3088,7 +3088,7 @@ mod tests {
         let host_of = |p: &Plan| {
             p.mounts
                 .iter()
-                .find(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+                .find(|m| m.guest == Path::new(crate::guest::GUEST_MEMORY))
                 .map(|m| m.host.clone())
                 .expect("note store mount")
         };
@@ -4793,13 +4793,11 @@ mod tests {
             .map(|m| m.guest.display().to_string())
             .collect();
         assert!(
-            !guests.iter().any(|g| g == crate::memory::GUEST_MEMORY),
+            !guests.iter().any(|g| g == crate::guest::GUEST_MEMORY),
             "no note store: {guests:?}"
         );
         assert!(
-            !guests
-                .iter()
-                .any(|g| g == crate::memory::deliver::GUEST_BIN),
+            !guests.iter().any(|g| g == crate::guest::GUEST_BIN),
             "and no server binary: {guests:?}"
         );
     }
@@ -4856,10 +4854,7 @@ mod tests {
                 },
             )
             .unwrap();
-            for guest in [
-                crate::memory::GUEST_MEMORY,
-                crate::memory::deliver::GUEST_BIN,
-            ] {
+            for guest in [crate::guest::GUEST_MEMORY, crate::guest::GUEST_BIN] {
                 assert_eq!(
                     p.mounts.iter().any(|m| m.guest == Path::new(guest)),
                     on,
@@ -4962,12 +4957,12 @@ mod tests {
                     ("note store", |p, _| {
                         p.mounts
                             .iter()
-                            .any(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+                            .any(|m| m.guest == Path::new(crate::guest::GUEST_MEMORY))
                     }),
                     ("server binary", |p, _| {
                         p.mounts
                             .iter()
-                            .any(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN))
+                            .any(|m| m.guest == Path::new(crate::guest::GUEST_BIN))
                     }),
                 ],
             ),

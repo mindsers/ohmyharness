@@ -1041,7 +1041,7 @@ fn note_taking() -> String {
          under **Expected**, there is nothing here worth recording.\n\n\
          Rename a note by rewriting its `key` and its filename together — never\n\
          one without the other.\n",
-        crate::memory::GUEST_MEMORY,
+        crate::guest::GUEST_MEMORY,
     )
 }
 
@@ -1173,7 +1173,7 @@ pub fn index_args(
         "-v".into(),
         // Read-only: indexing reads code, and an indexer that can write into
         // the checkout is a sandbox hole for no benefit.
-        format!("{}:{}:ro", repo.display(), crate::container_workdir()),
+        format!("{}:{}:ro", repo.display(), crate::guest::WORKDIR),
         "-v".into(),
         format!("{cache_volume}:{GRAPH_CACHE}"),
         // The server derives its project name from the working directory, not
@@ -1185,13 +1185,13 @@ pub fn index_args(
         // the agent does. Spelled as a literal until 2026.09, when the source
         // scans first read this far into the file — see `testsrc`.
         "-w".into(),
-        crate::container_workdir().into(),
+        crate::guest::WORKDIR.into(),
         image.into(),
         GRAPH_BIN.into(),
         "cli".into(),
         "index_repository".into(),
         "--repo-path".into(),
-        crate::container_workdir().into(),
+        crate::guest::WORKDIR.into(),
         // Sessions live at different paths and the server derives a project
         // name from the path; without this every session builds its own graph.
         "--name".into(),
@@ -1971,7 +1971,7 @@ command = "c"
         let args = entry.args.clone();
         assert!(
             args.windows(2)
-                .any(|w| w[0] == "--notes" && w[1] == crate::memory::GUEST_MEMORY),
+                .any(|w| w[0] == "--notes" && w[1] == crate::guest::GUEST_MEMORY),
             "the server must read the directory omh mounts: {args:?}"
         );
     }

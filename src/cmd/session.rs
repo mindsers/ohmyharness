@@ -343,7 +343,7 @@ pub(crate) fn session_up(
                 "cli".into(),
                 "index_repository".into(),
                 "--repo-path".into(),
-                crate::container_workdir().into(),
+                crate::guest::WORKDIR.into(),
                 "--name".into(),
                 project,
                 "--mode".into(),
@@ -499,7 +499,7 @@ pub(crate) fn attach(
         .as_deref()
         .map(|a| auth::dir(&paths, &adapter, a));
     if let Some(account_dir) = &account {
-        auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+        auth::prepare(&adapter, account_dir, crate::guest::GUEST_HOME)?;
     }
 
     // Said here, because `attach` is the one launch path that never said it.
@@ -2015,7 +2015,7 @@ pub(crate) fn run(
         // The mountpoints have to exist before docker binds over them — which
         // is staging, and is why this is not a third reading of the flag.
         if staging.is_apply() {
-            auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+            auth::prepare(&adapter, account_dir, crate::guest::GUEST_HOME)?;
         }
         // An account file no session can be seeded from refuses here, before
         // a worktree is made — and on a dry run, which would otherwise preview
@@ -2193,7 +2193,7 @@ pub(crate) fn run(
         // Everything omh mounts is read-only but these, so naming them names
         // the whole of what a session can reach. The worktree *is* `/work`, so
         // it is named once, by the path you would go and look at.
-        let workdir = crate::container_workdir();
+        let workdir = crate::guest::WORKDIR;
         let writes: Vec<String> = std::iter::once(format!(
             "{}  — this session's worktree, as {workdir}",
             session.worktree.display()

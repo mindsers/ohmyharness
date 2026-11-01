@@ -9,6 +9,7 @@
 
 use crate::adapter::Adapter;
 use crate::base::GRAPH_CACHE;
+use crate::guest::GUEST_HOME;
 use crate::runtime::{Backend, Engine};
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -49,18 +50,6 @@ pub fn tag_for(adapter: &Adapter, ca: Option<&str>) -> String {
     );
     format!("omh/{}:{}", adapter.name, tag_digest(&recipe))
 }
-
-/// The agent's home inside the sandbox.
-///
-/// Defined here because this is where it is *established* — the Dockerfile's
-/// `usermod -d` below — and the same constant is interpolated into that
-/// Dockerfile, so the image and the code that mounts into it cannot disagree.
-///
-/// Declared once because the alternative is consistency by copying: a literal
-/// in `auth`, another in `container`, another in `doctor`, each with a comment
-/// claiming it mirrors the others. That is consistent right up until it isn't,
-/// and the symptom is a session that starts and reads nothing.
-pub const GUEST_HOME: &str = "/home/agent";
 
 /// A digest of an image recipe, for a note to pin.
 ///
@@ -503,9 +492,9 @@ fn ca_layer(ca: Option<&str>) -> String {
 pub fn base_dockerfile(ca: Option<&str>) -> String {
     // Interpolated rather than written out, so the directory the image
     // prepares and the directory the launcher mounts into cannot drift.
-    let notes = crate::memory::GUEST_MEMORY;
+    let notes = crate::guest::GUEST_MEMORY;
     let hostkeys = crate::ssh::GUEST_HOST_KEYS;
-    let workdir = crate::container_workdir();
+    let workdir = crate::guest::WORKDIR;
     #[allow(non_snake_case)]
     let AGENT_UID = crate::runtime::AGENT_UID;
     let ca_layer = ca_layer(ca);
@@ -1142,7 +1131,7 @@ fn owner_of(
 /// Non-unique ids are allowed — a primary group of 100, `users`, is common —
 /// and the directories the image gave the agent are re-owned with it.
 pub(crate) fn owner_dockerfile(base: &str, uid: u32, gid: u32) -> String {
-    let work = crate::container_workdir();
+    let work = crate::guest::WORKDIR;
     format!(
         "FROM {base}\nUSER root\nRUN usermod -o -u {uid} agent \\\n && groupmod -o -g {gid} agent \\\n && chown -R {uid}:{gid} {GUEST_HOME} /omh {work}\nUSER agent\nWORKDIR {work}\n"
     )
@@ -2471,7 +2460,7 @@ mod tests {
     fn git_in_the_sandbox_trusts_the_worktree() {
         let want = format!(
             "git config --system --add safe.directory {}",
-            crate::container_workdir()
+            crate::guest::WORKDIR
         );
         assert!(
             base_dockerfile(None).contains(&want),
@@ -4787,7 +4776,7 @@ mod tests {
     #[test]
     fn the_image_creates_the_note_store_the_launcher_mounts_into() {
         let df = base_dockerfile(None);
-        let notes = crate::memory::GUEST_MEMORY;
+        let notes = crate::guest::GUEST_MEMORY;
         assert!(
             df.contains(notes),
             "the image must create {notes}, or docker makes it root-owned"

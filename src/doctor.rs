@@ -20,12 +20,11 @@
 
 use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::catalogue::Catalogue;
+use crate::guest::GUEST_HOME;
 use anyhow::Context;
 use anyhow::Result;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
-
-use crate::image::GUEST_HOME;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expect {

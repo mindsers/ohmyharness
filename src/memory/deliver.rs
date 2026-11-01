@@ -25,10 +25,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Where the sandbox expects to find it. Not under the agent's home, because
-/// it is a program rather than state, and `/usr/local/bin` is already on PATH.
-pub const GUEST_BIN: &str = "/usr/local/bin/omh";
-
 /// What has to happen before the server can start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
@@ -1111,9 +1107,9 @@ mod tests {
     /// bare `command = "omh"` resolves to nothing.
     #[test]
     fn the_guest_path_is_on_the_default_path() {
-        assert!(GUEST_BIN.starts_with("/usr/local/bin/"));
+        assert!(crate::guest::GUEST_BIN.starts_with("/usr/local/bin/"));
         assert!(
-            !GUEST_BIN.starts_with(crate::image::GUEST_HOME),
+            !crate::guest::GUEST_BIN.starts_with(crate::guest::GUEST_HOME),
             "a program is not state, and the home is mounted over"
         );
     }

@@ -19,13 +19,6 @@ pub mod tools;
 
 // ── the store ───────────────────────────────────────────────────────────────
 
-/// Where the note store is mounted inside the sandbox.
-///
-/// Deliberately not under `/work`: the code graph would index notes as source,
-/// `git status` would show them, and an agent running `git add -A` would commit
-/// them onto its session branch — where a guess arrives looking reviewed.
-pub const GUEST_MEMORY: &str = "/omh/memory";
-
 /// What `move_old_store` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Moved {
@@ -3506,7 +3499,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let mut input = observation();
         input.invalidated_by = Some(format!(
             "file:{}/src/main.rs@abc1230",
-            crate::container_workdir()
+            crate::guest::WORKDIR
         ));
         remember(&paths, &input, IfExists::Error).unwrap();
 
@@ -3773,8 +3766,9 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn the_staged_rules_name_the_path_the_store_is_mounted_at() {
         assert!(
-            shipped_rules().contains(GUEST_MEMORY),
-            "the rules must point at {GUEST_MEMORY}"
+            shipped_rules().contains(crate::guest::GUEST_MEMORY),
+            "the rules must point at {}",
+            crate::guest::GUEST_MEMORY
         );
     }
 }

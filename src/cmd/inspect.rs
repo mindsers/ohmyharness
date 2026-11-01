@@ -526,7 +526,8 @@ pub(crate) fn doctor_cmd(
                     .is_some_and(|p| a.join(crate::provider::file(p.format)).is_file())
         };
         let logged_in = account.as_deref().is_some_and(|a| {
-            auth::unfilled(&adapter, a, auth::GUEST_HOME).is_empty() && !provider_is_login(a)
+            auth::unfilled(&adapter, a, crate::guest::GUEST_HOME).is_empty()
+                && !provider_is_login(a)
         });
         if logged_in {
             checks.extend(doctor::credential_checks(&adapter));
@@ -639,7 +640,7 @@ pub(crate) fn doctor_cmd(
             recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
         };
         if let Some(account_dir) = account.as_ref().filter(|_| staging.is_apply()) {
-            auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+            auth::prepare(&adapter, account_dir, crate::guest::GUEST_HOME)?;
         }
         // Read and checked before anything runs; written below.
         let mut seeds = match &account {

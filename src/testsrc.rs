@@ -883,13 +883,11 @@ impl Ctx {
                 "report",
                 "rules",
                 "runtime",
-                "session",
                 "settings",
-                "shadow",
-                "ssh",
                 "stack",
                 "why",
             ],
+            &["session", "shadow"],
         ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let graph = module_graph(&root);
@@ -937,7 +935,7 @@ impl Ctx {
         // added six inside the big one with this test green. Counted rather
         // than listed — a refactor moves dozens — and printed whole when the
         // count moves, so a diff of two runs names the edge.
-        const KNOWN_EDGES_INSIDE: usize = 130;
+        const KNOWN_EDGES_INSIDE: usize = 107;
         let inside: Vec<String> = found
             .iter()
             .flat_map(|cycle| {

@@ -26,6 +26,7 @@ mod facts;
 mod fsx;
 mod git;
 mod guard;
+mod guest;
 mod hash;
 mod held;
 mod home;
@@ -874,12 +875,6 @@ pub(crate) fn policy_value(paths: &Paths, key: &str) -> Result<Option<String>> {
 
 pub(crate) fn runtime_preference(paths: &Paths) -> Result<String> {
     Ok(policy_value(paths, "runtime")?.unwrap_or_else(|| "auto".into()))
-}
-
-/// The agent's working directory inside the sandbox. Named once, so the note
-/// store and the launch plan cannot disagree about it.
-pub(crate) fn container_workdir() -> &'static str {
-    "/work"
 }
 
 #[cfg(test)]

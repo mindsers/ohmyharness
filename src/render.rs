@@ -517,7 +517,7 @@ pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
                 }
             }
             let work = projects
-                .entry(crate::container_workdir())
+                .entry(crate::guest::WORKDIR)
                 .or_insert_with(|| serde_json::json!({}));
             if !work.is_object() {
                 *work = serde_json::json!({});
@@ -2047,7 +2047,7 @@ fn codex_hooks(
             daemon_auto_start: false,
         },
         projects: BTreeMap::from([(
-            crate::container_workdir(),
+            crate::guest::WORKDIR,
             Trust {
                 trust_level: "trusted",
             },
