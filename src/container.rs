@@ -2751,7 +2751,9 @@ mod tests {
             std::fs::read_to_string(shadow.gitdir.join("info/exclude")).expect("a seeded shadow");
         for rel in staged {
             assert!(
-                exclude.lines().any(|l| l == rel),
+                exclude
+                    .lines()
+                    .any(|l| l == crate::shadow::literal_pattern(&rel)),
                 "omh mounts {rel} into the worktree, so the sandbox's repository \
                  must not track it. exclude list was:\n{exclude}"
             );
@@ -2798,7 +2800,9 @@ mod tests {
             std::fs::read_to_string(shadow.gitdir.join("info/exclude")).expect("a seeded shadow");
         for rel in arrived {
             assert!(
-                exclude.lines().any(|l| l == *rel),
+                exclude
+                    .lines()
+                    .any(|l| l == crate::shadow::literal_pattern(rel)),
                 "{rel} was mounted by the second launch and the sandbox built by the \
                  first has never heard of it. exclude list was:\n{exclude}"
             );
