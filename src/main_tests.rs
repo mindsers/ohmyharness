@@ -3667,6 +3667,78 @@ fn work_the_agent_told_git_to_ignore_is_still_at_stake() {
         !matches!(stake, cmd::harvest::AtStake::Nothing),
         "a .gitignore the agent wrote hid sub/morning.rs from rm: {stake:?}"
     );
+
+    // Nor an excludes file the agent names in the sandbox repository's own
+    // config: its source is an absolute path, and every absolute source was
+    // believed as the user's own `core.excludesFile`.
+    let (tmp, paths, session, shadow) = a_session_with_nothing_unkept();
+    let planted = tmp.path().join("agents-ignore");
+    std::fs::write(&planted, "*\n").unwrap();
+    std::fs::write(session.worktree.join("evening.rs"), "fn late() {}\n").unwrap();
+    let ok = Command::new("git")
+        .arg("--git-dir")
+        .arg(&shadow.gitdir)
+        .args(["config", "core.excludesFile"])
+        .arg(&planted)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "an excludes file the agent's config named hid evening.rs from rm: {stake:?}"
+    );
+
+    // Nor one named by a relative path, at a file the repository tracks: git
+    // reads only `.gitignore` as a per-directory rule, and any tracked file
+    // was believed as one — a tracked `.dockerignore` holding `*`, say.
+    let (_tmp, paths, session, shadow) = a_session_with_nothing_unkept();
+    std::fs::write(session.worktree.join(".dockerignore"), "*\n").unwrap();
+    agent_git(&shadow, &session, &["add", "-f", ".dockerignore"]);
+    agent_git(&shadow, &session, &["commit", "-qm", "as the trunk's own"]);
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    std::fs::write(session.worktree.join("night.rs"), "fn later() {}\n").unwrap();
+    agent_git(
+        &shadow,
+        &session,
+        &["config", "core.excludesFile", ".dockerignore"],
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a tracked file the agent's config named as excludes hid night.rs: {stake:?}"
+    );
+
+    // And a tracked `.gitignore` the agent's config names as the excludes
+    // file — from an `include`, out of `--local`'s sight — applies at the root
+    // rather than in its own directory: it is the agent's rule there.
+    let (_tmp, paths, session, shadow) = a_session_with_nothing_unkept();
+    std::fs::create_dir_all(session.worktree.join("sub")).unwrap();
+    std::fs::write(session.worktree.join("sub/.gitignore"), "*\n").unwrap();
+    agent_git(&shadow, &session, &["add", "-f", "sub/.gitignore"]);
+    agent_git(&shadow, &session, &["commit", "-qm", "as the trunk's own"]);
+    std::fs::write(
+        &shadow.landed_record,
+        agent_git(&shadow, &session, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    std::fs::write(session.worktree.join("dawn.rs"), "fn early() {}\n").unwrap();
+    let included = shadow.gitdir.join("more-config");
+    std::fs::write(&included, "[core]\n\texcludesFile = sub/.gitignore\n").unwrap();
+    agent_git(
+        &shadow,
+        &session,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    let stake = cmd::harvest::at_stake(&paths, &session);
+    assert!(
+        !matches!(stake, cmd::harvest::AtStake::Nothing),
+        "a tracked .gitignore the agent's config named as excludes hid dawn.rs: {stake:?}"
+    );
 }
 
 /// What omh and the repository themselves ignore stays out of the count: a
