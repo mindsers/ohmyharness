@@ -522,10 +522,8 @@ fn ask(
 /// ran, by harness name.
 pub fn homes_of(run: &crate::rundir::Run) -> Result<Vec<(String, Home)>> {
     let dir = run.preferences_root();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(entries) = crate::fsx::read_dir_or_absent(&dir)? else {
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
     for entry in entries {

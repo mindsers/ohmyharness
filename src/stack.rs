@@ -588,10 +588,8 @@ struct Markers {
 /// Every marker omh recognises without being able to provision it.
 pub fn markers(dir: &Path) -> Result<Vec<Marker>> {
     let mut out = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(entries) = crate::fsx::read_dir_or_absent(dir)? else {
+        return Ok(Vec::new());
     };
     for entry in entries {
         let path = entry
@@ -691,10 +689,8 @@ pub fn over(shipped: Vec<Definition>, catalogue: &Path, repo: &Path) -> Result<V
 }
 
 pub fn load_dir(dir: &Path) -> Result<Vec<Definition>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(entries) = crate::fsx::read_dir_or_absent(dir)? else {
+        return Ok(Vec::new());
     };
 
     let mut out = Vec::new();

@@ -48,9 +48,43 @@ pub(crate) fn read_or_absent(path: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// `dir`'s entries, or `None` when there is no directory at all. Only
+/// `NotFound` is absence: a directory omh could not read is an error naming
+/// it, never one that holds nothing.
+pub(crate) fn read_dir_or_absent(dir: &Path) -> anyhow::Result<Option<std::fs::ReadDir>> {
+    use anyhow::Context as _;
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", dir.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same three answers for a directory: none there, entries, and a
+    /// file where the directory belongs, which is an error naming it.
+    #[test]
+    fn a_directory_omh_cannot_list_is_an_error_naming_it_never_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let at = d.path().join("stacks");
+        assert!(read_dir_or_absent(&at).unwrap().is_none(), "nothing there");
+        std::fs::create_dir(&at).unwrap();
+        std::fs::write(at.join("rust.toml"), "").unwrap();
+        assert_eq!(read_dir_or_absent(&at).unwrap().unwrap().count(), 1);
+        std::fs::remove_dir_all(&at).unwrap();
+        std::fs::write(&at, "").unwrap();
+        let err = format!(
+            "{:#}",
+            read_dir_or_absent(&at).expect_err("a file listed as a directory")
+        );
+        assert!(
+            err.contains("stacks"),
+            "the error names the directory: {err}"
+        );
+    }
 
     /// Absent, present, and there but unreadable are three answers. A
     /// directory where the file belongs is the uid-independent way to make

@@ -1832,12 +1832,8 @@ pub fn next_id(claimed: &Claimed) -> Result<String> {
 ///
 /// Absent is zero; unreadable is an error, entry by entry.
 fn highest_in(dir: &Path) -> Result<u32> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => {
-            return Err(anyhow::Error::new(e)).with_context(|| format!("reading {}", dir.display()))
-        }
+    let Some(entries) = crate::fsx::read_dir_or_absent(dir)? else {
+        return Ok(0);
     };
     let mut used = 0;
     for entry in entries {

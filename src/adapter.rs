@@ -1107,13 +1107,8 @@ impl Adapter {
         // and answering `[]` to that put "nothing is installed" and "nobody
         // could read this" into the same word — which `omh inspect` lists and
         // `tool_hint` prints as `available:`.
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(anyhow::Error::new(e))
-                    .with_context(|| format!("reading {}", dir.display()))
-            }
+        let Some(entries) = crate::fsx::read_dir_or_absent(dir)? else {
+            return Ok(Vec::new());
         };
         let mut out = Vec::new();
         for entry in entries {
