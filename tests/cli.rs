@@ -2850,6 +2850,28 @@ fn an_omh_flag_after_the_command_is_refused_not_passed_on() {
     assert!(out.status.success(), "{}", printed(&out));
 }
 
+/// `omh init` refuses a checkout whose path holds a `:`, by name, before it
+/// writes anything: no container omh starts could mount it, since `-v`
+/// reads `:` as a separator, and it set the repo up and then failed on
+/// docker's own words.
+#[test]
+fn init_refuses_a_checkout_whose_path_holds_a_colon() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let repo = sb.home.parent().unwrap().join("a:b");
+    std::fs::create_dir_all(&repo).unwrap();
+    let ok = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let out = sb.omh_in(&repo, &["init"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("holds a `:`"), "{}", printed(&out));
+    assert!(!repo.join(".omh").exists(), "it wrote before refusing");
+}
+
 /// A first `omh init` that fails at the image runs again. The stamp that
 /// says a checkout is set up was written before the image was built, so
 /// after a build that failed, every `omh init` said "this project already

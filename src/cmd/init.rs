@@ -459,6 +459,9 @@ pub(crate) fn refuse_what_cannot_be_seeded(
 pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
+    // And in a checkout no container can mount: set up, it then failed on
+    // docker's own words at the first image step.
+    crate::container::mountable(&paths.repo)?;
 
     // `init` is a one-time command. A repo carrying the stamp is already set
     // up, and refreshing its catalogue and rebuilding its images is `omh

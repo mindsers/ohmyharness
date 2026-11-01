@@ -1118,6 +1118,19 @@ mod tests {
         }
     }
 
+    /// A host path holding a `:` is refused by name: `-v` reads `:` as the
+    /// separator between host, guest and options, so a checkout under
+    /// `/Volumes/a:b` was handed to docker as a mount it could not parse.
+    #[test]
+    fn a_host_path_holding_a_colon_is_refused_by_name() {
+        let plan = plan_with(vec![dir_mount("/Volumes/a:b/repo", "/work", false)]);
+        let err = format!("{:#}", plan.validate(&Docker.caps()).unwrap_err());
+        assert!(
+            err.contains("/Volumes/a:b/repo") && err.contains("holds a `:`"),
+            "{err}"
+        );
+    }
+
     fn sample_plan() -> Plan {
         plan_with(vec![
             dir_mount("/host/worktree", "/work", false),

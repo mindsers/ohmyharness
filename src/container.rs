@@ -1504,6 +1504,21 @@ fn symlink(src: &Path, dst: &Path) -> Result<()> {
         .with_context(|| format!("linking {} -> {}", dst.display(), src.display()))
 }
 
+/// Whether `path` can be the host side of a mount. Docker's and podman's
+/// `-v` read `:` as the separator between host, guest and options, so a path
+/// holding one is handed over as a mount they cannot parse, and the launch
+/// fails in their words instead of omh's.
+pub fn mountable(path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !path.as_os_str().as_encoded_bytes().contains(&b':'),
+        "{} holds a `:`, which docker's and podman's `-v` read as the separator \
+         between a mount's parts, so omh cannot mount it — move it to a path \
+         without one",
+        path.display()
+    );
+    Ok(())
+}
+
 impl Plan {
     /// Refuse a plan the chosen backend cannot honour. Starting a sandbox where
     /// the catalogue silently is not there is the worst available outcome.
@@ -1519,6 +1534,9 @@ impl Plan {
     }
 
     pub fn validate(&self, caps: &crate::runtime::Caps) -> Result<()> {
+        for m in &self.mounts {
+            mountable(&m.host)?;
+        }
         let mut problems = Vec::new();
         for m in &self.mounts {
             if !caps.file_mounts && m.file {
