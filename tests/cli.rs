@@ -10990,6 +10990,23 @@ fn a_named_down_stops_only_the_named_session() {
     );
 }
 
+/// `omh s99 down` for a session that does not exist is refused, as every
+/// other verb that names one is: it said "was not running" and exited 0, a
+/// stop that reads as done for a typo.
+#[test]
+fn a_down_of_a_session_that_does_not_exist_is_refused() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    let out = sb.omh(&["s99", "down"]);
+    assert!(!out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("no session s99 — `omh s` lists them"),
+        "{}",
+        printed(&out)
+    );
+}
+
 /// `--all` is gone from `down` — absence already means all.
 #[test]
 fn down_no_longer_takes_all() {

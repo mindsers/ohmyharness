@@ -730,7 +730,9 @@ pub(crate) fn down(
         runtime::installed(p)
     })?;
     let ids = match id {
-        Some(i) => vec![i.to_string()],
+        // A session that does not exist is refused, as every verb that names
+        // one refuses it: this said "was not running" and exited 0.
+        Some(i) => vec![crate::cmd::harvest::existing_session(&paths, Some(i))?.id],
         // No session named means every session. A wide stop asks first when
         // there is a terminal to ask at — the blast radius grows with how much
         // is in flight — and proceeds without asking when there is not: it is
