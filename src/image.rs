@@ -290,7 +290,9 @@ impl Root {
                  to make the file fit, because dropping is rewriting. Strip \
                  the file to the blocks and nothing else.",
                     path_for_msg.display(),
-                    if line.len() > 60 { &line[..60] } else { line }
+                    // By characters: sliced at byte 60, a line whose 60th
+                    // byte fell inside a character panicked.
+                    line.chars().take(60).collect::<String>()
                 );
             }
         }
@@ -3642,6 +3644,28 @@ mod tests {
         .unwrap();
         let (_d2, paths) = ca_fixture(Some(&at.display().to_string()));
         assert!(ca_for(&paths).is_err(), "a quote in a PEM body is refused");
+    }
+
+    /// A preamble line is quoted in the refusal, cut to 60 — by characters,
+    /// never bytes. Sliced at byte 60, a line whose 60th byte fell inside a
+    /// character panicked: `omh set --local ca_cert` on a company's own name.
+    #[test]
+    fn a_preamble_line_with_a_wide_character_is_refused_not_a_panic() {
+        let (dir, _) = ca_fixture(None);
+        let at = dir.path().join("p12.pem");
+        let line = format!("friendlyName: {}é and more", "x".repeat(45));
+        assert!(
+            !line.is_char_boundary(60),
+            "the fixture puts a character across byte 60"
+        );
+        std::fs::write(
+            &at,
+            format!("{line}\n-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n"),
+        )
+        .unwrap();
+        let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+        let e = format!("{:#}", ca_for(&paths).unwrap_err());
+        assert!(e.contains("friendlyName"), "{e}");
     }
 
     /// **"Refuses" has to mean refuses.** Both doc pages promised that a
