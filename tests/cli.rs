@@ -3332,6 +3332,88 @@ fn a_launch_with_no_account_points_at_omh_auth() {
     );
 }
 
+/// A launch says which of your logins it mounted, and says so louder when the
+/// committed settings chose it: whoever commits to a repository otherwise
+/// picks which of your captured logins its sessions run as, and nothing said
+/// which one a session got (10-19 S7).
+#[test]
+fn a_launch_names_its_account_and_whether_the_repository_chose_it() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+    sb.account("claude", "work");
+    sb.account("claude", "mine");
+    let settings = |file: &str, body: &str| {
+        let at = sb.repo.join(".omh").join(file);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        let mut held = std::fs::read_to_string(&at).unwrap_or_default();
+        held.push_str(body);
+        std::fs::write(&at, held).unwrap();
+    };
+    let launch = || {
+        let out = sb.omh(&["s01", "--dry-run", "resume", "claude"]);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "the dry run failed: {said}");
+        said
+    };
+
+    settings("settings.toml", "account = \"work\"\n");
+    let said = launch();
+    assert!(
+        said.contains("claude on omh/s01 as work"),
+        "the launch does not name its account: {said}"
+    );
+    assert!(
+        said.contains(
+            "the claude account `work` is named in this repository's committed .omh/settings.toml"
+        ),
+        "the committed settings chose a login and nothing said so: {said}"
+    );
+
+    settings("settings.local.toml", "account = \"mine\"\n");
+    let said = launch();
+    assert!(said.contains("claude on omh/s01 as mine"), "{said}");
+    assert!(
+        !said.contains("committed .omh/settings.toml"),
+        "your own choice is announced as the repository's: {said}"
+    );
+
+    // A harness's own entry outranks a default at any layer, so a committed
+    // `[account] claude = …` beats the default you set.
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "[account]\nclaude = \"work\"\n",
+    )
+    .unwrap();
+    let said = launch();
+    assert!(said.contains("claude on omh/s01 as work"), "{said}");
+    let remedy = said
+        .split('`')
+        .find(|part| part.starts_with("omh set account "))
+        .unwrap_or_else(|| panic!("the warning names no way out: {said}"))
+        .to_string();
+
+    // The way out it names, run as printed.
+    let argv: Vec<&str> = remedy.split_whitespace().skip(1).collect();
+    let out = sb.omh(&argv);
+    assert!(
+        out.status.success(),
+        "`{remedy}`: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = launch();
+    assert!(said.contains("claude on omh/s01 as work"), "{said}");
+    assert!(
+        !said.contains("committed .omh/settings.toml"),
+        "`{remedy}` did not make the choice yours: {said}"
+    );
+}
+
 /// `omh doctor` answers about the memory server on a machine that has never
 /// launched.
 ///
