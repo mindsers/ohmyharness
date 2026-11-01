@@ -986,6 +986,105 @@ const BEFORE_TOOL: &str = "tool.execute.before";
 const AFTER_TOOL: &str = "tool.execute.after";
 /// The catch-all. Fires for every message on the bus, hence the type test.
 const BUS: &str = "event";
+/// Every event opencode's bus carries, at the version `adapters/` pins
+/// (1.19.0): each `({type:"…"` its binary defines, dotted names only,
+/// measured 2026-11-01 with `grep -ao` over `opencode.exe` in omh's image.
+/// An event the adapter maps to the bus that is not here never fires — so it
+/// is refused as the adapter's, as omp's `Moment::of` refuses one. Measured
+/// again with each pin bump: `the_opencode_bus_was_measured_at_the_pin` fails
+/// until it is.
+const OPENCODE_BUS_MEASURED_AT: &str = "1.19.0";
+const OPENCODE_BUS_EVENTS: &[&str] = &[
+    "catalog.updated",
+    "command.executed",
+    "file.edited",
+    "file.watcher.updated",
+    "global.disposed",
+    "installation.update-available",
+    "installation.updated",
+    "integration.connection.updated",
+    "integration.updated",
+    "lsp.updated",
+    "mcp.browser.open.failed",
+    "mcp.tools.changed",
+    "message.part.delta",
+    "message.part.removed",
+    "message.part.updated",
+    "message.removed",
+    "message.updated",
+    "models-dev.refreshed",
+    "permission.asked",
+    "permission.replied",
+    "permission.v2.asked",
+    "permission.v2.replied",
+    "plugin.added",
+    "project.directories.updated",
+    "project.updated",
+    "pty.created",
+    "pty.deleted",
+    "pty.exited",
+    "pty.updated",
+    "question.asked",
+    "question.rejected",
+    "question.replied",
+    "question.v2.asked",
+    "question.v2.rejected",
+    "question.v2.replied",
+    "reference.updated",
+    "response.create",
+    "server.connected",
+    "session.compacted",
+    "session.created",
+    "session.deleted",
+    "session.diff",
+    "session.error",
+    "session.idle",
+    "session.next.agent.switched",
+    "session.next.compaction.delta",
+    "session.next.compaction.ended",
+    "session.next.compaction.started",
+    "session.next.context.updated",
+    "session.next.model.switched",
+    "session.next.moved",
+    "session.next.prompt.admitted",
+    "session.next.prompted",
+    "session.next.reasoning.delta",
+    "session.next.reasoning.ended",
+    "session.next.reasoning.started",
+    "session.next.retried",
+    "session.next.revert.cleared",
+    "session.next.revert.committed",
+    "session.next.revert.staged",
+    "session.next.shell.ended",
+    "session.next.shell.started",
+    "session.next.step.ended",
+    "session.next.step.failed",
+    "session.next.step.started",
+    "session.next.synthetic",
+    "session.next.text.delta",
+    "session.next.text.ended",
+    "session.next.text.started",
+    "session.next.tool.called",
+    "session.next.tool.failed",
+    "session.next.tool.input.delta",
+    "session.next.tool.input.ended",
+    "session.next.tool.input.started",
+    "session.next.tool.progress",
+    "session.next.tool.success",
+    "session.status",
+    "session.updated",
+    "todo.updated",
+    "tui.command.execute",
+    "tui.prompt.append",
+    "tui.session.select",
+    "tui.toast.show",
+    "vcs.branch.updated",
+    "workspace.failed",
+    "workspace.ready",
+    "workspace.status",
+    "worktree.failed",
+    "worktree.ready",
+];
 
 /// Where a moment's handler puts things, which is not the same at every moment.
 ///
@@ -1084,6 +1183,17 @@ fn opencode_plugin(
             wanted: wanted.to_string(),
         };
         let slot = Slot::of(wired.event);
+        if let Slot::Bus { ty } = slot {
+            anyhow::ensure!(
+                OPENCODE_BUS_EVENTS.contains(&ty),
+                "adapter maps `{}` to `{ty}`, which is not an event opencode \
+                 {OPENCODE_BUS_MEASURED_AT} has — it would never fire, and omh would report \
+                 every hook there as something opencode lacks. Its bus carries, among \
+                 others: session.idle, session.created, session.error, message.updated, \
+                 file.edited.",
+                hook.on,
+            );
+        }
         // A moment with no call in scope can express none of the things that
         // need one. Emitting them anyway referenced an undeclared `output` —
         // a `ReferenceError` that takes every other hook in the handler with
@@ -1195,10 +1305,9 @@ impl Moment {
     /// scope" — so an adapter typo came back as a statement about the harness:
     /// `after-tool = "toolresult"` dropped every injecting hook with *"no way
     /// to inject text at `after-tool`"*, which is false of omp and sends the
-    /// reader to the wrong software. `Slot::of` can fall through honestly
-    /// because `Slot::Bus` carries the unrecognised name forward into a real
-    /// opencode mechanism; `Bare` discards it. The two look symmetric and are
-    /// not.
+    /// reader to the wrong software. opencode's `Slot::of` falls through to
+    /// the bus, which carries the name forward, and the name is then checked
+    /// against the events the bus has; `Bare` would discard it.
     fn of(event: &str) -> Option<Self> {
         match event {
             OMP_TOOL_CALL => Some(Moment::Before),
@@ -3711,6 +3820,49 @@ mod tests {
         opencode()
             .supports(Capability::Hooks)
             .expect("opencode has hooks")
+    }
+
+    /// The bus events were measured at the version the adapter pins; a pin
+    /// bump measures them again, or an event the new version added is refused
+    /// and one it dropped is let through.
+    #[test]
+    fn the_opencode_bus_was_measured_at_the_pin() {
+        assert_eq!(
+            opencode().version.as_deref(),
+            Some(OPENCODE_BUS_MEASURED_AT),
+            "measure `OPENCODE_BUS_EVENTS` again at the new pin"
+        );
+    }
+
+    /// An event the adapter maps to opencode's bus that opencode does not
+    /// have is refused as the adapter's mistake. It fell through to the bus,
+    /// where it never fired, and a hook needing a payload there was dropped as
+    /// something opencode lacks — the wrong software to go looking in. omp's
+    /// `Moment::of` already refused an event omp does not have.
+    #[test]
+    fn an_opencode_event_opencode_does_not_have_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(Path::new(ADAPTERS).join("opencode.toml")).unwrap();
+        assert_eq!(real.matches("\"session.idle\"").count(), 1);
+        std::fs::write(
+            d.path().join("opencode.toml"),
+            real.replace("\"session.idle\"", "\"session.idel\""),
+        )
+        .unwrap();
+        let adapter = Adapter::find(d.path(), "opencode").unwrap();
+        let binding = adapter.supports(Capability::Hooks).unwrap();
+        let hooks = BTreeMap::from([(
+            "x".to_string(),
+            hook::Hook::parse(r#"{"on":"turn-end","run":"true"}"#, "h").unwrap(),
+        )]);
+        let err = match opencode_plugin(&hooks, binding, &adapter.tools, None) {
+            Ok(_) => panic!("an event opencode does not have was rendered"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("session.idel") && err.contains("not an event opencode"),
+            "{err}"
+        );
     }
 
     fn omp() -> &'static Adapter {
