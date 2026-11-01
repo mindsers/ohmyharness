@@ -721,167 +721,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // certificate omh cannot read should stop.
     let ca = image::ca_for(&paths)?;
     if let Some(h) = &harness {
-        // Past the first gate, so the harness is no longer the reason. Set
-        // before the probe rather than after it, because the two arms that
-        // fail below return an empty answer and read as ordinary — the reason
-        // has to be true from the moment it stops being the previous one.
-        hooks = report::Hooks::Unchecked("the sandbox could not be asked".into());
-        let backend = runtime::for_repo(&paths)?;
-        let adapter = Adapter::find(&paths.adapters(), h)?;
-        // Without it the headline command cannot run, so init is not finished
-        // until this exists — and until it exists there is no sandbox to ask
-        // about a toolchain.
-        if image::exists(
-            &backend,
-            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
-        ) {
-            summary.image = Some(format!(
-                "{} (already built)",
-                image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
-            ));
-        } else {
-            // Progress, not report: this is the minutes-long step, and
-            // somebody watching a blank terminal needs to know it is alive.
-            ctx.progress(&format!(
-                "building {} — first run only…",
-                image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
-            ));
-            image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
-            summary.image = Some(image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)));
-        }
-
-        // Which provides apply here. Evaluated **in the sandbox**, with the repo
-        // mounted read-only: a predicate is arbitrary shell out of a stack file,
-        // and running it on the host during `init` is the one thing omh exists
-        // to avoid.
-        let detected = stack::detected(&stack_defs, &paths.repo);
-
-        {
-            // No `if !candidates.is_empty()` guard. A repo with nothing to ask
-            // has still been answered — the answer is "nothing applies" — and
-            // skipping would leave a resolution recorded when this repo *was* a
-            // rust project asserting `rust/toolchain = true` for ever.
-            let asked = ask_conditions(
-                &backend,
-                &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
-                &paths.repo,
-                &detected,
-            );
-            summary.problems.extend(asked.said.iter().cloned());
-
-            // Recorded only when something was actually measured. `reconcile`
-            // drops every `true` it is not told about, so writing an empty
-            // answer would erase the repo's resolution rather than leave it be.
-            //
-            // And read against what is already recorded, because this is not
-            // always a first look: the stamp `init` refuses on is per checkout,
-            // so a teammate's `init` meets the table yours committed.
-            //
-            // Read whether or not anything will be recorded from this, because
-            // what to say about a condition that could not answer depends on
-            // it: an entry the table already holds is *left as it was*, and
-            // that is true of every entry when nothing is recorded at all.
-            let look = stack::reread(
-                &config::read_provision(&paths, config::Layer::Shared)?,
-                &asked.verdicts(),
-            );
-            summary
-                .problems
-                .extend(look.unanswered.iter().map(stack::Unanswered::says));
-            let unrecordable = asked.unrecordable();
-            if let Some(why) = &unrecordable {
-                hooks = report::Hooks::Unchecked(why.clone());
-            }
-            if unrecordable.is_none() {
-                let recorded = record_resolution(&paths, &look.standing)?;
-                for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
-                    summary.provisioned.push(key.clone());
-                }
-
-                // The stack layer, through the same function every launch
-                // reads — so what `init` reports built is what `omh new` and
-                // `omh sNN resume` run, by construction rather than by two
-                // implementations agreeing.
-                //
-                // Re-resolved from disk rather than reusing `recorded`, which
-                // is the committed table alone: `record_resolution` has just
-                // written it, and a `false` in `settings.local.toml` means *not
-                // on this laptop*, which is the laptop building the image.
-                let (own, repo) = crate::settings::resolved(&paths)?;
-                let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
-                image::ensure_stack(
-                    &backend,
-                    &adapter,
-                    &sandbox.recipe(),
-                    // The sandbox's own reading, not a fresh one. `sandbox.tag`
-                    // was computed from it, and two reads of a file can differ.
-                    sandbox.ca.as_ref().map(image::Root::pem),
-                    &paths.repo,
-                )?;
-                // `sandbox.ca`, not `ca` — the same reading `sandbox.tag`
-                // was computed from. They are one value now, and comparing a
-                // tag against one derived from a different read is what made
-                // this comparison meaningless when they could differ.
-                if sandbox.tag
-                    != image::tag_for(&adapter, sandbox.ca.as_ref().map(image::Root::pem))
-                {
-                    summary.stack_image = Some(sandbox.tag.clone());
-                }
-
-                // And what that image turned out to contain, measured once and
-                // remembered: every launch afterwards reads `~/.omh/facts.json`
-                // rather than starting a container to ask again.
-                //
-                // Two readings of one probe. A `needs` that did not resolve is
-                // a **provisioning failure** — the recipe ran and the
-                // environment still does not work, which is exactly what
-                // shipping rustup with no `cc` looked like. The same
-                // measurements hold back a hook whose program is missing, which
-                // is a different question about the same fact.
-                let hook_dirs = Catalogue::resolve(&paths).sources(adapter::Capability::Hooks)?;
-                let mut sandbox = sandbox;
-                sandbox.top_up(&paths, &backend, &adapter, &hook_dirs, &own, &repo, ctx)?;
-                for name in &sandbox.owed {
-                    if sandbox.resolves.get(name) == Some(&false) {
-                        summary
-                            .problems
-                            .push(format!("{name} did not resolve after installing"));
-                    }
-                }
-
-                // And the other reading, through the launcher's own function so
-                // `init` cannot report one thing and a launch do another.
-                //
-                // No question here any more, and that is the point of the whole
-                // design. What stood here asked, for every program the sandbox
-                // lacked, whether to switch its hook off — and recorded the
-                // answer in a committed file. It was asking somebody to
-                // configure around a broken environment, and the answer
-                // outlived the breakage: a repo whose sandbox later gained
-                // `cargo` still had `cargo = "skip"` on file, so the hook
-                // stayed off for everybody who cloned it, with nothing to
-                // re-ask. Now nothing is on file, because nothing had to be
-                // decided.
-                // **Only when the image was actually asked.** `measure`
-                // reports and swallows a probe that will not run, which is
-                // right for a launch — an unmeasured program suppresses
-                // nothing, so no hook is dropped on a guess — and reaches this
-                // report as an empty `resolves`, from which `render::held_back`
-                // derives an empty list. Read as `Measured`, that is a clean
-                // bill of health issued by a doctor who was out. It is the same
-                // defect one level in from the one this value was added for,
-                // and it is why the ask is asked about rather than assumed.
-                hooks = match &sandbox.unmeasured {
-                    Some(why) => report::Hooks::Unchecked(why.clone()),
-                    None => report::Hooks::Measured(
-                        render::held_back(&hook_dirs, &own, &repo, &sandbox.resolves)?
-                            .iter()
-                            .map(|d| (d.name.clone(), d.wanted.clone()))
-                            .collect(),
-                    ),
-                };
-            }
-        }
+        build_and_ask(&paths, h, &ca, &stack_defs, &mut hooks, &mut summary, ctx)?;
     }
     // No harness is no image, and no image is no sandbox to ask about. The
     // hooks are already written either way.
@@ -1050,6 +890,181 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     .with_context(|| format!("writing {}", repo_omh.join(SEEDED_BY).display()))?;
 
     ctx.say(&summary);
+    Ok(())
+}
+
+/// The harness's image, then what the sandbox turned out to hold: the
+/// image built, each stack's predicates asked, the resolution recorded, and
+/// which of this repo's hooks the sandbox cannot run. `hooks` says why it
+/// stopped when it stops short.
+fn build_and_ask(
+    paths: &Paths,
+    h: &str,
+    ca: &Option<crate::image::Root>,
+    stack_defs: &[stack::Definition],
+    hooks: &mut report::Hooks,
+    summary: &mut report::Init,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    // Past the first gate, so the harness is no longer the reason. Set
+    // before the probe rather than after it, because the two arms that
+    // fail below return an empty answer and read as ordinary — the reason
+    // has to be true from the moment it stops being the previous one.
+    *hooks = report::Hooks::Unchecked("the sandbox could not be asked".into());
+    let backend = runtime::for_repo(paths)?;
+    let adapter = Adapter::find(&paths.adapters(), h)?;
+    // Without it the headline command cannot run, so init is not finished
+    // until this exists — and until it exists there is no sandbox to ask
+    // about a toolchain.
+    if image::exists(
+        &backend,
+        &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+    ) {
+        summary.image = Some(format!(
+            "{} (already built)",
+            image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
+        ));
+    } else {
+        // Progress, not report: this is the minutes-long step, and
+        // somebody watching a blank terminal needs to know it is alive.
+        ctx.progress(&format!(
+            "building {} — first run only…",
+            image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
+        ));
+        image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
+        summary.image = Some(image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)));
+    }
+
+    // Which provides apply here. Evaluated **in the sandbox**, with the repo
+    // mounted read-only: a predicate is arbitrary shell out of a stack file,
+    // and running it on the host during `init` is the one thing omh exists
+    // to avoid.
+    let detected = stack::detected(stack_defs, &paths.repo);
+
+    {
+        // No `if !candidates.is_empty()` guard. A repo with nothing to ask
+        // has still been answered — the answer is "nothing applies" — and
+        // skipping would leave a resolution recorded when this repo *was* a
+        // rust project asserting `rust/toolchain = true` for ever.
+        let asked = ask_conditions(
+            &backend,
+            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+            &paths.repo,
+            &detected,
+        );
+        summary.problems.extend(asked.said.iter().cloned());
+
+        // Recorded only when something was actually measured. `reconcile`
+        // drops every `true` it is not told about, so writing an empty
+        // answer would erase the repo's resolution rather than leave it be.
+        //
+        // And read against what is already recorded, because this is not
+        // always a first look: the stamp `init` refuses on is per checkout,
+        // so a teammate's `init` meets the table yours committed.
+        //
+        // Read whether or not anything will be recorded from this, because
+        // what to say about a condition that could not answer depends on
+        // it: an entry the table already holds is *left as it was*, and
+        // that is true of every entry when nothing is recorded at all.
+        let look = stack::reread(
+            &config::read_provision(paths, config::Layer::Shared)?,
+            &asked.verdicts(),
+        );
+        summary
+            .problems
+            .extend(look.unanswered.iter().map(stack::Unanswered::says));
+        let unrecordable = asked.unrecordable();
+        if let Some(why) = &unrecordable {
+            *hooks = report::Hooks::Unchecked(why.clone());
+        }
+        if unrecordable.is_none() {
+            let recorded = record_resolution(paths, &look.standing)?;
+            for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
+                summary.provisioned.push(key.clone());
+            }
+
+            // The stack layer, through the same function every launch
+            // reads — so what `init` reports built is what `omh new` and
+            // `omh sNN resume` run, by construction rather than by two
+            // implementations agreeing.
+            //
+            // Re-resolved from disk rather than reusing `recorded`, which
+            // is the committed table alone: `record_resolution` has just
+            // written it, and a `false` in `settings.local.toml` means *not
+            // on this laptop*, which is the laptop building the image.
+            let (own, repo) = crate::settings::resolved(paths)?;
+            let sandbox = sandbox(paths, &adapter, &repo, ca.clone())?;
+            image::ensure_stack(
+                &backend,
+                &adapter,
+                &sandbox.recipe(),
+                // The sandbox's own reading, not a fresh one. `sandbox.tag`
+                // was computed from it, and two reads of a file can differ.
+                sandbox.ca.as_ref().map(image::Root::pem),
+                &paths.repo,
+            )?;
+            // `sandbox.ca`, not `ca` — the same reading `sandbox.tag`
+            // was computed from. They are one value now, and comparing a
+            // tag against one derived from a different read is what made
+            // this comparison meaningless when they could differ.
+            if sandbox.tag != image::tag_for(&adapter, sandbox.ca.as_ref().map(image::Root::pem)) {
+                summary.stack_image = Some(sandbox.tag.clone());
+            }
+
+            // And what that image turned out to contain, measured once and
+            // remembered: every launch afterwards reads `~/.omh/facts.json`
+            // rather than starting a container to ask again.
+            //
+            // Two readings of one probe. A `needs` that did not resolve is
+            // a **provisioning failure** — the recipe ran and the
+            // environment still does not work, which is exactly what
+            // shipping rustup with no `cc` looked like. The same
+            // measurements hold back a hook whose program is missing, which
+            // is a different question about the same fact.
+            let hook_dirs = Catalogue::resolve(paths).sources(adapter::Capability::Hooks)?;
+            let mut sandbox = sandbox;
+            sandbox.top_up(paths, &backend, &adapter, &hook_dirs, &own, &repo, ctx)?;
+            for name in &sandbox.owed {
+                if sandbox.resolves.get(name) == Some(&false) {
+                    summary
+                        .problems
+                        .push(format!("{name} did not resolve after installing"));
+                }
+            }
+
+            // And the other reading, through the launcher's own function so
+            // `init` cannot report one thing and a launch do another.
+            //
+            // No question here any more, and that is the point of the whole
+            // design. What stood here asked, for every program the sandbox
+            // lacked, whether to switch its hook off — and recorded the
+            // answer in a committed file. It was asking somebody to
+            // configure around a broken environment, and the answer
+            // outlived the breakage: a repo whose sandbox later gained
+            // `cargo` still had `cargo = "skip"` on file, so the hook
+            // stayed off for everybody who cloned it, with nothing to
+            // re-ask. Now nothing is on file, because nothing had to be
+            // decided.
+            // **Only when the image was actually asked.** `measure`
+            // reports and swallows a probe that will not run, which is
+            // right for a launch — an unmeasured program suppresses
+            // nothing, so no hook is dropped on a guess — and reaches this
+            // report as an empty `resolves`, from which `render::held_back`
+            // derives an empty list. Read as `Measured`, that is a clean
+            // bill of health issued by a doctor who was out. It is the same
+            // defect one level in from the one this value was added for,
+            // and it is why the ask is asked about rather than assumed.
+            *hooks = match &sandbox.unmeasured {
+                Some(why) => report::Hooks::Unchecked(why.clone()),
+                None => report::Hooks::Measured(
+                    render::held_back(&hook_dirs, &own, &repo, &sandbox.resolves)?
+                        .iter()
+                        .map(|d| (d.name.clone(), d.wanted.clone()))
+                        .collect(),
+                ),
+            };
+        }
+    }
     Ok(())
 }
 
