@@ -2773,6 +2773,31 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
     );
 }
 
+/// A value `omh init` seeds that this omh cannot read — one written to your
+/// defaults with `--anyway`, for a newer omh — is named as it is seeded. It
+/// went into the repo's committed file without a word.
+///
+/// `#[ignore]`d: `init` needs a container runtime.
+#[test]
+#[ignore]
+fn init_names_a_seeded_value_this_omh_cannot_read() {
+    let sb = real_sandbox();
+    sb.git_init();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "persistence = \"tmux\"\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["init"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("seeded `persistence = tmux` as your defaults have it"),
+        "{}",
+        printed(&out)
+    );
+}
+
 /// The launcher discloses this repo's hooks, and a dry run leaves no trace.
 ///
 /// `notice::hooks` and `Record::commit` are both well covered by unit tests,

@@ -5596,6 +5596,36 @@ fn a_seeded_key_lands_where_omh_set_would_put_it() {
     assert_eq!(cmd::init::seed_settings(&paths).unwrap().local, None);
 }
 
+/// A value this omh cannot read — written to your defaults with `--anyway`,
+/// for a newer omh — is seeded as it was written, and said: it went into the
+/// repo's committed file without a word.
+#[test]
+fn a_seeded_value_this_omh_cannot_read_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths {
+        root: dir.path().join("home").join(".omh"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(&paths.root).unwrap();
+    std::fs::write(
+        config::Layer::Personal.file(&paths),
+        "persistence = \"tmux\"\nidle_timeout = \"45m\"\n",
+    )
+    .unwrap();
+    let seed = cmd::init::seed_settings(&paths).unwrap();
+    assert!(
+        seed.shared.contains("tmux"),
+        "seeded as written: {}",
+        seed.shared
+    );
+    assert_eq!(seed.unread.len(), 1, "{:?}", seed.unread);
+    assert!(
+        seed.unread[0].contains("persistence") && seed.unread[0].contains("tmux"),
+        "{:?}",
+        seed.unread
+    );
+}
+
 /// Every account `omh settings set account` writes, a new repo takes — into
 /// the file `omh set account` writes, as it stood.
 ///

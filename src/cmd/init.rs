@@ -199,6 +199,7 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
     let mut took = Vec::new();
     let mut local = toml_edit::DocumentMut::new();
     let mut took_local = Vec::new();
+    let mut unread = Vec::new();
 
     // Keys omh reads, and nothing else. A typo in your template is one you get
     // told about once, rather than one propagated into every repo you start.
@@ -214,6 +215,23 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
             // `[carry_in]` never reaches this loop — a second guard for it
             // could not fire, and a check nothing can reach is decoration.
             // `[account]` does, and goes where a string `account` goes.
+            //
+            // And a value — `[account]` goes on as it is — that this omh
+            // cannot read, one `omh settings set --anyway` wrote for a newer
+            // omh, travels as it was written, and is said: it went into the
+            // committed file without a word.
+            if let Some(value) = item.as_value() {
+                let typed = value
+                    .as_str()
+                    .map_or_else(|| value.to_string().trim().to_string(), String::from);
+                if let Some(why) = key::quarrel(k, &typed) {
+                    unread.push(format!(
+                        "seeded `{} = {typed}` as your defaults have it, though this omh \
+                         does not read it: {why}",
+                        k.name
+                    ));
+                }
+            }
             match k.default_layer() {
                 config::Layer::Local => {
                     local.insert(k.name, item.clone());
@@ -283,6 +301,7 @@ pub(crate) fn seed_settings(paths: &Paths) -> Result<Seed> {
         took,
         local,
         took_local,
+        unread,
     })
 }
 
@@ -299,6 +318,8 @@ pub(crate) struct Seed {
     pub(crate) local: Option<String>,
     /// What went into that one, by name.
     pub(crate) took_local: Vec<String>,
+    /// A sentence for each value seeded that this omh does not read.
+    pub(crate) unread: Vec<String>,
 }
 
 /// What a template may not hand on, refused by name.
@@ -513,6 +534,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // did not have — `write_if_absent` never revisits.
     if write_if_absent(&repo_omh.join("settings.toml"), &seeded.shared)? {
         summary.seeded = seeded.took.clone();
+        seeded.unread.iter().for_each(|u| ctx.warn(u));
     }
     // No hooks are seeded into the repo. omh's own are generated from the
     // manifest at launch, which is the only arrangement in which omh can ship a
