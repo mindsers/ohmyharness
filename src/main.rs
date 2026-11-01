@@ -33,7 +33,7 @@ mod image;
 mod key;
 mod landing;
 mod ledger;
-mod mcp;
+mod mcp_server;
 mod memory;
 mod notice;
 mod out;

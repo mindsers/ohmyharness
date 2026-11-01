@@ -7124,7 +7124,7 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     // what it guards.
     let named = [
         // The real exemptions.
-        ("src/mcp.rs", "omh-mcp: ignoring unparseable line"),
+        ("src/mcp_server.rs", "omh-mcp: ignoring unparseable line"),
         // Owed a `Ctx`. See above.
         ("src/facts.rs", "could not read"),
         // Wrapped, so the macro line carries no text of its own — the
