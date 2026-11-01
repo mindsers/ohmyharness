@@ -6101,29 +6101,61 @@ fn what_init_says_to_run_next_is_a_command_omh_accepts() {
 /// anywhere the scan does not look.
 #[test]
 fn only_dispatch_is_handed_the_whole_cli() {
-    let whole = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
-    )
-    .unwrap();
-    // The production half only. Below the test module the same spelling
-    // appears inside this very scan, and a guard that counts itself is a
-    // guard that can never reach one.
-    let body = crate::testsrc::production_of(&whole);
-    let holders: Vec<&str> = body
-        .match_indices("cli: &Cli")
-        .map(|(at, _)| {
+    // **Every production file, and the type however it is spelled.** This read
+    // `src/main.rs` alone, for the text `cli: &Cli` — so `c: &Cli`, a
+    // `&crate::cli::Cli`, or any of it in another file held the whole `Cli`
+    // unseen. A `Cli` in a type position is found by what precedes it: a lone
+    // `:`, past any `&`, `mut` and `crate::cli::` path.
+    let mut holders: Vec<String> = Vec::new();
+    for (path, source) in crate::testsrc::production() {
+        let body = crate::testsrc::code_of(&source);
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        for (at, _) in body.match_indices("Cli") {
+            let after = body[at + 3..].chars().next();
+            let before = body[..at].chars().next_back();
+            if after.is_some_and(ident) || before.is_some_and(ident) {
+                continue;
+            }
+            let lead = body[..at]
+                .trim_end_matches("cli::")
+                .trim_end_matches("crate::")
+                .trim_end()
+                .trim_end_matches("mut")
+                .trim_end()
+                .trim_end_matches('&')
+                .trim_end();
+            if !lead.ends_with(':') || lead.ends_with("::") {
+                continue;
+            }
             // Walk back to the `fn` that owns this parameter.
-            let head = &body[..at];
-            let start = head.rfind("fn ").unwrap_or(0);
-            let name = &body[start + 3..at];
-            name.split(['(', '<']).next().unwrap_or("").trim()
-        })
-        .collect();
+            let start = body[..at].rfind("fn ").map_or(0, |s| s + 3);
+            let name = body[start..at]
+                .split(['(', '<'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            let file = path.file_name().unwrap().to_string_lossy();
+            holders.push(format!("{file}: {name}"));
+        }
+    }
     assert_eq!(
         holders,
-        vec!["dispatch"],
+        vec!["main.rs: dispatch"],
         "a function other than `dispatch` takes the whole `Cli`, so it can \
          read `cli.session` where the dispatch scan cannot see it"
+    );
+    // And `Cli`'s own methods, which hold it as `self`, read no session.
+    let cli = crate::testsrc::code_of(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli.rs"),
+        )
+        .unwrap(),
+    );
+    let start = cli.find("impl Cli {").expect("impl Cli");
+    let end = start + cli[start..].find("\n}\n").expect("impl Cli closes");
+    assert!(
+        !cli[start..end].contains("self.session"),
+        "a method on `Cli` reads the session, out of the dispatch scan's sight"
     );
 }
 
