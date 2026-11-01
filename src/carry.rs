@@ -282,7 +282,10 @@ fn copy_dir(root: &Path, src: &Path, dst: &Path) -> Result<Action> {
     validate_destination(root, dst)?;
     std::fs::create_dir_all(dst)?;
     let mut action = Action::Unchanged;
-    for entry in std::fs::read_dir(src)?.flatten() {
+    for entry in std::fs::read_dir(src)? {
+        // An entry that failed to read stops the copy rather than leaving it
+        // short with nothing said.
+        let entry = entry.with_context(|| format!("reading {}", src.display()))?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
         let result = if from.is_dir() {

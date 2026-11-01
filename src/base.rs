@@ -260,8 +260,13 @@ impl Manifest {
             ),
             listed => listed.with_context(|| format!("reading {}", dir.display()))?,
         };
-        for entry in listed.flatten() {
-            let path = entry.path();
+        // Every entry or the reason, never `.flatten()`: an entry that failed
+        // to read could be the newest manifest, and skipping it loaded an
+        // older one with nothing said.
+        for entry in listed {
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
             if !path.extension().is_some_and(|x| x == "toml") {
                 continue;
             }
