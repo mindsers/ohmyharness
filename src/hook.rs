@@ -742,10 +742,14 @@ pub fn render(
         // the JS renderers' `event.input?.SUFFIX` template.
         // Exported, as the plugin renderers' `env` is: a `run` that calls a
         // script reading `$OMH_TOOL_FILE` reads the same value on every harness.
+        //
+        // The expression is the adapter's, as one shell word: in bare single
+        // quotes, one holding a `'` ended the quote and broke the command.
         for (field, expr, _) in &fields {
             command.push_str(&format!(
-                "{0}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); export {0}; ",
-                field.var()
+                "{0}=$(printf '%s' \"$p\" | jq -r {1}); export {0}; ",
+                field.var(),
+                crate::quote::sh(&format!("{expr} // empty"))
             ));
             if *field == Field::ToolFile {
                 command.push_str(&absolute_file_sh());
@@ -1519,6 +1523,38 @@ mod tests {
             Outcome::Dropped(d) => assert!(d.wanted.contains("read"), "got: {}", d.wanted),
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
         }
+    }
+
+    /// A field's jq expression is one shell word whatever it holds. It sat in
+    /// bare single quotes, so an adapter's expression with a `'` in it —
+    /// `.tool_input["it's"]` — ended the quote early and broke the command.
+    #[cfg(unix)]
+    #[test]
+    fn a_field_expression_is_one_shell_word() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [fields]\ntool-file = \".tool_input[\\\"it's\\\"]\"\n",
+        );
+        let h = Hook::parse(
+            r#"{"on":"before-tool","run":"echo \"$OMH_TOOL_FILE\""}"#,
+            "h.json",
+        )
+        .unwrap();
+        let command = rendered("peek", &h, &b).command;
+        let syntax = std::process::Command::new("/bin/sh")
+            .args(["-n", "-c", &command])
+            .output()
+            .unwrap();
+        assert!(
+            syntax.status.success(),
+            "{}\n{command}",
+            String::from_utf8_lossy(&syntax.stderr)
+        );
+        assert!(
+            command.contains(&crate::quote::sh(".tool_input[\"it's\"] // empty")),
+            "{command}"
+        );
     }
 
     /// `[fields-by-tool.<tool>]` — the escape hatch for a field that lives

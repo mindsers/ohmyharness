@@ -617,11 +617,15 @@ pub fn harness_dockerfile(adapter: &Adapter, ca: Option<&str>) -> String {
     // Docker creates a missing mount parent as root, leaving the agent unable
     // to write beside its own config — atomic credential writes and transcripts
     // both fail, the first of them silently.
+    //
+    // Each a shell word: they come from the adapter's paths, and joined bare a
+    // path with a space was two directories, one with a `;` a second command
+    // run as root at build time.
     let dirs = mount_parents(adapter);
     if !dirs.is_empty() {
         df.push_str(&format!(
             "RUN mkdir -p {0} && chown -R agent:agent {0}\n",
-            dirs.join(" ")
+            crate::quote::sh_words(&dirs)
         ));
     }
     // A document the harness reads only when told to, handed to every run of
@@ -2217,6 +2221,35 @@ pub fn exists(backend: &Backend, tag: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The directories made for a harness's mounts are shell words, each
+    /// one: they come from the adapter's paths, and joined bare into the
+    /// Dockerfile's `RUN`, a path with a space was two directories, and one
+    /// with a `;` was a second command run as root at build time.
+    #[cfg(unix)]
+    #[test]
+    fn a_mount_parent_is_one_shell_word() {
+        let d = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/claude.toml"),
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("claude.toml"),
+            real.replace("creds   = [", "creds   = [\"$HOME/my dir;id/sub/\", "),
+        )
+        .unwrap();
+        let adapter = Adapter::find(d.path(), "claude").unwrap();
+        let df = harness_dockerfile(&adapter, None);
+        let run = df
+            .lines()
+            .find(|l| l.starts_with("RUN mkdir -p"))
+            .unwrap_or_else(|| panic!("no mkdir in:\n{df}"));
+        assert!(
+            run.contains(&crate::quote::sh("/home/agent/my dir;id")),
+            "{run}"
+        );
+    }
+
     /// **A listing of what is in use that failed is not a listing of nothing.**
     /// `images_in_use` read stdout whatever the status, and `[]` on a spawn
     /// that failed — so a runtime that would not list its containers made
@@ -2358,7 +2391,9 @@ mod tests {
             df.lines()
                 .filter_map(|l| l.split(&format!("chown -R {owner} ")).nth(1))
                 .flat_map(|dirs| dirs.split_whitespace().take_while(|d| *d != "\\"))
-                .map(str::to_string)
+                // A harness's directories are shell words, quoted; the base
+                // image's are omh's own and bare.
+                .map(|d| d.trim_matches('\'').to_string())
                 .collect()
         };
         let moved = chowned(&df, "1001:100");

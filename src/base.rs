@@ -623,7 +623,13 @@ pub fn drop_graph_command(project: &str) -> Vec<String> {
     vec![
         "sh".into(),
         "-c".into(),
-        format!("{GRAPH_BIN} cli delete_project --project '{project}' >/dev/null 2>&1 || true"),
+        // One shell word: the project carries the repo's directory name, and
+        // in bare quotes a checkout called `it's` broke this — silently,
+        // behind `|| true`, so the graph of a removed session stayed listed.
+        format!(
+            "{GRAPH_BIN} cli delete_project --project {} >/dev/null 2>&1 || true",
+            crate::quote::sh(project)
+        ),
     ]
 }
 
@@ -1197,6 +1203,26 @@ pub fn index_args(
 
 #[cfg(test)]
 mod tests {
+
+    /// The graph project is one shell word: it carries the repo's directory
+    /// name, and in bare single quotes a checkout called `it's` broke the
+    /// command `omh sNN rm` runs to drop the graph — silently, behind
+    /// `|| true`, so the graph of a deleted session stayed listed for good.
+    #[cfg(unix)]
+    #[test]
+    fn a_graph_project_is_one_shell_word() {
+        let argv = drop_graph_command("it's-1a2b3c4d-s01");
+        let script = argv.last().unwrap();
+        let syntax = std::process::Command::new("/bin/sh")
+            .args(["-n", "-c", script])
+            .output()
+            .unwrap();
+        assert!(syntax.status.success(), "{script}");
+        assert!(
+            script.contains(&crate::quote::sh("it's-1a2b3c4d-s01")),
+            "{script}"
+        );
+    }
 
     /// The graph UI's port is the same on every toolchain: FNV-1a of
     /// `container\0graph-ui`, these values worked from the specification,
