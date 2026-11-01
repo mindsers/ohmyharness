@@ -725,9 +725,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // fail below return an empty answer and read as ordinary — the reason
         // has to be true from the moment it stops being the previous one.
         hooks = report::Hooks::Unchecked("the sandbox could not be asked".into());
-        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-            runtime::installed(p)
-        })?;
+        let backend = runtime::for_repo(&paths)?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
         // Without it the headline command cannot run, so init is not finished
         // until this exists — and until it exists there is no sandbox to ask
@@ -947,9 +945,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // The index lives in a container volume, so it has to be built inside the
     // sandbox — one built on the host would land where no session can read it.
     if let Some(h) = &harness {
-        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-            runtime::installed(p)
-        })?;
+        let backend = runtime::for_repo(&paths)?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
         // The harness's image as this host runs it, not as built: the volume
         // this first index creates takes its owner from the image's agent, and

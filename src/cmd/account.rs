@@ -438,9 +438,7 @@ fn login_in_sandbox(
 ) -> Result<()> {
     let harness = adapter.name.as_str();
     let catalogue = Catalogue::resolve(paths);
-    let backend = runtime::select(&crate::runtime_preference(paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(paths)?;
     let ca = image::ca_for(paths)?;
     image::ensure(&backend, adapter, ca.as_ref().map(image::Root::pem))?;
 

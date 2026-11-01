@@ -973,8 +973,8 @@ pub fn plan(
         // must read the same as no key, or it would stamp differently and read
         // as drift against a session launched without it.
         limits: Limits {
-            memory: crate::policy_value(paths, "sandbox_memory")?.filter(|s| !s.is_empty()),
-            cpus: crate::policy_value(paths, "sandbox_cpus")?.filter(|s| !s.is_empty()),
+            memory: crate::config::policy_value(paths, "sandbox_memory")?.filter(|s| !s.is_empty()),
+            cpus: crate::config::policy_value(paths, "sandbox_cpus")?.filter(|s| !s.is_empty()),
         },
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),

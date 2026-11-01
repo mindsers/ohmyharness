@@ -451,9 +451,7 @@ pub(crate) fn attach(
     let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     // Selected once, here, and handed down: `session_up` used to select its
     // own, so a launch chose a runtime twice and a test could inject neither.
-    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(&paths)?;
     sandbox.top_up(
         &paths,
         &backend,
@@ -662,7 +660,7 @@ fn mark_in_use(paths: &Paths, id: &str) -> Option<String> {
 /// Best-effort by design: this runs on the way to starting a session, and a
 /// failure to reap must never stop you working.
 pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
-    let raw = match crate::policy_value(paths, "idle_timeout") {
+    let raw = match crate::config::policy_value(paths, "idle_timeout") {
         Ok(Some(raw)) => raw,
         Ok(None) => return,
         // Said, not skipped as though unset: the settings the launch is about
@@ -680,9 +678,7 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         ));
         return;
     };
-    let Ok(backend) = crate::runtime_preference(paths)
-        .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)))
-    else {
+    let Ok(backend) = runtime::for_repo(paths) else {
         return;
     };
 
@@ -746,9 +742,7 @@ pub(crate) fn down(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(&paths)?;
     let ids = match id {
         // A session that does not exist is refused, as every verb that names
         // one refuses it: this said "was not running" and exited 0.
@@ -1351,9 +1345,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // Said once, about the machine, rather than once per row. The `running`
     // column renders a `None` as an absence — nobody asked — and *why* nobody
     // asked is one fact, not N.
-    let backend = match runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    }) {
+    let backend = match runtime::for_repo(&paths) {
         Ok(backend) => Ok(backend),
         // **The reason is kept, not only said.** It was warned to stderr and
         // dropped, so `leftovers` could not tell "omh looked and found no
@@ -1994,7 +1986,7 @@ pub(crate) fn run(
     let harness = name.clone();
 
     let adapter =
-        Adapter::find(&paths.adapters(), name).map_err(|e| crate::unknown_tool(&paths, name, e))?;
+        Adapter::find(&paths.adapters(), name).map_err(|e| unknown_tool(&paths, name, e))?;
     let catalogue = Catalogue::resolve(&paths);
 
     // Which identity this session runs as. Ambiguity is an error rather than a
@@ -2051,9 +2043,7 @@ pub(crate) fn run(
     // validation, and to `session_up`, which used to select its own. A dry run
     // selects too: the plan it prints is validated against the backend's
     // capabilities and spelled in the backend's argv.
-    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(&paths)?;
     // A write guard, so it is spelled like the other write guards. It was
     // `if !dry_run`, reading a local derived from this same value — which is
     // how a guard comes to be added in the spelling that has no guard.
@@ -2072,7 +2062,7 @@ pub(crate) fn run(
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
         staging,
-        persist: crate::policy_value(&paths, "persistence")?
+        persist: crate::config::policy_value(&paths, "persistence")?
             .as_deref()
             .unwrap_or("dtach")
             .parse()?,
@@ -2421,9 +2411,7 @@ pub(crate) fn rm(
     // opposite two lines earlier.
     let mut went: Vec<String> = Vec::new();
     let mut unreached: Vec<String> = Vec::new();
-    match runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    }) {
+    match runtime::for_repo(&paths) {
         Err(e) => {
             // Was `if let Ok(_)`, so this fell through in silence and the
             // report went on to claim the container had gone.
@@ -2792,6 +2780,62 @@ pub(crate) fn rm(
         }
     }
     Ok(())
+}
+
+/// What to tell someone whose word matched nothing. Pure so it can be tested:
+/// the message is the entire value of this path.
+pub(crate) fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
+    if editors.iter().any(|e| e == name) {
+        return format!("`{name}` is an editor — try `omh sNN attach {name}`");
+    }
+    format!(
+        "unknown harness `{name}`\n  available: {}",
+        harnesses.join(", ")
+    )
+}
+
+/// Neither a harness nor a reserved word — say what is available, since the
+/// user cannot tell from the name alone which kind they meant.
+pub(crate) fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -> anyhow::Error {
+    // A word that is not a name at all is not an *unknown* one, and the list of
+    // what is available answers a question this user did not ask. `Adapter::find`
+    // already said the useful thing — that the word cannot be a harness name —
+    // and replacing it with "unknown harness `../../x`\n  available: ..." buries
+    // the only sentence that explains the refusal.
+    if adapter::Name::parse(name).is_err() {
+        return original;
+    }
+    // **Both catalogues, or neither.** `tool_hint` answers "what could you have
+    // meant", and it answers it from these two lists — so a list that is empty
+    // because omh could not read the directory produces a confident wrong
+    // sentence: `unknown harness \`zed\`` naming the harnesses, about an editor
+    // omh ships. Both reads were `.unwrap_or_default()`; the adapters one was
+    // saved by the `is_empty` fallback below and the editors one was not.
+    //
+    // Falling back to `original` rather than reporting here: `original` is
+    // `Adapter::find`'s error, which already names the catalogue and the file,
+    // and a second sentence about a second directory would bury it.
+    let harnesses: Vec<String> = match Adapter::load_dir(&paths.adapters()) {
+        Ok(found) => found.into_iter().map(|a| a.name.to_string()).collect(),
+        // `original` is `Adapter::find`'s own error about this same directory,
+        // which says it better than a second sentence would.
+        Err(_) => return original,
+    };
+    if harnesses.is_empty() {
+        return original;
+    }
+    let editors: Vec<String> = match editor::Editor::load_dir(&paths.editors()) {
+        Ok(found) => found.into_iter().map(|e| e.name.to_string()).collect(),
+        // Said, not swallowed. Nothing else on this path has looked at the
+        // editors directory, so falling through to `tool_hint` with an empty
+        // list is omh answering "not an editor either" having never opened it.
+        Err(e) => {
+            return e.context(format!(
+                "could not tell whether `{name}` is an editor omh knows"
+            ))
+        }
+    };
+    anyhow::anyhow!("{}", tool_hint(name, &harnesses, &editors))
 }
 
 #[cfg(test)]

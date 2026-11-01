@@ -38,9 +38,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         "this repo is not set up yet — run `omh init` first"
     );
 
-    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(&paths)?;
     let ca = image::ca_for(&paths)?;
     // Before anything is written. Settings that do not resolve stop this
     // command, and they are read again below once the table has been looked

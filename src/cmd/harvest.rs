@@ -217,10 +217,7 @@ pub(crate) fn stop_before_syncing(
     // sync is also not something that machine was going to do usefully. The
     // message says which it is and `--down` is not the way past — the way past
     // is a runtime.
-    let backend = runtime::select(&crate::runtime_preference(paths)?, &|p| {
-        runtime::installed(p)
-    })
-    .with_context(|| {
+    let backend = runtime::for_repo(paths).with_context(|| {
         format!(
             "omh cannot tell whether {}'s sandbox is running, so it will not sync over it",
             session.id
@@ -1509,7 +1506,7 @@ fn decide_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::C
     if the_checks.is_empty() {
         return Checked::NotRun("this repo declares no turn-end checks".into());
     }
-    let preference = match crate::runtime_preference(paths) {
+    let preference = match crate::runtime::preference(paths) {
         Ok(preference) => preference,
         Err(e) => return Checked::NotRun(format!("{e:#}")),
     };

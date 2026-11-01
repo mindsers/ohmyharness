@@ -887,6 +887,18 @@ fn workspace_args(staging: &SbxStaging) -> Vec<String> {
         .collect()
 }
 
+/// The backend this repo's settings ask for: the `runtime` setting, `auto`
+/// when unset. An unreadable settings file is an error, never `auto`.
+pub fn preference(paths: &crate::paths::Paths) -> Result<String> {
+    Ok(crate::config::policy_value(paths, "runtime")?.unwrap_or_else(|| "auto".into()))
+}
+
+/// The backend a command in this repo runs on: [`select`] over the repo's
+/// [`preference`], asking the host what is installed.
+pub fn for_repo(paths: &crate::paths::Paths) -> Result<Backend> {
+    select(&preference(paths)?, &|p| installed(p))
+}
+
 /// The backend the settings ask for, or the one measured backend under `auto`.
 pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Backend> {
     let build = |name: &str| Engine::named(name).map(Engine::build);

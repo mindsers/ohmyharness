@@ -860,32 +860,23 @@ impl Ctx {
         const KNOWN_CYCLES: &[&[&str]] = &[
             &["adapter", "hook"],
             &[
-                "ask",
                 "auth",
                 "base",
                 "catalogue",
-                "cli",
-                "cmd",
                 "config",
                 "container",
-                "derive",
                 "detect",
                 "doctor",
-                "facts",
                 "idle",
                 "image",
-                "key",
                 "leftovers",
-                "main",
                 "memory",
                 "notice",
                 "render",
-                "report",
                 "rules",
                 "runtime",
                 "settings",
                 "stack",
-                "why",
             ],
             &["session", "shadow"],
         ];
@@ -935,7 +926,7 @@ impl Ctx {
         // added six inside the big one with this test green. Counted rather
         // than listed — a refactor moves dozens — and printed whole when the
         // count moves, so a diff of two runs names the edge.
-        const KNOWN_EDGES_INSIDE: usize = 107;
+        const KNOWN_EDGES_INSIDE: usize = 60;
         let inside: Vec<String> = found
             .iter()
             .flat_map(|cycle| {

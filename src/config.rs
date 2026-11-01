@@ -1396,6 +1396,20 @@ fn list_of(settings: &[Setting], key: &str) -> Result<Vec<String>, String> {
     }
 }
 
+/// Read one policy key through the usual layer merge.
+///
+/// **Unset is `None`; unreadable is an error.** This was `.ok()?`, so a
+/// settings file omh could not read answered every key as unset — `runtime`
+/// as `auto`, `persistence` as its default, the sandbox limits as none — and
+/// a launch went ahead on settings nobody chose.
+pub(crate) fn policy_value(paths: &Paths, key: &str) -> Result<Option<String>> {
+    Ok(policy(paths)
+        .context("reading this repo's settings")?
+        .into_iter()
+        .find(|s| s.key == key)
+        .map(|s| s.value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2546,12 +2560,12 @@ mod tests {
         // Not valid UTF-8, so the read fails the same way for root.
         std::fs::write(&file, b"runtime = \"podman\"\n\xff\n").unwrap();
         assert!(
-            crate::policy_value(&paths, "runtime").is_err(),
+            crate::config::policy_value(&paths, "runtime").is_err(),
             "policy_value"
         );
         assert!(
-            crate::runtime_preference(&paths).is_err(),
-            "runtime_preference"
+            crate::runtime::preference(&paths).is_err(),
+            "runtime::preference"
         );
         assert!(policy_list(&paths, "carry_in").is_err(), "policy_list");
         let checked = policy_list_checked(&paths, "carry_in").unwrap_err();

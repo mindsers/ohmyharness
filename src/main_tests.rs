@@ -1,4 +1,5 @@
 use super::*;
+use crate::adapter::Adapter;
 use crate::session::Session;
 use clap::CommandFactory;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2001,8 +2002,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh {id} down` after a review that left something undecided. +
         // `omh {id} rm` when the agent wrote more while `rm` decided. +
         // `omh set account {harness}:{name} --local` when the committed
-        // settings chose the launch's account.
-        ("src/cmd/session.rs", 23),
+        // settings chose the launch's account. + `omh sNN attach {name}` in
+        // `tool_hint`, for a word that names an editor.
+        ("src/cmd/session.rs", 24),
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
         // + `omh settings edit mcp`, in the refusal of a name for a server.
@@ -2075,8 +2077,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // The `omh <id> rm` in the reason `leftovers` gives for naming nothing.
         ("src/leftovers.rs", 1),
         // The ninth is the `--json` refusal, beside the two for `--dry-run`
-        // and a session prefix nothing consumes.
-        ("src/main.rs", 9),
+        // and a session prefix nothing consumes. `tool_hint`'s
+        // `omh sNN attach` went to src/cmd/session.rs with it.
+        ("src/main.rs", 8),
         ("src/memory.rs", 2),
         ("src/memory/ingest.rs", 2),
         ("src/notice.rs", 2),
@@ -6551,13 +6554,13 @@ fn no_bundled_adapter_shares_a_name_with_an_editor() {
 /// will make is typing an editor where a harness goes. Say the fix.
 #[test]
 fn naming_an_editor_where_a_harness_goes_names_the_fix() {
-    let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
+    let hint = cmd::session::tool_hint("zed", &["claude".into()], &["zed".into()]);
     assert!(hint.contains("omh sNN attach zed"), "got: {hint}");
 }
 
 #[test]
 fn an_unknown_word_lists_the_harnesses() {
-    let hint = tool_hint(
+    let hint = cmd::session::tool_hint(
         "emacs",
         &["claude".into(), "opencode".into()],
         &["zed".into()],
@@ -6577,7 +6580,7 @@ fn a_command_typed_as_a_harness_is_no_longer_a_thing_that_can_happen() {
     // word is not a launch, so `config` is the command and cannot be
     // mistaken for anything. What survives is the editor half, which is
     // still a real confusion because editors and harnesses are both names.
-    let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
+    let hint = cmd::session::tool_hint("zed", &["claude".into()], &["zed".into()]);
     assert!(hint.contains("omh sNN attach zed"), "got: {hint}");
 }
 

@@ -872,10 +872,7 @@ pub fn prune_cmd(
     out: &mut dyn std::io::Write,
 ) -> anyhow::Result<()> {
     let paths = crate::paths::Paths::discover(cwd)?;
-    let backend = crate::runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        crate::runtime::installed(p)
-    })
-    .ok();
+    let backend = crate::runtime::for_repo(&paths).ok();
 
     // **One walk.** The plan the question names is the plan that acts, so
     // nothing can appear between the two — a second inventory after the prompt

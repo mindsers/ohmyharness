@@ -26,9 +26,7 @@ use std::process::Command;
 /// and going, and lets the container mount only the index.
 pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(&paths)?;
     let container = base::ui_container(&paths.repo_id());
 
     if stop {
@@ -165,8 +163,7 @@ pub(crate) fn doctor_cmd(
     //
     // Not `?` on the preference either: settings omh cannot read are what the
     // settings row below exists to name, and stopping here printed nothing.
-    let chosen = crate::runtime_preference(&paths)
-        .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)));
+    let chosen = runtime::for_repo(&paths);
     // Not `?`. A stack definition omh cannot read is something to report, not
     // a reason to print nothing — see `host_checks`.
     // The same resolution `sandbox()` uses to decide what installs, so the row
@@ -486,12 +483,7 @@ pub(crate) fn doctor_cmd(
             false => container::Staging::Apply,
         };
         let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
-        if let (true, Ok(backend)) = (
-            staging.is_apply(),
-            runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-                runtime::installed(p)
-            }),
-        ) {
+        if let (true, Ok(backend)) = (staging.is_apply(), runtime::for_repo(&paths)) {
             sandbox.top_up(
                 &paths,
                 &backend,
@@ -579,9 +571,7 @@ pub(crate) fn doctor_cmd(
             crate::ssh::ensure_host_key(&paths.keys())?;
         }
 
-        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-            runtime::installed(p)
-        })?;
+        let backend = runtime::for_repo(&paths)?;
 
         // **Built, not merely looked for.** `deliver::available` never builds —
         // that is its contract — so on a machine that has not launched yet it
