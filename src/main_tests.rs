@@ -4384,7 +4384,7 @@ fn outcome(name: &str, ok: bool, detail: &str) -> crate::probe::Outcome {
 #[test]
 fn a_resolution_nobody_measured_is_never_recorded() {
     assert_eq!(
-        cmd::init::fired_from(3, &[]),
+        provision::fired_from(3, &[]),
         None,
         "three provides asked, none answered — the container never ran"
     );
@@ -4409,7 +4409,7 @@ fn a_resolution_nobody_measured_is_never_recorded() {
 fn a_partial_report_is_not_a_resolution() {
     let truncated = [outcome("rust/toolchain", true, "applies")];
     assert_eq!(
-        cmd::init::fired_from(2, &truncated),
+        provision::fired_from(2, &truncated),
         None,
         "two provides asked, one answered — the container died mid-script"
     );
@@ -4427,7 +4427,7 @@ fn a_partial_report_is_not_a_resolution() {
 #[test]
 fn nothing_to_ask_is_an_answer_and_clears_a_stale_resolution() {
     assert_eq!(
-        cmd::init::fired_from(0, &[]),
+        provision::fired_from(0, &[]),
         Some(std::collections::BTreeSet::new()),
         "no candidates is a measured 'nothing applies', not a failure to measure"
     );
@@ -4445,7 +4445,7 @@ fn only_the_provides_that_applied_are_recorded() {
         outcome("node/bun", false, "2 could not answer"),
     ];
     assert_eq!(
-        cmd::init::fired_from(3, &answered),
+        provision::fired_from(3, &answered),
         Some(std::collections::BTreeSet::from([
             "rust/toolchain".to_string()
         ]))
@@ -4472,7 +4472,7 @@ fn installs_are_the_recorded_recipes_in_file_order() {
         .iter()
         .map(|p| (stack::key(&node.name, &p.name), true))
         .collect();
-    let got = cmd::init::installs_for(&[node], &all);
+    let got = provision::installs_for(&[node], &all);
 
     let expected: Vec<&str> = node
         .provides
@@ -4531,7 +4531,7 @@ fn only_the_recorded_recipes_run_and_the_file_decides_their_order() {
         .collect();
 
     assert_eq!(
-        cmd::init::installs_for(&[&def], &resolved),
+        provision::installs_for(&[&def], &resolved),
         vec!["install zulu", "install alpha"],
         "a provide the resolution does not name must contribute no recipe, \
          and sorted order is not file order"
@@ -4579,7 +4579,7 @@ fn a_provide_somebody_opted_out_of_is_not_installed() {
     ]);
 
     assert_eq!(
-        cmd::init::installs_for(&[&def], &resolved),
+        provision::installs_for(&[&def], &resolved),
         vec!["install rustup"],
         "the predicate said the linker applies; a person said not here, and \
          a person outranks a predicate"
@@ -4621,7 +4621,7 @@ fn a_repo_that_provisions_runs_a_different_image() {
         for k in keys {
             repo.provision.insert((*k).to_string(), true);
         }
-        cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap())
+        provision::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap())
             .unwrap()
             .tag
     };
@@ -4664,7 +4664,7 @@ fn a_repo_that_provisions_runs_a_different_image() {
 /// rather than a `println!` no test can watch vanish.
 #[test]
 fn a_probe_that_ran_and_failed_is_a_reason_not_a_measurement() {
-    let failed = cmd::init::measured_or_reason(false, "", "Error: No such image: omh/x:abc\n");
+    let failed = provision::measured_or_reason(false, "", "Error: No such image: omh/x:abc\n");
     let Err(reason) = failed else {
         panic!("a failed container was read as a sandbox with nothing in it");
     };
@@ -4679,14 +4679,14 @@ fn a_probe_that_ran_and_failed_is_a_reason_not_a_measurement() {
 
     // A probe that succeeded is taken at its word, protocol and all.
     assert_eq!(
-        cmd::init::measured_or_reason(true, "ok\tcargo\tresolves\n", "")
+        provision::measured_or_reason(true, "ok\tcargo\tresolves\n", "")
             .expect("a successful probe is an answer")
             .len(),
         1
     );
     // Including when it honestly measured nothing — an empty *successful*
     // report is a report, and must not be dressed as a failure.
-    assert_eq!(cmd::init::measured_or_reason(true, "", ""), Ok(Vec::new()));
+    assert_eq!(provision::measured_or_reason(true, "", ""), Ok(Vec::new()));
 }
 
 /// Stderr is carried, but not all of it.
@@ -4698,7 +4698,7 @@ fn a_probe_that_ran_and_failed_is_a_reason_not_a_measurement() {
 #[test]
 fn the_reason_carries_a_few_lines_of_evidence_not_a_page() {
     let noisy: String = (0..40).map(|i| format!("line {i}\n")).collect();
-    let Err(reason) = cmd::init::measured_or_reason(false, "", &noisy) else {
+    let Err(reason) = provision::measured_or_reason(false, "", &noisy) else {
         panic!("must be a reason");
     };
     assert_eq!(
@@ -4961,8 +4961,8 @@ fn the_sandbox_is_asked_about_both_what_stacks_promised_and_what_hooks_run() {
     // Through `needs_of`, because that is what `sandbox` puts in `owed` —
     // asserting the union over a hand-written set would let the two halves
     // agree here and disagree in the one place it matters.
-    let owed = cmd::init::needs_of(&[&def], &repo.provision);
-    let asked = cmd::init::probe_targets(&[hooks], &Default::default(), &repo, &owed).unwrap();
+    let owed = provision::needs_of(&[&def], &repo.provision);
+    let asked = provision::probe_targets(&[hooks], &Default::default(), &repo, &owed).unwrap();
 
     assert_eq!(
         asked,
@@ -5018,7 +5018,7 @@ fn only_what_was_provisioned_owes_a_program() {
     ]);
 
     assert_eq!(
-        cmd::init::needs_of(&[&def], &resolved),
+        provision::needs_of(&[&def], &resolved),
         BTreeSet::from(["node".to_string(), "pnpm".to_string()]),
         "an assertion with no recipe is still owed; an opt-out and an \
          absence are not"
@@ -5084,7 +5084,7 @@ fn the_resolution_is_read_and_written_in_the_committed_layer() {
         .iter()
         .map(|k| (*k).to_string())
         .collect();
-    cmd::init::record_resolution(&paths, &fired).unwrap();
+    provision::record_resolution(&paths, &fired).unwrap();
 
     let shared = std::fs::read_to_string(config::Layer::Shared.file(&paths)).unwrap();
     let parsed: toml::Table = toml::from_str(&shared).expect("still TOML");
@@ -5159,8 +5159,8 @@ fn probes(dir: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-fn a_sandbox(tag: &str, owed: &[&str]) -> cmd::init::Sandbox {
-    cmd::init::Sandbox {
+fn a_sandbox(tag: &str, owed: &[&str]) -> provision::Sandbox {
+    provision::Sandbox {
         installs: Vec::new(),
         tag: tag.to_string(),
         resolves: BTreeMap::new(),
@@ -5468,7 +5468,7 @@ fn the_layer_a_sandbox_names_is_the_layer_its_recipe_builds() {
     assert!(ca.is_some(), "the fixture must actually set one");
 
     let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
-    let sb = cmd::init::sandbox(&paths, &adapter, &fixture_policy(), ca.clone()).unwrap();
+    let sb = provision::sandbox(&paths, &adapter, &fixture_policy(), ca.clone()).unwrap();
 
     assert_eq!(
         sb.recipe(),
@@ -5508,7 +5508,7 @@ fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
     let repo = fixture_policy();
 
     let first =
-        cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
+        provision::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
     assert_eq!(
         first.owed,
         BTreeSet::from(["zulu".to_string(), "alpha".to_string()]),
@@ -5533,7 +5533,7 @@ fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
     facts.save(&paths).unwrap();
 
     let second =
-        cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
+        provision::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
     assert_eq!(
         second.resolves.get("alpha"),
         Some(&false),

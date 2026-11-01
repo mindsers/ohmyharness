@@ -183,11 +183,11 @@ pub(crate) fn session_up(
     // The resolution behind `opts.image` — the recipe *and* the certificate the
     // tag was computed with. Handed in whole rather than derived here, so
     // everything about the layer a launch builds comes from one
-    // `crate::cmd::init::sandbox()` call and cannot name a different image than
+    // `crate::provision::sandbox()` call and cannot name a different image than
     // it builds. That split is what let `init` build a layer no launch ever
     // ran, and taking the two apart into separate arguments is how it reopened
     // — this PR read `ca_cert` a second time here — so they arrive together.
-    sandbox: &crate::cmd::init::Sandbox,
+    sandbox: &crate::provision::Sandbox,
     ctx: &out::Ctx,
 ) -> Result<String> {
     let name = paths.container(&session.id);
@@ -448,7 +448,7 @@ pub(crate) fn attach(
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
     let (own, repo) = settings::resolved(&paths)?;
     let ca = crate::image::ca_for(&paths)?;
-    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
+    let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca)?;
     // Selected once, here, and handed down: `session_up` used to select its
     // own, so a launch chose a runtime twice and a test could inject neither.
     let backend = runtime::for_repo(&paths)?;
@@ -2034,7 +2034,7 @@ pub(crate) fn run(
     let base = session::default_branch(&paths.repo);
     let (own, repo) = settings::resolved(&paths)?;
     let ca = crate::image::ca_for(&paths)?;
-    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
+    let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca)?;
     // Not on a dry run, which promises to leave no trace: topping up starts a
     // container and writes `~/.omh/facts.json`. What is already cached is used,
     // so the plan it prints is the plan a real launch would build from the same

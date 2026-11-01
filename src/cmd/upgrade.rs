@@ -8,11 +8,10 @@
 //! running on an old image.
 
 use crate::adapter::Adapter;
-use crate::cmd::init::{
-    ask_conditions, record_resolution, refresh_catalogue, sandbox_from, SEEDED_BY,
-};
+use crate::cmd::init::{ask_conditions, refresh_catalogue, SEEDED_BY};
 use crate::image::{self, Root};
 use crate::paths::Paths;
+use crate::provision::{record_resolution, sandbox_from};
 use crate::report::{self, Outcome, Reprovisioned, StaleImage, StaleSession};
 use crate::{config, out, runtime, session, stack};
 use anyhow::Result;
