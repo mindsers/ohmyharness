@@ -381,6 +381,14 @@ pub struct Options {
     /// spell here. A program absent from the map is one nobody probed, which
     /// suppresses nothing.
     pub resolves: BTreeMap<String, bool>,
+    /// The digest of the image recipe, which the sandbox is told through
+    /// `RECIPE_ENV`.
+    ///
+    /// Resolved by the caller from the same reading of `ca_cert` it built the
+    /// image with. Worked out in here, it was a second read — and a second
+    /// read can differ from the first, so a sandbox could be told the digest
+    /// of an image it is not running.
+    pub recipe: crate::memory::expiry::Recipe,
 }
 
 pub fn plan(
@@ -951,8 +959,8 @@ pub fn plan(
             // me" rather than as a digest.
             (
                 crate::memory::expiry::RECIPE_ENV.into(),
-                match crate::memory::expiry::Recipe::here(paths) {
-                    crate::memory::expiry::Recipe::Digest(d) => d,
+                match &opts.recipe {
+                    crate::memory::expiry::Recipe::Digest(d) => d.clone(),
                     crate::memory::expiry::Recipe::Unknowable(_) => String::new(),
                 },
             ),
@@ -1837,6 +1845,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap()
@@ -1875,6 +1884,7 @@ mod tests {
                     repo: decided().1,
                     image: crate::image::tag_for(&adapter, None),
                     resolves,
+                    recipe: crate::memory::expiry::Recipe::of(None),
                 },
             )
             .unwrap()
@@ -1935,6 +1945,7 @@ mod tests {
                 repo,
                 image: "omh/this-repos-toolchain:deadbeef".into(),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -2041,6 +2052,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap()
@@ -2084,6 +2096,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -2201,6 +2214,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -2408,6 +2422,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -2534,6 +2549,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -2934,6 +2950,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap()
@@ -2960,6 +2977,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -3024,6 +3042,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -3639,6 +3658,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -3676,6 +3696,7 @@ mod tests {
                     repo,
                     image: crate::image::tag_for(&adapter, None),
                     resolves: BTreeMap::new(),
+                    recipe: crate::memory::expiry::Recipe::of(None),
                 },
             )
             .unwrap();
@@ -3808,6 +3829,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .expect_err("a broken provider file refuses the launch");
@@ -4134,6 +4156,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         );
         assert!(
@@ -4169,6 +4192,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -4447,6 +4471,7 @@ mod tests {
                 repo: decided_with(["memory".to_string()].into()).1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -4516,6 +4541,7 @@ mod tests {
                     repo: crate::settings::RepoPolicy::switching_off(&manifest, off),
                     image: crate::image::tag_for(&adapter, None),
                     resolves: BTreeMap::new(),
+                    recipe: crate::memory::expiry::Recipe::of(None),
                 },
             )
             .unwrap();
@@ -4725,6 +4751,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -4818,6 +4845,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .expect_err("a reserved name must not launch");
@@ -4925,6 +4953,7 @@ mod tests {
                 repo: decided_with(["codegraph".to_string()].into()).1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .expect_err("a manifest name is omh's whether the feature is on or off");
@@ -4954,6 +4983,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -5177,6 +5207,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -5319,6 +5350,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&bad, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap_err();
@@ -5371,6 +5403,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -5411,6 +5444,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -5463,6 +5497,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -5484,6 +5519,7 @@ mod tests {
                 repo: decided().1,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap();
@@ -5516,6 +5552,7 @@ mod tests {
             repo: decided().1,
             image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
+            recipe: crate::memory::expiry::Recipe::of(None),
         };
         let p = plan(&fx.paths, &fx.catalogue, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -5539,6 +5576,7 @@ mod tests {
             repo: decided().1,
             image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
+            recipe: crate::memory::expiry::Recipe::of(None),
         };
         let p = plan(&fx.paths, &fx.catalogue, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
@@ -5567,6 +5605,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
         .unwrap()
@@ -5597,6 +5636,7 @@ mod tests {
                 repo,
                 image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
+                recipe: crate::memory::expiry::Recipe::of(None),
             },
         )
     }

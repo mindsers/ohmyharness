@@ -409,6 +409,7 @@ fn login_in_sandbox(
             // one hook too many costs nothing, and this container exists for
             // the length of an OAuth redirect.
             resolves: BTreeMap::new(),
+            recipe: crate::memory::expiry::Recipe::of(ca.as_ref()),
         },
     )?;
     plan.validate_for(&backend)?;
