@@ -38,16 +38,14 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         "this repo is not set up yet — run `omh init` first"
     );
 
-    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(&paths)?;
     let ca = image::ca_for(&paths)?;
     // Before anything is written. Settings that do not resolve stop this
     // command, and they are read again below once the table has been looked
     // at — by which time the catalogue has been refreshed, a container run and
     // a committed file rewritten. A refusal after all that reads as though
     // nothing happened.
-    crate::cmd::session::resolved(&paths)?;
+    crate::settings::resolved(&paths)?;
     // And your catalogue, for the same reason: the refresh below rewrites it,
     // and a server omh cannot read is named here, before anything else is.
     config::servers(&paths)?;
@@ -120,7 +118,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         _ => None,
     };
     let rest = || -> Result<Rebuilt> {
-        let (_own, mut repo) = crate::cmd::session::resolved(&paths)?;
+        let (_own, mut repo) = crate::settings::resolved(&paths)?;
         if let Some(table) = table {
             // A dry run wrote nothing, so the resolution on disk is still the old
             // one. Classify against the table a real run would have written, as

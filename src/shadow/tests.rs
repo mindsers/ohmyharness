@@ -1040,7 +1040,7 @@ fn a_checkpoint_number_shows_that_checkpoints_own_patch() {
     checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
     let second = checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
 
-    let patch = s.show(&wt, 2, crate::session::What::Patch).unwrap();
+    let patch = s.show(&wt, 2, crate::git::What::Patch).unwrap();
     assert!(
         patch.contains("+fn two() {}") && !patch.contains("+fn one() {}"),
         "checkpoint 2 is the second commit and nothing else: {patch}"
@@ -1080,13 +1080,13 @@ fn a_subject_the_agent_wrote_cannot_repaint_a_checkpoint_review() {
         "Fix \u{1b}[2K\rnothing at all",
     );
 
-    let body = s.show(&wt, 1, crate::session::What::Summary).unwrap();
+    let body = s.show(&wt, 1, crate::git::What::Summary).unwrap();
     let report = crate::report::Diff {
         label: "s01 checkpoint 1".into(),
         session: "s01".into(),
         checkpoint: Some(1),
         base: "its parent".into(),
-        what: crate::session::What::Summary,
+        what: crate::git::What::Summary,
         body,
     };
     use crate::out::Report;
@@ -1142,8 +1142,8 @@ fn a_merges_summary_and_its_patch_do_not_contradict_each_other() {
         .map(|c| c.number)
         .expect("the merge is a checkpoint");
 
-    let summary = s.show(&wt, merge, crate::session::What::Summary).unwrap();
-    let patch = s.show(&wt, merge, crate::session::What::Patch).unwrap();
+    let summary = s.show(&wt, merge, crate::git::What::Summary).unwrap();
+    let patch = s.show(&wt, merge, crate::git::What::Patch).unwrap();
 
     assert!(
         summary.contains("side.rs"),
@@ -1206,7 +1206,7 @@ fn the_pager_omh_names_last_is_the_users_own() {
 /// safe. Asserted on the arguments so the two cannot drift apart quietly.
 #[test]
 fn a_checkpoint_read_is_guarded_like_every_other_read() {
-    let args = show_args(crate::session::What::Patch, "abc123", "never");
+    let args = show_args(crate::git::What::Patch, "abc123", "never");
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let guarded = guarded(&args);
 
@@ -1239,7 +1239,7 @@ fn a_checkpoint_number_the_session_does_not_have_is_refused() {
     s.ensure(&wt, &[]).unwrap();
 
     let empty = s
-        .show(&wt, 1, crate::session::What::Summary)
+        .show(&wt, 1, crate::git::What::Summary)
         .expect_err("nothing has been committed here");
     assert!(
         empty.to_string().contains("not committed anything"),
@@ -1249,7 +1249,7 @@ fn a_checkpoint_number_the_session_does_not_have_is_refused() {
     checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
     checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
     let err = s
-        .show(&wt, 9, crate::session::What::Summary)
+        .show(&wt, 9, crate::git::What::Summary)
         .expect_err("there is no checkpoint 9");
     assert!(
         err.to_string().contains('9') && err.to_string().contains("1 to 2"),
@@ -1258,7 +1258,7 @@ fn a_checkpoint_number_the_session_does_not_have_is_refused() {
     // Zero is outside it too, and is what a reader who assumed the list was
     // zero-based would type first.
     assert!(
-        s.show(&wt, 0, crate::session::What::Summary).is_err(),
+        s.show(&wt, 0, crate::git::What::Summary).is_err(),
         "the numbers start at 1"
     );
 }
@@ -4161,7 +4161,7 @@ fn a_record_that_would_not_go_is_not_gone() {
     // A directory with something in it is a seed `remove_file` cannot take.
     std::fs::create_dir_all(shadow.seed_record.join("stuck")).unwrap();
     match shadow.reap() {
-        crate::session::Gone::No(why) => assert!(
+        crate::fsx::Gone::No(why) => assert!(
             why.contains(&shadow.seed_record.display().to_string()),
             "the answer names the record that stayed: {why}"
         ),

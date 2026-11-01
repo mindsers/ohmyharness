@@ -13,8 +13,8 @@
 //! The manifest is the single source of truth: every launch generates from it
 //! and `omh why` explains from it, so they cannot disagree.
 
-use crate::hook::Field;
-use crate::render::Server;
+use crate::servers::Server;
+use crate::vocab::Field;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -741,7 +741,8 @@ pub fn grep_nudge(project: &str) -> String {
 /// they all did until the format landed: the interception is `when`, the text is
 /// `inject`, and how either reaches a particular harness is adapter data.
 pub fn hooks() -> Vec<Hook> {
-    use crate::hook::{Action, Event, Hook as Canonical, Tool};
+    use crate::hook::Hook as Canonical;
+    use crate::vocab::{Action, Event, Tool};
 
     // Every source extension worth not reading whole. A `case` arm rather than
     // a list omh iterates: it is evaluated by the shell inside the sandbox,
@@ -1041,7 +1042,7 @@ fn note_taking() -> String {
          under **Expected**, there is nothing here worth recording.\n\n\
          Rename a note by rewriting its `key` and its filename together — never\n\
          one without the other.\n",
-        crate::memory::GUEST_MEMORY,
+        crate::guest::GUEST_MEMORY,
     )
 }
 
@@ -1075,7 +1076,7 @@ pub struct Own {
     /// part of a feature you could edit or delete on its own, and a deleted
     /// one took the hooks and the rules section with it while the rest of the
     /// feature stayed mounted.
-    pub servers: BTreeMap<String, crate::render::Server>,
+    pub servers: BTreeMap<String, crate::servers::Server>,
     /// Every hook name the manifest owns, whether or not its feature is on.
     ///
     /// A file in a layer answering to one of these is never read. With the
@@ -1173,7 +1174,7 @@ pub fn index_args(
         "-v".into(),
         // Read-only: indexing reads code, and an indexer that can write into
         // the checkout is a sandbox hole for no benefit.
-        format!("{}:{}:ro", repo.display(), crate::container_workdir()),
+        format!("{}:{}:ro", repo.display(), crate::guest::WORKDIR),
         "-v".into(),
         format!("{cache_volume}:{GRAPH_CACHE}"),
         // The server derives its project name from the working directory, not
@@ -1185,13 +1186,13 @@ pub fn index_args(
         // the agent does. Spelled as a literal until 2026.09, when the source
         // scans first read this far into the file — see `testsrc`.
         "-w".into(),
-        crate::container_workdir().into(),
+        crate::guest::WORKDIR.into(),
         image.into(),
         GRAPH_BIN.into(),
         "cli".into(),
         "index_repository".into(),
         "--repo-path".into(),
-        crate::container_workdir().into(),
+        crate::guest::WORKDIR.into(),
         // Sessions live at different paths and the server derives a project
         // name from the path; without this every session builds its own graph.
         "--name".into(),
@@ -1971,7 +1972,7 @@ command = "c"
         let args = entry.args.clone();
         assert!(
             args.windows(2)
-                .any(|w| w[0] == "--notes" && w[1] == crate::memory::GUEST_MEMORY),
+                .any(|w| w[0] == "--notes" && w[1] == crate::guest::GUEST_MEMORY),
             "the server must read the directory omh mounts: {args:?}"
         );
     }
@@ -2214,7 +2215,7 @@ command = "c"
             .supports(crate::adapter::Capability::Hooks)
             .expect("claude has hooks");
         let mut tools = adapter.tools.clone();
-        tools.insert(crate::hook::Tool::Search, "Grep|Glob".into());
+        tools.insert(crate::vocab::Tool::Search, "Grep|Glob".into());
         match crate::hook::render(name, &hook(name).hook, binding, &tools, None).unwrap() {
             crate::hook::Outcome::Rendered(r) => r,
             crate::hook::Outcome::Dropped(d) => panic!("cannot express {d}"),
@@ -2248,7 +2249,7 @@ command = "c"
         }
         for adapter in crate::adapter::Adapter::load_dir(Path::new(ADAPTERS)).unwrap() {
             assert!(
-                !adapter.tools.contains_key(&crate::hook::Tool::Search),
+                !adapter.tools.contains_key(&crate::vocab::Tool::Search),
                 "{} spells search; the hooks in UNSPELLED reach it",
                 adapter.name
             );
@@ -2526,7 +2527,7 @@ command = "c"
                 .find(|h| h.name == name)
                 .unwrap_or_else(|| panic!("the base set ships {name}"));
             assert!(
-                matches!(h.hook.action, crate::hook::Action::Inject { .. }),
+                matches!(h.hook.action, crate::vocab::Action::Inject { .. }),
                 "{name} is a nudge and has to stay one: {:?}",
                 h.hook.action
             );

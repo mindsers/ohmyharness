@@ -5,23 +5,12 @@
 //! mounted, so an agent cannot touch uncommitted work or `main` — review is a
 //! plain `git diff`.
 
-use crate::fsx::still_there;
+use crate::fsx::{still_there, Gone};
+use crate::git::What;
 use crate::landing::{self, History, Holding, Proof, Reach, Standing, Survey};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Whether a thing this command is named for actually went.
-///
-/// **Not a bool.** `No` carries why, because a removal that did not happen and
-/// a removal nobody could explain are the same news to a caller that only has
-/// a flag — and this is the value `rm` prints to somebody deciding what to
-/// clean up by hand.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Gone {
-    Yes,
-    No(String),
-}
 
 /// What a removal actually did, part by part.
 ///
@@ -392,24 +381,6 @@ pub fn merge_three(repo: &Path, base: &str, theirs: &str, ours: &str) -> Result<
         }
     }
     Ok(Merged { tree, conflicted })
-}
-
-/// Which of the two answers a review wants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum What {
-    /// The shape of the change: which files, how much.
-    Summary,
-    /// The change itself.
-    Patch,
-}
-
-impl What {
-    pub(crate) fn flag(self) -> &'static str {
-        match self {
-            What::Summary => "--stat",
-            What::Patch => "-p",
-        }
-    }
 }
 
 impl Session {
@@ -1901,7 +1872,7 @@ fn session_number(name: &str) -> Option<u32> {
 /// It was left alone once deliberately, on the argument that "its other callers
 /// reap and render, and emptiness is the right answer for them". That is true
 /// of reaping and false of rendering: a rendered emptiness is a claim, which is
-/// the whole of what [`crate::cmd::session::Leftovers`] exists to keep out of a
+/// the whole of what [`crate::leftovers::Leftovers`] exists to keep out of a
 /// report. Seven of the nine take the error now. The two that still swallow it
 /// say why where they do it — `reap_idle`, which prints nothing and feeds no
 /// report, and `omh s`, which has to answer with a document whatever happened

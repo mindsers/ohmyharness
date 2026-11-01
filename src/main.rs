@@ -15,6 +15,7 @@ mod carry;
 mod catalogue;
 mod cli;
 mod cmd;
+mod command;
 mod config;
 mod container;
 mod derive;
@@ -26,6 +27,7 @@ mod facts;
 mod fsx;
 mod git;
 mod guard;
+mod guest;
 mod hash;
 mod held;
 mod home;
@@ -35,13 +37,16 @@ mod image;
 mod key;
 mod landing;
 mod ledger;
+mod leftovers;
 mod mcp_server;
 mod memory;
 mod notice;
 mod out;
 mod paths;
 mod persist;
+mod plan;
 mod prefs;
+mod probe;
 mod provider;
 mod quote;
 mod render;
@@ -49,6 +54,7 @@ mod report;
 mod rules;
 mod runtime;
 mod selection;
+mod servers;
 mod session;
 mod settings;
 mod shadow;
@@ -58,9 +64,9 @@ mod stack;
 mod testsrc;
 mod transcript;
 mod tui;
+mod vocab;
 mod why;
 
-use adapter::Adapter;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
@@ -210,9 +216,7 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
         let dir = paths.root.join("worktrees").join(legacy);
         // Unreadable settings are no backend too, and no backend reads as
         // running below: the migration waits rather than guessing.
-        let backend = runtime_preference(&paths)
-            .ok()
-            .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)).ok());
+        let backend = runtime::for_repo(&paths).ok();
         // **And the same defect through the other door.** The paragraph above
         // is about a backend omh could not resolve reading as *not running*;
         // this is the listing omh could not read doing it. `Vec::new()` makes
@@ -799,86 +803,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             cmd::session::run(&cwd, &argv, session::Start::Fresh, cli.staging(), ctx)
         }
     }
-}
-
-/// What to tell someone whose word matched nothing. Pure so it can be tested:
-/// the message is the entire value of this path.
-pub(crate) fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
-    if editors.iter().any(|e| e == name) {
-        return format!("`{name}` is an editor — try `omh sNN attach {name}`");
-    }
-    format!(
-        "unknown harness `{name}`\n  available: {}",
-        harnesses.join(", ")
-    )
-}
-
-/// Neither a harness nor a reserved word — say what is available, since the
-/// user cannot tell from the name alone which kind they meant.
-pub(crate) fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -> anyhow::Error {
-    // A word that is not a name at all is not an *unknown* one, and the list of
-    // what is available answers a question this user did not ask. `Adapter::find`
-    // already said the useful thing — that the word cannot be a harness name —
-    // and replacing it with "unknown harness `../../x`\n  available: ..." buries
-    // the only sentence that explains the refusal.
-    if adapter::Name::parse(name).is_err() {
-        return original;
-    }
-    // **Both catalogues, or neither.** `tool_hint` answers "what could you have
-    // meant", and it answers it from these two lists — so a list that is empty
-    // because omh could not read the directory produces a confident wrong
-    // sentence: `unknown harness \`zed\`` naming the harnesses, about an editor
-    // omh ships. Both reads were `.unwrap_or_default()`; the adapters one was
-    // saved by the `is_empty` fallback below and the editors one was not.
-    //
-    // Falling back to `original` rather than reporting here: `original` is
-    // `Adapter::find`'s error, which already names the catalogue and the file,
-    // and a second sentence about a second directory would bury it.
-    let harnesses: Vec<String> = match Adapter::load_dir(&paths.adapters()) {
-        Ok(found) => found.into_iter().map(|a| a.name.to_string()).collect(),
-        // `original` is `Adapter::find`'s own error about this same directory,
-        // which says it better than a second sentence would.
-        Err(_) => return original,
-    };
-    if harnesses.is_empty() {
-        return original;
-    }
-    let editors: Vec<String> = match editor::Editor::load_dir(&paths.editors()) {
-        Ok(found) => found.into_iter().map(|e| e.name.to_string()).collect(),
-        // Said, not swallowed. Nothing else on this path has looked at the
-        // editors directory, so falling through to `tool_hint` with an empty
-        // list is omh answering "not an editor either" having never opened it.
-        Err(e) => {
-            return e.context(format!(
-                "could not tell whether `{name}` is an editor omh knows"
-            ))
-        }
-    };
-    anyhow::anyhow!("{}", tool_hint(name, &harnesses, &editors))
-}
-
-/// Read one policy key through the usual layer merge.
-///
-/// **Unset is `None`; unreadable is an error.** This was `.ok()?`, so a
-/// settings file omh could not read answered every key as unset — `runtime`
-/// as `auto`, `persistence` as its default, the sandbox limits as none — and
-/// a launch went ahead on settings nobody chose.
-pub(crate) fn policy_value(paths: &Paths, key: &str) -> Result<Option<String>> {
-    Ok(config::policy(paths)
-        .context("reading this repo's settings")?
-        .into_iter()
-        .find(|s| s.key == key)
-        .map(|s| s.value))
-}
-
-pub(crate) fn runtime_preference(paths: &Paths) -> Result<String> {
-    Ok(policy_value(paths, "runtime")?.unwrap_or_else(|| "auto".into()))
-}
-
-/// The agent's working directory inside the sandbox. Named once, so the note
-/// store and the launch plan cannot disagree about it.
-pub(crate) fn container_workdir() -> &'static str {
-    "/work"
 }
 
 #[cfg(test)]

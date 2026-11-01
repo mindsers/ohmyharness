@@ -9,6 +9,7 @@
 //! it actually varies: this repo is work, that one is personal.
 
 use crate::adapter::Adapter;
+use crate::guest::GUEST_HOME;
 use crate::paths::Paths;
 use anyhow::Context;
 use anyhow::Result;
@@ -25,10 +26,6 @@ pub struct CredMount {
 }
 
 pub const DEFAULT_ACCOUNT: &str = "default";
-
-/// Home inside the sandbox. Re-exported so callers here need not reach into
-/// `image`, but there is exactly one definition.
-pub use crate::image::GUEST_HOME;
 
 /// Where one account's captured login lives.
 ///

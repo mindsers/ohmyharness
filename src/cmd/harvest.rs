@@ -217,10 +217,7 @@ pub(crate) fn stop_before_syncing(
     // sync is also not something that machine was going to do usefully. The
     // message says which it is and `--down` is not the way past — the way past
     // is a runtime.
-    let backend = runtime::select(&crate::runtime_preference(paths)?, &|p| {
-        runtime::installed(p)
-    })
-    .with_context(|| {
+    let backend = runtime::for_repo(paths).with_context(|| {
         format!(
             "omh cannot tell whether {}'s sandbox is running, so it will not sync over it",
             session.id
@@ -419,8 +416,8 @@ pub(crate) fn diff_report(
     ctx: &out::Ctx,
 ) -> Result<report::Diff> {
     let what = match patch {
-        true => session::What::Patch,
-        false => session::What::Summary,
+        true => crate::git::What::Patch,
+        false => crate::git::What::Summary,
     };
     let Some(number) = checkpoint else {
         let base = base
@@ -610,16 +607,16 @@ pub(crate) fn what_to_keep(
 /// an empty one is refused below.
 ///
 /// **Every check asked is a check answered.** Each prints exactly one line,
-/// and `doctor::parse` keeps the lines it can read — so a check whose line
+/// and `crate::probe::parse` keeps the lines it can read — so a check whose line
 /// never arrived (a probe the shell could not run, a quote that swallowed the
 /// next line) was simply absent, and with the rest green the run said every
 /// check passed. Non-empty is not finished; `init`'s `fired_from` refuses a
 /// short answer for the same reason.
 pub(crate) fn every_check(
     asked: &[&str],
-    from_the_sandbox: Vec<doctor::Outcome>,
+    from_the_sandbox: Vec<crate::probe::Outcome>,
     host: doctor::HostRows,
-) -> Result<Vec<doctor::Outcome>> {
+) -> Result<Vec<crate::probe::Outcome>> {
     anyhow::ensure!(
         !from_the_sandbox.is_empty(),
         "the probe produced no output — the sandbox did not run it"
@@ -1509,7 +1506,7 @@ fn decide_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::C
     if the_checks.is_empty() {
         return Checked::NotRun("this repo declares no turn-end checks".into());
     }
-    let preference = match crate::runtime_preference(paths) {
+    let preference = match crate::runtime::preference(paths) {
         Ok(preference) => preference,
         Err(e) => return Checked::NotRun(format!("{e:#}")),
     };
@@ -1546,7 +1543,7 @@ fn checks_for(paths: &Paths, ctx: &out::Ctx) -> std::result::Result<Vec<(String,
         .iter()
         .map(|d| d.name.clone())
         .collect();
-    let (own, repo) = crate::cmd::session::resolved(paths)
+    let (own, repo) = crate::settings::resolved(paths)
         .map_err(|e| format!("could not read this repo's setup — {e:#}"))?;
     let dirs = Catalogue::resolve(paths)
         .sources(adapter::Capability::Hooks)
@@ -1596,13 +1593,13 @@ pub(crate) fn checks(
 ) -> Vec<(String, String)> {
     hooks
         .iter()
-        .filter(|(_, h)| h.on == crate::hook::Event::TurnEnd)
+        .filter(|(_, h)| h.on == crate::vocab::Event::TurnEnd)
         .filter(|(_, h)| match &h.stack {
             None => true,
             Some(stack) => detected.iter().any(|d| d == stack),
         })
         .filter_map(|(name, h)| match &h.action {
-            crate::hook::Action::Run(cmd) => Some((name.clone(), cmd.clone())),
+            crate::vocab::Action::Run(cmd) => Some((name.clone(), cmd.clone())),
             _ => None,
         })
         .collect()
@@ -1715,8 +1712,9 @@ mod tests {
         let got = record_check(&paths, "s01", &Checked::Passed(1));
         assert!(got.is_err(), "an outcome that was not recorded answered Ok");
     }
-    use crate::hook::{Action, Event, Hook};
+    use crate::hook::Hook;
     use crate::runtime::{answered, Backend, Docker};
+    use crate::vocab::{Action, Event};
     use std::collections::BTreeMap;
 
     fn hook(on: Event, stack: Option<&str>, action: Action) -> Hook {

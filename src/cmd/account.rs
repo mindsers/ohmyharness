@@ -438,9 +438,7 @@ fn login_in_sandbox(
 ) -> Result<()> {
     let harness = adapter.name.as_str();
     let catalogue = Catalogue::resolve(paths);
-    let backend = runtime::select(&crate::runtime_preference(paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(paths)?;
     let ca = image::ca_for(paths)?;
     image::ensure(&backend, adapter, ca.as_ref().map(image::Root::pem))?;
 
@@ -454,7 +452,7 @@ fn login_in_sandbox(
     // by the daemon, as root, on Linux.
     crate::ssh::ensure_host_key(&paths.keys())?;
 
-    let (own, repo) = crate::cmd::session::resolved(paths)?;
+    let (own, repo) = crate::settings::resolved(paths)?;
     // The account's preferences, as a session has them: checked before
     // anything starts, then migrated and seeded — into the login's own copy,
     // under `scratch/` — before the login does.
@@ -547,16 +545,17 @@ fn login_in_sandbox(
 
     // Host paths, not guest ones: the guest path names a container that has
     // already been torn down and that the user cannot inspect.
-    let unfilled: Vec<std::path::PathBuf> = auth::unfilled(adapter, account_dir, auth::GUEST_HOME)
-        .iter()
-        .map(|guest| {
-            account_dir.join(
-                guest
-                    .strip_prefix(auth::GUEST_HOME)
-                    .unwrap_or(guest.as_path()),
-            )
-        })
-        .collect();
+    let unfilled: Vec<std::path::PathBuf> =
+        auth::unfilled(adapter, account_dir, crate::guest::GUEST_HOME)
+            .iter()
+            .map(|guest| {
+                account_dir.join(
+                    guest
+                        .strip_prefix(crate::guest::GUEST_HOME)
+                        .unwrap_or(guest.as_path()),
+                )
+            })
+            .collect();
     auth::login_outcome(status.success(), &unfilled).map_err(|e| {
         e.context(format!(
             "run `omh account login {harness} --name {account}` again"

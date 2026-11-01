@@ -9,63 +9,13 @@
 
 use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::catalogue::Catalogue;
+use crate::guest::GUEST_HOME;
 use crate::paths::Paths;
+use crate::plan::{Limits, Mount, Plan};
 use crate::session::Session;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug)]
-pub struct Plan {
-    pub image: String,
-    pub mounts: Vec<Mount>,
-    pub env: Vec<(String, String)>,
-    pub network: String,
-    pub workdir: String,
-    pub argv: Vec<String>,
-    /// How much of the host the sandbox may take. Part of the plan, and so of
-    /// the stamp: a limit changed in the settings is drift, and the sandbox
-    /// restarts under the new one rather than running on under the old.
-    pub limits: Limits,
-    /// Capabilities the catalogue carries that this harness cannot express.
-    pub dropped: Vec<(Capability, usize)>,
-    /// Hooks this harness *nearly* expressed — it has the capability but not
-    /// the moment, tool or payload field they asked for. Separate from
-    /// `dropped` because the granularity differs: a capability is given up
-    /// whole, a hook individually, and reporting the second as the first would
-    /// say a harness has no hooks when it has all but one.
-    pub dropped_hooks: Vec<crate::hook::Dropped>,
-    /// What composing the project's rules turned up that the user should hear.
-    pub rules: crate::rules::Report,
-    /// What the harness's policy stops that this checkout or account carries,
-    /// and each read that could not be made to say so (a line beginning "could
-    /// not check"), to be said at launch — see [`crate::notice::policy`].
-    pub policy: Vec<String>,
-    /// Interactive harnesses need a terminal; a captured probe must not ask.
-    pub tty: bool,
-}
-
-/// How much of the host the sandbox may take, from `sandbox_memory` and
-/// `sandbox_cpus`. Each is passed to the runtime as written — `4g`, `1.5` —
-/// because the runtime is the one that knows what it accepts, and `omh doctor`
-/// is where a value it rejects gets found out. A write refuses only what no
-/// runtime reads as a size or a count (`key::quarrel`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Limits {
-    pub memory: Option<String>,
-    pub cpus: Option<String>,
-}
-
-impl Limits {
-    /// The stamp `Plan::labels` carries, so a changed limit reads as drift.
-    pub fn stamp(&self) -> String {
-        format!(
-            "memory={}\ncpus={}",
-            self.memory.as_deref().unwrap_or(""),
-            self.cpus.as_deref().unwrap_or("")
-        )
-    }
-}
 
 /// What to do with the container already sitting under a session id.
 #[derive(Debug)]
@@ -232,21 +182,6 @@ pub fn drift(
     }
     out
 }
-
-#[derive(Debug)]
-pub struct Mount {
-    pub host: PathBuf,
-    pub guest: PathBuf,
-    pub read_only: bool,
-    /// A single file rather than a directory. Recorded at construction, never
-    /// probed: under `Staging::Skip` the file does not exist yet, and a runtime
-    /// capability check that changed answer between dry and real runs would be
-    /// worse than no check.
-    pub file: bool,
-}
-
-/// Home directory *inside* the container. Adapters template `$HOME` against it.
-use crate::image::GUEST_HOME;
 
 /// Where catalogue layer `i`'s copy of `cap` is mounted inside the container.
 fn guest_layer(i: usize, cap: Capability) -> PathBuf {
@@ -424,7 +359,7 @@ pub fn plan(
     // The agent's entire world. Never the host working tree.
     mounts.push(Mount {
         host: session.worktree.clone(),
-        guest: crate::container_workdir().into(),
+        guest: crate::guest::WORKDIR.into(),
         read_only: false,
         file: false,
     });
@@ -582,7 +517,7 @@ pub fn plan(
         }
         mounts.push(Mount {
             host: item.host.clone(),
-            guest: PathBuf::from(crate::container_workdir()).join(&item.rel),
+            guest: PathBuf::from(crate::guest::WORKDIR).join(&item.rel),
             read_only: false,
             file: true,
         });
@@ -612,7 +547,7 @@ pub fn plan(
     if session.branch.is_some() {
         let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
 
-        let workdir = crate::container_workdir();
+        let workdir = crate::guest::WORKDIR;
         let mut excluded = crate::config::policy_list(paths, "carry_in")?;
         excluded.extend(mounts.iter().filter_map(|m| {
             m.guest
@@ -753,7 +688,7 @@ pub fn plan(
     if memory_on {
         mounts.push(Mount {
             host: paths.memory(),
-            guest: PathBuf::from(crate::memory::GUEST_MEMORY),
+            guest: PathBuf::from(crate::guest::GUEST_MEMORY),
             read_only: false,
             file: false,
         });
@@ -770,7 +705,7 @@ pub fn plan(
     if let Some(bin) = opts.memory_bin.clone().filter(|_| memory_on) {
         mounts.push(Mount {
             host: bin,
-            guest: PathBuf::from(crate::memory::deliver::GUEST_BIN),
+            guest: PathBuf::from(crate::guest::GUEST_BIN),
             read_only: true,
             file: true,
         });
@@ -973,8 +908,8 @@ pub fn plan(
         // must read the same as no key, or it would stamp differently and read
         // as drift against a session launched without it.
         limits: Limits {
-            memory: crate::policy_value(paths, "sandbox_memory")?.filter(|s| !s.is_empty()),
-            cpus: crate::policy_value(paths, "sandbox_cpus")?.filter(|s| !s.is_empty()),
+            memory: crate::config::policy_value(paths, "sandbox_memory")?.filter(|s| !s.is_empty()),
+            cpus: crate::config::policy_value(paths, "sandbox_cpus")?.filter(|s| !s.is_empty()),
         },
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),
@@ -1005,7 +940,7 @@ pub fn plan(
             true => paths.session_network(&session.id),
             false => paths.scratch_network(),
         },
-        workdir: crate::container_workdir().into(),
+        workdir: crate::guest::WORKDIR.into(),
         argv: crate::persist::wrap(
             opts.persist,
             &session.id,
@@ -1236,7 +1171,7 @@ pub(crate) fn admitted(
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
     adapter: &Adapter,
-) -> Result<BTreeMap<String, crate::render::Server>> {
+) -> Result<BTreeMap<String, crate::servers::Server>> {
     // Both gates the document goes through: a harness with no MCP binding is
     // handed nothing, whatever the catalogue carries.
     if adapter.supports(Capability::Mcp).is_some()
@@ -1642,6 +1577,8 @@ pub fn mountable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether a runtime can honour a plan: asked here, where plans are built, so
+/// `plan` itself depends on no runtime.
 impl Plan {
     /// Refuse a plan the chosen backend cannot honour. Starting a sandbox where
     /// the catalogue silently is not there is the worst available outcome.
@@ -1680,95 +1617,6 @@ impl Plan {
             "the selected runtime cannot honour this plan:\n  {}",
             problems.join("\n  ")
         )
-    }
-
-    /// What this container is made of, stamped onto it at launch.
-    ///
-    /// A `Plan` is a pure description; a container is one plan materialized.
-    /// Everything here is fixed the moment `docker run` returns — no later
-    /// `exec` can change the image, the mount set, the network or the
-    /// environment. So a running container is the session you asked for only if
-    /// these still match, and until this existed nothing asked: `omh s01 resume opencode`
-    /// against a session started by `omh new claude` execed a binary that image does
-    /// not contain, and `--account work` on one started as `personal` went on
-    /// quietly using `personal`.
-    ///
-    /// `argv` and `tty` are deliberately absent. They belong to the *launch*,
-    /// not to the container, and stamping them would rebuild the sandbox every
-    /// time you passed a different flag to the harness.
-    ///
-    /// Values are verbatim rather than hashed, for two reasons. A digest can
-    /// only say *that* something changed, and the line a user acts on has to say
-    /// *what*. And the obvious hasher is the one `image::base_tag` uses —
-    /// `DefaultHasher`, whose output std explicitly does not guarantee across
-    /// releases. Fine for a tag, which is rebuilt anyway; here it would restart
-    /// every running session on the day somebody upgrades Rust.
-    pub fn labels(&self) -> Vec<(String, String)> {
-        let mut mounts: Vec<String> = self
-            .mounts
-            .iter()
-            .map(|m| {
-                // Deliberately *not* docker's own `host:guest:ro` spelling. The
-                // stamp travels on the same command line as the `-v` flags, and
-                // a value that parses as a mount is one a reader — or a test
-                // counting `:ro` — will mistake for one.
-                format!(
-                    "{} {} -> {}",
-                    if m.read_only { "ro" } else { "rw" },
-                    m.host.display(),
-                    m.guest.display()
-                )
-            })
-            .collect();
-        mounts.sort();
-        let mut env: Vec<String> = self.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        env.sort();
-        // Sorted, because docker reports neither back in the order it was
-        // given, and a stamp whose value depends on iteration order reads as
-        // drift on the very next launch.
-        //
-        // Newline-separated: a mount is a pair of paths, and every other
-        // plausible separator is a character a path may legally contain.
-        vec![
-            ("omh.image".into(), self.image.clone()),
-            ("omh.network".into(), self.network.clone()),
-            ("omh.workdir".into(), self.workdir.clone()),
-            ("omh.mounts".into(), mounts.join("\n")),
-            ("omh.env".into(), env.join("\n")),
-            ("omh.limits".into(), self.limits.stamp()),
-            // What confines it, as the flags that do: a release that changes
-            // `SESSION_CAPS` or the pids limit alone read as no drift, and the
-            // running container kept the old ones.
-            (
-                "omh.confinement".into(),
-                crate::runtime::session_confinement(self).join("\n"),
-            ),
-        ]
-    }
-
-    /// One line, once, naming what this harness cannot do.
-    ///
-    /// Two granularities, because there are two kinds of loss. A capability is
-    /// given up whole and counting is enough — nobody needs the names of nine
-    /// skills. A hook is given up one at a time, and a count would be a lie
-    /// dressed as a summary: "hooks: 0" while three are missing. So a dropped
-    /// hook is named, with the word it asked for, because a hook that was never
-    /// installed behaves exactly like one that has nothing to say.
-    pub fn degradation(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if !self.dropped.is_empty() {
-            let caps: Vec<_> = self
-                .dropped
-                .iter()
-                .map(|(cap, n)| format!("{n} {cap}"))
-                .collect();
-            parts.push(format!("dropped {} (unsupported)", caps.join(", ")));
-        }
-        if !self.dropped_hooks.is_empty() {
-            let hooks: Vec<_> = self.dropped_hooks.iter().map(|d| d.to_string()).collect();
-            parts.push(format!("dropped hooks: {}", hooks.join(", ")));
-        }
-        (!parts.is_empty()).then(|| parts.join("; "))
     }
 }
 
@@ -2429,7 +2277,7 @@ mod tests {
         );
         assert!(guests.contains(&"/work".to_string()));
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
-        assert!(guests.iter().any(|g| g == crate::memory::GUEST_MEMORY));
+        assert!(guests.iter().any(|g| g == crate::guest::GUEST_MEMORY));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
         assert!(
             guests.iter().any(|g| g.contains(".claude/projects")),
@@ -3015,7 +2863,7 @@ mod tests {
         let notes = p
             .mounts
             .iter()
-            .find(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+            .find(|m| m.guest == Path::new(crate::guest::GUEST_MEMORY))
             .expect("the local note store must reach the sandbox");
 
         assert!(!notes.read_only, "`remember` writes there");
@@ -3052,7 +2900,7 @@ mod tests {
         let mount = p
             .mounts
             .iter()
-            .find(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN))
+            .find(|m| m.guest == Path::new(crate::guest::GUEST_BIN))
             .expect("the server binary must be mounted");
 
         assert_eq!(mount.host, host);
@@ -3074,7 +2922,7 @@ mod tests {
         assert!(
             !p.mounts
                 .iter()
-                .any(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN)),
+                .any(|m| m.guest == Path::new(crate::guest::GUEST_BIN)),
             "nothing is mounted where nothing exists"
         );
     }
@@ -3088,7 +2936,7 @@ mod tests {
         let host_of = |p: &Plan| {
             p.mounts
                 .iter()
-                .find(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+                .find(|m| m.guest == Path::new(crate::guest::GUEST_MEMORY))
                 .map(|m| m.host.clone())
                 .expect("note store mount")
         };
@@ -3640,7 +3488,7 @@ mod tests {
             return BTreeMap::new();
         };
         let body = std::fs::read_to_string(&mount.host).unwrap();
-        crate::render::parse(binding.render, &body)
+        crate::servers::parse(binding.render, &body)
             .unwrap()
             .into_iter()
             .map(|(name, s)| (name, std::iter::once(s.command).chain(s.args).collect()))
@@ -4793,13 +4641,11 @@ mod tests {
             .map(|m| m.guest.display().to_string())
             .collect();
         assert!(
-            !guests.iter().any(|g| g == crate::memory::GUEST_MEMORY),
+            !guests.iter().any(|g| g == crate::guest::GUEST_MEMORY),
             "no note store: {guests:?}"
         );
         assert!(
-            !guests
-                .iter()
-                .any(|g| g == crate::memory::deliver::GUEST_BIN),
+            !guests.iter().any(|g| g == crate::guest::GUEST_BIN),
             "and no server binary: {guests:?}"
         );
     }
@@ -4856,10 +4702,7 @@ mod tests {
                 },
             )
             .unwrap();
-            for guest in [
-                crate::memory::GUEST_MEMORY,
-                crate::memory::deliver::GUEST_BIN,
-            ] {
+            for guest in [crate::guest::GUEST_MEMORY, crate::guest::GUEST_BIN] {
                 assert_eq!(
                     p.mounts.iter().any(|m| m.guest == Path::new(guest)),
                     on,
@@ -4962,12 +4805,12 @@ mod tests {
                     ("note store", |p, _| {
                         p.mounts
                             .iter()
-                            .any(|m| m.guest == Path::new(crate::memory::GUEST_MEMORY))
+                            .any(|m| m.guest == Path::new(crate::guest::GUEST_MEMORY))
                     }),
                     ("server binary", |p, _| {
                         p.mounts
                             .iter()
-                            .any(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN))
+                            .any(|m| m.guest == Path::new(crate::guest::GUEST_BIN))
                     }),
                 ],
             ),

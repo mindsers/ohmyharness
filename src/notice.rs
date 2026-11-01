@@ -741,7 +741,7 @@ mod tests {
             "silence has to come from a record, not from the absence of one"
         );
         // **A regular file, directly under `runs()`** — which is where
-        // `cmd::session::leftovers` sweeps for session directories. It took
+        // `leftovers::leftovers` sweeps for session directories. It took
         // this for a session id and stat'd `hooks.json/last-used`, reporting a
         // run it could not read on every `omh s`. Pinned here so the fixtures
         // that guard it over there are copying a real shape rather than a name

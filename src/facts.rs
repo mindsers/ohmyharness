@@ -25,7 +25,7 @@
 //! An **unknown** program is [`None`], never `Some(false)`. Suppression acts on
 //! `Some(false)` alone, so a cache that is missing, empty, corrupt or truncated
 //! suppresses nothing and every hook ships — the same direction
-//! `detect::program` and `main::fired_from` already fall in. The other way
+//! `command::program` and `main::fired_from` already fall in. The other way
 //! round, one
 //! unreadable file would silently switch off every hook in every repo, and the
 //! user would see a working session with no automation in it and no reason
@@ -110,8 +110,8 @@ impl Facts {
     /// Record what a probe reported about one image.
     ///
     /// Outcomes rather than a map, so this reads the one wire format
-    /// `doctor::parse` produces and there is no second shape to keep in step.
-    pub fn learn(&mut self, tag: &str, outcomes: &[crate::doctor::Outcome]) {
+    /// `crate::probe::parse` produces and there is no second shape to keep in step.
+    pub fn learn(&mut self, tag: &str, outcomes: &[crate::probe::Outcome]) {
         let entry = self.0.entry(tag.to_string()).or_default();
         for o in outcomes {
             entry.insert(o.name.clone(), o.ok);
@@ -158,8 +158,8 @@ mod tests {
         facts.about(tag).get(program).copied()
     }
 
-    fn outcome(name: &str, ok: bool) -> crate::doctor::Outcome {
-        crate::doctor::Outcome {
+    fn outcome(name: &str, ok: bool) -> crate::probe::Outcome {
+        crate::probe::Outcome {
             name: name.to_string(),
             ok,
             detail: if ok {

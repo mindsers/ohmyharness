@@ -225,11 +225,11 @@ pub fn turn_hook_command(gitdir: &str, worktree: &str) -> String {
 /// the trap this project keeps rediscovering: it proved the reimplementation
 /// worked, and would have passed against a hook that did nothing at all.
 pub fn turn_hook_for_the_sandbox() -> String {
-    // Through `container_workdir()` rather than a second literal — a test
+    // Through `guest::WORKDIR` rather than a second literal — a test
     // allows exactly one spelling of the guest workdir in the whole tree, and
     // it found the const the moment it was added. It reads comments too, so
     // this one does not quote the path either.
-    turn_hook_command(GUEST_GITDIR, crate::container_workdir())
+    turn_hook_command(GUEST_GITDIR, crate::guest::WORKDIR)
 }
 
 /// The test that stops the hook from running anywhere it would be nonsense.
@@ -891,12 +891,7 @@ impl Shadow {
     /// may not see. It is that a command which prints any object you name is a
     /// different command from one that shows you a checkpoint, and the numbers
     /// are the only handle the log ever offered.
-    pub fn show(
-        &self,
-        worktree: &Path,
-        number: usize,
-        what: crate::session::What,
-    ) -> Result<String> {
+    pub fn show(&self, worktree: &Path, number: usize, what: crate::git::What) -> Result<String> {
         let id = self.checkpoint_id(worktree, number)?;
         let args = show_args(what, &id, "auto");
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -931,7 +926,7 @@ impl Shadow {
         colour: &str,
     ) -> Result<()> {
         let id = self.checkpoint_id(worktree, number)?;
-        let args = show_args(crate::session::What::Patch, &id, colour);
+        let args = show_args(crate::git::What::Patch, &id, colour);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let status = host_git(&self.gitdir)
             .current_dir(worktree)
@@ -2443,7 +2438,7 @@ impl Shadow {
     /// sandbox repository "did go" while this discarded every error — and this
     /// is the one holding commits no branch points at, so a silent failure
     /// here is exactly the orphan nobody goes looking for.
-    pub fn reap(&self) -> crate::session::Gone {
+    pub fn reap(&self) -> crate::fsx::Gone {
         let why = std::fs::remove_dir_all(&self.gitdir).err();
         // With the seed, and for the reason the seed goes: session ids come
         // back around, and a replay point inherited by a stranger says a branch
@@ -2460,14 +2455,12 @@ impl Shadow {
             .collect();
         match crate::fsx::still_there(&self.gitdir) {
             // A session that never built one is not a failed removal.
-            Ok(false) if stayed.is_empty() => crate::session::Gone::Yes,
+            Ok(false) if stayed.is_empty() => crate::fsx::Gone::Yes,
             Ok(false) => {
-                crate::session::Gone::No(format!("its records would not go: {}", stayed.join(", ")))
+                crate::fsx::Gone::No(format!("its records would not go: {}", stayed.join(", ")))
             }
-            Err(e) => {
-                crate::session::Gone::No(format!("omh could not tell whether it is there: {e}"))
-            }
-            Ok(true) => crate::session::Gone::No(match why {
+            Err(e) => crate::fsx::Gone::No(format!("omh could not tell whether it is there: {e}")),
+            Ok(true) => crate::fsx::Gone::No(match why {
                 Some(e) => format!("{e}"),
                 None => "it is still there".to_string(),
             }),
@@ -2804,7 +2797,7 @@ pub fn unscannable(repo: &Path, carried: &[String]) -> Result<Vec<Unscanned>> {
 /// where the user can still act, and the harvest, where the count would
 /// otherwise read as a clean bill. Two sites wording this differently is how
 /// one of them ends up sounding like a note rather than a gap, and it is the
-/// same argument `image::GUEST_HOME` makes about consistency by copying.
+/// same argument `crate::guest::GUEST_HOME` makes about consistency by copying.
 ///
 /// Empty in, `None` out: nothing to say is said by saying nothing, not by
 /// printing a reassuring line about zero problems.
@@ -3039,7 +3032,7 @@ fn user_pager(repo: &Path) -> String {
 /// Built as a list rather than passed inline so the pager ordering below is
 /// something a test can read: the user's `-c core.pager` has to come *after*
 /// the one in `NEUTRALISED` or the sandbox's `cat` wins and nothing pages.
-fn show_args(what: crate::session::What, id: &str, colour: &str) -> Vec<String> {
+fn show_args(what: crate::git::What, id: &str, colour: &str) -> Vec<String> {
     [
         "show",
         what.flag(),

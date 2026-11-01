@@ -1366,7 +1366,7 @@ fn servers(paths: &Paths) -> Section {
     let path = config::mcp_path(paths);
     let held = match path.try_exists() {
         Ok(false) => return out,
-        Ok(true) => crate::render::parse_layers(std::slice::from_ref(&path)),
+        Ok(true) => crate::servers::parse_layers(std::slice::from_ref(&path)),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let held = match held {
@@ -1558,9 +1558,11 @@ fn describe(cap: Capability, path: &std::path::Path) -> Described {
         return match hook::Hook::parse(&raw, &file.display().to_string()) {
             Ok(h) => {
                 let what = match &h.action {
-                    hook::Action::Run(cmd) => cmd.clone(),
-                    hook::Action::Refuse { text } => format!("refuses — {text}"),
-                    hook::Action::Inject { text, .. } => format!("tells the agent — {text}"),
+                    crate::vocab::Action::Run(cmd) => cmd.clone(),
+                    crate::vocab::Action::Refuse { text } => format!("refuses — {text}"),
+                    crate::vocab::Action::Inject { text, .. } => {
+                        format!("tells the agent — {text}")
+                    }
                 };
                 let tools = h
                     .tools

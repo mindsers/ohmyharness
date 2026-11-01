@@ -64,15 +64,6 @@ struct ServerOverride {
     env: BTreeMap<String, String>,
 }
 
-/// The gitignored layer's filename, so `init` ignores exactly the file this
-/// module reads.
-///
-/// It is not covered by the `local/` line `init` already writes — that ignores
-/// the *directory* `.omh/local`, and this is a file beside it. Documenting a
-/// tracked file as gitignored is how a machine-local override gets committed
-/// to somebody's team repo.
-pub const LOCAL: &str = "settings.local.toml";
-
 /// This repo's, then this repo's gitignored — later winning.
 ///
 /// `~/.omh/default.toml` is not here and is not a layer. It is the template
@@ -309,6 +300,23 @@ fn read(path: &Path) -> Result<Option<String>> {
     }
 }
 
+/// The two things a launch needs from outside the plan: what omh contributes,
+/// and what this repo decided.
+///
+/// Resolved by the caller of `container::plan` rather than inside it, the rule
+/// `memory_bin` and `base` already follow — the manifest is a file, and a probe
+/// inside `plan` is a probe no test can reach.
+///
+/// Returned as a pair rather than merged. They arrive together and travel
+/// together, which is exactly what made one struct tempting, but "omh generated
+/// this" and "this repo asked for this" are the two answers `omh why` exists to
+/// keep apart — and a type that holds both cannot help blurring them.
+pub(crate) fn resolved(paths: &Paths) -> Result<(crate::base::Own, RepoPolicy)> {
+    let manifest = Manifest::load_dir(&paths.base())?;
+    let repo = resolve(paths, &manifest)?;
+    Ok((crate::base::own(&manifest, &repo.off)?, repo))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,7 +350,10 @@ mod tests {
     fn the_gitignored_layer_is_the_file_init_ignores() {
         let (_d, paths, _m) = fixture();
         let last = layers(&paths).last().unwrap().clone();
-        assert_eq!(last.file_name().unwrap().to_string_lossy(), LOCAL);
+        assert_eq!(
+            last.file_name().unwrap().to_string_lossy(),
+            crate::config::LOCAL
+        );
         assert!(last.starts_with(paths.repo.join(".omh")));
     }
 

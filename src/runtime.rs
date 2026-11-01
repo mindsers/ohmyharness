@@ -9,7 +9,7 @@
 //! before launch. An `sbx` sandbox that cannot mount a single file must say so,
 //! not silently drop the catalogue.
 
-use crate::container::Plan;
+use crate::plan::Plan;
 use anyhow::Result;
 
 /// What a backend can actually do. Unknowns default to `false`: a distribution
@@ -237,6 +237,74 @@ pub const SESSION_CAPS: &[&str] = &[
 /// it is a chosen constant, not a measured limit, and it is here so that the
 /// day it is wrong the fix is one line with a reason next to it.
 pub const PIDS_LIMIT: u32 = 2048;
+
+/// The container's stamp is here rather than in `plan`, because part of it is
+/// the confinement this module decides.
+impl Plan {
+    /// What this container is made of, stamped onto it at launch.
+    ///
+    /// A `Plan` is a pure description; a container is one plan materialized.
+    /// Everything here is fixed the moment `docker run` returns — no later
+    /// `exec` can change the image, the mount set, the network or the
+    /// environment. So a running container is the session you asked for only if
+    /// these still match, and until this existed nothing asked: `omh s01 resume opencode`
+    /// against a session started by `omh new claude` execed a binary that image does
+    /// not contain, and `--account work` on one started as `personal` went on
+    /// quietly using `personal`.
+    ///
+    /// `argv` and `tty` are deliberately absent. They belong to the *launch*,
+    /// not to the container, and stamping them would rebuild the sandbox every
+    /// time you passed a different flag to the harness.
+    ///
+    /// Values are verbatim rather than hashed, for two reasons. A digest can
+    /// only say *that* something changed, and the line a user acts on has to say
+    /// *what*. And the obvious hasher is the one `image::base_tag` uses —
+    /// `DefaultHasher`, whose output std explicitly does not guarantee across
+    /// releases. Fine for a tag, which is rebuilt anyway; here it would restart
+    /// every running session on the day somebody upgrades Rust.
+    pub fn labels(&self) -> Vec<(String, String)> {
+        let mut mounts: Vec<String> = self
+            .mounts
+            .iter()
+            .map(|m| {
+                // Deliberately *not* docker's own `host:guest:ro` spelling. The
+                // stamp travels on the same command line as the `-v` flags, and
+                // a value that parses as a mount is one a reader — or a test
+                // counting `:ro` — will mistake for one.
+                format!(
+                    "{} {} -> {}",
+                    if m.read_only { "ro" } else { "rw" },
+                    m.host.display(),
+                    m.guest.display()
+                )
+            })
+            .collect();
+        mounts.sort();
+        let mut env: Vec<String> = self.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        env.sort();
+        // Sorted, because docker reports neither back in the order it was
+        // given, and a stamp whose value depends on iteration order reads as
+        // drift on the very next launch.
+        //
+        // Newline-separated: a mount is a pair of paths, and every other
+        // plausible separator is a character a path may legally contain.
+        vec![
+            ("omh.image".into(), self.image.clone()),
+            ("omh.network".into(), self.network.clone()),
+            ("omh.workdir".into(), self.workdir.clone()),
+            ("omh.mounts".into(), mounts.join("\n")),
+            ("omh.env".into(), env.join("\n")),
+            ("omh.limits".into(), self.limits.stamp()),
+            // What confines it, as the flags that do: a release that changes
+            // `SESSION_CAPS` or the pids limit alone read as no drift, and the
+            // running container kept the old ones.
+            (
+                "omh.confinement".into(),
+                session_confinement(self).join("\n"),
+            ),
+        ]
+    }
+}
 
 /// The confinement every Docker `run` carries: the capability set, no process
 /// gaining privilege, the process ceiling, and whatever
@@ -472,7 +540,7 @@ impl Runtime for Docker {
             "-u".into(),
             "agent".into(),
             "-w".into(),
-            crate::container_workdir().into(),
+            crate::guest::WORKDIR.into(),
         ];
         a.push(name.into());
         a.extend(argv.iter().cloned());
@@ -490,7 +558,7 @@ impl Runtime for Docker {
             "-u".into(),
             "agent".into(),
             "-w".into(),
-            crate::container_workdir().into(),
+            crate::guest::WORKDIR.into(),
         ]);
         a.push(name.into());
         a.extend(argv.iter().cloned());
@@ -593,7 +661,7 @@ pub struct SbxStaging {
     pub links: Vec<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
-pub fn sbx_staging(mounts: &[crate::container::Mount]) -> SbxStaging {
+pub fn sbx_staging(mounts: &[crate::plan::Mount]) -> SbxStaging {
     use std::collections::BTreeMap;
     let mut writable: BTreeMap<std::path::PathBuf, bool> = BTreeMap::new();
     let mut links = Vec::new();
@@ -887,6 +955,18 @@ fn workspace_args(staging: &SbxStaging) -> Vec<String> {
         .collect()
 }
 
+/// The backend this repo's settings ask for: the `runtime` setting, `auto`
+/// when unset. An unreadable settings file is an error, never `auto`.
+pub fn preference(paths: &crate::paths::Paths) -> Result<String> {
+    Ok(crate::config::policy_value(paths, "runtime")?.unwrap_or_else(|| "auto".into()))
+}
+
+/// The backend a command in this repo runs on: [`select`] over the repo's
+/// [`preference`], asking the host what is installed.
+pub fn for_repo(paths: &crate::paths::Paths) -> Result<Backend> {
+    select(&preference(paths)?, &|p| installed(p))
+}
+
 /// The backend the settings ask for, or the one measured backend under `auto`.
 pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Backend> {
     let build = |name: &str| Engine::named(name).map(Engine::build);
@@ -1092,7 +1172,7 @@ pub fn answered(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container::Mount;
+    use crate::plan::Mount;
     use std::path::PathBuf;
 
     /// A program name is a word `command -v` is asked about, never a line the
@@ -1415,8 +1495,8 @@ mod tests {
         assert!(args.ends_with("claude"), "harness argv comes last: {args}");
     }
 
-    fn mount(host: &str, guest: &str, read_only: bool, file: bool) -> crate::container::Mount {
-        crate::container::Mount {
+    fn mount(host: &str, guest: &str, read_only: bool, file: bool) -> crate::plan::Mount {
+        crate::plan::Mount {
             host: host.into(),
             guest: guest.into(),
             read_only,
@@ -1831,7 +1911,7 @@ mod tests {
         );
 
         let mut plan = sample_plan();
-        plan.limits = crate::container::Limits {
+        plan.limits = crate::plan::Limits {
             memory: Some("4g".into()),
             cpus: Some("2".into()),
         };
@@ -2230,13 +2310,13 @@ mod tests {
 
 #[cfg(test)]
 mod workdir_tests {
-    /// `container_workdir`'s docstring says the path is named once, so the note
+    /// `guest::WORKDIR`'s docstring says the path is named once, so the note
     /// store and the launch plan cannot disagree about it. It was not: the plan
     /// spelled it twice and the note store's path folding a third time.
     ///
     /// Introspects the source, the way the dispatch guard introspects the CLI
     /// definition, because the obvious test cannot fail. Asserting that the
-    /// plan's workdir equals `container_workdir()` passes just as well when the
+    /// plan's workdir equals `guest::WORKDIR` passes just as well when the
     /// plan holds the literal — both sides are the same string, so it pins
     /// nothing. Only counting the spellings can tell them apart.
     ///
@@ -2263,7 +2343,7 @@ mod workdir_tests {
         assert_eq!(
             offenders.len(),
             1,
-            "exactly one place may spell it — `container_workdir` itself. Found: {offenders:?}"
+            "exactly one place may spell it — `guest::WORKDIR` itself. Found: {offenders:?}"
         );
     }
 }

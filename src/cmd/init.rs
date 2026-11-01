@@ -10,8 +10,8 @@ use crate::catalogue::Catalogue;
 use crate::out;
 use crate::paths::Paths;
 use crate::{
-    ask, base, bundled, config, derive, detect, doctor, facts, hook, image, key, memory, render,
-    report, runtime, settings, stack,
+    ask, base, bundled, config, derive, detect, facts, image, key, memory, render, report, runtime,
+    settings, stack,
 };
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,11 +108,11 @@ pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
 
 /// What lives in a repo's `.omh/` and must not be committed.
 ///
-/// `settings::LOCAL` because it holds secrets — that is the whole safety
+/// `config::LOCAL` because it holds secrets — that is the whole safety
 /// argument. `SEEDED_BY` because it records *this checkout's* setup, and
 /// committing it would have two teammates on different omh versions
 /// overwriting each other's line for no gain.
-pub(crate) const IGNORED: &[&str] = &[settings::LOCAL, SEEDED_BY];
+pub(crate) const IGNORED: &[&str] = &[config::LOCAL, SEEDED_BY];
 
 /// The file recording which omh set this checkout up.
 ///
@@ -139,13 +139,13 @@ pub(crate) fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
     // early return, so a `.gitignore` that already had it could never gain a
     // second — and `seeded-by` is per-checkout, so committing it is churn
     // between teammates on different omh versions. The security argument is
-    // unchanged: `settings::LOCAL` is still ensured, and still first.
+    // unchanged: `config::LOCAL` is still ensured, and still first.
     let missing = append_missing(&ignore, IGNORED)?;
     if missing.is_empty() {
         return Ok(());
     }
     // **What was actually added, not the first name in the list.** This
-    // hardcoded `settings::LOCAL` while `missing` is computed per name — so
+    // hardcoded `config::LOCAL` while `missing` is computed per name — so
     // every existing checkout, which already ignores that file and is only
     // gaining `seeded-by`, was told *nothing was ignoring settings.local.toml*.
     // A false alarm about the one file the whole safety argument rests on, and
@@ -592,7 +592,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let markers = stack::markers(&paths.markers())?;
     let unclaimed = stack::unclaimed(&markers, &stack_defs, &paths.repo);
     let has_test = covered.iter().any(|s| stacks.iter().any(|d| &d.name == s))
-        || derived.iter().any(|d| d.hook.on == hook::Event::TurnEnd)
+        || derived
+            .iter()
+            .any(|d| d.hook.on == crate::vocab::Event::TurnEnd)
         || repo_omh.join("hooks").join("test.json").exists();
     let (asked, answered) = questions(&repo_omh, &unclaimed, has_test, ctx)?;
 
@@ -725,9 +727,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // fail below return an empty answer and read as ordinary — the reason
         // has to be true from the moment it stops being the previous one.
         hooks = report::Hooks::Unchecked("the sandbox could not be asked".into());
-        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-            runtime::installed(p)
-        })?;
+        let backend = runtime::for_repo(&paths)?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
         // Without it the headline command cannot run, so init is not finished
         // until this exists — and until it exists there is no sandbox to ask
@@ -808,7 +808,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // is the committed table alone: `record_resolution` has just
                 // written it, and a `false` in `settings.local.toml` means *not
                 // on this laptop*, which is the laptop building the image.
-                let (own, repo) = crate::cmd::session::resolved(&paths)?;
+                let (own, repo) = crate::settings::resolved(&paths)?;
                 let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
                 image::ensure_stack(
                     &backend,
@@ -947,9 +947,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // The index lives in a container volume, so it has to be built inside the
     // sandbox — one built on the host would land where no session can read it.
     if let Some(h) = &harness {
-        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-            runtime::installed(p)
-        })?;
+        let backend = runtime::for_repo(&paths)?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
         // The harness's image as this host runs it, not as built: the volume
         // this first index creates takes its owner from the image's agent, and
@@ -1397,7 +1395,7 @@ pub(crate) fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<
 pub(crate) struct Asked {
     /// How many provides there were to ask about. None is an answer.
     pub asked: usize,
-    pub answered: Vec<doctor::Outcome>,
+    pub answered: Vec<crate::probe::Outcome>,
     /// Why the question could not be put, when it could not.
     pub problem: Option<String>,
     /// What to say about that in a report: the reason, and the first lines
@@ -1501,7 +1499,7 @@ pub(crate) fn ask_conditions(
                 }
                 Vec::new()
             }
-            Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
+            Ok(out) => crate::probe::parse(&String::from_utf8_lossy(&out.stdout)),
             Err(e) => {
                 // Non-fatal, and never fatal *silently*: `init` sets a
                 // repo up, and failing that over a diagnostic would be
@@ -1547,7 +1545,10 @@ pub(crate) fn ask_conditions(
 /// it — otherwise `[provision]` keeps asserting `rust/toolchain = true` after
 /// the `Cargo.toml` is gone, and the stack layer keeps installing a toolchain
 /// nothing uses.
-pub(crate) fn fired_from(asked: usize, answered: &[doctor::Outcome]) -> Option<BTreeSet<String>> {
+pub(crate) fn fired_from(
+    asked: usize,
+    answered: &[crate::probe::Outcome],
+) -> Option<BTreeSet<String>> {
     if asked == 0 {
         return Some(BTreeSet::new());
     }
@@ -1705,7 +1706,7 @@ pub(crate) fn measured_or_reason(
     ok: bool,
     stdout: &str,
     stderr: &str,
-) -> Result<Vec<doctor::Outcome>, String> {
+) -> Result<Vec<crate::probe::Outcome>, String> {
     if !ok {
         let mut reason = String::from("could not ask the sandbox what it has");
         for line in stderr.lines().filter(|l| !l.trim().is_empty()).take(3) {
@@ -1714,7 +1715,7 @@ pub(crate) fn measured_or_reason(
         }
         return Err(reason);
     }
-    Ok(doctor::parse(stdout))
+    Ok(crate::probe::parse(stdout))
 }
 
 /// What an image was found to have — and whether it was actually asked.
@@ -1743,7 +1744,10 @@ pub(crate) fn measure(
     let unseen = facts.unseen(tag, wanted);
     if !unseen.is_empty() {
         let borrowed: Vec<&str> = unseen.iter().map(String::as_str).collect();
-        let ran = backend.output(&image::probe_args(tag, &doctor::probe_programs(&borrowed)));
+        let ran = backend.output(&image::probe_args(
+            tag,
+            &crate::probe::probe_programs(&borrowed),
+        ));
         let outcomes = match ran {
             Ok(out) => measured_or_reason(
                 out.status.success(),

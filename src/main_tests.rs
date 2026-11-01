@@ -1,4 +1,5 @@
 use super::*;
+use crate::adapter::Adapter;
 use crate::session::Session;
 use clap::CommandFactory;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1993,8 +1994,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
         // `omh <id> resume <harness>` the way the `Resume` arm does.
-        // + the `omh s` pointer when rm names no session, and the `omh <id> rm`
-        // in the reason `leftovers` gives for naming nothing.
+        // + the `omh s` pointer when rm names no session.
         // + `omh {id} down`, `omh {id} rm` and `omh {id} rm --yes` in the
         // line naming a session's preferences to review, `omh {id} rm` and
         // `omh {id} rm --yes` in `rm`'s refusal once its container is down,
@@ -2002,7 +2002,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `omh {id} down` after a review that left something undecided. +
         // `omh {id} rm` when the agent wrote more while `rm` decided. +
         // `omh set account {harness}:{name} --local` when the committed
-        // settings chose the launch's account.
+        // settings chose the launch's account. + `omh sNN attach {name}` in
+        // `tool_hint`, for a word that names an editor.
         ("src/cmd/session.rs", 24),
         // + `rm`'s three: `omh upgrade` and `omh unuse hooks <name>` in the
         // refusal for a hook omh ships, and `--yes` in the consent refusal.
@@ -2073,9 +2074,12 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // The fourth is `docker info`, which `host_owner` asks a rootful Linux
         // Docker before it moves the agent to the host user's uid.
         ("src/image.rs", 4),
+        // The `omh <id> rm` in the reason `leftovers` gives for naming nothing.
+        ("src/leftovers.rs", 1),
         // The ninth is the `--json` refusal, beside the two for `--dry-run`
-        // and a session prefix nothing consumes.
-        ("src/main.rs", 9),
+        // and a session prefix nothing consumes. `tool_hint`'s
+        // `omh sNN attach` went to src/cmd/session.rs with it.
+        ("src/main.rs", 8),
         ("src/memory.rs", 2),
         ("src/memory/ingest.rs", 2),
         ("src/notice.rs", 2),
@@ -3938,7 +3942,7 @@ fn a_selection_on_a_git_that_cannot_do_it_says_which_command_still_works() {
 /// usually explained by, so they read first.
 #[test]
 fn host_checks_never_stand_in_for_a_probe_that_did_not_run() {
-    let sandbox = vec![doctor::Outcome {
+    let sandbox = vec![crate::probe::Outcome {
         name: "rules".into(),
         ok: true,
         detail: "reads".into(),
@@ -4317,7 +4321,7 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
         std::fs::write(p, body).unwrap();
     };
     cmd::init::install_bundled(&paths.base(), bundled::Shipped::Base, &out::Ctx::plain()).unwrap();
-    let (own, _) = cmd::session::resolved(&paths).unwrap();
+    let (own, _) = settings::resolved(&paths).unwrap();
     assert!(
         !own.hooks.is_empty() && !own.sections.is_empty(),
         "a launch must be given what the manifest ships"
@@ -4332,7 +4336,7 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
         paths.repo.join(".omh/settings.toml"),
         "[omh]\ncodegraph = false\n\n[mcp.linear.env]\nOMH_TEST = \"seen\"\n",
     );
-    let (off, policy) = cmd::session::resolved(&paths).unwrap();
+    let (off, policy) = settings::resolved(&paths).unwrap();
     assert!(
         !off.hooks.iter().any(|h| h.name.starts_with("graph-")),
         "and `[omh]` in this repo has to reach it: {:?}",
@@ -4361,8 +4365,8 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
 
 // ── the provisioning resolution ─────────────────────────────────────────
 
-fn outcome(name: &str, ok: bool, detail: &str) -> doctor::Outcome {
-    doctor::Outcome {
+fn outcome(name: &str, ok: bool, detail: &str) -> crate::probe::Outcome {
+    crate::probe::Outcome {
         name: name.into(),
         ok,
         detail: detail.into(),
@@ -4375,7 +4379,7 @@ fn outcome(name: &str, ok: bool, detail: &str) -> doctor::Outcome {
 /// resolution and, on the next launch, the repo would provision nothing.
 ///
 /// Silence is cannot-tell, and cannot-tell writes nothing at all — the same
-/// asymmetry `detect::program` and `facts::Facts` are built on, at the one
+/// asymmetry `command::program` and `facts::Facts` are built on, at the one
 /// point where acting on it would delete somebody's file contents.
 #[test]
 fn a_resolution_nobody_measured_is_never_recorded() {
@@ -4900,7 +4904,7 @@ fn a_hook_for_an_ecosystem_this_repo_is_not_is_not_offered() {
     let detected: BTreeSet<String> = ["rust".to_string()].into_iter().collect();
 
     assert_eq!(
-        cmd::catalogue::applicable_hooks(names.clone(), &declared, &detected),
+        catalogue::applicable_hooks(names.clone(), &declared, &detected),
         vec![
             "rust-test".to_string(),
             "shellcheck".to_string(),
@@ -4911,7 +4915,7 @@ fn a_hook_for_an_ecosystem_this_repo_is_not_is_not_offered() {
 
     // A repo omh detects nothing for keeps everything that claims nothing.
     assert_eq!(
-        cmd::catalogue::applicable_hooks(names, &declared, &BTreeSet::new()),
+        catalogue::applicable_hooks(names, &declared, &BTreeSet::new()),
         vec!["shellcheck".to_string(), "mine".to_string()]
     );
 }
@@ -5520,7 +5524,7 @@ fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
     let mut facts = facts::Facts::default();
     facts.learn(
         &first.tag,
-        &[doctor::Outcome {
+        &[crate::probe::Outcome {
             name: "alpha".into(),
             ok: false,
             detail: "not installed in the sandbox".into(),
@@ -6550,13 +6554,13 @@ fn no_bundled_adapter_shares_a_name_with_an_editor() {
 /// will make is typing an editor where a harness goes. Say the fix.
 #[test]
 fn naming_an_editor_where_a_harness_goes_names_the_fix() {
-    let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
+    let hint = cmd::session::tool_hint("zed", &["claude".into()], &["zed".into()]);
     assert!(hint.contains("omh sNN attach zed"), "got: {hint}");
 }
 
 #[test]
 fn an_unknown_word_lists_the_harnesses() {
-    let hint = tool_hint(
+    let hint = cmd::session::tool_hint(
         "emacs",
         &["claude".into(), "opencode".into()],
         &["zed".into()],
@@ -6576,7 +6580,7 @@ fn a_command_typed_as_a_harness_is_no_longer_a_thing_that_can_happen() {
     // word is not a launch, so `config` is the command and cannot be
     // mistaken for anything. What survives is the editor half, which is
     // still a real confusion because editors and harnesses are both names.
-    let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
+    let hint = cmd::session::tool_hint("zed", &["claude".into()], &["zed".into()]);
     assert!(hint.contains("omh sNN attach zed"), "got: {hint}");
 }
 
@@ -7265,7 +7269,7 @@ fn a_hook_that_belongs_to_nothing_is_offered_everywhere() {
     let rust: BTreeSet<String> = ["rust".to_string()].into_iter().collect();
 
     assert_eq!(
-        cmd::catalogue::applicable_hooks(names, &declared, &rust),
+        catalogue::applicable_hooks(names, &declared, &rust),
         vec![
             "rust-test".to_string(),
             "graph-refresh".to_string(),
@@ -7659,7 +7663,7 @@ fn syncing_leaves_the_worktree_holding_exactly_the_merged_tree() {
     );
     // The invariant, not the two names: what the session now claims to
     // have changed against its moved base is nothing at all.
-    let claimed = session.diff("main", session::What::Summary).unwrap();
+    let claimed = session.diff("main", crate::git::What::Summary).unwrap();
     assert_eq!(
         claimed.trim(),
         "",
@@ -7894,7 +7898,7 @@ fn an_untouched_session_holds_nothing_but_omhs_placeholders() {
         Vec::<String>::new(),
         "`omh s` counts omh's placeholders as uncommitted work"
     );
-    let review = session.diff("main", session::What::Summary).unwrap();
+    let review = session.diff("main", crate::git::What::Summary).unwrap();
     for name in carry::hidden_in_the_worktree() {
         assert!(
             !review.contains(name),
@@ -8059,15 +8063,13 @@ fn an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty() {
     let paths = leftover_paths(&dir);
     std::fs::create_dir_all(paths.shadows()).unwrap();
 
-    let Some(cmd::session::Leftovers { unchecked, .. }) =
-        while_unreadable(&paths.shadows(), || {
-            cmd::session::leftovers(
-                &paths,
-                Err("docker: not found".into()),
-                cmd::session::Unchecked::new(&out::Ctx::plain()),
-            )
-        })
-    else {
+    let Some(leftovers::Leftovers { unchecked, .. }) = while_unreadable(&paths.shadows(), || {
+        leftovers::leftovers(
+            &paths,
+            Err("docker: not found".into()),
+            leftovers::Unchecked::new(&out::Ctx::plain()),
+        )
+    }) else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
         return;
     };
@@ -8090,11 +8092,11 @@ fn an_unreadable_run_directory_is_reported_rather_than_read_as_empty() {
     let paths = leftover_paths(&dir);
     std::fs::create_dir_all(paths.runs()).unwrap();
 
-    let Some(cmd::session::Leftovers { unchecked, .. }) = while_unreadable(&paths.runs(), || {
-        cmd::session::leftovers(
+    let Some(leftovers::Leftovers { unchecked, .. }) = while_unreadable(&paths.runs(), || {
+        leftovers::leftovers(
             &paths,
             Err("docker: not found".into()),
-            cmd::session::Unchecked::new(&out::Ctx::plain()),
+            leftovers::Unchecked::new(&out::Ctx::plain()),
         )
     }) else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
@@ -8136,12 +8138,12 @@ fn a_failed_source_read_does_not_discard_what_another_source_found() {
     std::fs::create_dir_all(paths.shadows()).unwrap();
     idle::touch(&paths.runs(), "s07").unwrap();
 
-    let Some(cmd::session::Leftovers { found, unchecked }) =
+    let Some(leftovers::Leftovers { found, unchecked }) =
         while_unreadable(&paths.shadows(), || {
-            cmd::session::leftovers(
+            leftovers::leftovers(
                 &paths,
                 Err("docker: not found".into()),
-                cmd::session::Unchecked::new(&out::Ctx::plain()),
+                leftovers::Unchecked::new(&out::Ctx::plain()),
             )
         })
     else {
@@ -8179,10 +8181,10 @@ fn a_run_whose_marker_could_not_be_read_is_reported_rather_than_read_as_unused()
     let restore = Restore::unreadable(&run).unwrap();
     let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
 
-    let cmd::session::Leftovers { found, unchecked } = cmd::session::leftovers(
+    let leftovers::Leftovers { found, unchecked } = leftovers::leftovers(
         &paths,
         Err("docker: not found".into()),
-        cmd::session::Unchecked::new(&out::Ctx::plain()),
+        leftovers::Unchecked::new(&out::Ctx::plain()),
     );
     drop(restore);
 
@@ -8232,7 +8234,7 @@ impl FakeEntry {
     }
 }
 
-impl cmd::session::Entry for FakeEntry {
+impl leftovers::Entry for FakeEntry {
     fn name(&self) -> String {
         self.name.to_string()
     }
@@ -8259,7 +8261,7 @@ fn an_entry_that_could_not_be_read_is_named_rather_than_dropped() {
         Ok("b.git"),
     ];
 
-    let (names, failed) = cmd::session::listed(entries);
+    let (names, failed) = leftovers::listed(entries);
 
     assert_eq!(names, vec!["a.git", "b.git"], "the readable ones survive");
     assert_eq!(
@@ -8284,14 +8286,14 @@ fn an_entry_that_could_not_be_read_is_named_rather_than_dropped() {
 #[test]
 fn a_sweep_takes_the_directories_and_says_which_entries_it_could_not_tell() {
     let ctx = out::Ctx::plain();
-    let mut unchecked = cmd::session::Unchecked::new(&ctx);
+    let mut unchecked = leftovers::Unchecked::new(&ctx);
     let entries: Vec<std::io::Result<FakeEntry>> = vec![
         Ok(FakeEntry::dir("s01")),
         Ok(FakeEntry::file("hooks.json")),
         Ok(FakeEntry::refused("s02")),
     ];
 
-    let found = cmd::session::sweep(
+    let found = leftovers::sweep(
         entries,
         std::path::Path::new("/tmp/run"),
         "run directories",
@@ -8321,12 +8323,12 @@ fn a_sweep_takes_the_directories_and_says_which_entries_it_could_not_tell() {
 #[test]
 fn a_sweep_never_reads_a_marker_for_a_live_session() {
     let ctx = out::Ctx::plain();
-    let mut unchecked = cmd::session::Unchecked::new(&ctx);
+    let mut unchecked = leftovers::Unchecked::new(&ctx);
     let asked = std::cell::RefCell::new(Vec::new());
     let entries: Vec<std::io::Result<FakeEntry>> =
         vec![Ok(FakeEntry::dir("s01")), Ok(FakeEntry::dir("s02"))];
 
-    let found = cmd::session::sweep(
+    let found = leftovers::sweep(
         entries,
         std::path::Path::new("/tmp/run"),
         "run directories",
@@ -8353,13 +8355,13 @@ fn a_sweep_never_reads_a_marker_for_a_live_session() {
 #[test]
 fn the_reason_for_a_directory_comes_before_the_reasons_for_what_is_in_it() {
     let ctx = out::Ctx::plain();
-    let mut unchecked = cmd::session::Unchecked::new(&ctx);
+    let mut unchecked = leftovers::Unchecked::new(&ctx);
     let entries: Vec<std::io::Result<FakeEntry>> = vec![
         Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
         Ok(FakeEntry::refused("s02")),
     ];
 
-    cmd::session::sweep(
+    leftovers::sweep(
         entries,
         std::path::Path::new("/tmp/run"),
         "run directories",
@@ -8381,7 +8383,7 @@ fn the_reason_for_a_directory_comes_before_the_reasons_for_what_is_in_it() {
 #[test]
 fn the_doctor_row_carries_each_reason_it_could_not_look() {
     let row = doctor::leftovers_from(
-        cmd::session::Leftovers {
+        leftovers::Leftovers {
             found: vec!["s07".into()],
             unchecked: vec![
                 "omh could not read /x, so orphaned sandbox repositories went unchecked: denied"
@@ -8420,7 +8422,7 @@ fn the_doctor_row_carries_each_reason_it_could_not_look() {
 #[test]
 fn a_leftover_and_a_failed_read_both_reach_the_row() {
     let row = doctor::leftovers_from(
-        cmd::session::Leftovers {
+        leftovers::Leftovers {
             found: vec!["s01".into()],
             unchecked: vec![
                 "omh could not read /shadow, so orphaned sandbox repositories went unchecked: \
@@ -8455,12 +8457,12 @@ fn the_entries_omh_could_not_read_become_the_line_that_names_them() {
     let dir = std::path::Path::new("/tmp/shadow");
 
     assert_eq!(
-        cmd::session::unreadable_reason(&[], "sandbox repositories", dir),
+        leftovers::unreadable_reason(&[], "sandbox repositories", dir),
         None,
         "a directory omh read completely has nothing to report"
     );
 
-    let one = cmd::session::unreadable_reason(&["denied".to_string()], "runs", dir)
+    let one = leftovers::unreadable_reason(&["denied".to_string()], "runs", dir)
         .expect("one failure is a reason");
     assert!(one.contains("1 entry"), "singular, not `1 entries`: {one}");
     assert!(one.contains("runs went unchecked"), "{one}");
@@ -8473,7 +8475,7 @@ fn the_entries_omh_could_not_read_become_the_line_that_names_them() {
     // Distinct reasons as well as repeated ones: fed only `["denied", "denied"]`,
     // `dedup` and `truncate(1)` are indistinguishable, so the line could quietly
     // start dropping every reason but the first.
-    let many = cmd::session::unreadable_reason(
+    let many = leftovers::unreadable_reason(
         &[
             "denied".to_string(),
             "gone".to_string(),
@@ -8514,10 +8516,10 @@ fn a_file_omh_writes_under_run_is_neither_a_leftover_nor_a_read_that_failed() {
     std::fs::create_dir_all(paths.runs()).unwrap();
     std::fs::write(paths.runs().join("hooks.json"), "{}").unwrap();
 
-    let cmd::session::Leftovers { found, unchecked } = cmd::session::leftovers(
+    let leftovers::Leftovers { found, unchecked } = leftovers::leftovers(
         &paths,
         Err("docker: not found".into()),
-        cmd::session::Unchecked::new(&out::Ctx::plain()),
+        leftovers::Unchecked::new(&out::Ctx::plain()),
     );
 
     assert!(
@@ -8549,10 +8551,10 @@ fn a_live_session_whose_marker_omh_could_not_read_is_not_unchecked() {
     let restore = Restore::unreadable(&run).unwrap();
     let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
 
-    let cmd::session::Leftovers { found, unchecked } = cmd::session::leftovers(
+    let leftovers::Leftovers { found, unchecked } = leftovers::leftovers(
         &paths,
         Err("docker: not found".into()),
-        cmd::session::Unchecked::new(&out::Ctx::plain()),
+        leftovers::Unchecked::new(&out::Ctx::plain()),
     );
     drop(restore);
 
@@ -8582,10 +8584,10 @@ fn no_container_runtime_is_a_read_that_did_not_happen() {
     let dir = tempfile::tempdir().unwrap();
     let paths = leftover_paths(&dir);
 
-    let cmd::session::Leftovers { unchecked, .. } = cmd::session::leftovers(
+    let leftovers::Leftovers { unchecked, .. } = leftovers::leftovers(
         &paths,
         Err("docker: not found".into()),
-        cmd::session::Unchecked::new(&out::Ctx::plain()),
+        leftovers::Unchecked::new(&out::Ctx::plain()),
     );
 
     assert!(
@@ -8625,12 +8627,12 @@ fn a_worktrees_read_omh_could_not_make_names_no_orphans() {
     // One candidate, which omh would name were the predicate readable.
     idle::touch(&paths.runs(), "s07").unwrap();
 
-    let Some(cmd::session::Leftovers { found, unchecked }) =
+    let Some(leftovers::Leftovers { found, unchecked }) =
         while_unreadable(&paths.worktrees(), || {
-            cmd::session::leftovers(
+            leftovers::leftovers(
                 &paths,
                 Err("docker: not found".into()),
-                cmd::session::Unchecked::new(&out::Ctx::plain()),
+                leftovers::Unchecked::new(&out::Ctx::plain()),
             )
         })
     else {
@@ -8664,10 +8666,10 @@ fn a_worktrees_read_omh_could_not_make_names_no_orphans() {
 #[test]
 fn a_sweep_settles_a_live_session_before_reading_anything_else_about_it() {
     let ctx = out::Ctx::plain();
-    let mut unchecked = cmd::session::Unchecked::new(&ctx);
+    let mut unchecked = leftovers::Unchecked::new(&ctx);
     let entries: Vec<std::io::Result<FakeEntry>> = vec![Ok(FakeEntry::refused("s01"))];
 
-    let found = cmd::session::sweep(
+    let found = leftovers::sweep(
         entries,
         std::path::Path::new("/tmp/shadow"),
         "sandbox repositories",
@@ -8697,10 +8699,10 @@ fn a_sweep_settles_a_live_session_before_reading_anything_else_about_it() {
 #[test]
 fn a_sweep_does_not_report_a_name_its_filter_would_have_dropped() {
     let ctx = out::Ctx::plain();
-    let mut unchecked = cmd::session::Unchecked::new(&ctx);
+    let mut unchecked = leftovers::Unchecked::new(&ctx);
     let entries: Vec<std::io::Result<FakeEntry>> = vec![Ok(FakeEntry::refused("s01.seed"))];
 
-    cmd::session::sweep(
+    leftovers::sweep(
         entries,
         std::path::Path::new("/tmp/shadow"),
         "sandbox repositories",
@@ -8737,10 +8739,10 @@ fn a_run_reached_through_a_symlink_is_read_like_any_other() {
     std::fs::create_dir_all(paths.runs()).unwrap();
     std::os::unix::fs::symlink(&real, paths.runs().join("s07")).unwrap();
 
-    let cmd::session::Leftovers { found, .. } = cmd::session::leftovers(
+    let leftovers::Leftovers { found, .. } = leftovers::leftovers(
         &paths,
         Err("docker: not found".into()),
-        cmd::session::Unchecked::new(&out::Ctx::plain()),
+        leftovers::Unchecked::new(&out::Ctx::plain()),
     );
 
     assert!(

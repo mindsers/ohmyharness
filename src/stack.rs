@@ -277,7 +277,7 @@ pub enum Verdict {
 /// wire format and the one parser serve both this and `doctor`'s checks. The
 /// emitter below and this reader are round-tripped by the tests, so they cannot
 /// drift into disagreeing about where the number is.
-pub fn verdict(o: &crate::doctor::Outcome) -> Verdict {
+pub fn verdict(o: &crate::probe::Outcome) -> Verdict {
     if o.ok {
         return Verdict::Applies;
     }
@@ -300,7 +300,7 @@ pub const BLIND: i32 = 96;
 /// A shell script asking, for each provide, whether it applies to this repo.
 ///
 /// Emits the same `ok|fail\t<key>\t<detail>` wire format as every other probe,
-/// so `doctor::parse` reads it and there is one format and one parser.
+/// so `crate::probe::parse` reads it and there is one format and one parser.
 ///
 /// The exit code leads `detail` because that is the only channel a two-valued
 /// `Outcome` leaves for a three-valued answer — see [`Verdict`]. Each predicate
@@ -344,7 +344,7 @@ pub fn predicate_script(markers: &[&str], candidates: &[(String, Option<&str>)])
             // the `if` sees its code.
             // `>/dev/null 2>&1` on the predicate itself, not just the subshell
             // for `exit`. Predicate output and omh's protocol share one stream,
-            // and `doctor::parse` takes a well-formed line from anywhere in it —
+            // and `crate::probe::parse` takes a well-formed line from anywhere in it —
             // so a predicate written without a redirect (`grep packageManager
             // package.json`) prints **repo-controlled text** into the channel.
             // `init` runs against repos you have just cloned, and a forged
@@ -379,7 +379,7 @@ pub fn predicate_args(tag: &str, repo: &Path, script: &str) -> Vec<String> {
     // Never the literal — `only_one_place_spells_the_container_workdir` counts
     // the spellings across the source, because asserting that two sides are
     // equal passes just as well when both hold the same hardcoded string.
-    let workdir = crate::container_workdir();
+    let workdir = crate::guest::WORKDIR;
     vec![
         "run".into(),
         "--rm".into(),
@@ -481,7 +481,7 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
         );
         // Every entry here is handed to `command -v` by the sandbox probe. A
         // blank one, or one carrying arguments, resolves nowhere — so it reports a gap for a
-        // toolchain the user has, and keeps reporting it. `detect::program`
+        // toolchain the user has, and keeps reporting it. `command::program`
         // returns `None` rather than guess for exactly this reason; a stack
         // file is the other door into the same mistake.
         anyhow::ensure!(
@@ -495,13 +495,13 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
                 "{at}: provide `{}` has a blank `needs` entry",
                 p.name
             );
-            // Through `detect::program` rather than a local re-spelling of the
+            // Through `command::program` rather than a local re-spelling of the
             // rule. That function is the codebase's answer to "is this word a
             // program name", it uses an allowlist for reasons its own tests
             // record, and a second implementation here accepted `$(which`,
             // `cargo|tee` and a leading space — the exact shapes it refuses.
             anyhow::ensure!(
-                crate::detect::program(need) == Some(need.as_str()),
+                crate::command::program(need) == Some(need.as_str()),
                 "{at}: provide `{}` needs `{need}`, which is not a program name \
                  — `needs` is what must resolve on PATH, not a command to run",
                 p.name
@@ -984,7 +984,7 @@ because = "cargo is how a rust project is built and tested"
                 .collect();
 
             for command in hook.runs() {
-                let Some(needed) = crate::detect::program(command) else {
+                let Some(needed) = crate::command::program(command) else {
                     panic!("{}: `{command}` names no program", file.name);
                 };
                 assert!(
@@ -1288,8 +1288,8 @@ because = "cargo is how a rust project is built and tested"
             .iter()
             .map(|(k, w)| ((*k).to_string(), *w))
             .collect();
-        let out = crate::doctor::run_probe_in(&predicate_script(&[], &owned), cwd);
-        crate::doctor::parse(&out)
+        let out = crate::probe::run_probe_in(&predicate_script(&[], &owned), cwd);
+        crate::probe::parse(&out)
             .iter()
             .map(|o| (o.name.clone(), verdict(o)))
             .collect()
@@ -1320,7 +1320,7 @@ because = "cargo is how a rust project is built and tested"
         let blind = run(elsewhere.path());
         assert_eq!(blind.status.code(), Some(BLIND), "{blind:?}");
         assert!(
-            crate::doctor::parse(&String::from_utf8_lossy(&blind.stdout)).is_empty(),
+            crate::probe::parse(&String::from_utf8_lossy(&blind.stdout)).is_empty(),
             "no verdict from where the repo is not: {blind:?}"
         );
         assert!(
@@ -1332,7 +1332,7 @@ because = "cargo is how a rust project is built and tested"
         let sees = run(repo.path());
         assert!(sees.status.success(), "{sees:?}");
         assert_eq!(
-            crate::doctor::parse(&String::from_utf8_lossy(&sees.stdout))
+            crate::probe::parse(&String::from_utf8_lossy(&sees.stdout))
                 .iter()
                 .map(|o| (o.name.clone(), verdict(o)))
                 .collect::<Vec<_>>(),
@@ -1460,9 +1460,8 @@ because = "cargo is how a rust project is built and tested"
                 }
                 let before = std::fs::read_dir(d.path()).unwrap().flatten().count();
 
-                let out =
-                    crate::doctor::run_probe_in(&predicate_script(&[], &candidates), d.path());
-                let answered = crate::doctor::parse(&out);
+                let out = crate::probe::run_probe_in(&predicate_script(&[], &candidates), d.path());
+                let answered = crate::probe::parse(&out);
                 assert_eq!(
                     answered.len(),
                     candidates.len(),
@@ -1512,7 +1511,7 @@ because = "cargo is how a rust project is built and tested"
         );
         assert!(
             args.windows(2)
-                .any(|w| w[0] == "-w" && w[1] == crate::container_workdir()),
+                .any(|w| w[0] == "-w" && w[1] == crate::guest::WORKDIR),
             "a predicate written `test -f pnpm-lock.yaml` needs the repo as its \
              working directory: {args:?}"
         );
@@ -1522,7 +1521,7 @@ because = "cargo is how a rust project is built and tested"
 
     /// A predicate's own output must never reach the report channel.
     ///
-    /// Predicate stdout and omh's protocol share one stream, and `doctor::parse`
+    /// Predicate stdout and omh's protocol share one stream, and `crate::probe::parse`
     /// accepts a well-formed line from anywhere in it. So a predicate written
     /// without a redirect — `grep packageManager package.json`, no `-q` — prints
     /// **repo-controlled text** into the protocol. `omh init` runs against
@@ -1566,13 +1565,13 @@ because = "cargo is how a rust project is built and tested"
             (hostile.to_string(), Some("true")),
             ("x/after".to_string(), Some("true")),
         ];
-        let out = crate::doctor::run_probe_in(&predicate_script(&[], &owned), d.path());
+        let out = crate::probe::run_probe_in(&predicate_script(&[], &owned), d.path());
 
         assert!(
             !out.lines().any(|l| l.trim() == "pwned"),
             "a key was expanded as shell: {out}"
         );
-        let answered = crate::doctor::parse(&out);
+        let answered = crate::probe::parse(&out);
         assert!(
             answered.iter().any(|o| o.name == hostile),
             "the key came back changed: {answered:?}"
@@ -1683,7 +1682,7 @@ because = "cargo is how a rust project is built and tested"
     /// with `command -v`.
     /// A blank one, or one carrying arguments, resolves nowhere — so it reports
     /// a permanent gap for a toolchain the user has, which is the expensive
-    /// failure direction and the one `detect::program` returns `None` to avoid.
+    /// failure direction and the one `command::program` returns `None` to avoid.
     ///
     /// Checked in `load_dir` rather than in the curation test, because the
     /// curation test only ever reads this source tree. Once `~/.omh/stacks`

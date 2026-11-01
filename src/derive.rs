@@ -398,9 +398,9 @@ pub struct Derived {
 /// a project using it means what omh thinks it means; `build`, `start` and
 /// `dev` are not — running `npm run build` at the end of every turn is a
 /// minute of wasted compute and a red mark whenever the tree is mid-edit.
-const MOMENTS: [(crate::hook::Event, &str, &[&str]); 2] = [
-    (crate::hook::Event::TurnEnd, "test", &["test"]),
-    (crate::hook::Event::AfterTool, "format", &["format", "fmt"]),
+const MOMENTS: [(crate::vocab::Event, &str, &[&str]); 2] = [
+    (crate::vocab::Event::TurnEnd, "test", &["test"]),
+    (crate::vocab::Event::AfterTool, "format", &["format", "fmt"]),
 ];
 
 /// What this repo's own files justify, for the ecosystems nothing already
@@ -480,11 +480,11 @@ pub fn hooks(
                 // testing belongs to the end of the turn, when there is
                 // something whole to test.
                 tools: match on {
-                    crate::hook::Event::AfterTool => vec![crate::hook::Tool::Edit],
+                    crate::vocab::Event::AfterTool => vec![crate::vocab::Tool::Edit],
                     _ => Vec::new(),
                 },
                 when: None,
-                action: crate::hook::Action::Run(command),
+                action: crate::vocab::Action::Run(command),
             },
             from,
         });
@@ -878,7 +878,7 @@ mod tests {
         d.iter()
             .find(|h| h.name == name)
             .map(|h| match &h.hook.action {
-                crate::hook::Action::Run(c) => c.clone(),
+                crate::vocab::Action::Run(c) => c.clone(),
                 other => panic!("a derived hook runs a command, not {other:?}"),
             })
     }
@@ -900,7 +900,7 @@ mod tests {
         assert_eq!(ran(&got, "pnpm-test").as_deref(), Some("pnpm run test"));
         assert_eq!(ran(&got, "pnpm-format").as_deref(), Some("pnpm run fmt"));
         let test = got.iter().find(|h| h.name == "pnpm-test").unwrap();
-        assert_eq!(test.hook.on, crate::hook::Event::TurnEnd);
+        assert_eq!(test.hook.on, crate::vocab::Event::TurnEnd);
         assert_eq!(
             test.hook.stack.as_deref(),
             Some("node"),
@@ -912,10 +912,10 @@ mod tests {
         );
 
         let fmt = got.iter().find(|h| h.name == "pnpm-format").unwrap();
-        assert_eq!(fmt.hook.on, crate::hook::Event::AfterTool);
+        assert_eq!(fmt.hook.on, crate::vocab::Event::AfterTool);
         assert_eq!(
             fmt.hook.tools,
-            vec![crate::hook::Tool::Edit],
+            vec![crate::vocab::Tool::Edit],
             "formatting belongs to the edit that made it necessary"
         );
     }
@@ -1006,7 +1006,7 @@ mod tests {
         assert_eq!(ran(&make, "make-test").as_deref(), Some("make test"));
 
         for d in node.iter().chain(make.iter()) {
-            let crate::hook::Action::Run(command) = &d.hook.action else {
+            let crate::vocab::Action::Run(command) = &d.hook.action else {
                 panic!("a derived hook runs a command");
             };
             assert!(

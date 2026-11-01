@@ -43,7 +43,7 @@ pub(crate) fn eject(
 
     refuse_the_checkout(cwd, &paths, to)?;
 
-    let (own, repo) = crate::cmd::session::resolved(&paths)?;
+    let (own, repo) = crate::settings::resolved(&paths)?;
 
     // The model provider a launch on this checkout's account would render —
     // redacted, since an eject is handed to the user to read and keep.
@@ -315,12 +315,12 @@ fn destinations(binding: &Binding, to: &Path) -> Result<Vec<PathBuf>> {
     std::iter::once(binding.eject.as_ref().unwrap_or(&binding.path))
         .chain(binding.also.iter())
         .map(|target| {
-            let expanded = crate::adapter::expand(target, crate::image::GUEST_HOME);
+            let expanded = crate::adapter::expand(target, crate::guest::GUEST_HOME);
             let s = expanded.to_string_lossy().to_string();
             if let Some(rel) = s.strip_prefix("/work/") {
                 return Ok(to.join(rel));
             }
-            Ok(match expanded.strip_prefix(crate::image::GUEST_HOME) {
+            Ok(match expanded.strip_prefix(crate::guest::GUEST_HOME) {
                 Ok(rel) => to.join("home").join(rel),
                 Err(_) => to.join("system").join(s.trim_start_matches('/')),
             })

@@ -26,9 +26,7 @@ use std::process::Command;
 /// and going, and lets the container mount only the index.
 pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-        runtime::installed(p)
-    })?;
+    let backend = runtime::for_repo(&paths)?;
     let container = base::ui_container(&paths.repo_id());
 
     if stop {
@@ -165,8 +163,7 @@ pub(crate) fn doctor_cmd(
     //
     // Not `?` on the preference either: settings omh cannot read are what the
     // settings row below exists to name, and stopping here printed nothing.
-    let chosen = crate::runtime_preference(&paths)
-        .and_then(|p| runtime::select(&p, &|p| runtime::installed(p)));
+    let chosen = runtime::for_repo(&paths);
     // Not `?`. A stack definition omh cannot read is something to report, not
     // a reason to print nothing — see `host_checks`.
     // The same resolution `sandbox()` uses to decide what installs, so the row
@@ -174,7 +171,7 @@ pub(crate) fn doctor_cmd(
     // Not `?`. This is one more thing that must not stop the host being
     // reported; a policy omh cannot resolve just means the row cannot say
     // whether a detected stack is switched on.
-    let provision = crate::cmd::session::resolved(&paths)
+    let provision = crate::settings::resolved(&paths)
         .map(|(_, repo)| repo.provision)
         .unwrap_or_default();
     let loaded = stack::load_all(&paths.stacks(), &paths.repo_stacks());
@@ -241,10 +238,10 @@ pub(crate) fn doctor_cmd(
     // pair into a `Result`, so a single failed read discarded every leftover the
     // other two reads had already found — the failure made omh report *less*
     // than it knew, in the row whose whole job is to notice what is left behind.
-    let orphans = crate::cmd::session::leftovers(
+    let orphans = crate::leftovers::leftovers(
         &paths,
         chosen.as_ref().map_err(|e| format!("{e:#}")),
-        crate::cmd::session::Unchecked::new(ctx),
+        crate::leftovers::Unchecked::new(ctx),
     );
 
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
@@ -285,7 +282,7 @@ pub(crate) fn doctor_cmd(
     // dropped the host's answers. `ensure_stack` is the case this feature's own
     // doc names: a build dying behind a TLS-inspecting proxy said nothing about
     // the machine it died on. One helper, called from one place per exit.
-    let say_host = |ctx: &out::Ctx, rows: Vec<doctor::Outcome>| -> usize {
+    let say_host = |ctx: &out::Ctx, rows: Vec<crate::probe::Outcome>| -> usize {
         let report = report::Doctor {
             sandbox: None,
             account: None,
@@ -322,7 +319,7 @@ pub(crate) fn doctor_cmd(
                     // `Doctor::json`'s own comment exists to prevent. A missing
                     // adapter *is* a failed check, so it is one now.
                     let mut rows = host.0;
-                    rows.push(doctor::Outcome {
+                    rows.push(crate::probe::Outcome {
                         name: "adapters installed".into(),
                         ok: false,
                         detail: "none — `omh init` installs them. Until then \
@@ -341,7 +338,7 @@ pub(crate) fn doctor_cmd(
     let host_rows = host.0.clone();
     // The host rows found inside the run below, kept here too so a run that
     // fails after finding them still reports them.
-    let mut found: Vec<doctor::Outcome> = Vec::new();
+    let mut found: Vec<crate::probe::Outcome> = Vec::new();
     // Whether the run below got as far as saying its report. Past that point
     // a failure *is* the report — it carries the host's rows already — and
     // saying them again was a second report: two documents under `--json`,
@@ -386,7 +383,7 @@ pub(crate) fn doctor_cmd(
         let prefs = match account.as_deref().map(|a| crate::prefs::check(&adapter, a)) {
             None | Some(Ok(None)) => None,
             Some(Ok(Some(prefs))) => {
-                let row = doctor::Outcome {
+                let row = crate::probe::Outcome {
                     name: "preferences".into(),
                     ok: true,
                     detail: prefs.summary(),
@@ -396,7 +393,7 @@ pub(crate) fn doctor_cmd(
                 Some(prefs)
             }
             Some(Err(e)) => {
-                let row = doctor::Outcome {
+                let row = crate::probe::Outcome {
                     name: "preferences".into(),
                     ok: false,
                     detail: format!("{e:#}")
@@ -412,7 +409,7 @@ pub(crate) fn doctor_cmd(
 
         // Resolved once and used for both the checks and the plan below, so the
         // probe cannot check a session different from the one it launches.
-        let (own, repo) = crate::cmd::session::resolved(&paths)?;
+        let (own, repo) = crate::settings::resolved(&paths)?;
         // The one reading this command makes. `ensure_stack` below takes
         // `sandbox.ca`, and `ca_check` asserts against the same value.
         let ca = image::ca_for(&paths)?;
@@ -446,7 +443,7 @@ pub(crate) fn doctor_cmd(
             // reason in its detail, where "fine" would have none at all.
             // `doctor_json_is_one_document`.
             if let doctor::Inspection::Unknown(why) = &verdict {
-                let row = doctor::Outcome {
+                let row = crate::probe::Outcome {
                     name: "tls inspection".into(),
                     ok: true,
                     detail: format!("could not check whether this network re-signs TLS: {why}"),
@@ -486,12 +483,7 @@ pub(crate) fn doctor_cmd(
             false => container::Staging::Apply,
         };
         let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
-        if let (true, Ok(backend)) = (
-            staging.is_apply(),
-            runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-                runtime::installed(p)
-            }),
-        ) {
+        if let (true, Ok(backend)) = (staging.is_apply(), runtime::for_repo(&paths)) {
             sandbox.top_up(
                 &paths,
                 &backend,
@@ -526,7 +518,8 @@ pub(crate) fn doctor_cmd(
                     .is_some_and(|p| a.join(crate::provider::file(p.format)).is_file())
         };
         let logged_in = account.as_deref().is_some_and(|a| {
-            auth::unfilled(&adapter, a, auth::GUEST_HOME).is_empty() && !provider_is_login(a)
+            auth::unfilled(&adapter, a, crate::guest::GUEST_HOME).is_empty()
+                && !provider_is_login(a)
         });
         if logged_in {
             checks.extend(doctor::credential_checks(&adapter));
@@ -578,9 +571,7 @@ pub(crate) fn doctor_cmd(
             crate::ssh::ensure_host_key(&paths.keys())?;
         }
 
-        let backend = runtime::select(&crate::runtime_preference(&paths)?, &|p| {
-            runtime::installed(p)
-        })?;
+        let backend = runtime::for_repo(&paths)?;
 
         // **Built, not merely looked for.** `deliver::available` never builds —
         // that is its contract — so on a machine that has not launched yet it
@@ -639,7 +630,7 @@ pub(crate) fn doctor_cmd(
             recipe: crate::memory::expiry::Recipe::of(sandbox.ca.as_ref()),
         };
         if let Some(account_dir) = account.as_ref().filter(|_| staging.is_apply()) {
-            auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+            auth::prepare(&adapter, account_dir, crate::guest::GUEST_HOME)?;
         }
         // Read and checked before anything runs; written below.
         let mut seeds = match &account {
@@ -674,7 +665,11 @@ pub(crate) fn doctor_cmd(
         if let Some(account_dir) = account.as_ref().filter(|_| !dry_run) {
             auth::drop_carried(&adapter, account_dir)?;
         }
-        plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
+        plan.argv = vec![
+            "sh".into(),
+            "-c".into(),
+            crate::probe::probe_script(&checks),
+        ];
 
         plan.validate_for(&backend)?;
 
@@ -683,7 +678,7 @@ pub(crate) fn doctor_cmd(
             // shell or read line by line, and a report around it would have to be
             // stripped back off. `Probe` says so in one place instead of here.
             ctx.say(&report::Probe {
-                script: doctor::probe_script(&checks),
+                script: crate::probe::probe_script(&checks),
                 checks: checks.iter().map(|c| c.name.clone()).collect(),
             });
             return Ok(());
@@ -723,7 +718,7 @@ pub(crate) fn doctor_cmd(
         });
 
         let out = backend.output(&backend.args(&plan))?;
-        let from_the_sandbox = doctor::parse(&String::from_utf8_lossy(&out.stdout));
+        let from_the_sandbox = crate::probe::parse(&String::from_utf8_lossy(&out.stdout));
         // Diagnostic: leave no session behind.
         let _ = session.remove(&paths.repo, "", &paths.shadows());
 
@@ -836,7 +831,7 @@ pub(crate) fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Res
     let mut derived = std::collections::BTreeMap::new();
     let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected = stack::detected(&stack_defs, &paths.repo);
-    let (own, repo_policy) = crate::cmd::session::resolved(&paths)?;
+    let (own, repo_policy) = crate::settings::resolved(&paths)?;
     let merged = render::merge_hooks(
         &Catalogue::resolve(&paths).sources(adapter::Capability::Hooks)?,
         &own,

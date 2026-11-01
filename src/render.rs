@@ -7,10 +7,11 @@
 use crate::adapter::{Binding, Capability, PolicyFormat, Render};
 use crate::hook::{self, Outcome};
 use crate::ledger;
+use crate::servers::Server;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// A rendered capability, and what did not fit in it.
 ///
@@ -57,7 +58,7 @@ pub struct RenderContext<'a> {
     /// feature is disabled here is still in your `mcp.json`, which is yours
     /// and is left exactly as you have it.
     pub repo: &'a crate::settings::RepoPolicy,
-    pub tools: &'a BTreeMap<hook::Tool, String>,
+    pub tools: &'a BTreeMap<crate::vocab::Tool, String>,
     /// What the image this session will run has been measured to contain,
     /// from `facts::Facts::about`. A program absent from it is one nobody
     /// probed, which suppresses nothing — see `suppressed_by_probe`.
@@ -127,8 +128,8 @@ pub fn document(
             // an injection there would reach nobody — and it is the binding's
             // one template, so the binding cannot say so itself.
             hooks.retain(|name, h| {
-                let speaks_at_turn_end =
-                    h.on == hook::Event::TurnEnd && matches!(h.action, hook::Action::Inject { .. });
+                let speaks_at_turn_end = h.on == crate::vocab::Event::TurnEnd
+                    && matches!(h.action, crate::vocab::Action::Inject { .. });
                 if speaks_at_turn_end {
                     dropped.push(hook::Dropped {
                         name: name.clone(),
@@ -165,26 +166,6 @@ pub fn document(
 
 // ── MCP ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Server {
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct CanonicalMcp {
-    #[serde(rename = "mcpServers", default)]
-    servers: BTreeMap<String, Server>,
-}
-
-/// Merge by server name; later layers win.
-pub fn parse_layers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
-    merge_servers(files)
-}
-
 /// Every server a session is handed: yours, as this repo takes them, then
 /// omh's for the features on here.
 ///
@@ -201,7 +182,7 @@ pub fn servers(
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
 ) -> Result<BTreeMap<String, Server>> {
-    let mut servers = merge_servers(sources)?;
+    let mut servers = crate::servers::parse_layers(sources)?;
     // Checked against the catalogue as written, *before* anything is dropped.
     // Checked after, an override for a server this repo did not name reported
     // "not in your catalogue" about a server that is plainly in it — advice
@@ -231,15 +212,6 @@ pub fn servers(
     }
     servers.extend(own.servers.clone());
     Ok(servers)
-}
-
-fn merge_servers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
-    let mut out = BTreeMap::new();
-    for f in files {
-        let parsed: CanonicalMcp = read_json(f)?;
-        out.extend(parsed.servers);
-    }
-    Ok(out)
 }
 
 /// [`mcp_approving`] with nothing approved — how the round-trip tests render.
@@ -517,7 +489,7 @@ pub fn scrub(format: PolicyFormat, doc: &mut serde_json::Value) {
                 }
             }
             let work = projects
-                .entry(crate::container_workdir())
+                .entry(crate::guest::WORKDIR)
                 .or_insert_with(|| serde_json::json!({}));
             if !work.is_object() {
                 *work = serde_json::json!({});
@@ -538,191 +510,6 @@ const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/";
 /// list (read in Codex's source); a plugin that did have this name gets an
 /// empty list anyway.
 const NO_PLUGIN: &str = "omh-none";
-
-/// Inverse of `mcp`: read a harness's own config back into canonical form.
-///
-/// `omh settings mcp import` exists because nobody retypes MCP servers they
-/// already have.
-/// Every format that renders must also parse, and the pair must round-trip —
-/// otherwise import silently drops fields the renderer knows how to write.
-pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
-    match format {
-        Render::McpJson => {
-            let doc: serde_json::Value = serde_json::from_str(raw).context("parsing MCP JSON")?;
-            if doc.get("mcpServers").is_none() && doc.get("projects").is_some() {
-                anyhow::bail!(
-                    "this config nests servers under `projects` — importing all of \
-                     them would pull in servers from unrelated repos. Point --from \
-                     at a project-scoped .mcp.json instead."
-                );
-            }
-            let doc: CanonicalMcp = serde_json::from_value(doc).context("reading mcpServers")?;
-            Ok(doc.servers)
-        }
-
-        Render::CodexToml => {
-            #[derive(Deserialize)]
-            struct Doc {
-                #[serde(default, rename = "mcp_servers")]
-                servers: BTreeMap<String, Server>,
-            }
-            let doc: Doc = toml::from_str(raw).context("parsing codex config.toml")?;
-            Ok(doc.servers)
-        }
-
-        Render::OpencodeJson => {
-            #[derive(Deserialize)]
-            struct Doc {
-                #[serde(default)]
-                mcp: BTreeMap<String, Entry>,
-            }
-            #[derive(Deserialize)]
-            struct Entry {
-                #[serde(default)]
-                command: Vec<String>,
-                #[serde(default)]
-                environment: BTreeMap<String, String>,
-            }
-            let doc: Doc = serde_json::from_str(raw).context("parsing opencode.json")?;
-            doc.mcp
-                .into_iter()
-                .map(|(name, e)| {
-                    // opencode folds command and args into one array; split the
-                    // head back off or every arg stays glued to the command.
-                    let (command, args) = e
-                        .command
-                        .split_first()
-                        .with_context(|| format!("server `{name}` has an empty command"))?;
-                    Ok((
-                        name,
-                        Server {
-                            command: command.clone(),
-                            args: args.to_vec(),
-                            env: e.environment,
-                        },
-                    ))
-                })
-                .collect()
-        }
-
-        other => anyhow::bail!("`{other:?}` is not an MCP format and cannot be imported"),
-    }
-}
-
-/// What an import found in a harness's file: the servers omh can run, and
-/// each one it cannot, with why.
-#[derive(Debug, Default)]
-pub struct Foreign {
-    pub servers: BTreeMap<String, Server>,
-    pub left: BTreeMap<String, String>,
-}
-
-/// [`parse`], for `omh settings mcp import`: each server read on its own, so
-/// one omh cannot take is left — named, with why — and never fails the rest.
-/// A remote server, an `url` and no `command`, failed the whole import with
-/// "missing field `command`"; and one the harness has switched off was
-/// imported on, into every session.
-pub fn parse_foreign(format: Render, raw: &str) -> Result<Foreign> {
-    const REMOTE: &str = "a remote server — omh's catalogue holds programs it runs";
-    const NO_COMMAND: &str = "no command to run";
-    let off = |harness: &str| format!("switched off in {harness} — `enabled = false`");
-    let mut out = Foreign::default();
-    match format {
-        Render::McpJson => {
-            let doc: serde_json::Value = serde_json::from_str(raw).context("parsing MCP JSON")?;
-            if doc.get("mcpServers").is_none() && doc.get("projects").is_some() {
-                // `parse`'s refusal, for the same reason.
-                parse(format, raw)?;
-            }
-            let empty = serde_json::Map::new();
-            let entries = doc
-                .get("mcpServers")
-                .and_then(serde_json::Value::as_object)
-                .unwrap_or(&empty);
-            for (name, entry) in entries {
-                if entry.get("command").is_none() {
-                    let remote = entry.get("url").is_some()
-                        || matches!(
-                            entry.get("type").and_then(serde_json::Value::as_str),
-                            Some("http" | "sse")
-                        );
-                    out.left.insert(
-                        name.clone(),
-                        (if remote { REMOTE } else { NO_COMMAND }).into(),
-                    );
-                    continue;
-                }
-                let server: Server = serde_json::from_value(entry.clone())
-                    .with_context(|| format!("reading server `{name}`"))?;
-                out.servers.insert(name.clone(), server);
-            }
-        }
-        Render::CodexToml => {
-            let doc: toml::Table = toml::from_str(raw).context("parsing codex config.toml")?;
-            let empty = toml::Table::new();
-            let entries = doc
-                .get("mcp_servers")
-                .and_then(toml::Value::as_table)
-                .unwrap_or(&empty);
-            for (name, entry) in entries {
-                if entry.get("enabled").and_then(toml::Value::as_bool) == Some(false) {
-                    out.left.insert(name.clone(), off("codex"));
-                    continue;
-                }
-                if entry.get("command").is_none() {
-                    let remote = entry.get("url").is_some();
-                    out.left.insert(
-                        name.clone(),
-                        (if remote { REMOTE } else { NO_COMMAND }).into(),
-                    );
-                    continue;
-                }
-                let server: Server = entry
-                    .clone()
-                    .try_into()
-                    .with_context(|| format!("reading server `{name}`"))?;
-                out.servers.insert(name.clone(), server);
-            }
-        }
-        Render::OpencodeJson => {
-            let doc: serde_json::Value =
-                serde_json::from_str(raw).context("parsing opencode.json")?;
-            let empty = serde_json::Map::new();
-            let entries = doc
-                .get("mcp")
-                .and_then(serde_json::Value::as_object)
-                .unwrap_or(&empty);
-            for (name, entry) in entries {
-                if entry.get("enabled").and_then(serde_json::Value::as_bool) == Some(false) {
-                    out.left.insert(name.clone(), off("opencode"));
-                    continue;
-                }
-                if entry.get("type").and_then(serde_json::Value::as_str) == Some("remote") {
-                    out.left.insert(name.clone(), REMOTE.into());
-                    continue;
-                }
-                let one = serde_json::json!({ "mcp": { name: entry } }).to_string();
-                match parse(format, &one) {
-                    Ok(mut parsed) => out
-                        .servers
-                        .extend(parsed.remove(name).map(|s| (name.clone(), s))),
-                    // An empty command is the one shape `parse` refuses here.
-                    Err(_)
-                        if entry
-                            .get("command")
-                            .and_then(serde_json::Value::as_array)
-                            .is_none_or(|c| c.is_empty()) =>
-                    {
-                        out.left.insert(name.clone(), NO_COMMAND.into());
-                    }
-                    Err(e) => return Err(e).with_context(|| format!("reading server `{name}`")),
-                }
-            }
-        }
-        other => anyhow::bail!("`{other:?}` is not an MCP format and cannot be imported"),
-    }
-    Ok(out)
-}
 
 // ── Hooks ───────────────────────────────────────────────────────────────────
 
@@ -817,10 +604,10 @@ fn suppressed_by_probe(
     let mut dropped = Vec::new();
     hooks.retain(|name, hook| {
         // Two cannot-tells, and neither is a licence to switch a hook off:
-        // `detect::program` answers `None` for a command it could not read, and
+        // `command::program` answers `None` for a command it could not read, and
         // a program absent from the map is one nobody has probed.
         let blocked = hook.runs().into_iter().find_map(|cmd| {
-            let p = crate::detect::program(cmd)?;
+            let p = crate::command::program(cmd)?;
             (resolves.get(p) == Some(&false)).then(|| p.to_string())
         });
         match blocked {
@@ -842,7 +629,7 @@ fn suppressed_by_probe(
 fn translate(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
-    tools: &BTreeMap<hook::Tool, String>,
+    tools: &BTreeMap<crate::vocab::Tool, String>,
     log: Option<&str>,
 ) -> Result<(BTreeMap<String, hook::Rendered>, Vec<hook::Dropped>)> {
     let mut rendered = BTreeMap::new();
@@ -965,7 +752,7 @@ pub fn merge_hooks(
 /// already. A second notion of *which hooks count* is how a probe starts
 /// answering about a hook nobody runs.
 ///
-/// A command `detect::program` cannot read contributes nothing. That is
+/// A command `command::program` cannot read contributes nothing. That is
 /// *cannot tell*, and this is the direction where cannot-tell is cheap: a
 /// missing question costs one confusing hook error, an invented one reports a
 /// gap in a repo whose toolchain is fine.
@@ -977,7 +764,7 @@ pub fn hook_programs(
     Ok(merge_hooks(dirs, own, repo)?
         .values()
         .flat_map(hook::Hook::runs)
-        .filter_map(crate::detect::program)
+        .filter_map(crate::command::program)
         .map(str::to_string)
         .collect())
 }
@@ -1161,7 +948,7 @@ impl<'a> Slot<'a> {
 fn opencode_plugin(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
-    tools: &BTreeMap<hook::Tool, String>,
+    tools: &BTreeMap<crate::vocab::Tool, String>,
     log: Option<&str>,
 ) -> Result<Document> {
     let mut dropped = Vec::new();
@@ -1204,9 +991,9 @@ fn opencode_plugin(
             let needs = match &hook.action {
                 _ if !wired.fields.is_empty() => Some("payload field"),
                 _ if !wired.tools.is_empty() => Some("way to narrow to a tool"),
-                hook::Action::Inject { .. } => Some("way to inject text"),
-                hook::Action::Refuse { .. } => Some("way to refuse a call"),
-                hook::Action::Run(_) => None,
+                crate::vocab::Action::Inject { .. } => Some("way to inject text"),
+                crate::vocab::Action::Refuse { .. } => Some("way to refuse a call"),
+                crate::vocab::Action::Run(_) => None,
             };
             if let Some(needs) = needs {
                 dropped.push(give_up(&format!("{needs} at `{}`", hook.on)));
@@ -1216,7 +1003,7 @@ fn opencode_plugin(
         // Advisory text has no channel before the call on this harness: the
         // only way to speak there is a throw, which blocks. Checked before the
         // binding is asked, because the binding *can* advise — just not here.
-        if matches!(hook.action, hook::Action::Inject { .. })
+        if matches!(hook.action, crate::vocab::Action::Inject { .. })
             && matches!(
                 slot,
                 Slot::Call {
@@ -1332,7 +1119,7 @@ impl Moment {
 fn omp_plugin(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
-    tools: &BTreeMap<hook::Tool, String>,
+    tools: &BTreeMap<crate::vocab::Tool, String>,
     log: Option<&str>,
 ) -> Result<Document> {
     let mut dropped = Vec::new();
@@ -1385,9 +1172,9 @@ fn omp_plugin(
             let needs = match &hook.action {
                 _ if !wired.fields.is_empty() => Some("payload field"),
                 _ if !wired.tools.is_empty() => Some("way to narrow to a tool"),
-                hook::Action::Inject { .. } => Some("way to inject text"),
-                hook::Action::Refuse { .. } => Some("way to refuse a call"),
-                hook::Action::Run(_) => None,
+                crate::vocab::Action::Inject { .. } => Some("way to inject text"),
+                crate::vocab::Action::Refuse { .. } => Some("way to refuse a call"),
+                crate::vocab::Action::Run(_) => None,
             };
             if let Some(needs) = needs {
                 dropped.push(give_up(&format!("{needs} at `{}`", hook.on)));
@@ -1398,7 +1185,7 @@ fn omp_plugin(
         // oh-my-pi's `tool_call` can return `additionalContext` since v18.3.1,
         // and omh does not use it yet. Checked before the binding is asked,
         // because the binding *can* advise — just not here.
-        if matches!(hook.action, hook::Action::Inject { .. }) && moment == Moment::Before {
+        if matches!(hook.action, crate::vocab::Action::Inject { .. }) && moment == Moment::Before {
             dropped.push(give_up("way to inject text before a tool runs"));
             continue;
         }
@@ -1461,7 +1248,7 @@ fn omp_one_hook(
     // omp calls an MCP tool by writing its arguments to
     // `xd://mcp__<server>_<tool>`: a write that resolves to no file is not an
     // edit, and a hook on edits leaves it alone.
-    if hook.tools.contains(&hook::Tool::Edit) {
+    if hook.tools.contains(&crate::vocab::Tool::Edit) {
         b.push_str(
             "    if (event.toolName === \"write\" && !omh_file(event.input?.path, true).startsWith(\"/\")) return\n",
         );
@@ -1484,12 +1271,12 @@ fn omp_one_hook(
                 "    env[{}] = String({expr} ?? \"\")\n",
                 crate::quote::js(field.var())
             ));
-            if *field == hook::Field::ToolFile {
+            if *field == crate::vocab::Field::ToolFile {
                 b.push_str(&hook::absolute_file_js("    ", true));
             }
         }
     }
-    if let hook::Action::Inject {
+    if let crate::vocab::Action::Inject {
         capture: Some(capture),
         ..
     } = &hook.action
@@ -1512,7 +1299,7 @@ fn omp_one_hook(
         // — so a refusal whose predicate could not run let the call through,
         // which is the one degradation this renderer must never make. An
         // `inject` or a `run` in the same state still falls through to silence.
-        if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
+        if let (crate::vocab::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
             b.push_str(&format!(
                 "    if (!p.ran) {{ {}{} }}\n",
                 log_call(log, name, ledger::Decision::Unevaluated),
@@ -1530,7 +1317,7 @@ fn omp_one_hook(
         ));
     }
     if log.is_some() {
-        let decision = if matches!(hook.action, hook::Action::Refuse { .. }) {
+        let decision = if matches!(hook.action, crate::vocab::Action::Refuse { .. }) {
             ledger::Decision::Refused
         } else {
             ledger::Decision::Fired
@@ -1538,12 +1325,12 @@ fn omp_one_hook(
         b.push_str(&format!("    {}\n", log_call(log, name, decision)));
     }
     match &hook.action {
-        hook::Action::Run(run) => b.push_str(&format!(
+        crate::vocab::Action::Run(run) => b.push_str(&format!(
             "    const r = sh({}, env)\n    if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
             crate::quote::js(run),
             crate::quote::js(name),
         )),
-        hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
+        crate::vocab::Action::Inject { text, .. } | crate::vocab::Action::Refuse { text } => {
             let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
             b.push_str(&format!(
                 "    {}\n",
@@ -1618,12 +1405,12 @@ fn one_hook(
                 "      env[{}] = String({expr} ?? \"\")\n",
                 crate::quote::js(field.var())
             ));
-            if *field == hook::Field::ToolFile {
+            if *field == crate::vocab::Field::ToolFile {
                 b.push_str(&hook::absolute_file_js("      ", false));
             }
         }
     }
-    if let hook::Action::Inject {
+    if let crate::vocab::Action::Inject {
         capture: Some(capture),
         ..
     } = &hook.action
@@ -1646,7 +1433,7 @@ fn one_hook(
         // declined, and returning from `tool.execute.before` lets the call
         // through. Only a refusal blocks; an `inject` or a `run` still falls
         // through to silence.
-        if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
+        if let (crate::vocab::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
             b.push_str(&format!(
                 "      if (!p.ran) {{ {}{} }}\n",
                 log_call(log, name, ledger::Decision::Unevaluated),
@@ -1669,7 +1456,7 @@ fn one_hook(
     // hook with no `when` always reaches its action, same reasoning as
     // `hook::render`'s own splice point.
     if log.is_some() {
-        let decision = if matches!(hook.action, hook::Action::Refuse { .. }) {
+        let decision = if matches!(hook.action, crate::vocab::Action::Refuse { .. }) {
             ledger::Decision::Refused
         } else {
             ledger::Decision::Fired
@@ -1680,7 +1467,7 @@ fn one_hook(
         // The exit code is not a decision — `graph-refresh` ends in `|| true`
         // deliberately — but a `run` that could not start, or died, is worth
         // saying rather than discarding.
-        hook::Action::Run(run) => b.push_str(&format!(
+        crate::vocab::Action::Run(run) => b.push_str(&format!(
             "      const r = sh({}, env)\n      if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
             crate::quote::js(run),
             crate::quote::js(name),
@@ -1689,7 +1476,7 @@ fn one_hook(
         // other render. `{{text}}` receives an expression evaluating to the
         // hook's text with its `$OMH_*` references expanded — which is what the
         // shell does for the same string on a config-shaped harness.
-        hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
+        crate::vocab::Action::Inject { text, .. } | crate::vocab::Action::Refuse { text } => {
             let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
             b.push_str(&format!(
                 "      {}\n",
@@ -2023,7 +1810,7 @@ fn codex_hooks(
     }
     let turn_end = binding
         .events
-        .get(&hook::Event::TurnEnd)
+        .get(&crate::vocab::Event::TurnEnd)
         .map(String::as_str);
     // The worktree, trusted. Unset, Codex's interactive app asks and saves the
     // answer to `~/.codex/config.toml`; untrusted, Codex was measured skipping
@@ -2047,7 +1834,7 @@ fn codex_hooks(
             daemon_auto_start: false,
         },
         projects: BTreeMap::from([(
-            crate::container_workdir(),
+            crate::guest::WORKDIR,
             Trust {
                 trust_level: "trusted",
             },
@@ -2180,7 +1967,7 @@ pub fn parse_hooks(
                                 stack: None,
                                 tools: tools.clone(),
                                 when: None,
-                                action: hook::Action::Run(command),
+                                action: crate::vocab::Action::Run(command),
                             },
                         );
                     }
@@ -2195,15 +1982,15 @@ pub fn parse_hooks(
 /// A matcher as a list of tools, or why it is not one.
 fn read_matcher(
     matcher: &str,
-    on: hook::Event,
+    on: crate::vocab::Event,
     vocab: &hook::Vocabulary,
-) -> std::result::Result<Vec<hook::Tool>, String> {
+) -> std::result::Result<Vec<crate::vocab::Tool>, String> {
     if matcher.trim().is_empty() {
         // Not a narrowing: every tool this moment has, which is what omh's own
         // empty `tools` means.
         return Ok(Vec::new());
     }
-    if on == hook::Event::SessionStart {
+    if on == crate::vocab::Event::SessionStart {
         return Err(format!(
             "`{matcher}` narrows a session start, which is not a tool — omh has \
              no word for that axis"
@@ -2266,10 +2053,14 @@ fn read_handler(handler: &serde_json::Value) -> std::result::Result<String, Stri
 ///
 /// From the moment and the program it runs, because those are what somebody
 /// scanning `.omh/hooks/` needs to recognise it by — `after-tool-prettier`
-/// rather than a number. `detect::program` answers `None` for a command it
+/// rather than a number. `command::program` answers `None` for a command it
 /// cannot read, and a numbered fallback is better than a name built from shell.
-fn name_for(taken: &BTreeMap<String, hook::Hook>, on: hook::Event, command: &str) -> String {
-    let base = match crate::detect::program(command) {
+fn name_for(
+    taken: &BTreeMap<String, hook::Hook>,
+    on: crate::vocab::Event,
+    command: &str,
+) -> String {
+    let base = match crate::command::program(command) {
         Some(p) => format!("{on}-{}", p.trim_start_matches("./").replace('/', "-")),
         None => format!("{on}-imported"),
     };
@@ -2284,12 +2075,6 @@ fn name_for(taken: &BTreeMap<String, hook::Hook>, on: hook::Event, command: &str
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
-}
-
 fn pretty(v: serde_json::Value) -> Result<String> {
     Ok(serde_json::to_string_pretty(&v)?)
 }
@@ -2297,6 +2082,8 @@ fn pretty(v: serde_json::Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::servers::{parse, parse_foreign};
+    use std::path::Path;
 
     use std::io::Write;
 
@@ -2856,11 +2643,11 @@ mod tests {
                 .unwrap();
         let (back, residue) = parse_hooks_as(Render::CodexHooks, &doc.body, &vocab).unwrap();
         assert!(residue.is_empty(), "{residue:?}");
-        let recovered: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = back
+        let recovered: BTreeSet<(crate::vocab::Event, Vec<crate::vocab::Tool>, String)> = back
             .values()
             .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
             .collect();
-        let mine: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = hooks
+        let mine: BTreeSet<(crate::vocab::Event, Vec<crate::vocab::Tool>, String)> = hooks
             .iter()
             .map(|(n, b)| hook::Hook::parse(b, n).unwrap())
             .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
@@ -2876,7 +2663,7 @@ mod tests {
     /// The whole point of the round trip is that the vocabulary travels through
     /// data. A fixture using Claude's own words would be satisfied by a reader
     /// that had them hardcoded, which is the bug this pair exists to prevent.
-    fn foreign() -> (Binding, BTreeMap<hook::Tool, String>) {
+    fn foreign() -> (Binding, BTreeMap<crate::vocab::Tool, String>) {
         let binding: Binding = toml::from_str(
             "path = \"x\"\nrender = \"claude-settings\"\n\n\
              [events]\nturn-end = \"AfterTurn\"\nafter-tool = \"ToolFinished\"\n\
@@ -2884,14 +2671,14 @@ mod tests {
         )
         .unwrap();
         let tools = BTreeMap::from([
-            (hook::Tool::Edit, "Modify".to_string()),
-            (hook::Tool::Read, "Fetch".to_string()),
+            (crate::vocab::Tool::Edit, "Modify".to_string()),
+            (crate::vocab::Tool::Read, "Fetch".to_string()),
         ]);
         (binding, tools)
     }
 
     /// **Every format that renders must also parse, and the pair must round
-    /// trip.** The rule `render::parse` already follows for MCP, applied to the
+    /// trip.** The rule `crate::servers::parse` already follows for MCP, applied to the
     /// capability that actually needs importing.
     ///
     /// Through the harness document, not through a fixture of one: what is
@@ -2917,7 +2704,7 @@ mod tests {
         let (back, residue) = parse_hooks(&document, &vocab).unwrap();
         assert!(residue.is_empty(), "nothing should be residue: {residue:?}");
 
-        let recovered: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = back
+        let recovered: BTreeSet<(crate::vocab::Event, Vec<crate::vocab::Tool>, String)> = back
             .values()
             .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
             .collect();
@@ -3044,7 +2831,7 @@ mod tests {
         );
         assert_eq!(
             imported.values().next().unwrap().tools,
-            vec![hook::Tool::Edit]
+            vec![crate::vocab::Tool::Edit]
         );
 
         // Two of them, joined — still whole spellings, not six words.
@@ -3052,7 +2839,7 @@ mod tests {
         assert_eq!(imported.len(), 1, "got: {residue:?}");
         assert_eq!(
             imported.values().next().unwrap().tools,
-            vec![hook::Tool::Edit, hook::Tool::Read]
+            vec![crate::vocab::Tool::Edit, crate::vocab::Tool::Read]
         );
 
         // And a partial alternation is **not** that tool.
@@ -3081,7 +2868,7 @@ mod tests {
     #[test]
     fn a_session_start_matcher_is_never_read_as_a_tool() {
         let (binding, _) = foreign();
-        let colliding = BTreeMap::from([(hook::Tool::Edit, "startup".to_string())]);
+        let colliding = BTreeMap::from([(crate::vocab::Tool::Edit, "startup".to_string())]);
         let vocab = hook::Vocabulary::of(&binding, &colliding).unwrap();
 
         let doc = r#"{"hooks":{"Boot":[{"matcher":"startup","hooks":[{"type":"command","command":"x"}]}]}}"#;
@@ -3247,7 +3034,7 @@ mod tests {
     #[test]
     fn mcp_merges_across_layers() {
         let (_d, files) = servers(&[("", L1), ("", L2)]);
-        let merged = merge_servers(&files).unwrap();
+        let merged = crate::servers::parse_layers(&files).unwrap();
         assert_eq!(merged.len(), 2);
         assert_eq!(merged["a"].command, "a-cmd");
         assert_eq!(merged["b"].env["K"], "v");
@@ -3256,7 +3043,7 @@ mod tests {
     #[test]
     fn later_layers_shadow_earlier_ones() {
         let (_d, files) = servers(&[("", L1), ("", L2_SHADOW)]);
-        let merged = merge_servers(&files).unwrap();
+        let merged = crate::servers::parse_layers(&files).unwrap();
         assert_eq!(
             merged["a"].command, "overridden",
             "layer 3 must win over layer 1"
@@ -3271,7 +3058,7 @@ mod tests {
     #[test]
     fn opencodes_render_never_sets_a_model() {
         let (_d, files) = servers(&[("", L1)]);
-        let m = merge_servers(&files).unwrap();
+        let m = crate::servers::parse_layers(&files).unwrap();
         let oc = mcp(Render::OpencodeJson, &m).unwrap();
         let v: serde_json::Value = serde_json::from_str(&oc).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
@@ -3283,7 +3070,7 @@ mod tests {
     #[test]
     fn each_format_emits_its_harness_shape() {
         let (_d, files) = servers(&[("", L1)]);
-        let m = merge_servers(&files).unwrap();
+        let m = crate::servers::parse_layers(&files).unwrap();
 
         let claude = mcp(Render::McpJson, &m).unwrap();
         let v: serde_json::Value = serde_json::from_str(&claude).unwrap();
@@ -3684,7 +3471,7 @@ mod tests {
         // and deleting `suppressed_by_probe` from that arm alone left the suite
         // green. This test's own doc predicts exactly that. And again with the
         // fourth: codex's arm was in neither list.
-        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 4] = [
+        let paths: [(&Binding, &BTreeMap<crate::vocab::Tool, String>); 4] = [
             (hooks_binding(&claude), &claude.tools),
             (codex.supports(Capability::Hooks).unwrap(), &codex.tools),
             (opencode_hooks(), &opencode().tools),
@@ -3760,7 +3547,7 @@ mod tests {
 
         let claude = claude_hooks();
         let codex = codex();
-        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 4] = [
+        let paths: [(&Binding, &BTreeMap<crate::vocab::Tool, String>); 4] = [
             (hooks_binding(&claude), &claude.tools),
             (codex.supports(Capability::Hooks).unwrap(), &codex.tools),
             (opencode_hooks(), &opencode().tools),
@@ -3874,7 +3661,7 @@ mod tests {
             )
             .unwrap(),
         )]);
-        let tools = BTreeMap::from([(hook::Tool::Shell, "sh\u{0}1".to_string())]);
+        let tools = BTreeMap::from([(crate::vocab::Tool::Shell, "sh\u{0}1".to_string())]);
         for body in [
             opencode_plugin(&hooks, opencode_hooks(), &tools, None)
                 .unwrap()
@@ -5935,7 +5722,7 @@ try {{
             "no.json",
             r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
         );
-        // And a command omh cannot read is *cannot tell* — `detect::program`
+        // And a command omh cannot read is *cannot tell* — `command::program`
         // answers `None` rather than guessing `$(which`, and a question about
         // a program nobody named would report a gap omh invented.
         file(
@@ -6026,7 +5813,7 @@ try {{
     fn malformed_json_names_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let bad = file(dir.path(), "broken.json", "{ not json");
-        let err = merge_servers(&[bad]).unwrap_err();
+        let err = crate::servers::parse_layers(&[bad]).unwrap_err();
         assert!(err.to_string().contains("broken.json"), "got: {err}");
     }
 
@@ -6243,7 +6030,7 @@ try {{
         );
         assert_eq!(
             imported.values().next().unwrap().on,
-            hook::Event::SessionStart
+            crate::vocab::Event::SessionStart
         );
     }
 
@@ -6255,8 +6042,8 @@ try {{
     fn the_longest_spelling_wins_so_a_prefix_cannot_strand_the_rest() {
         let (binding, _) = foreign();
         let overlapping = BTreeMap::from([
-            (hook::Tool::Edit, "Edit".to_string()),
-            (hook::Tool::Read, "Edit|Write".to_string()),
+            (crate::vocab::Tool::Edit, "Edit".to_string()),
+            (crate::vocab::Tool::Read, "Edit|Write".to_string()),
         ]);
         let vocab = hook::Vocabulary::of(&binding, &overlapping).unwrap();
         let doc = "{\"hooks\":{\"ToolFinished\":[{\"matcher\":\"Edit|Write\",\"hooks\":[\
@@ -6266,7 +6053,7 @@ try {{
         assert_eq!(imported.len(), 1, "got: {residue:?}");
         assert_eq!(
             imported.values().next().unwrap().tools,
-            vec![hook::Tool::Read],
+            vec![crate::vocab::Tool::Read],
             "`Edit|Write` is one spelling, not `Edit` followed by something"
         );
     }

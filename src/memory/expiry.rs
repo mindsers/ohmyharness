@@ -276,7 +276,7 @@ pub enum Verdict {
 /// every `file:` trigger would report stale on day one — turning the command
 /// into noise nobody reads.
 pub fn normalise_path(raw: &str, repo: &Path) -> String {
-    let sandbox = format!("{}/", crate::container_workdir());
+    let sandbox = format!("{}/", crate::guest::WORKDIR);
     let trimmed = raw
         .strip_prefix(&sandbox)
         .or_else(|| raw.strip_prefix("./"))
@@ -792,7 +792,7 @@ mod tests {
         // is, recorded against the path the agent sees.
         let pinned = hash_file(&paths.repo, "tracked.txt").unwrap();
         let sandbox = Trigger::File {
-            path: format!("{}/tracked.txt", crate::container_workdir()),
+            path: format!("{}/tracked.txt", crate::guest::WORKDIR),
             hash: pinned,
         };
         let facts = gather(&paths, std::slice::from_ref(&sandbox));

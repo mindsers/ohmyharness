@@ -99,7 +99,7 @@ pub fn how_is_it_installed(
     let programs: Vec<&str> = needs.split_whitespace().collect();
     if programs
         .iter()
-        .any(|p| crate::detect::program(p) != Some(*p))
+        .any(|p| crate::command::program(p) != Some(*p))
     {
         writeln!(
             out,
@@ -157,11 +157,11 @@ pub fn what_tests_it(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Opt
     };
 
     let hook = crate::hook::Hook {
-        on: crate::hook::Event::TurnEnd,
+        on: crate::vocab::Event::TurnEnd,
         stack: None,
         tools: Vec::new(),
         when: None,
-        action: crate::hook::Action::Run(command.clone()),
+        action: crate::vocab::Action::Run(command.clone()),
     };
     let body = serde_json::to_string_pretty(&hook).context("writing the hook you described")?;
     // Through the real parser before it reaches disk. `Hook`'s fields are
@@ -359,10 +359,10 @@ mod tests {
         assert_eq!(answer.path, Path::new("hooks/test.json"));
 
         let parsed = crate::hook::Hook::parse(&answer.body, "test.json").expect("must parse");
-        assert_eq!(parsed.on, crate::hook::Event::TurnEnd);
+        assert_eq!(parsed.on, crate::vocab::Event::TurnEnd);
         assert_eq!(
             parsed.action,
-            crate::hook::Action::Run("mix test".into()),
+            crate::vocab::Action::Run("mix test".into()),
             "the command reaches the hook"
         );
     }
@@ -378,7 +378,7 @@ mod tests {
             crate::hook::Hook::parse(&answer.body, "test.json")
                 .expect("must parse back")
                 .action,
-            crate::hook::Action::Run("sh -c \"mix test\"".into())
+            crate::vocab::Action::Run("sh -c \"mix test\"".into())
         );
     }
 
@@ -398,7 +398,7 @@ mod tests {
             crate::hook::Hook::parse(&answer.body, "test.json")
                 .expect("must parse")
                 .action,
-            crate::hook::Action::Run("mix test $MIX_ENV".into())
+            crate::vocab::Action::Run("mix test $MIX_ENV".into())
         );
     }
 }
