@@ -3719,6 +3719,29 @@ fn a_launched_session_answers_ssh() {
         .expect("ssh must be installed to run this test");
     let _ = agent.kill();
     let _ = agent.wait();
+
+    // Nobody in the session becomes root (10-19 S1): the agent had
+    // passwordless sudo, and on rootful Linux Docker root there owns what it
+    // writes into the bind mounts. Asked of a login with a terminal — what an
+    // editor opens, and the path through sshd's pty handling — and of a
+    // `docker exec`, which is how omh starts the harness.
+    let probe =
+        "grep NoNewPrivs /proc/self/status; sudo -n true 2>/dev/null && echo SUDO-WORKED; exit 0";
+    let login = Command::new("ssh")
+        .env("HOME", &sb.home)
+        .arg("-F")
+        .arg(&config)
+        .args(["-tt", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
+        .arg(sb.container("s01"))
+        .arg(probe)
+        .output()
+        .expect("ssh must be installed to run this test");
+    let exec = Command::new("docker")
+        .args(["exec", "-u", "agent"])
+        .arg(sb.container("s01"))
+        .args(["sh", "-c", probe])
+        .output()
+        .expect("docker must be installed to run this test");
     let _ = sb.omh(&["s01", "down"]);
 
     assert!(
@@ -3734,6 +3757,17 @@ fn a_launched_session_answers_ssh() {
         "",
         "the user's ssh agent was forwarded into the sandbox"
     );
+    for (how, out) in [("an ssh login", &login), ("a docker exec", &exec)] {
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && said.contains("NoNewPrivs:\t1"),
+            "{how} in the session can gain privilege: {out:?}"
+        );
+        assert!(
+            !said.contains("SUDO-WORKED"),
+            "{how} in the session became root through sudo: {said}"
+        );
+    }
 }
 
 /// A resumed session runs the harness it ran before.
