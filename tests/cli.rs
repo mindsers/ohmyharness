@@ -112,9 +112,13 @@ impl Drop for Sandbox {
         if !self.real {
             return;
         }
-        // Everything omh names for this checkout starts with the checkout's
-        // id — `omh-<id>-sNN`, `omh-<id>`, `omh-graph-<id>` — and the id holds
-        // a digest of a temporary path, so nothing of anyone else's can match.
+        // Everything omh names for this checkout carries the checkout's id —
+        // `omh-<id>-sNN`, `omh-<id>`, `omh-graph-<id>`, and the graph index's
+        // volume `omh-cache-<id>` — and the id holds a digest of a temporary
+        // path, so nothing of anyone else's can match. The volume was left out
+        // once, and every real run left one behind: hundreds of
+        // `omh-cache-repo-*` on a developer's daemon, which `omh prune` then
+        // reports as unattributable.
         // Asked of omh, like every other use of it here; a sandbox that never
         // got as far as having one left nothing to clear.
         let out = self.omh(&["info", "--repo", "--json"]);
@@ -135,6 +139,7 @@ impl Drop for Sandbox {
                         .filter(|name| {
                             name.starts_with(&format!("omh-{id}"))
                                 || *name == format!("omh-graph-{id}")
+                                || *name == format!("omh-cache-{id}")
                         })
                         .map(str::to_string)
                         .collect()
@@ -150,6 +155,11 @@ impl Drop for Sandbox {
         for network in named(&["network", "ls", "--format", "{{.Name}}"]) {
             let _ = Command::new("docker")
                 .args(["network", "rm", &network])
+                .output();
+        }
+        for volume in named(&["volume", "ls", "--format", "{{.Name}}"]) {
+            let _ = Command::new("docker")
+                .args(["volume", "rm", "-f", &volume])
                 .output();
         }
     }
