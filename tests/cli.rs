@@ -11361,22 +11361,6 @@ fn a_check_the_sandbox_did_not_answer_fails_the_run_by_name() {
     );
 }
 
-/// `omh doctor` honours the account you name, or says why it cannot.
-///
-/// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
-/// says so under *honesty about coverage* — and credentials are the half no
-/// in-process test can reach. So a `doctor` that skips the credential checks is
-/// the one failure that leaves nothing behind it.
-///
-/// It skipped them for anyone with more than one account. `doctor_cmd` passed a
-/// hardcoded `None` where `omh new` passes the user's `-a`, and then wrapped the
-/// resolver in `.unwrap_or(None)` — turning a function whose own doc comment
-/// reads *"Ambiguity is an error, never a guess"* into a guess of *no account*.
-/// Two accounts captured, and `omh -a work doctor` printed *"no account, so
-/// credentials go unchecked"*, byte-identical to naming none.
-///
-/// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
-/// flag `doctor` was discarding, and was swallowed before it could print.
 /// **The host's answers survive the thing that stopped the sandbox.**
 ///
 /// This is the whole feature, and nothing reached it: `doctor_cmd` needs a
@@ -12431,6 +12415,22 @@ fn doctor_without_adapters_reports_the_host_and_fails_honestly() {
     );
 }
 
+/// `omh doctor` honours the account you name, or says why it cannot.
+///
+/// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
+/// says so under *honesty about coverage* — and credentials are the half no
+/// in-process test can reach. So a `doctor` that skips the credential checks is
+/// the one failure that leaves nothing behind it.
+///
+/// It skipped them for anyone with more than one account. `doctor_cmd` passed a
+/// hardcoded `None` where `omh new` passes the user's `-a`, and then wrapped the
+/// resolver in `.unwrap_or(None)` — turning a function whose own doc comment
+/// reads *"Ambiguity is an error, never a guess"* into a guess of *no account*.
+/// Two accounts captured, and `omh -a work doctor` printed *"no account, so
+/// credentials go unchecked"*, byte-identical to naming none.
+///
+/// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
+/// flag `doctor` was discarding, and was swallowed before it could print.
 #[test]
 fn doctor_checks_the_credentials_of_the_account_it_was_given() {
     let sb = sandbox();
