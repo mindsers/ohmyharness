@@ -153,6 +153,18 @@ impl std::fmt::Display for Layer {
 /// The repo's two layers only. Your `~/.omh/settings.toml` is a template for
 /// new repos, not a layer beneath this one — see [`Layer::SETTINGS`].
 pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
+    Ok(resolve(
+        layered(paths)?
+            .into_iter()
+            .map(|(key, value, layer)| (key, repr(&value), layer))
+            .collect(),
+    ))
+}
+
+/// Every setting each of this repo's layers declares, in layer order, as the
+/// TOML value it is — tables left out, since a table is configuration *for*
+/// something rather than a setting with a value.
+fn layered(paths: &Paths) -> Result<Vec<(String, toml::Value, Layer)>> {
     let mut found = Vec::new();
     for layer in Layer::SETTINGS {
         let path = layer.file(paths);
@@ -169,10 +181,20 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
             if value.is_table() {
                 continue;
             }
-            found.push((key, repr(&value), layer));
+            found.push((key, value, layer));
         }
     }
-    Ok(resolve(found))
+    Ok(found)
+}
+
+/// The value the last layer declaring `key` gives it: the one [`policy`]
+/// resolves to, before it is turned into text.
+fn winning<'a>(found: &'a [(String, toml::Value, Layer)], key: &str) -> Option<&'a toml::Value> {
+    found
+        .iter()
+        .rev()
+        .find(|(k, ..)| k == key)
+        .map(|(_, v, _)| v)
 }
 
 /// The account a launch of `harness` is configured with, if any.
@@ -1316,8 +1338,8 @@ fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> 
 /// list reads as nothing here, as it always has — `omh doctor`'s `carry_in` row
 /// is where that is said, through [`policy_list_checked`].
 pub fn policy_list(paths: &Paths, key: &str) -> Result<Vec<String>> {
-    let settings = policy(paths).context("reading this repo's settings")?;
-    Ok(list_of(&settings, key).unwrap_or_default())
+    let found = layered(paths).context("reading this repo's settings")?;
+    Ok(list_of(winning(&found, key), key).unwrap_or_default())
 }
 
 /// The same read, with the one failure that is worth a word kept separate
@@ -1340,31 +1362,28 @@ pub fn policy_list(paths: &Paths, key: &str) -> Result<Vec<String>> {
 pub fn policy_list_checked(paths: &Paths, key: &str) -> Result<Vec<String>, String> {
     // Unreadable is not undeclared: it was `.ok()`, and `omh doctor` said
     // there was nothing to carry about settings it never read.
-    let settings = policy(paths)
+    let found = layered(paths)
         .map_err(|e| format!("omh could not read the settings that would declare {key}: {e:#}"))?;
-    list_of(&settings, key)
+    list_of(winning(&found, key), key)
 }
 
-/// `key` among `settings`, as a list of strings.
-fn list_of(settings: &[Setting], key: &str) -> Result<Vec<String>, String> {
-    let Some(repr) = settings.iter().find(|s| s.key == key) else {
+/// `key`'s value, as a list of strings. Read from the value itself: it was
+/// read from the text `policy` turns it into, parsed back as TOML, so a
+/// string — `.env`, which is not TOML on its own — was refused as
+/// "unreadable" rather than as the string it is.
+fn list_of(value: Option<&toml::Value>, key: &str) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
         return Ok(Vec::new());
     };
-    let parsed = toml::from_str::<toml::Table>(&format!("v = {}", repr.value))
-        .ok()
-        .and_then(|t| t.get("v").cloned());
-    match parsed.as_ref().and_then(|v| v.as_array()) {
+    match value.as_array() {
         Some(a) => Ok(a
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect()),
         None => Err(format!(
             "{key} must be a list of strings, and this one is {}: {}",
-            match parsed.as_ref() {
-                Some(v) => v.type_str(),
-                None => "unreadable",
-            },
-            repr.value
+            value.type_str(),
+            repr(value)
         )),
     }
 }
@@ -2664,7 +2683,7 @@ account_from: None
 read_provision: {}
 read_table omh: {}
 resolve: off={} provision={} mcp_env={}
-policy_list_checked carry_in: ERR carry_in must be a list of strings, and this one is unreadable: .env
+policy_list_checked carry_in: ERR carry_in must be a list of strings, and this one is string: .env
 policy_value runtime: None
 == not TOML
 policy: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
