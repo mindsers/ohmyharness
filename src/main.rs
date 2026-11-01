@@ -18,6 +18,7 @@ mod cmd;
 mod command;
 mod config;
 mod container;
+mod date;
 mod derive;
 mod detect;
 mod doc;
@@ -48,10 +49,12 @@ mod plan;
 mod prefs;
 mod probe;
 mod provider;
+mod provision;
 mod quote;
 mod render;
 mod report;
 mod rules;
+mod rundir;
 mod runtime;
 mod selection;
 mod servers;
@@ -780,7 +783,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     relates_to: relates_to.clone(),
                     invalidated_by: invalidated_by.clone(),
                     source: source.clone().unwrap_or_default(),
-                    recorded: memory::today(),
+                    recorded: crate::date::today(),
                 },
                 *if_exists,
                 ctx,

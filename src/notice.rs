@@ -245,7 +245,7 @@ pub fn selection(
 /// one missed call-out; erroring would refuse every launch until the file is
 /// deleted by hand, over a report.
 fn compare(paths: &Paths, present: &BTreeMap<String, String>) -> Result<Option<Vec<String>>> {
-    let Some(raw) = read(&record_path(paths))? else {
+    let Some(raw) = crate::fsx::read_or_absent(&record_path(paths))? else {
         return Ok(None);
     };
     let Ok(seen) = serde_json::from_str::<BTreeMap<String, String>>(&raw) else {
@@ -436,14 +436,6 @@ fn read_held(root: &Path, rel: &str) -> Result<Option<String>> {
         root.join(rel).display()
     );
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
-}
-
-fn read(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => Ok(Some(raw)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
 }
 
 #[cfg(test)]

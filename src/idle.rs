@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 /// exactly what this exists to reap, and one where an agent is working
 /// unattended is one you launched recently.
 pub fn marker(run_dir: &Path, session: &str) -> PathBuf {
-    run_dir.join(session).join("last-used")
+    crate::rundir::Run::at(run_dir, session).last_used()
 }
 
 pub fn touch(run_dir: &Path, session: &str) -> std::io::Result<()> {

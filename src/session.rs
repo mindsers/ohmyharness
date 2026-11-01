@@ -946,7 +946,7 @@ impl Session {
                              replay onto the new base cleanly. Nothing was changed — rebase \
                              them yourself where {branch} is checked out, with `{}`, then \
                              sync again",
-                            if mine == 1 { "" } else { "s" },
+                            crate::out::plural(mine),
                             crate::git::typed_in_worktree(
                                 &self.worktree,
                                 &format!("rebase --onto {onto} {old_baseline}")
@@ -1680,7 +1680,7 @@ pub fn pick(claimed: &Claimed, start: Start) -> Result<String> {
 /// is about to go. `last-used` has the same latent shape and has never been
 /// hit; there is no reason to add a second, likelier word to the collision.
 fn harness_marker(run_dir: &Path, session: &str) -> PathBuf {
-    run_dir.join(session).join(".harness")
+    crate::rundir::Run::at(run_dir, session).harness()
 }
 
 /// Record which harness a session ran, so it can be rejoined as itself.

@@ -4014,7 +4014,7 @@ mod tests {
     /// Two rules, and `Root` is what makes the second one cheap to check:
     ///
     /// 1. No function resolves twice.
-    /// 2. `cmd::init::sandbox` does not resolve **at all** — it is handed the
+    /// 2. `provision::sandbox` does not resolve **at all** — it is handed the
     ///    caller's reading. Every command funnels through it, so while it
     ///    resolved independently, any caller that also needed the certificate
     ///    for a harness image resolved twice by construction.
@@ -4084,7 +4084,7 @@ mod tests {
         assert!(saw_sandbox_fn, "the scan never found `fn sandbox` at all");
         assert!(
             !sandbox_resolves,
-            "`cmd::init::sandbox` resolves `ca_cert` itself. Every command \
+            "`provision::sandbox` resolves `ca_cert` itself. Every command \
              funnels through it, so a caller that also needs the certificate \
              for its harness image resolves twice — take the caller's reading \
              as a parameter instead"

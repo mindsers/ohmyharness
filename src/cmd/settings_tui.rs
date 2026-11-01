@@ -23,8 +23,8 @@
 //! so.
 
 use crate::adapter::{Adapter, Capability};
-use crate::cmd::harvest::plural;
 use crate::cmd::settings::{self, Edited};
+use crate::out::plural;
 use crate::paths::Paths;
 use crate::tui::{Act, App, Edit, Import, Model, Next, Page, Row, Section};
 use crate::{config, hook, key};

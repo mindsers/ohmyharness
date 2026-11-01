@@ -241,7 +241,7 @@ fn described(server: &crate::servers::Server) -> String {
         out.push_str(&format!(
             ", with {} argument{}",
             server.args.len(),
-            crate::cmd::harvest::plural(server.args.len())
+            crate::out::plural(server.args.len())
         ));
     }
     if !server.env.is_empty() {

@@ -677,7 +677,7 @@ pub(crate) fn may_commit(id: &str, unresolved: &[String], force: bool) -> Result
          Resolve them first, or:\n  \
          omh {id} commit --keep --allow-conflicts   commit them anyway",
         n = unresolved.len(),
-        s = if unresolved.len() == 1 { "" } else { "s" },
+        s = crate::out::plural(unresolved.len()),
         lines = shown.join("\n  "),
         more = match rest {
             0 => String::new(),
@@ -832,7 +832,7 @@ pub(crate) fn may_remove(
     // is a command the user can paste, and there is a test that says so.
     let also = match &snapshots {
         Snapshots::None => String::new(),
-        Snapshots::Kept(n) => format!(", and {n} turn snapshot{} omh took", plural(*n)),
+        Snapshots::Kept(n) => format!(", and {n} turn snapshot{} omh took", crate::out::plural(*n)),
         // Said as its own clause rather than folded into a number, because a
         // count omh could not take is the one answer a user might want to go
         // and look into before deleting.
@@ -878,7 +878,7 @@ pub(crate) fn may_remove(
                 ),
                 n => format!(
                     "{n} turn snapshot{} omh took go with {id}. `omh {id} log --turns` reads them",
-                    plural(n),
+                    crate::out::plural(n),
                     id = session.id
                 ),
             }))
@@ -1034,7 +1034,7 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
                 Ok(changed) => AtStake::Work(format!(
                     "{} uncommitted path{} in the worktree",
                     changed.len(),
-                    plural(changed.len())
+                    crate::out::plural(changed.len())
                 )),
                 Err(e) => AtStake::Unknown(format!(
                     "the worktree at {} could not be inspected: {e:#}",
@@ -1048,21 +1048,18 @@ pub(crate) fn at_stake(paths: &Paths, session: &Session) -> AtStake {
     match shadow.unkept(&session.worktree) {
         Err(e) => AtStake::Unknown(format!("a sandbox omh could not read: {e}")),
         Ok((0, 0)) => AtStake::Nothing,
-        Ok((0, files)) => AtStake::Work(format!("{files} uncommitted path{}", plural(files))),
-        Ok((commits, 0)) => AtStake::Work(format!("{commits} commit{}", plural(commits))),
+        Ok((0, files)) => AtStake::Work(format!(
+            "{files} uncommitted path{}",
+            crate::out::plural(files)
+        )),
+        Ok((commits, 0)) => {
+            AtStake::Work(format!("{commits} commit{}", crate::out::plural(commits)))
+        }
         Ok((commits, files)) => AtStake::Work(format!(
             "{commits} commit{} and {files} uncommitted path{}",
-            plural(commits),
-            plural(files)
+            crate::out::plural(commits),
+            crate::out::plural(files)
         )),
-    }
-}
-
-/// The `s` on a count, in the one place that decides what that looks like.
-pub(crate) fn plural(n: usize) -> &'static str {
-    match n {
-        1 => "",
-        _ => "s",
     }
 }
 
@@ -1217,7 +1214,7 @@ pub(crate) fn commit(
                 ctx.warn(&format!(
                     "you named {named} checkpoint{}, and {landed} reached {branch} — git drops a \
                  commit whose changes are already there. `omh {} log` shows what is left",
-                    if named == 1 { "" } else { "s" },
+                    crate::out::plural(named),
                     session.id
                 ));
             }
@@ -1571,7 +1568,7 @@ fn record_check(paths: &Paths, id: &str, outcome: &Checked) -> Result<()> {
     });
     // Replaced whole or not at all, and a failure said: it was `let _ =`, so
     // a write that failed left the last run's `passed` for `omh sNN` to show.
-    let at = paths.runs().join(id).join("check.json");
+    let at = paths.run(id).check();
     crate::shadow::replace_record(&at, serde_json::to_string(&record)?)
         .with_context(|| format!("recording the checks' outcome at {}", at.display()))
 }

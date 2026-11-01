@@ -155,7 +155,7 @@ pub fn leftovers_from(
             let mut parts = vec![format!(
                 "{} omh volume{} on this machine",
                 v.len(),
-                if v.len() == 1 { "" } else { "s" }
+                crate::out::plural(v.len())
             )];
             if !split.gone.is_empty() {
                 let mut whose: Vec<String> = split
@@ -3628,7 +3628,7 @@ mod tests {
     /// `entry_names` fed `Expect::Entries`. Restoring its `read_dir(..).ok()`
     /// left the whole suite green, so the `?` shipped unguarded — and unlike
     /// the `mcp.json` half nothing catches this earlier: `catalogue::sources`
-    /// only asks `try_exists`, `init::sandbox` reads no capability directory,
+    /// only asks `try_exists`, `crate::provision::sandbox` reads no capability directory,
     /// and `top_up` takes `sources(Hooks)`, which is existence-only. `checks`
     /// at `cmd/inspect.rs:445` is the first thing to open the directory, so a
     /// `0o000` `commands/` reached the empty-list probe and printed `ok`.

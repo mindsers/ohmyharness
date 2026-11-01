@@ -182,35 +182,12 @@ pub(crate) fn assert_measured_states_its_case(label: &str, measured: &[Measured]
         // goes wrong on a schedule and is then edited by whoever it blocks,
         // which is how a guard becomes a formality.
         assert!(
-            days_from_civil(day[0] as i64, day[1] as i64, day[2] as i64) <= today_in_days(),
+            crate::date::days_from_civil(day[0] as i64, day[1] as i64, day[2] as i64)
+                <= crate::date::today_in_days(),
             "{label}: measured {} has not happened yet",
             m.on
         );
     }
-}
-
-/// Days since 1970-01-01, or `i64::MAX` if this machine's clock is before the
-/// epoch — cannot-tell refuses nothing, the rule the rest of this codebase runs
-/// on. A broken clock must not turn every measurement into a curation failure.
-#[cfg(test)]
-fn today_in_days() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(i64::MAX, |d| (d.as_secs() / 86_400) as i64)
-}
-
-/// Days since 1970-01-01 for a civil date — Howard Hinnant's `days_from_civil`,
-/// exact across the proleptic Gregorian calendar and short enough not to be
-/// worth a dependency for one comparison.
-#[cfg(test)]
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 /// `YYYY.MM` or `YYYY-MM-DD` → (year, month). One parser, so a date that the

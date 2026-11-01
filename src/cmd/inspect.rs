@@ -482,7 +482,7 @@ pub(crate) fn doctor_cmd(
             true => container::Staging::Skip,
             false => container::Staging::Apply,
         };
-        let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
+        let mut sandbox = crate::provision::sandbox(&paths, &adapter, &repo, ca)?;
         if let (true, Ok(backend)) = (staging.is_apply(), runtime::for_repo(&paths)) {
             sandbox.top_up(
                 &paths,

@@ -70,7 +70,7 @@ pub(crate) fn memory_serve(notes: std::path::PathBuf) -> Result<()> {
         // declare static arguments and still record real provenance.
         session: std::env::var("OMH_SESSION").unwrap_or_else(|_| "unknown".into()),
         client: None,
-        today: memory::today,
+        today: crate::date::today,
         // Told, never worked out. This process runs inside the sandbox, where
         // the PEM `ca_cert` names is not mounted and the recipe cannot be
         // computed at all.
@@ -142,7 +142,7 @@ pub(crate) fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> 
     if stale > 0 {
         anyhow::bail!(
             "{stale} note{} the world has moved past",
-            if stale == 1 { "" } else { "s" }
+            crate::out::plural(stale)
         );
     }
     if unknown > 0 {
@@ -184,7 +184,7 @@ fn say_what_is_no_longer_read(paths: &Paths, ctx: &out::Ctx) {
         "{} note{} in {} {} no longer read — omh keeps one store per repo now, \
          and it is not committed. They are yours to delete",
         files.len(),
-        if files.len() == 1 { "" } else { "s" },
+        crate::out::plural(files.len()),
         at.display(),
         if files.len() == 1 { "is" } else { "are" },
     ));
@@ -210,7 +210,7 @@ pub(crate) fn memory_lint(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     if refused > 0 {
         anyhow::bail!(
             "{refused} violation{} the schema refuses",
-            if refused == 1 { "" } else { "s" }
+            crate::out::plural(refused)
         );
     }
     Ok(())

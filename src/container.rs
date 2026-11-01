@@ -229,9 +229,7 @@ pub enum Launch {
 /// directory's other children are named after harnesses.
 pub fn session_home(paths: &Paths, session: &Session, harness: &str) -> crate::auth::Home {
     match session.branch {
-        Some(_) => {
-            crate::auth::Home::Kept(paths.runs().join(&session.id).join(".home").join(harness))
-        }
+        Some(_) => crate::auth::Home::Kept(paths.run(&session.id).home(harness)),
         None => crate::auth::Home::Scratch(paths.scratch("home").join(&session.id).join(harness)),
     }
 }
@@ -242,13 +240,7 @@ pub fn session_home(paths: &Paths, session: &Session, harness: &str) -> crate::a
 /// time. Dotted like `.home`.
 pub fn prefs_home(paths: &Paths, session: &Session, harness: &str) -> crate::home::Home {
     match session.branch {
-        Some(_) => crate::home::Home::Kept(
-            paths
-                .runs()
-                .join(&session.id)
-                .join(".preferences")
-                .join(harness),
-        ),
+        Some(_) => crate::home::Home::Kept(paths.run(&session.id).preferences(harness)),
         None => crate::home::Home::Scratch(paths.scratch("prefs").join(&session.id).join(harness)),
     }
 }
@@ -880,7 +872,7 @@ pub fn plan(
     // transcript path gets no mount, and `omh sNN` says so rather than
     // inventing an empty history.
     if let Some(template) = &adapter.transcripts {
-        let host = paths.runs().join(&session.id).join("transcripts");
+        let host = paths.run(&session.id).transcripts();
         // The directory is created only when staging — a preview writes
         // nothing — but the mount itself is part of the plan in either mode,
         // so `Staging::Skip` and `Staging::Apply` describe the same container.

@@ -30,10 +30,8 @@ fn read_checked<T>(
     validate: fn(&T) -> Result<()>,
 ) -> Result<Option<T>> {
     let path = account_dir.join(name);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    let Some(raw) = crate::fsx::read_or_absent(&path)? else {
+        return Ok(None);
     };
     let doc = parse(&raw).with_context(|| format!("{}", path.display()))?;
     validate(&doc).with_context(|| format!("{}", path.display()))?;

@@ -4098,7 +4098,7 @@ fn a_link_swapped_in_after_the_check_is_not_followed() {
     s.ensure(&wt, &[]).unwrap();
     let info = s.gitdir.join("info");
 
-    let held = Held::open(&info).unwrap();
+    let held = crate::held::Dir::open_or_reset(&info).unwrap();
     // The agent, in the window: the real directory aside, a link in its place.
     let aside = s.gitdir.join("info.aside");
     let elsewhere = d.path().join("elsewhere");
@@ -4106,7 +4106,8 @@ fn a_link_swapped_in_after_the_check_is_not_followed() {
     std::fs::rename(&info, &aside).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &info).unwrap();
 
-    held.replace("exclude", b".env\n").unwrap();
+    held.replace(std::ffi::OsStr::new("exclude"), b".env\n")
+        .unwrap();
 
     assert!(
         !elsewhere.join("exclude").exists(),
