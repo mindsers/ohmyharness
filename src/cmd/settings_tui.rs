@@ -790,6 +790,28 @@ fn seeds(paths: &Paths, cap: Capability, section: &mut Section) {
     section.seeds = (total > 0).then_some(said);
 }
 
+/// Why `omh init` refuses your defaults over this one table, if it does: its
+/// own check, run on the table alone, so the reason is the one init gives.
+/// A table it refuses was drawn as "a table in …", like any other, while
+/// every `omh init` stopped on the whole file.
+fn init_refuses(
+    doc: &Result<toml_edit::DocumentMut>,
+    table: &str,
+    file: &std::path::Path,
+) -> Option<String> {
+    let key = table.trim_matches(['[', ']']);
+    let item = doc.as_ref().ok()?.get(key)?;
+    let mut alone = toml_edit::DocumentMut::new();
+    alone.insert(key, item.clone());
+    let why = crate::cmd::init::refuse_what_cannot_be_seeded(&alone, file).err()?;
+    let why = why.to_string();
+    let why = why.lines().next().unwrap_or_default();
+    let why = why
+        .strip_prefix(&format!("{}: ", file.display()))
+        .unwrap_or(why);
+    Some(format!("`omh init` refuses this file: {why}"))
+}
+
 /// What one of your defaults' lists — `[use]` or `[unuse]` — names that it
 /// cannot mean, each with what `omh init` does about it: a kind that is not one
 /// is refused, a name `[use]` lists that your catalogue does not have is warned
@@ -1153,11 +1175,13 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
             true => Row {
                 name: name.clone(),
                 value: Some(table_summary(&doc, name)),
-                warning: [config::USE, config::UNUSE]
+                warning: match [config::USE, config::UNUSE]
                     .iter()
                     .any(|t| *name == format!("[{t}]"))
-                    .then(|| names_nothing(paths, name.trim_matches(['[', ']'])))
-                    .flatten(),
+                {
+                    true => names_nothing(paths, name.trim_matches(['[', ']'])),
+                    false => init_refuses(&doc, name, &file),
+                },
                 about: match name.trim_matches(['[', ']']) {
                     config::USE => vec![
                         "what `omh init` gives a new repo from your catalogue, where a kind \
@@ -2561,6 +2585,35 @@ mod tests {
             "{:?}",
             row.about
         );
+    }
+
+    /// A table `omh init` refuses — one omh reads nowhere, or `[mcp]`, which
+    /// would carry a server's token into a committed file — is marked, with
+    /// init's own reason. Both were drawn as "a table in …", like any other,
+    /// while every `omh init` refused the whole file.
+    #[test]
+    fn a_table_init_refuses_is_marked_with_its_reason() {
+        let (_dir, paths) = paths();
+        write(
+            &paths.root.join("default.toml"),
+            "[foo]\nx = 1\n\n[mcp.linear.env]\nK = \"v\"\n",
+        );
+        let model = model(&paths);
+        let rows = &page(&model, "defaults").rows;
+        for (name, why) in [
+            ("[foo]", "is read by nobody"),
+            ("[mcp]", "is not seeded into a repo"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no {name} row: {rows:?}"));
+            let warning = row.warning.clone().unwrap_or_default();
+            assert!(
+                warning.contains("`omh init` refuses this file") && warning.contains(why),
+                "{name}: {warning:?}"
+            );
+        }
     }
 
     /// Each list says what is wrong with it, and what `omh init` does about

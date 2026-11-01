@@ -2031,8 +2031,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // list's warning — a kind that is not one, a value that is not a list.
         // + `omh <line>` for each command the screen ran, said once it closes —
         // twice, a server's line with its values held back. + `omh init`
-        // where a feature switch is not true or false.
-        ("src/cmd/settings_tui.rs", 19),
+        // where a feature switch is not true or false. + `omh init` on a table
+        // in your defaults it refuses.
+        ("src/cmd/settings_tui.rs", 20),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
         // Six, and they are the reason this scan is load-bearing rather
