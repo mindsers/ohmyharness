@@ -282,7 +282,7 @@ pub(crate) fn doctor_cmd(
     // dropped the host's answers. `ensure_stack` is the case this feature's own
     // doc names: a build dying behind a TLS-inspecting proxy said nothing about
     // the machine it died on. One helper, called from one place per exit.
-    let say_host = |ctx: &out::Ctx, rows: Vec<doctor::Outcome>| -> usize {
+    let say_host = |ctx: &out::Ctx, rows: Vec<crate::probe::Outcome>| -> usize {
         let report = report::Doctor {
             sandbox: None,
             account: None,
@@ -319,7 +319,7 @@ pub(crate) fn doctor_cmd(
                     // `Doctor::json`'s own comment exists to prevent. A missing
                     // adapter *is* a failed check, so it is one now.
                     let mut rows = host.0;
-                    rows.push(doctor::Outcome {
+                    rows.push(crate::probe::Outcome {
                         name: "adapters installed".into(),
                         ok: false,
                         detail: "none — `omh init` installs them. Until then \
@@ -338,7 +338,7 @@ pub(crate) fn doctor_cmd(
     let host_rows = host.0.clone();
     // The host rows found inside the run below, kept here too so a run that
     // fails after finding them still reports them.
-    let mut found: Vec<doctor::Outcome> = Vec::new();
+    let mut found: Vec<crate::probe::Outcome> = Vec::new();
     // Whether the run below got as far as saying its report. Past that point
     // a failure *is* the report — it carries the host's rows already — and
     // saying them again was a second report: two documents under `--json`,
@@ -383,7 +383,7 @@ pub(crate) fn doctor_cmd(
         let prefs = match account.as_deref().map(|a| crate::prefs::check(&adapter, a)) {
             None | Some(Ok(None)) => None,
             Some(Ok(Some(prefs))) => {
-                let row = doctor::Outcome {
+                let row = crate::probe::Outcome {
                     name: "preferences".into(),
                     ok: true,
                     detail: prefs.summary(),
@@ -393,7 +393,7 @@ pub(crate) fn doctor_cmd(
                 Some(prefs)
             }
             Some(Err(e)) => {
-                let row = doctor::Outcome {
+                let row = crate::probe::Outcome {
                     name: "preferences".into(),
                     ok: false,
                     detail: format!("{e:#}")
@@ -443,7 +443,7 @@ pub(crate) fn doctor_cmd(
             // reason in its detail, where "fine" would have none at all.
             // `doctor_json_is_one_document`.
             if let doctor::Inspection::Unknown(why) = &verdict {
-                let row = doctor::Outcome {
+                let row = crate::probe::Outcome {
                     name: "tls inspection".into(),
                     ok: true,
                     detail: format!("could not check whether this network re-signs TLS: {why}"),
@@ -665,7 +665,11 @@ pub(crate) fn doctor_cmd(
         if let Some(account_dir) = account.as_ref().filter(|_| !dry_run) {
             auth::drop_carried(&adapter, account_dir)?;
         }
-        plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
+        plan.argv = vec![
+            "sh".into(),
+            "-c".into(),
+            crate::probe::probe_script(&checks),
+        ];
 
         plan.validate_for(&backend)?;
 
@@ -674,7 +678,7 @@ pub(crate) fn doctor_cmd(
             // shell or read line by line, and a report around it would have to be
             // stripped back off. `Probe` says so in one place instead of here.
             ctx.say(&report::Probe {
-                script: doctor::probe_script(&checks),
+                script: crate::probe::probe_script(&checks),
                 checks: checks.iter().map(|c| c.name.clone()).collect(),
             });
             return Ok(());
@@ -714,7 +718,7 @@ pub(crate) fn doctor_cmd(
         });
 
         let out = backend.output(&backend.args(&plan))?;
-        let from_the_sandbox = doctor::parse(&String::from_utf8_lossy(&out.stdout));
+        let from_the_sandbox = crate::probe::parse(&String::from_utf8_lossy(&out.stdout));
         // Diagnostic: leave no session behind.
         let _ = session.remove(&paths.repo, "", &paths.shadows());
 

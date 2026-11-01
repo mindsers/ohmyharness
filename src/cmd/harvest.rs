@@ -607,16 +607,16 @@ pub(crate) fn what_to_keep(
 /// an empty one is refused below.
 ///
 /// **Every check asked is a check answered.** Each prints exactly one line,
-/// and `doctor::parse` keeps the lines it can read — so a check whose line
+/// and `crate::probe::parse` keeps the lines it can read — so a check whose line
 /// never arrived (a probe the shell could not run, a quote that swallowed the
 /// next line) was simply absent, and with the rest green the run said every
 /// check passed. Non-empty is not finished; `init`'s `fired_from` refuses a
 /// short answer for the same reason.
 pub(crate) fn every_check(
     asked: &[&str],
-    from_the_sandbox: Vec<doctor::Outcome>,
+    from_the_sandbox: Vec<crate::probe::Outcome>,
     host: doctor::HostRows,
-) -> Result<Vec<doctor::Outcome>> {
+) -> Result<Vec<crate::probe::Outcome>> {
     anyhow::ensure!(
         !from_the_sandbox.is_empty(),
         "the probe produced no output — the sandbox did not run it"

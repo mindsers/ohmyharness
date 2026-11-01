@@ -2067,7 +2067,7 @@ pub struct Doctor {
     pub sandbox: Option<DoctorSandbox>,
     /// `None` means no account was staged, so credentials went unchecked.
     pub account: Option<String>,
-    pub outcomes: Vec<crate::doctor::Outcome>,
+    pub outcomes: Vec<crate::probe::Outcome>,
     /// How many of the *leading* `outcomes` were gathered on the host —
     /// the rest came back from inside the sandbox. A split point rather than
     /// a second `Vec`, so `outcomes`, `failed()` and `json()` stay exactly
@@ -2084,18 +2084,18 @@ impl Doctor {
         self.outcomes.iter().filter(|o| !o.ok).count()
     }
 
-    /// Through `doctor::passed`, which is the definition the command's exit
+    /// Through `crate::probe::passed`, which is the definition the command's exit
     /// code has always used — including its refusal to call an **empty** run a
     /// pass. Re-deriving it from `failed() == 0` here would quietly say yes to
     /// a probe that produced nothing.
     pub fn passed(&self) -> bool {
-        crate::doctor::passed(&self.outcomes)
+        crate::probe::passed(&self.outcomes)
     }
 }
 
 impl Report for Doctor {
     fn human(&self, p: &out::Palette) -> String {
-        let table = |outcomes: &[crate::doctor::Outcome]| {
+        let table = |outcomes: &[crate::probe::Outcome]| {
             let mut t = Table::new();
             for o in outcomes {
                 t = t.row(vec![

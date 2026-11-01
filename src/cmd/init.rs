@@ -10,8 +10,8 @@ use crate::catalogue::Catalogue;
 use crate::out;
 use crate::paths::Paths;
 use crate::{
-    ask, base, bundled, config, derive, detect, doctor, facts, hook, image, key, memory, render,
-    report, runtime, settings, stack,
+    ask, base, bundled, config, derive, detect, facts, hook, image, key, memory, render, report,
+    runtime, settings, stack,
 };
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1393,7 +1393,7 @@ pub(crate) fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<
 pub(crate) struct Asked {
     /// How many provides there were to ask about. None is an answer.
     pub asked: usize,
-    pub answered: Vec<doctor::Outcome>,
+    pub answered: Vec<crate::probe::Outcome>,
     /// Why the question could not be put, when it could not.
     pub problem: Option<String>,
     /// What to say about that in a report: the reason, and the first lines
@@ -1497,7 +1497,7 @@ pub(crate) fn ask_conditions(
                 }
                 Vec::new()
             }
-            Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
+            Ok(out) => crate::probe::parse(&String::from_utf8_lossy(&out.stdout)),
             Err(e) => {
                 // Non-fatal, and never fatal *silently*: `init` sets a
                 // repo up, and failing that over a diagnostic would be
@@ -1543,7 +1543,10 @@ pub(crate) fn ask_conditions(
 /// it — otherwise `[provision]` keeps asserting `rust/toolchain = true` after
 /// the `Cargo.toml` is gone, and the stack layer keeps installing a toolchain
 /// nothing uses.
-pub(crate) fn fired_from(asked: usize, answered: &[doctor::Outcome]) -> Option<BTreeSet<String>> {
+pub(crate) fn fired_from(
+    asked: usize,
+    answered: &[crate::probe::Outcome],
+) -> Option<BTreeSet<String>> {
     if asked == 0 {
         return Some(BTreeSet::new());
     }
@@ -1701,7 +1704,7 @@ pub(crate) fn measured_or_reason(
     ok: bool,
     stdout: &str,
     stderr: &str,
-) -> Result<Vec<doctor::Outcome>, String> {
+) -> Result<Vec<crate::probe::Outcome>, String> {
     if !ok {
         let mut reason = String::from("could not ask the sandbox what it has");
         for line in stderr.lines().filter(|l| !l.trim().is_empty()).take(3) {
@@ -1710,7 +1713,7 @@ pub(crate) fn measured_or_reason(
         }
         return Err(reason);
     }
-    Ok(doctor::parse(stdout))
+    Ok(crate::probe::parse(stdout))
 }
 
 /// What an image was found to have — and whether it was actually asked.
@@ -1739,7 +1742,10 @@ pub(crate) fn measure(
     let unseen = facts.unseen(tag, wanted);
     if !unseen.is_empty() {
         let borrowed: Vec<&str> = unseen.iter().map(String::as_str).collect();
-        let ran = backend.output(&image::probe_args(tag, &doctor::probe_programs(&borrowed)));
+        let ran = backend.output(&image::probe_args(
+            tag,
+            &crate::probe::probe_programs(&borrowed),
+        ));
         let outcomes = match ran {
             Ok(out) => measured_or_reason(
                 out.status.success(),

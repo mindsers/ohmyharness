@@ -3942,7 +3942,7 @@ fn a_selection_on_a_git_that_cannot_do_it_says_which_command_still_works() {
 /// usually explained by, so they read first.
 #[test]
 fn host_checks_never_stand_in_for_a_probe_that_did_not_run() {
-    let sandbox = vec![doctor::Outcome {
+    let sandbox = vec![crate::probe::Outcome {
         name: "rules".into(),
         ok: true,
         detail: "reads".into(),
@@ -4365,8 +4365,8 @@ fn resolved_reads_the_manifest_and_this_repos_settings() {
 
 // ── the provisioning resolution ─────────────────────────────────────────
 
-fn outcome(name: &str, ok: bool, detail: &str) -> doctor::Outcome {
-    doctor::Outcome {
+fn outcome(name: &str, ok: bool, detail: &str) -> crate::probe::Outcome {
+    crate::probe::Outcome {
         name: name.into(),
         ok,
         detail: detail.into(),
@@ -5524,7 +5524,7 @@ fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
     let mut facts = facts::Facts::default();
     facts.learn(
         &first.tag,
-        &[doctor::Outcome {
+        &[crate::probe::Outcome {
             name: "alpha".into(),
             ok: false,
             detail: "not installed in the sandbox".into(),

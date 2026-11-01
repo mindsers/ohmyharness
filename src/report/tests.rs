@@ -1713,8 +1713,8 @@ fn no_section_reaches_a_person_without_also_reaching_a_script() {
     }
 }
 
-fn check(name: &str, ok: bool) -> crate::doctor::Outcome {
-    crate::doctor::Outcome {
+fn check(name: &str, ok: bool) -> crate::probe::Outcome {
+    crate::probe::Outcome {
         name: name.into(),
         ok,
         detail: if ok { "resolves" } else { "missing" }.into(),
@@ -1903,7 +1903,7 @@ fn the_tally_is_the_list_counted_and_the_verdict_is_not_a_tally() {
 
 /// An empty probe is not a pass, in the machine format either.
 ///
-/// `doctor::passed` refuses to call an empty run a success, and `ok` goes
+/// `crate::probe::passed` refuses to call an empty run a success, and `ok` goes
 /// through it. Deriving the verdict as `failed_count == 0` here instead
 /// would report `true` for a probe that produced nothing at all — the
 /// state a broken sandbox leaves behind.

@@ -44,6 +44,7 @@ mod out;
 mod paths;
 mod persist;
 mod prefs;
+mod probe;
 mod provider;
 mod quote;
 mod render;
