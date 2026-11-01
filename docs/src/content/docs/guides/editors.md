@@ -96,11 +96,13 @@ Host omh-ohmyharness-3f9a2c1b-s01
   HostName 127.0.0.1
   Port 49201
   User agent
-  IdentityFile /Users/you/.omh/keys/ohmyharness-3f9a2c1b/id_ed25519
+  IdentityFile "/Users/you/.omh/keys/ohmyharness-3f9a2c1b/id_ed25519"
   IdentitiesOnly yes
   HostKeyAlias omh-ohmyharness-3f9a2c1b-s01
   StrictHostKeyChecking yes
-  UserKnownHostsFile /Users/you/.omh/keys/ohmyharness-3f9a2c1b/known_hosts
+  UserKnownHostsFile "/Users/you/.omh/keys/ohmyharness-3f9a2c1b/known_hosts"
+  ForwardAgent no
+  ForwardX11 no
   LogLevel ERROR
 ```
 

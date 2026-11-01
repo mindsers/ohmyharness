@@ -508,6 +508,14 @@ your defaults ~/.omh/default.toml
 several refuses to launch until you pick one with `omh set account <name>`, and
 one with none starts logged out. [Accounts](/guides/accounts/) has the rest.
 
+**A launch names the login it mounts** — `claude on omh/s01 as work` — and
+says more when the name came from the committed `settings.toml`. Whoever
+commits to a repository chooses which of your captured logins its sessions
+run as, so a launch that took the repository's choice says so on stderr, with
+`omh set account <harness>:<name> --local` to make the choice yours. A
+harness's own entry outranks a default at any layer, so a committed
+`claude = "work"` wins over a default you set locally until you name claude's.
+
 ## `[use]` — what this repo takes from your catalogue
 
 The catalogue is everything you have. `[use]` is what *this* project uses — one

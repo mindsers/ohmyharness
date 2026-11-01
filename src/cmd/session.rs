@@ -489,8 +489,13 @@ pub(crate) fn attach(
     }
 
     let configured = auth::configured(&paths, &adapter)?;
-    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-        .map(|a| auth::dir(&paths, &adapter, &a));
+    let account_name = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?;
+    if let Some(said) = chosen_by_the_repository(&paths, &adapter, account_name.as_deref())? {
+        ctx.warn(&said);
+    }
+    let account = account_name
+        .as_deref()
+        .map(|a| auth::dir(&paths, &adapter, a));
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
@@ -2155,6 +2160,28 @@ pub(crate) fn work_state(
     }
 }
 
+/// What a launch says when the account it mounts was named by this
+/// repository's committed settings ([`crate::config::account_from`]) rather
+/// than by you. Whoever commits to a repository otherwise picks which of your
+/// captured logins its sessions run as, and nothing said so.
+pub(crate) fn chosen_by_the_repository(
+    paths: &Paths,
+    adapter: &Adapter,
+    mounted: Option<&str>,
+) -> Result<Option<String>> {
+    let harness = adapter.name.as_str();
+    Ok(match crate::config::account_from(paths, harness)? {
+        Some((name, crate::config::Layer::Shared)) if mounted == Some(name.as_str()) => {
+            Some(format!(
+                "the {harness} account `{name}` is named in this repository's committed \
+                 .omh/settings.toml, so whoever commits here chose it — \
+                 `omh set account {harness}:{name} --local` makes it your own choice"
+            ))
+        }
+        _ => None,
+    })
+}
+
 /// Say what composing the project's rules turned up, if anything.
 ///
 /// Called from every path that builds a plan, not just `run`: `attach` and
@@ -2417,8 +2444,13 @@ pub(crate) fn run(
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
     let configured = auth::configured(&paths, &adapter)?;
-    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-        .map(|a| auth::dir(&paths, &adapter, &a));
+    let account_name = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?;
+    if let Some(said) = chosen_by_the_repository(&paths, &adapter, account_name.as_deref())? {
+        ctx.warn(&said);
+    }
+    let account = account_name
+        .as_deref()
+        .map(|a| auth::dir(&paths, &adapter, a));
     if account.is_none() {
         let home = dirs::home_dir().context("no home directory")?;
         ctx.warn(&auth::logged_out(&adapter, &home));
@@ -2558,9 +2590,14 @@ pub(crate) fn run(
     // Without the `omh: ` prefix, which `Ctx` now owns: the launch line is a
     // diagnostic and goes through the same voice as every other one, so it
     // paints and prefixes the same way.
-    let status_line = match plan.degradation() {
-        Some(d) => format!("{} on {} — {d}", adapter.name, session.label()),
+    // Which login, by name, whoever chose it.
+    let running = match &account_name {
+        Some(name) => format!("{} on {} as {name}", adapter.name, session.label()),
         None => format!("{} on {}", adapter.name, session.label()),
+    };
+    let status_line = match plan.degradation() {
+        Some(d) => format!("{running} — {d}"),
+        None => running,
     };
 
     // Not a write guard: the question here is *print the plan instead of

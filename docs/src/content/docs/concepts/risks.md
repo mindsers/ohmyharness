@@ -365,6 +365,14 @@ sandbox to the local network.
 **That sshd honours those flags is a fact about openssh**, and `omh doctor` is
 where it gets proved, not the suite.
 
+**Neither your ssh agent nor X11 is forwarded into the sandbox.** The stock
+Debian config allows both, and an ssh config or an editor that forwards the
+agent would have handed the session a socket that signs as you for as long as
+you stayed attached. omh's `Host` block asks for neither, and the session's
+sshd refuses both — the half that holds, since an `ssh -A` on the command line
+outranks any config file. A test on a real container asks for the agent with
+`-A` and checks the session never sees it.
+
 ### 4. `carry_in` is read from a committed layer
 
 **It is the only path by which a secret reaches the agent**, so patterns are

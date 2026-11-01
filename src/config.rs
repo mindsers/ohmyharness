@@ -182,6 +182,13 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
 /// every setting. A layer omh cannot read is an error, not "no account": a
 /// launch that read nothing would go ahead logged out.
 pub fn account_for(paths: &Paths, harness: &str) -> Result<Option<String>> {
+    Ok(account_from(paths, harness)?.map(|(name, _)| name))
+}
+
+/// [`account_for`], with the layer whose entry decided it. A name from
+/// [`Layer::Shared`] is the repository's choice of which of your logins its
+/// sessions get, made by whoever commits to it, and a launch says so.
+pub fn account_from(paths: &Paths, harness: &str) -> Result<Option<(String, Layer)>> {
     let mut own = None;
     let mut default = None;
     for layer in Layer::SETTINGS {
@@ -190,13 +197,13 @@ pub fn account_for(paths: &Paths, harness: &str) -> Result<Option<String>> {
             continue;
         };
         if let Some(name) = item.as_str() {
-            default = Some(name.to_string());
+            default = Some((name.to_string(), layer));
         } else if let Some(table) = item.as_table_like() {
             if let Some(name) = table.get(ACCOUNT_DEFAULT).and_then(|i| i.as_str()) {
-                default = Some(name.to_string());
+                default = Some((name.to_string(), layer));
             }
             if let Some(name) = table.get(harness).and_then(|i| i.as_str()) {
-                own = Some(name.to_string());
+                own = Some((name.to_string(), layer));
             }
         }
     }

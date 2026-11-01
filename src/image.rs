@@ -559,6 +559,9 @@ RUN git config --system --add safe.directory {workdir}
 # none — a fact about the base image, not a decision. Its log goes to a file
 # doctor can read after an attach that would not connect.
 #
+# Nor does it forward your ssh agent or X11 into the sandbox, which the stock
+# config allows: a client's `-A` outranks any `ForwardAgent no` it was given.
+#
 # The host key is omh's, mounted in and installed here as root — a bind-mounted
 # key carries host ownership and sshd refuses it — so the client can pin it.
 # `ssh-keygen -A` is the fallback for a container run without the mount.
@@ -592,7 +595,7 @@ RUN printf '%s\n' \
   '  sudo ssh-keygen -A >/dev/null 2>&1 || true' \
   'fi' \
   'sudo mkdir -p /run/sshd' \
-  'sudo /usr/sbin/sshd -E /omh/sshd.log -o HostKey=/etc/ssh/ssh_host_ed25519_key -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes' \
+  'sudo /usr/sbin/sshd -E /omh/sshd.log -o HostKey=/etc/ssh/ssh_host_ed25519_key -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes -o AllowAgentForwarding=no -o X11Forwarding=no' \
   'exec sleep infinity' \
   > /usr/local/bin/omh-session \
  && chmod 0755 /usr/local/bin/omh-session
@@ -4550,6 +4553,24 @@ mod tests {
             sshd.contains("-E /omh/sshd.log"),
             "sshd's own log goes where doctor can read it after a failed attach: {sshd}"
         );
+    }
+
+    /// The session's sshd forwards neither your ssh agent nor X11 into the
+    /// sandbox. Debian's stock config allows both, so an editor or an ssh
+    /// config that forwards the agent — VS Code Remote-SSH has a setting for
+    /// it — handed the agent a socket that signs as you while attached. The
+    /// server's answer is the one that holds: a client's `-A` outranks any
+    /// `ForwardAgent no` in a config file.
+    #[test]
+    fn the_session_sshd_forwards_neither_agent_nor_x11() {
+        let df = base_dockerfile(None);
+        let sshd = df
+            .lines()
+            .find(|l| l.contains("/usr/sbin/sshd"))
+            .expect("the entrypoint starts sshd");
+        for flag in ["-o AllowAgentForwarding=no", "-o X11Forwarding=no"] {
+            assert!(sshd.contains(flag), "{flag} is missing from: {sshd}");
+        }
     }
 
     /// The entrypoint installs the mounted host key as root and pins sshd to
