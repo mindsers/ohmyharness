@@ -216,6 +216,14 @@ before. Nothing omh does puts your own there: your personal memory reaches a
 session as a rule you import into your catalogue. The cost is that a session
 cannot write Claude's personal memory.
 
+The capabilities omh mounts into the account — skills, commands, subagents —
+are omh's whether your catalogue carries them or not: one it does not carry is
+an empty read-only directory, rather than whatever a session left in the
+account's. The e2e turns are one-shot, and an interactive session may read
+more of the account than they do. Claude's `output-styles/` is not hidden: a
+style applies only when the settings select it, and the settings file is each
+session's own.
+
 **Still open:**
 
 - an enterprise account's cloud bundle composes above omh's requirements: its
