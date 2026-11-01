@@ -3689,12 +3689,15 @@ mod tests {
         let measured = BTreeMap::from([("cargo".to_string(), false)]);
 
         let claude = claude_hooks();
+        let codex = codex();
         // Every render path, which is what "on every render path" means — a
         // third arm was added to `document`'s match without this list moving,
         // and deleting `suppressed_by_probe` from that arm alone left the suite
-        // green. This test's own doc predicts exactly that.
-        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 3] = [
+        // green. This test's own doc predicts exactly that. And again with the
+        // fourth: codex's arm was in neither list.
+        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 4] = [
             (hooks_binding(&claude), &claude.tools),
+            (codex.supports(Capability::Hooks).unwrap(), &codex.tools),
             (opencode_hooks(), &opencode().tools),
             (omp_hooks(), &omp().tools),
         ];
@@ -3767,8 +3770,10 @@ mod tests {
         );
 
         let claude = claude_hooks();
-        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 3] = [
+        let codex = codex();
+        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 4] = [
             (hooks_binding(&claude), &claude.tools),
+            (codex.supports(Capability::Hooks).unwrap(), &codex.tools),
             (opencode_hooks(), &opencode().tools),
             (omp_hooks(), &omp().tools),
         ];
