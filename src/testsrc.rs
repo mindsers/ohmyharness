@@ -895,6 +895,84 @@ impl Ctx {
         );
     }
 
+    /// Every function of 200 lines or more, at the most it may be. The list is
+    /// exact: one that grows fails, one that shrinks is lowered here, and one
+    /// that crosses the line fails by name, so a long function only ever gets
+    /// shorter. 10-15 counted 32 functions of 120 lines and more, and the
+    /// longest grew by a hundred lines between two audits with nothing to say
+    /// so.
+    #[test]
+    fn no_long_function_grows() {
+        const LIMIT: usize = 200;
+        const LONG: &[(&str, &str, usize)] = &[
+            ("adapter.rs", "check_preferences", 200),
+            ("cmd/account.rs", "login", 200),
+            ("cmd/init.rs", "init", 436),
+            ("cmd/inspect.rs", "doctor_cmd", 490),
+            ("cmd/session.rs", "attach", 214),
+            ("cmd/session.rs", "rm", 245),
+            ("cmd/session.rs", "run", 318),
+            ("cmd/session.rs", "sessions_ls", 273),
+            ("cmd/settings_tui.rs", "defaults", 212),
+            ("cmd/upgrade.rs", "upgrade_cmd", 203),
+            ("container.rs", "plan", 277),
+            ("main.rs", "dispatch", 498),
+            ("prefs/review.rs", "review", 283),
+            ("report.rs", "human", 201),
+            ("shadow.rs", "harvest", 287),
+            ("tui.rs", "draw_list", 248),
+        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<(String, String, usize)> = Vec::new();
+        for (path, body) in production() {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let lines: Vec<&str> = body.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                let indent = &line[..line.len() - trimmed.len()];
+                let rest = trimmed
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| trimmed.strip_prefix("pub "))
+                    .unwrap_or(trimmed);
+                let Some(after) = rest.strip_prefix("fn ") else {
+                    continue;
+                };
+                let name: String = after
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                let close = format!("{indent}}}");
+                if let Some(j) = lines[i + 1..].iter().position(|l| *l == close) {
+                    let length = j + 2;
+                    if length >= LIMIT {
+                        found.push((rel.clone(), name, length));
+                    }
+                }
+            }
+        }
+        // Liveness: a scan that matched nothing would agree with an empty list.
+        assert!(
+            found.iter().any(|(_, name, _)| name == "doctor_cmd"),
+            "the scan found no long function at all: {found:?}"
+        );
+        found.sort();
+        let mut want: Vec<(String, String, usize)> = LONG
+            .iter()
+            .map(|(f, n, l)| (f.to_string(), n.to_string(), *l))
+            .collect();
+        want.sort();
+        assert_eq!(
+            found, want,
+            "the functions of {LIMIT} lines or more changed. One that grew is to \
+             split; one that shrank, or fell under the line, is progress — \
+             lower or strike it in LONG."
+        );
+    }
+
     /// The real tree, held to the rule. Two halves: nothing under `src/` is
     /// undeclared, and the test modules are exactly the ones named here — a
     /// list, not a floor, so a file moving either way is an edit made here.
