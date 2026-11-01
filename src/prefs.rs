@@ -968,8 +968,20 @@ impl Account {
                 None => {}
             }
         }
+        // A directory mount's `live` is the harness's whole state directory:
+        // besides the files declared here it holds what lasts a session's
+        // relaunches — opencode's prompt history, its stash, `session.json`.
+        // Seeding a session that exists from another account replaces the
+        // declared files below and leaves the rest; it was cleared whole, and
+        // all of it went. A new session — an id coming round again — still
+        // starts from nothing.
+        let keep_state = self.mount == PrefMount::Dir && !created;
         for part in ["base", "reviewed", "live", REST] {
             let dir = root.join(part);
+            if part == "live" && keep_state {
+                std::fs::create_dir_all(&dir)?;
+                continue;
+            }
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2140,6 +2152,52 @@ base_url = "https://example.invalid"
             .seed(&opencode(), &home, &BTreeMap::new(), false)
             .unwrap();
         assert!(live(&home).join("prompt-history.jsonl").is_file());
+    }
+
+    /// **An opencode session relaunched on another account keeps its own
+    /// state.** Its whole state directory is the session's copy, and besides
+    /// the two preference files it holds what lasts a session's relaunches —
+    /// prompt history, stash, `session.json`. Seeding from another account
+    /// replaced the directory whole, and all of that went with it, under a note
+    /// that said only that preferences were seeded again.
+    #[test]
+    fn an_opencode_session_on_another_account_keeps_its_history() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("creds/opencode/work");
+        let personal = root.path().join("creds/opencode/personal");
+        for (acct, model) in [(&work, "w"), (&personal, "p")] {
+            std::fs::create_dir_all(acct.join("preferences")).unwrap();
+            std::fs::write(
+                acct.join("preferences/model.json"),
+                format!(r#"{{"recent":[{{"providerID":"fake","modelID":"{model}"}}]}}"#),
+            )
+            .unwrap();
+        }
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/opencode"));
+        let seed = |acct: &Path, created: bool| {
+            let checked = check(&opencode(), acct).unwrap().unwrap();
+            checked
+                .seed(&opencode(), &home, &BTreeMap::new(), created)
+                .unwrap()
+        };
+        seed(&work, true);
+        std::fs::write(
+            live(&home).join("prompt-history.jsonl"),
+            "{\"t\":\"mine\"}\n",
+        )
+        .unwrap();
+        seed(&personal, false);
+        assert_eq!(
+            std::fs::read_to_string(live(&home).join("prompt-history.jsonl")).unwrap(),
+            "{\"t\":\"mine\"}\n",
+            "the session's history went with the account switch"
+        );
+        assert!(
+            std::fs::read_to_string(live(&home).join("model.json"))
+                .unwrap()
+                .contains("\"p\""),
+            "and the preferences are the new account's"
+        );
     }
 
     /// Every path under `dir`, sorted — what a launch must leave as it was.
