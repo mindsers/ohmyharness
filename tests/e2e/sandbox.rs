@@ -249,6 +249,19 @@ impl Session {
         script: &[serde_json::Value],
         args: &[String],
     ) -> Turn {
+        self.turn_with(prompt, script, |argv| {
+            argv.splice(1..1, args.iter().cloned());
+        })
+    }
+
+    /// [`Session::turn`], with the driver's command line changed by `edit`
+    /// before it runs.
+    pub fn turn_with(
+        &self,
+        prompt: &str,
+        script: &[serde_json::Value],
+        edit: impl FnOnce(&mut Vec<String>),
+    ) -> Turn {
         // A directory per turn, so nothing the last fake logged can be taken
         // for this turn's. One port for all of them — omp's provider is a file
         // naming it, written whenever the container is new — and it is clear
@@ -287,7 +300,7 @@ impl Session {
             env.push((k.to_string(), v.replace("{url}", &url)));
         }
         let mut argv = (self.harness.turn)(prompt, &url);
-        argv.splice(1..1, args.iter().cloned());
+        edit(&mut argv);
         let out = self.exec(&env, &argv);
 
         // Stopped, and gone, before the next turn wants the port.
