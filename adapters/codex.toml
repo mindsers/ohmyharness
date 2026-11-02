@@ -286,15 +286,19 @@ mount = "link"
   "notice.model_migrations",
 ]
 
-# Notices Codex records once a prompt is dismissed, and its model-availability
-# bookkeeping. Not `notice.hide_full_access_warning`, which acknowledges a
-# consent and omh renders itself. Which of these Codex writes on a first start
-# on its own is not measured.
+# Notices Codex records once a prompt is dismissed, and its bookkeeping. Not
+# `notice.hide_full_access_warning`, which acknowledges a consent and omh
+# renders itself. A first start of the 0.166.0 TUI, left 20 seconds with no
+# input, wrote `tui.screen_reader_detection_done` and no notice [measured];
+# `notice.hide_gov_cloud_guidance`, new at 0.166.0, is written once its
+# GovCloud guidance has been shown (`tui/src/lib.rs`) [src].
 [preferences.quiet]
 "$HOME/.codex/config.toml" = [
   "tui.model_availability_nux",
+  "tui.screen_reader_detection_done",
   "notice.fast_default_opt_out",
   "notice.hide_rate_limit_model_nudge",
+  "notice.hide_gov_cloud_guidance",
   "notice.hide_gpt5_1_migration_prompt",
   'notice."hide_gpt-5.1-codex-max_migration_prompt"',
 ]
