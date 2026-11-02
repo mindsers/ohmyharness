@@ -427,30 +427,12 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
         let Some(dir) = layer.content_dir(paths).map(|d| d.join("hooks")) else {
             continue;
         };
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        let Some(files) = crate::hook::files_in(&dir)? else {
+            continue;
         };
-        for entry in entries {
-            // Not `.flatten()`, for the reason `render::merge_hooks` gives: a
-            // `readdir` failing part-way through would drop a hook from this
-            // listing while the launcher still ships it, and the two telling
-            // different stories about one directory is what this module's
-            // other guards exist to stop.
-            let path = entry
-                .with_context(|| format!("reading {}", dir.display()))?
-                .path();
-            if !path.extension().is_some_and(|e| e == "json") {
-                continue;
-            }
+        for (name, path) in files {
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let name = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
             // Refused where `render::merge_hooks` refuses it, for the reason
             // the parse below gives: two readers of one directory agree.
             crate::selection::validate_entry_name(&name, crate::adapter::Capability::Hooks, &path)?;

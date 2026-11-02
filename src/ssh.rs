@@ -213,10 +213,8 @@ pub fn write_hosts(path: &Path, blocks: &[String]) -> Result<()> {
 /// would erase aliases belonging to every other checkout.
 pub fn config_blocks(root: &Path) -> Result<Vec<String>> {
     let worktrees = root.join("worktrees");
-    let repos = match std::fs::read_dir(&worktrees) {
-        Ok(repos) => repos,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", worktrees.display())),
+    let Some(repos) = crate::fsx::read_dir_or_absent(&worktrees)? else {
+        return Ok(Vec::new());
     };
     let mut blocks = Vec::new();
     for repo in repos {

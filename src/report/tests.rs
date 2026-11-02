@@ -2827,3 +2827,44 @@ fn an_ejected_document_is_not_a_one_entry_directory_in_json() {
     assert_eq!(json["wrote"][0]["shape"], "document", "{json}");
     assert_eq!(json["wrote"][1]["shape"], "directory", "{json}");
 }
+
+/// What `omh memory` lists and what `--json` carries are one answer. The
+/// listing counted each note's references and printed them; the document
+/// never had them, so a script reading `--json` could not tell an orphan
+/// from a note everything points at.
+#[test]
+fn a_notes_references_reach_its_json_as_they_reach_the_listing() {
+    let note = |key: &str, body: &str| crate::memory::Note {
+        key: key.into(),
+        kind: crate::memory::Kind::Topic,
+        source: "session s01, claude".into(),
+        recorded: "2026-08-07".into(),
+        invalidated_by: None,
+        body: body.into(),
+        path: format!("/m/{key}.md").into(),
+    };
+    let notes = Notes {
+        notes: vec![
+            note("build/cache", "see [[build/flags]]"),
+            note("build/flags", "the flags"),
+            note("deploy", "see [[build/flags]]"),
+        ],
+    };
+    let human = notes.human(&Palette::plain());
+    assert!(
+        human.contains("build/flags") && human.contains("2 refs"),
+        "{human}"
+    );
+    let json = notes.json();
+    let by_key = |key: &str| {
+        json["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["key"] == key)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by_key("build/flags")["refs"], 2, "{json}");
+    assert_eq!(by_key("deploy")["refs"], 0, "{json}");
+}
