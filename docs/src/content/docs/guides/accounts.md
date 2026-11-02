@@ -130,6 +130,8 @@ of the host's environment, commands or loopback, so:
 | `env_http_headers` | the same, into `http_headers` |
 | `env_key_instructions` | dropped |
 | `auth` (a command), `gateway_oauth`, `aws` | refused: a sandbox cannot run your command or read your AWS profile. Put the token the command produces in a provider file and name that |
+| `credential_file`, `project_id`, `location` | refused: a credential file is a path on your machine, and the other two are for Codex's own Google Cloud provider |
+| a table under one of Codex's own ids — `openai`, `amazon-bedrock`, `amazon-bedrock-runtime`, `gcp`, `ollama`, `lmstudio` | refused: Codex refuses to start with a provider of yours there, and its own Bedrock and Google Cloud ones sign in from your machine. Give yours another id. An `openai` table holding only `model_catalog_url` is kept |
 | a `base_url` on `127.0.0.1` or `localhost` | refused: in a sandbox that is the sandbox itself. Name an address it can reach — on Docker Desktop, `host.docker.internal` |
 
 A refusal keeps nothing. A file you write by hand is held to the same

@@ -15,12 +15,14 @@
 //! `developer_instructions` there would be a managed hook or a standing
 //! prompt. Within a provider, only fields that are data pass: what reads the
 //! host's environment (`env_key`, `env_http_headers`), runs a command
-//! (`auth`), or reaches a profile or a login flow (`aws`, `gateway_oauth`)
-//! cannot be satisfied in a sandbox — `omh account login codex --provider` resolves the
-//! environment ones once into the file, and refuses the rest by name.
+//! (`auth`), or reaches a profile, a login flow or a credential file (`aws`,
+//! `gateway_oauth`, `credential_file`) cannot be satisfied in a sandbox —
+//! `omh account login codex --provider` resolves the environment ones once
+//! into the file, and refuses the rest by name. A provider under one of
+//! Codex's own ids is refused too: it is not a provider of your own.
 //!
 //! The fields are `ModelProviderInfo`'s at the pinned tag
-//! (`codex-rs/model-provider-info/src/lib.rs`, `rust-v0.162.1`).
+//! (`codex-rs/model-provider-info/src/lib.rs`, `rust-v0.166.0`).
 
 use super::{host, loopback, redacted_url};
 use anyhow::{Context, Result};
@@ -46,6 +48,21 @@ const DATA: &[&str] = &[
     "requires_openai_auth",
     "supports_websockets",
     "supports_standalone_web_search",
+];
+
+/// Codex's own providers (`built_in_model_providers`, `rust-v0.166.0`). A
+/// table under one of these ids is not a provider of your own, and Codex
+/// refuses to start with one there (`validate_reserved_model_provider_ids`)
+/// — but for the overrides it takes: an `openai` table holding only
+/// `model_catalog_url`, and a few fields on the Amazon Bedrock and Google
+/// Cloud ones, which sign in with credentials from the host.
+const OWN: &[&str] = &[
+    "openai",
+    "amazon-bedrock",
+    "amazon-bedrock-runtime",
+    "gcp",
+    "ollama",
+    "lmstudio",
 ];
 
 /// Fields whose values are secrets: never printed, and redacted on eject.
@@ -74,6 +91,18 @@ pub fn validate(doc: &toml::Table) -> Result<()> {
         let fields = provider
             .as_table()
             .with_context(|| format!("`model_providers.{id}` is not a table"))?;
+        let catalog_only = id == "openai" && fields.keys().all(|f| f == "model_catalog_url");
+        anyhow::ensure!(
+            !OWN.contains(&id.as_str()) || catalog_only,
+            "`model_providers.{id}` is one of Codex's own providers{} — give a provider of \
+             your own another id",
+            match id.as_str() {
+                "gcp" => ", Google Cloud's, which signs in by running a command on the host",
+                "amazon-bedrock" | "amazon-bedrock-runtime" =>
+                    ", Amazon Bedrock's, which signs requests with AWS credentials from the host",
+                _ => ", and Codex refuses to start with a provider of your own under its id",
+            }
+        );
         for field in fields.keys() {
             anyhow::ensure!(
                 DATA.contains(&field.as_str()),
@@ -84,6 +113,10 @@ pub fn validate(doc: &toml::Table) -> Result<()> {
                         "reads the environment, which a sandbox does not have",
                     "auth" | "gateway_oauth" => "runs a command or a login flow",
                     "aws" => "reads an AWS profile, which a sandbox does not have",
+                    "credential_file" =>
+                        "reads a credential file on the host, which a sandbox does not have",
+                    "project_id" | "location" =>
+                        "is for Codex's own Google Cloud provider, which omh refuses",
                     _ => "is not a provider field omh passes",
                 }
             );
@@ -296,6 +329,68 @@ query_params = { api-version = "2025-04-01-preview" }
             let err = validate(&doc).unwrap_err().to_string();
             assert!(err.contains(name), "{name}: {err}");
         }
+    }
+
+    /// Codex 0.166.0's three Google Cloud fields: a credential file is a path
+    /// on the host, and the other two are the built-in Google Cloud
+    /// provider's, which omh refuses.
+    #[test]
+    fn a_google_cloud_field_is_refused_with_its_reason() {
+        for (field, why) in [
+            (
+                "credential_file = \"/home/me/adc.json\"",
+                "reads a credential file on the host",
+            ),
+            (
+                "project_id = \"p\"",
+                "is for Codex's own Google Cloud provider",
+            ),
+            (
+                "location = \"global\"",
+                "is for Codex's own Google Cloud provider",
+            ),
+        ] {
+            let doc = table(&format!("{AZURE}{field}\n"));
+            let err = validate(&doc).unwrap_err().to_string();
+            assert!(err.contains(why), "{field}: {err}");
+        }
+    }
+
+    /// A table under one of Codex's own ids is not a provider of your own:
+    /// Codex refuses to start with one there, or takes a few fields for a
+    /// provider that signs in from the host (`validate_reserved_model_provider_ids`
+    /// and `merge_configured_model_providers`, `rust-v0.166.0`). omh accepted
+    /// it at login, and every launch on the account failed inside the
+    /// sandbox; `gcp` was a free id until 0.166.0 made it Google Cloud's.
+    /// What Codex does take, an `openai` table holding only a catalog URL,
+    /// passes.
+    #[test]
+    fn a_provider_under_one_of_codexs_own_ids_is_refused_by_name() {
+        for id in [
+            "openai",
+            "amazon-bedrock",
+            "amazon-bedrock-runtime",
+            "gcp",
+            "ollama",
+            "lmstudio",
+        ] {
+            let doc = table(&AZURE.replace("azure", id));
+            let err = validate(&doc).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!(
+                    "`model_providers.{id}` is one of Codex's own providers"
+                )),
+                "{id}: {err}"
+            );
+        }
+        let doc = table(&AZURE.replace("azure", "gcp"));
+        let err = validate(&doc).unwrap_err().to_string();
+        assert!(err.contains("signs in by running a command"), "{err}");
+        validate(&table(&AZURE.replace("azure", "my-gcp"))).unwrap();
+        validate(&table(
+            "[model_providers.openai]\nmodel_catalog_url = \"https://chatgpt.com/models\"\n",
+        ))
+        .unwrap();
     }
 
     #[test]
