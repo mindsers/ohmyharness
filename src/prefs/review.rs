@@ -61,9 +61,10 @@ struct Side {
     /// The file is a copy of an account file, whose other keys are the
     /// harness's bookkeeping and never the session's to keep or name.
     copy: bool,
-    /// What the account's provider file seeds the file with beside its
-    /// preferences — omp's filters (`provider::seeded`): the account's, and
-    /// never named as the session's. The file's other keys still are.
+    /// What the account's provider file seeded the file with beside its
+    /// preferences, when it seeded any — omp's filters (`provider::seeded`):
+    /// the account's, and never named as the session's. The file's other
+    /// keys still are.
     seeded: Vec<KeyPath>,
 }
 
@@ -87,15 +88,18 @@ impl Side {
                 )
             })?
             .unwrap_or_default();
-        let seeded = match crate::provider::seeded(adapter) {
-            Some((d, keys)) if d.path == declared.path => keys,
-            _ => Vec::new(),
+        // Only what the account did seed: with no rest, a filter in the copy
+        // is one the session set.
+        let rest = root.join(REST).join(name).is_file();
+        let seeded = match rest {
+            true => crate::provider::seeded_keys(adapter, &declared),
+            false => Vec::new(),
         };
         Ok(Side {
             base: own("base")?,
             reviewed: own("reviewed")?,
             live,
-            copy: seeded.is_empty() && root.join(REST).join(name).is_file(),
+            copy: rest && seeded.is_empty(),
             declared,
             seeded,
         })
@@ -1129,6 +1133,49 @@ mod tests {
         assert_eq!(
             outcome.notes,
             vec!["s01: not kept, not preferences: shellCommandPrefix".to_string()]
+        );
+    }
+
+    /// On an account whose provider file seeds no filter, one a session set
+    /// is the session's own, and named like any other setting that is not a
+    /// preference.
+    #[test]
+    fn a_filter_no_account_seeded_is_named_as_the_sessions() {
+        let omp = Adapter::find(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters"),
+            "omp",
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/omp/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/config.yml"),
+            "modelRoles:\n  default: a/b\n",
+        )
+        .unwrap();
+        std::fs::write(account.join(crate::provider::omp::FILE), "providers: {}\n").unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/omp"));
+        let rests = crate::provider::rests(&omp, &account).unwrap();
+        assert!(rests.is_empty());
+        super::super::check(&omp, &account)
+            .unwrap()
+            .unwrap()
+            .seed(&omp, &home, &rests, false)
+            .unwrap();
+        std::fs::write(
+            super::super::live(&home).join("config.yml"),
+            "modelRoles:\n  default: a/b\ndisabledProviders: [ollama]\n",
+        )
+        .unwrap();
+        let sitting = Sitting {
+            id: "s01".into(),
+            home,
+        };
+        let outcome = review(&omp, std::slice::from_ref(&sitting), Answers::DropAll).unwrap();
+        assert_eq!(
+            outcome.notes,
+            vec!["s01: not kept, not preferences: disabledProviders".to_string()]
         );
     }
 }

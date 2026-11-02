@@ -78,6 +78,17 @@ pub fn seeded(
     }
 }
 
+/// The keys [`seeded`] seeds in `declared`: none for another file.
+pub fn seeded_keys(
+    adapter: &crate::adapter::Adapter,
+    declared: &crate::adapter::Declared,
+) -> Vec<crate::adapter::KeyPath> {
+    match seeded(adapter) {
+        Some((d, keys)) if d.path == declared.path => keys,
+        _ => Vec::new(),
+    }
+}
+
 /// What the account's provider file puts in a session's preferences copy
 /// beside its preferences, as `prefs::Account::seed` takes it: the copy's
 /// account path to the document. A session's copy is the account's

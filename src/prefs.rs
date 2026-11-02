@@ -949,7 +949,7 @@ impl Account {
         }
         if let (Home::Kept(_), false) = (home, created) {
             match recorded.as_deref() {
-                Some(r) if r == this => return self.continue_from_live(home, &rest_of),
+                Some(r) if r == this => return self.continue_from_live(adapter, home, &rest_of),
                 Some(r) => {
                     let left = review::unreviewed(adapter, home)?;
                     anyhow::ensure!(
@@ -1028,6 +1028,7 @@ impl Account {
     /// as its last review left them where they cannot be read.
     fn continue_from_live(
         &self,
+        adapter: &Adapter,
         home: &Home,
         rest_of: &BTreeMap<String, (Doc, Option<String>)>,
     ) -> Result<Vec<String>> {
@@ -1060,11 +1061,37 @@ impl Account {
                     .unwrap_or_default()
                 }
             };
-            let copy = compose(rest, &values, f.declared.all());
+            // What the account's provider file seeds is set afresh in the
+            // session's own copy, and nothing else of the session's goes:
+            // the rest of that file is the session's, not the account's.
+            let seeded = crate::provider::seeded_keys(adapter, &f.declared);
+            let copy = match (intact, seeded.is_empty()) {
+                (true, false) => {
+                    let mut copy = values;
+                    for key in &seeded {
+                        set(&mut copy, key, get(rest, key).cloned());
+                    }
+                    copy
+                }
+                _ => compose(rest, &values, f.declared.all()),
+            };
             place(&live_dir, name, &format.render(&copy)?, self.mount)?;
-            if let Some(digest) = digest {
-                std::fs::create_dir_all(root.join(REST))?;
-                crate::held::Dir::open(&root.join(REST))?.replace(name, digest.as_bytes())?;
+            match digest {
+                Some(digest) => {
+                    std::fs::create_dir_all(root.join(REST))?;
+                    crate::held::Dir::open(&root.join(REST))?.replace(name, digest.as_bytes())?;
+                }
+                // A rest the account no longer has: gone with it, or every
+                // relaunch after this would write the copy again.
+                None => match std::fs::remove_file(root.join(REST).join(name)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("removing {}", root.join(REST).join(name).display())
+                        })
+                    }
+                },
             }
         }
         Ok(notes)
@@ -1989,6 +2016,73 @@ base_url = "https://example.invalid"
         assert_eq!(
             std::fs::read_to_string(&yaml).unwrap(),
             "theme:\n  dark: other\n"
+        );
+    }
+
+    /// The provider filters a session's `config.yml` was seeded with are the
+    /// account's: a relaunch after the account changed them takes the new
+    /// ones and leaves what else the session set, and once the account has
+    /// none they go — once: what the session sets itself after that stands.
+    #[test]
+    fn a_relaunch_follows_the_accounts_provider_filters_and_leaves_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/omp/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/config.yml"),
+            "modelRoles:\n  default: a/b\n",
+        )
+        .unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/omp"));
+        let launch = |filters: &str, created: bool| {
+            std::fs::write(
+                account.join(crate::provider::omp::FILE),
+                format!("providers: {{}}\n{filters}"),
+            )
+            .unwrap();
+            let rests = crate::provider::rests(&omp(), &account).unwrap();
+            check(&omp(), &account)
+                .unwrap()
+                .unwrap()
+                .seed(&omp(), &home, &rests, created)
+                .unwrap();
+        };
+        let copy = live(&home).join("config.yml");
+        let read = || Format::Yaml.parse(&std::fs::read(&copy).unwrap()).unwrap();
+        let yaml = |raw: &str| Format::Yaml.parse(raw.as_bytes()).unwrap();
+
+        launch("disabledProviders: [ollama]\n", true);
+        assert_eq!(
+            read(),
+            yaml("modelRoles:\n  default: a/b\ndisabledProviders: [ollama]\n")
+        );
+        std::fs::write(
+            &copy,
+            "modelRoles:\n  default: a/b\ndisabledProviders: [ollama]\ntodo:\n  enabled: false\n",
+        )
+        .unwrap();
+        launch("disabledProviders: [lm-studio]\n", false);
+        assert_eq!(
+            read(),
+            yaml("modelRoles:\n  default: a/b\ndisabledProviders: [lm-studio]\ntodo:\n  enabled: false\n"),
+            "the account's new filters, and the session's own setting"
+        );
+        launch("", false);
+        assert_eq!(
+            read(),
+            yaml("modelRoles:\n  default: a/b\ntodo:\n  enabled: false\n"),
+            "the account's filters gone"
+        );
+        std::fs::write(
+            &copy,
+            "modelRoles:\n  default: a/b\ndisabledProviders: [kilo]\n",
+        )
+        .unwrap();
+        launch("", false);
+        assert_eq!(
+            read(),
+            yaml("modelRoles:\n  default: a/b\ndisabledProviders: [kilo]\n"),
+            "what the session set itself, once the account had none"
         );
     }
 
