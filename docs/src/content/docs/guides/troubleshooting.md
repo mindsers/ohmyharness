@@ -822,8 +822,8 @@ added there lasts nowhere. Add it to a `models.yml` of your own and run
 Expected, unless it is a preference. A session's `config.yml` is its own: an
 extension, a tool or MCP setting, `auth` last that session, and so does a
 change to `disabledProviders` or the other lists that choose among providers —
-each new session starts from the account's, kept by
-`omh account login omp --provider`. Your
+each new session starts from the account's, kept by `omh account login omp`
+with `--provider` or `--import`. Your
 [preferences](/guides/accounts/#ompagentconfigyml-is-each-sessions-own) — the
 model each role uses, the thinking level, the themes, your presets, the display
 choices omp's setup wizard asks for — reach the account once you keep them in

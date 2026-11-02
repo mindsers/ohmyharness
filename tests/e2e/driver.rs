@@ -461,7 +461,7 @@ const DISABLED: &str =
 /// omp's provider comes from its account, and its model from the account's
 /// preferences (`omp_account`): the driver names none. The providers it
 /// would otherwise ask for model lists are switched off by the account's
-/// provider file too, which each session's `config.yml` is seeded with. Not
+/// provider file, which each session's `config.yml` is seeded with. Not
 /// `--no-extensions`: omh's hooks are an extension.
 pub const OMP: Driver = Driver {
     name: "omp",
