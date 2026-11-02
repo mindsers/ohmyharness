@@ -51,10 +51,31 @@ login = "run `/login` inside omp, then exit"
 # phrase planted in each file reached the model; one planted in `skills/`,
 # `agents/`, `commands/` and `prompts/` did not. `hooks/pre/` holds only omh's
 # own `omh.ts`.
+#
+# More, read in omp's source at v18.15.0 (`discovery/builtin.ts`,
+# `system-prompt.ts`, `utils/src/env.ts`; each already there at v18.10.4) and
+# measured the same way at 18.15.0: a phrase planted in `SYSTEM_TEMPLATE.md`,
+# `PERSONALITY.md` and `rules/` reached the model; a variable planted in
+# `.env`, which omp loads into its environment where nothing set it, reached
+# the model through the shell; and a server in `.mcp.json` was started.
+# `settings.json` names modules omp imports, in its `extensions` list, and its
+# discovery reads the file as settings too. A module planted there was imported
+# when omp was started by hand in the e2e session, and not by the scripted turn,
+# for a reason not found. `mcp.json`, without the dot, is omh's own (below),
+# and masked in a session with no server. `instructions/` is discovered and
+# used by nothing, and a phrase planted there did not reach the model. An empty
+# `PERSONALITY.md` is a line in omp's log at every start; the other masks omp
+# skips without a word.
 mask = [
   "$HOME/.omp/agent/AGENTS.md",
   "$HOME/.omp/agent/RULES.md",
   "$HOME/.omp/agent/SYSTEM.md",
+  "$HOME/.omp/agent/SYSTEM_TEMPLATE.md",
+  "$HOME/.omp/agent/PERSONALITY.md",
+  "$HOME/.omp/agent/rules/",
+  "$HOME/.omp/agent/.env",
+  "$HOME/.omp/agent/.mcp.json",
+  "$HOME/.omp/agent/settings.json",
   "$HOME/.omp/agent/hooks/pre/",
   "$HOME/.omp/agent/hooks/post/",
   "$HOME/.omp/agent/tools/",

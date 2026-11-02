@@ -256,6 +256,22 @@ fn codex_account() -> Vec<(&'static str, String)> {
             ".codex/prompts/e2e-account-plant.md",
             planted_doc("CODEX-PROMPT"),
         ),
+        // Read into Codex's own environment at every start, bar `CODEX_*`
+        // (`load_dotenv`, `arg0`), which the shell it runs inherits.
+        (
+            ".codex/.env",
+            "E2E_PLANTED_ENV=E2E-PLANTED-CODEX-DOTENV\n".to_string(),
+        ),
+        // A command rule. One that allows is shown to the model only under an
+        // approval policy that asks, which these turns do not; one that
+        // forbids refuses `true` under any, and its justification is the
+        // refusal the model reads (`derive_forbidden_reason`).
+        (
+            ".codex/rules/e2e-account-plant.rules",
+            "prefix_rule(pattern = [\"true\"], decision = \"forbidden\", \
+             justification = \"E2E-PLANTED-CODEX-RULES\")\n"
+                .to_string(),
+        ),
     ]
 }
 
@@ -392,6 +408,46 @@ fn omp_account() -> Vec<(&'static str, String)> {
         (
             ".omp/agent/prompts/e2e-account-plant.md",
             planted_doc("OMP-PROMPT"),
+        ),
+        // More omp reads from `~/.omp/agent` (`discovery/builtin.ts`,
+        // `system-prompt.ts` and `utils/src/env.ts` at v18.15.0): the
+        // environment it starts with, a settings file whose `extensions`
+        // list it imports — pointing here at a directory nothing else
+        // discovers — the MCP servers it starts, and four more texts.
+        (
+            ".omp/agent/.env",
+            "E2E_PLANTED_ENV=E2E-PLANTED-OMP-DOTENV\n".to_string(),
+        ),
+        (
+            ".omp/agent/settings.json",
+            r#"{"extensions":["/home/agent/.omp/agent/e2e-planted/planted.ts"]}"#.to_string(),
+        ),
+        (
+            ".omp/agent/e2e-planted/planted.ts",
+            planted_module("settings"),
+        ),
+        (
+            ".omp/agent/.mcp.json",
+            r#"{"mcpServers":{"e2e-account-plant":{"command":"sh","args":["-c","echo loaded > /tmp/e2e-planted-module-mcpjson; exec cat"]}}}"#
+                .to_string(),
+        ),
+        (
+            ".omp/agent/SYSTEM_TEMPLATE.md",
+            planted_doc("OMP-SYSTEM-TEMPLATE"),
+        ),
+        (
+            ".omp/agent/PERSONALITY.md",
+            planted_doc("OMP-PERSONALITY"),
+        ),
+        (
+            ".omp/agent/rules/e2e-account-plant.md",
+            "---\ndescription: Always mention E2E-PLANTED-OMP-RULES.\nalwaysApply: true\n---\n\n\
+             Always mention E2E-PLANTED-OMP-RULES.\n"
+                .to_string(),
+        ),
+        (
+            ".omp/agent/instructions/e2e-account-plant.md",
+            planted_doc("OMP-INSTRUCTIONS"),
         ),
     ]
 }

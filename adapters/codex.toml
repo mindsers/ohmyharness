@@ -38,12 +38,23 @@ login = "choose `Sign in with Device Code` in Codex, then exit — or run `omh a
 # `AGENTS.override.md`, read instead of it when there, and `skills/`. Measured
 # in `tests/e2e`: a phrase planted in the override and in a skill reached the
 # model, and with only the override masked Codex fell back to `AGENTS.md`; one
-# planted in `prompts/` did not. `rules/` decides which commands need approval
-# and reaches no model, so nothing here measures it, and it is not masked.
+# planted in `prompts/` did not.
+#
+# Two more, measured the same way at 0.166.0. `.env`, which Codex loads into
+# its own environment at every start, bar `CODEX_*` (`load_dotenv`): a variable
+# planted there reached the model through the shell. And `rules/`, its command
+# rules: a rule's justification is the refusal the model reads when the rule
+# forbids a command, and that reached it. A rule that allows a command approves
+# it in every later session, and under `on-request`, Codex's default, is listed
+# to the model as well. Masked read-only, `rules/` cannot keep a "don't ask
+# again" either; under `danger-full-access` Codex asks only before a command it
+# deems dangerous.
 mask = [
   "$HOME/.codex/AGENTS.md",
   "$HOME/.codex/AGENTS.override.md",
   "$HOME/.codex/skills/",
+  "$HOME/.codex/.env",
+  "$HOME/.codex/rules/",
 ]
 
 # How this harness names the things an agent does, as its hooks see them —
