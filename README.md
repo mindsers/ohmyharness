@@ -30,12 +30,13 @@ harness's preference files — Claude's `~/.claude.json` and `settings.json`,
 Codex's `config.toml`, omp's `config.yml`, opencode's state directory — and
 when it ends, a [review](https://docs.ohmyharness.sh/guides/accounts/#the-review)
 asks which changes to keep: a model, a theme, a thinking level. What you keep
-seeds the next session, and nothing else reaches the account. A model provider
-of your own is a file the account keeps: `omh account login codex --provider`
-or `omh account login omp --provider`, or `--import` from the host. omp's
-provider filters travel with its providers. The first Codex or omp launch on
-an existing account migrates its file, keeps the old one beside it, and names
-what it kept and what it dropped.
+seeds the next session, and nothing else reaches the account. With no terminal
+to ask at, `omh sNN rm` refuses while a session has changes to review, and
+`--yes` drops them. A model provider of your own is a file the account keeps:
+`omh account login codex --provider` or `omh account login omp --provider`, or
+`--import` from the host. omp's provider filters travel with its providers.
+The first Codex or omp launch on an existing account migrates its file, keeps
+the old one beside it, and names what it kept and what it dropped.
 
 **Breaking: logging in is `omh account login` now, where it was `auth`**,
 with the same flags, and the old line is refused with the new one named.
