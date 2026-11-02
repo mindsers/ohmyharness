@@ -338,7 +338,13 @@ pub fn free_space(at: &std::path::Path) -> Result<u64, String> {
     // asks about an empty `ps` and answers the other way, for the other
     // reason: there, nothing is a legitimate listing; here, nothing is a
     // filesystem declining to say.
-    match u64::from(stat.f_bavail) * stat.f_frsize as u64 {
+    //
+    // A cast, not `u64::from`: `f_bavail` is a `u32` on macOS and a `u64` on
+    // Linux, so `from` is a useless conversion on one and the cast lossless on
+    // the other, and each clippy refuses one of them.
+    #[allow(clippy::cast_lossless)]
+    let available = stat.f_bavail as u64;
+    match available * stat.f_frsize as u64 {
         0 => Err(format!(
             "the filesystem holding {} does not report free space",
             at.display()
