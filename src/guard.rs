@@ -882,7 +882,7 @@ mod rendered {
 
     /// Every `[PATH#TAG]` header oh-my-pi accepts is guarded, not only the
     /// plain one. Its parser splits a header at the last `#` (`rsplit_once`
-    /// in `crates/pi-edit/src/modes/hashline/tokenizer.rs` at v18.10.4),
+    /// in `crates/pi-edit/src/modes/hashline/tokenizer.rs` at v18.15.0),
     /// takes a tag in either case and upper-cases it, and lets a path hold
     /// brackets. Each header here was one the guard could not read: it saw no
     /// file, or the wrong one, and the edit went through.

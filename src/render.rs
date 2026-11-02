@@ -1605,13 +1605,13 @@ const t = (hook, raw, word, env) => {
 // file another way: relative, `..`, `./`, a doubled slash.
 //
 // omp is followed step for step (`write.ts` and `tools/path-utils.ts` at
-// v18.10.4): a `[PATH]` or `[PATH#TAG]` hashline header is unwrapped; a URL its
+// v18.15.0): a `[PATH]` or `[PATH#TAG]` hashline header is unwrapped; a URL its
 // router handles is not a file here — `xd://mcp__<server>_<tool>` is how it
 // calls an MCP tool, and its `local:` writes stay in its own session
 // directory — and anything else goes through `expandPath`: a stray leading `:`
 // or `@`, a `file:` URL, and `~`, which is joined to the home directory
 // whatever follows it. A scheme the router does not handle, `a://`, is a path.
-const OMP_SCHEMES = new Set(["agent", "artifact", "attachment", "cfg", "conflict", "history", "issue", "local", "mcp", "memory", "omp", "pr", "proc", "rule", "security", "skill", "ssh", "vault", "xd"])
+const OMP_SCHEMES = new Set(["agent", "artifact", "attachment", "cfg", "conflict", "history", "issue", "local", "mcp", "memory", "mr", "omp", "out", "pr", "proc", "rule", "security", "skill", "ssh", "vault", "xd"])
 const omh_file = (f, omp) => {
   if (!f) return ""
   if (omp) {
@@ -4890,6 +4890,49 @@ try {{
         assert!(said.contains(&tricky), "omp, `://` inside a path: {said}");
     }
 
+    /// omp 18.15.0's router took two schemes 18.10.4's did not: `out://`, the
+    /// reply shown to the user, and `mr://`, a merge request
+    /// (`internal-urls/router.ts`). Neither is a file, so a hook on edits
+    /// leaves a write to either alone; read as paths, they were `/work/out:/…`
+    /// to every guard, and a "no edits here" hook refused omp's replies.
+    #[test]
+    fn a_write_to_an_omp_reply_or_merge_request_is_not_an_edit() {
+        let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#;
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/saw.json", hook);
+        let body = document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: None,
+                provider: None,
+            },
+        )
+        .unwrap()
+        .body;
+        let write = |path: &str| {
+            drive_omp(
+                &body,
+                "tool_call",
+                &format!(r#"{{ toolName: "write", input: {{ path: "{path}", content: "x" }} }}"#),
+            )
+        };
+        let here = std::env::current_dir().unwrap();
+        let said = write("reply.md");
+        assert!(
+            said.contains(&format!("saw {}/reply.md", here.display())),
+            "a file is still an edit: {said}"
+        );
+        for url in ["out://reply.md", "mr://42"] {
+            assert_eq!(write(url), "null", "{url} is not a file");
+        }
+    }
+
     /// One spelling of every path: a hook sees the file a call touches the way
     /// the harness will resolve it, so a guard matching `/work/.omh/*` cannot
     /// be walked past by writing the same path differently.
@@ -4897,7 +4940,7 @@ try {{
     /// A relative path is resolved against where the harness runs, and `.`,
     /// `..` and doubled slashes are collapsed — `pkg/../.omh/x` is `.omh/x`
     /// to the filesystem. omp also cleans a path before it resolves it
-    /// (`expandPath` in `tools/path-utils.ts` at v18.10.4): a stray leading
+    /// (`expandPath` in `tools/path-utils.ts` at v18.15.0): a stray leading
     /// `:` or `@`, a `file:` URL, a `~`. Its renderer does the same, so a
     /// `file:` URL naming `/work/.omh/x` is not taken for a URI omp would not
     /// open.

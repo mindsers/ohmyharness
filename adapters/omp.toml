@@ -193,11 +193,11 @@ tool-command = "command"
 # itself; the first version of this line read `event.input` directly and
 # threw `event.input?.match is not a function` the first time it actually
 # ran. That string contains one or more `[PATH#TAG]` sections rather than a
-# plain path at all: confirmed against `docs/tools/edit.md` at v18.2.3 and
-# again at v18.10.4 — "One or more `[PATH#TAG]` sections containing
+# plain path at all: confirmed against `docs/tools/edit.md` at v18.2.3,
+# v18.10.4 and v18.15.0 — "One or more `[PATH#TAG]` sections containing
 # hashline operations", TAG being "four-uppercase-hex". This reads the first
 # section's PATH the way omp's parser does (`parse_header` in
-# `crates/pi-edit/src/modes/hashline/tokenizer.rs` at v18.10.4): up to the
+# `crates/pi-edit/src/modes/hashline/tokenizer.rs` at v18.15.0): up to the
 # *last* `#`, since v18.4.1 lets a file name hold one ("Fixed hashline edits
 # rejecting files whose names contain `#` (such as yadm alternate files)");
 # with balanced brackets, as in `app/[slug]/page.tsx`; and with a tag in
