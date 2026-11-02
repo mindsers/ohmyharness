@@ -96,7 +96,7 @@ The `claude` adapter, shortened:
 ```toml
 name    = "claude"
 bin     = "claude"
-version = "2.1.300"
+version = "2.1.316"
 install = "npm install -g @anthropic-ai/claude-code@{{version}}"
 creds   = ["$HOME/.claude/", "$HOME/.claude.json"]
 token   = ["$HOME/.claude/.credentials.json"]

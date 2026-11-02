@@ -765,13 +765,19 @@ const AFTER_TOOL: &str = "tool.execute.after";
 /// The catch-all. Fires for every message on the bus, hence the type test.
 const BUS: &str = "event";
 /// Every event opencode's bus carries, at the version `adapters/` pins
-/// (1.19.0): each `({type:"…"` its binary defines, dotted names only,
-/// measured 2026-11-01 with `grep -ao` over `opencode.exe` in omh's image.
+/// (1.19.5): each name its binary defines with a schema — `({type:"…",schema:`
+/// or `({type:"…",...spread,schema:` — dotted names only (`json` is an output
+/// format), read from `opencode.exe` in omh's image as Latin-1 and as UTF-16LE:
+/// 1.19.5 keeps part of its text in the second, which a `grep -ao` cannot see.
+/// Measured 2026-11-02; 1.19.0 defined the same names. A bare `({type:"…"`
+/// also matches what the TUI and its workers send each other (`popover.close`,
+/// `rpc.event`) and the request opencode sends a model (`response.create`),
+/// none of them on the bus.
 /// An event the adapter maps to the bus that is not here never fires — so it
 /// is refused as the adapter's, as omp's `Moment::of` refuses one. Measured
 /// again with each pin bump: `the_opencode_bus_was_measured_at_the_pin` fails
 /// until it is.
-const OPENCODE_BUS_MEASURED_AT: &str = "1.19.0";
+const OPENCODE_BUS_MEASURED_AT: &str = "1.19.5";
 const OPENCODE_BUS_EVENTS: &[&str] = &[
     "catalog.updated",
     "command.executed",
@@ -809,7 +815,6 @@ const OPENCODE_BUS_EVENTS: &[&str] = &[
     "question.v2.rejected",
     "question.v2.replied",
     "reference.updated",
-    "response.create",
     "server.connected",
     "session.compacted",
     "session.created",
@@ -3661,6 +3666,37 @@ mod tests {
         };
         assert!(
             err.contains("session.idel") && err.contains("not an event opencode"),
+            "{err}"
+        );
+    }
+
+    /// `response.create` is a type opencode writes, not one its bus carries:
+    /// it is the request opencode sends a model's websocket
+    /// (`send(JSON.stringify({type:"response.create",…}))`), and nothing
+    /// defines it on the bus. A scan of every `({type:"…"` took it for an
+    /// event, so an adapter mapping to it was let through to never fire.
+    #[test]
+    fn a_type_opencode_sends_a_model_is_not_a_bus_event() {
+        let d = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(Path::new(ADAPTERS).join("opencode.toml")).unwrap();
+        assert_eq!(real.matches("\"session.idle\"").count(), 1);
+        std::fs::write(
+            d.path().join("opencode.toml"),
+            real.replace("\"session.idle\"", "\"response.create\""),
+        )
+        .unwrap();
+        let adapter = Adapter::find(d.path(), "opencode").unwrap();
+        let binding = adapter.supports(Capability::Hooks).unwrap();
+        let hooks = BTreeMap::from([(
+            "x".to_string(),
+            hook::Hook::parse(r#"{"on":"turn-end","run":"true"}"#, "h").unwrap(),
+        )]);
+        let err = match opencode_plugin(&hooks, binding, &adapter.tools, None) {
+            Ok(_) => panic!("a type opencode sends a model was rendered as a bus event"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("`response.create`, which is not an event opencode"),
             "{err}"
         );
     }

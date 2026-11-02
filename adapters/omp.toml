@@ -14,13 +14,13 @@ bin  = "omp"
 # this tag's release, cross-checked by downloading `omp-linux-arm64` and
 # `omp-linux-x64` independently and hashing them rather than trusting the sums
 # file alone — the two agreed.
-version = "18.10.4"
-install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo 58d711d56fa0c95d208c150575dfdb08fe8fc1262e3820d2d900f0a5e750110b ;; *) echo ff59fc1b484c1308a7247ad208305005627b3fac62b440737c2b1835ac32074e ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
+version = "18.15.0"
+install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo 6d7d65030ba562d73cb0687b9710e0ac597b362a185d1911e7b211706dadd4ac ;; *) echo 6737ee2415555a3656cc7b89c14d1c25c18658ee4c0fd4f7309705149ccb7b0f ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
 
 # Per-`uname -m` SHA-256 of the release binary — `omp-linux-arm64` and
-# `omp-linux-x64` from `v18.10.4`. Inline, so it stays a top-level key rather
+# `omp-linux-x64` from `v18.15.0`. Inline, so it stays a top-level key rather
 # than swallowing the keys below it into a `[checksums]` section.
-checksums = { x86_64 = "ff59fc1b484c1308a7247ad208305005627b3fac62b440737c2b1835ac32074e", aarch64 = "58d711d56fa0c95d208c150575dfdb08fe8fc1262e3820d2d900f0a5e750110b" }
+checksums = { x86_64 = "6737ee2415555a3656cc7b89c14d1c25c18658ee4c0fd4f7309705149ccb7b0f", aarch64 = "6d7d65030ba562d73cb0687b9710e0ac597b362a185d1911e7b211706dadd4ac" }
 
 # The whole directory, and it has to be: omp keeps credentials in **SQLite**
 # (`auth_credentials`, `auth_credential_blocks` in `agent.db`), and a bind-
