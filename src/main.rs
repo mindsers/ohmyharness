@@ -403,270 +403,16 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         // to it — the prefix means *this one* everywhere else, and this is the
         // last place it did not.
         Cmd::Sessions { cmd: None } => cmd::session::sessions_ls(&cwd, cli.session.as_deref(), ctx),
-        Cmd::Sessions { cmd: Some(cmd) } => match cmd {
-            // One source for which session a command acts on, now that the
-            // prefix and `--session` both land in `cli.session`. `rm` used to
-            // require its own positional and `diff` accepted either, which is
-            // how the same question came to have two answers.
-            SessionsCmd::Rm { yes } => {
-                let id = cli.session.as_deref().context(
-                    "which session? name it first:\n  omh s01 rm\n  omh s      lists them",
-                )?;
-                cmd::session::rm(
-                    &cwd,
-                    id,
-                    // Wrapped where the two bools are born, so no frame
-                    // carries them side by side. Moving `Consent` to
-                    // `may_remove` only pushed the swap up to `rm`; this is
-                    // the boundary it was pushed to.
-                    cmd::harvest::Consent::read(
-                        cmd::harvest::Forced(*yes),
-                        cmd::harvest::Interactive::of_stdin(),
-                    ),
-                    ctx,
-                )
-            }
-            SessionsCmd::Attach { editor } => {
-                cmd::session::attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx)
-            }
-            SessionsCmd::Resume { harness, args } => {
-                let paths = Paths::discover(&cwd)?;
-                let session = cmd::harvest::existing_session(&paths, cli.session.as_deref())?;
-                // Where the name came from is kept, not flattened. It decides
-                // both what may be said about it and whether it has been
-                // checked: a name off the command line is the user's word and
-                // `Adapter::find` judges it, a name off the marker is omh's own
-                // record and `harness_of` has already refused anything that is
-                // not a harness name.
-                let (harness, from_record) = match harness {
-                    Some(named) => {
-                        // Naming a harness the session did not run is a switch,
-                        // not a resume: an image is built per harness, so the
-                        // sandbox stops and starts on the other one, and the
-                        // record is rewritten so every later `resume` follows.
-                        // Both are wanted — running two harnesses against one
-                        // session is a feature — but the word says *rejoin*, so
-                        // the other meaning has to be said rather than assumed.
-                        if let session::Ran::Harness(before) =
-                            session::harness_of(&paths.runs(), &session.id)
-                        {
-                            if before.as_str() != named.as_str() {
-                                ctx.warn(&format!(
-                                    "{} was running {}; resuming as {named} \
-                                     restarts its sandbox and records {named}",
-                                    session.id,
-                                    out::untrusted(before.as_str())
-                                ));
-                            }
-                        }
-                        (named.clone(), false)
-                    }
-                    None => match session::harness_of(&paths.runs(), &session.id) {
-                        session::Ran::Harness(name) => (name.to_string(), true),
-                        // Refused, never guessed. `detect::preferred_harness`
-                        // would answer for a session it knows nothing about,
-                        // and the answer would be indistinguishable from a
-                        // right one — claude attached to a worktree an
-                        // afternoon of opencode built. Every session made
-                        // before this release is here, and so is every one
-                        // `omh s attach` created for an editor.
-                        session::Ran::NeverRecorded => anyhow::bail!(
-                            "omh has no record of a harness running in {id}, so \
-                             it cannot rejoin as one.\n  \
-                             omh {id} resume <harness>   rejoin it as that\n  \
-                             omh s                       what is here",
-                            id = session.id
-                        ),
-                        session::Ran::CouldNotTell(why) => anyhow::bail!(
-                            "omh recorded a harness for {id} and cannot read it \
-                             back: {why}\n  \
-                             omh {id} resume <harness>   rejoin it as that, \
-                             which rewrites the record",
-                            id = session.id
-                        ),
-                    },
-                };
-                let mut argv = vec![harness.clone()];
-                argv.extend(args.iter().cloned());
-                let launched = cmd::session::run(
-                    &cwd,
-                    &argv,
-                    session::Start::Named(&session.id),
-                    cli.staging(),
-                    ctx,
-                );
-                // Said only when it is true. The record is what omh knows and
-                // the user does not, so a failure needs the provenance; a name
-                // they typed a second ago does not, and claiming omh recorded
-                // it is a statement about history omh cannot support — the
-                // inverse of the mistake this context was added to fix.
-                if from_record {
-                    launched.with_context(|| {
-                        format!("{} recorded `{}`", session.id, out::untrusted(&harness))
-                    })
-                } else {
-                    launched
-                }
-            }
-            SessionsCmd::Down {} => cmd::session::down(
-                &cwd,
-                cli.session.as_deref(),
-                std::io::IsTerminal::is_terminal(&std::io::stdin()),
-                ctx,
-            ),
-            // Absence of a session means every session; naming one scopes to
-            // it. No `--all`: the selector's absence already carries that.
-            SessionsCmd::Sync { base, down } => match cli.session.as_deref() {
-                Some(id) => cmd::harvest::sync(&cwd, id, base.as_deref(), *down, ctx),
-                None => cmd::harvest::sync_all(&cwd, base.as_deref(), *down, ctx),
-            },
-            SessionsCmd::Log { turns } => {
-                cmd::harvest::log_cmd(&cwd, cli.session.as_deref(), *turns, ctx)
-            }
-            SessionsCmd::Diff {
-                checkpoint,
-                base,
-                patch,
-            } => cmd::harvest::diff(
-                &cwd,
-                cli.session.as_deref(),
-                *checkpoint,
-                base.as_deref(),
-                *patch,
-                ctx,
-            ),
-            SessionsCmd::Commit {
-                message,
-                skip_carried,
-                keep,
-                edit,
-                force,
-                no_verify,
-            } => cmd::harvest::commit(
-                &cwd,
-                cli.session.as_deref(),
-                match keep.as_deref() {
-                    Some(selection) => cmd::harvest::Landing::Keep {
-                        selection,
-                        edit: *edit,
-                    },
-                    None => cmd::harvest::Landing::Squash(message.as_deref()),
-                },
-                *skip_carried,
-                *force,
-                *no_verify,
-                ctx,
-            ),
-            SessionsCmd::Push { name, pr } => {
-                cmd::harvest::push(&cwd, cli.session.as_deref(), name.as_deref(), *pr, ctx)
-            }
-        },
+        Cmd::Sessions { cmd: Some(cmd) } => {
+            sessions_cmd(cmd, cli.session.as_deref(), cli.staging(), &cwd, ctx)
+        }
 
         // Outside a repo too. `Paths::discover` refuses there, correctly — a
         // session is a worktree — but this command's whole subject is the file
         // you configure *before* a repo exists, and its own docs say so. The
         // refusal reasoned about worktree branches to somebody setting a
         // default in their home directory.
-        Cmd::Settings { cmd } => {
-            let paths = Paths::anywhere(&cwd)?;
-            match cmd {
-                // At a terminal it is a screen, and anywhere else the report.
-                None if cmd::settings_tui::wanted(cli.json, cli.dry_run) => {
-                    cmd::settings_tui::run(&paths, !ctx.palette.is_plain(), ctx)
-                }
-                None => cmd::settings_tui::show(&paths, ctx),
-                Some(SettingsCmd::Set { key, value, anyway }) => {
-                    // One of omh's features: switched in `[omh]`, for the repos
-                    // `init` seeds — never written as a bare key nothing reads.
-                    if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
-                        let reach = cmd::settings::Reach::named(config::Layer::Personal);
-                        return cmd::settings::feature_switch(
-                            &paths,
-                            key,
-                            cmd::settings::on_or_off(key, value, &reach)?,
-                            reach,
-                            cli.dry_run,
-                            ctx,
-                        );
-                    }
-                    cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
-                    // Both doors, for the reason the guard above exists: a
-                    // check on one spelling of a write is a check somebody
-                    // routes around by typing the other.
-                    if key == "account" {
-                        cmd::settings::check_account(&paths, value, ctx)?;
-                    }
-                    cmd::settings::set(
-                        &paths,
-                        key,
-                        value,
-                        cmd::settings::Reach::named(config::Layer::Personal),
-                        *anyway,
-                        cli.dry_run,
-                        ctx,
-                    )
-                }
-                Some(SettingsCmd::Unset { key, harness }) => {
-                    cmd::settings::only_account_is_per_harness(key, harness.as_deref())?;
-                    if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
-                        return cmd::settings::feature_forget(
-                            &paths,
-                            key,
-                            cmd::settings::Reach::named(config::Layer::Personal),
-                            cli.dry_run,
-                            ctx,
-                        );
-                    }
-                    cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
-                    cmd::settings::unset(
-                        &paths,
-                        key,
-                        harness.as_deref(),
-                        cmd::settings::Reach::named(config::Layer::Personal),
-                        cli.dry_run,
-                        ctx,
-                    )
-                }
-                Some(SettingsCmd::Use {
-                    capability,
-                    name,
-                    all,
-                }) => cmd::catalogue::defaults_use(
-                    &paths,
-                    capability,
-                    name.as_deref(),
-                    *all,
-                    cli.dry_run,
-                    ctx,
-                ),
-                Some(SettingsCmd::Unuse { capability, name }) => {
-                    cmd::catalogue::defaults_unuse(&paths, capability, name, cli.dry_run, ctx)
-                }
-                Some(SettingsCmd::Edit { capability, name }) => cmd::settings::edit(
-                    &paths,
-                    capability.as_deref(),
-                    name.as_deref(),
-                    config::Layer::Personal,
-                    ctx,
-                ),
-                Some(SettingsCmd::Rm {
-                    capability,
-                    name,
-                    yes,
-                }) => cmd::settings::rm(
-                    &paths,
-                    capability,
-                    name,
-                    cmd::harvest::Consent::read(
-                        cmd::harvest::Forced(*yes),
-                        cmd::harvest::Interactive::of_stdin(),
-                    ),
-                    cli.dry_run,
-                    ctx,
-                ),
-                Some(SettingsCmd::Mcp { cmd }) => cmd::mcp::mcp(&paths, cmd, cli.dry_run, ctx),
-            }
-        }
+        Cmd::Settings { cmd } => settings_cmd(cmd, cli.dry_run, cli.json, &cwd, ctx),
 
         Cmd::Set {
             key,
@@ -756,39 +502,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             cmd::catalogue::import_cmd(&cwd, capability, harness, from.as_deref(), cli.dry_run, ctx)
         }
 
-        Cmd::Memory { cmd } => match cmd {
-            None => cmd::memory::memory_ls(&cwd, ctx),
-            Some(MemoryCmd::Lint) => cmd::memory::memory_lint(&cwd, ctx),
-            Some(MemoryCmd::Stale) => cmd::memory::memory_stale(&cwd, ctx),
-            Some(MemoryCmd::Serve { notes }) => cmd::memory::memory_serve(notes.clone()),
-            Some(MemoryCmd::Rm { key, at }) => {
-                cmd::memory::memory_rm(&cwd, key, at.as_deref(), cli.dry_run, ctx)
-            }
-            Some(MemoryCmd::Remember {
-                expected,
-                observed,
-                evidence,
-                answers,
-                relates_to,
-                invalidated_by,
-                source,
-                if_exists,
-            }) => cmd::memory::memory_remember(
-                &cwd,
-                memory::Remembered {
-                    expected: expected.clone(),
-                    observed: observed.clone(),
-                    evidence: evidence.clone(),
-                    answers: answers.clone(),
-                    relates_to: relates_to.clone(),
-                    invalidated_by: invalidated_by.clone(),
-                    source: source.clone().unwrap_or_default(),
-                    recorded: crate::date::today(),
-                },
-                *if_exists,
-                ctx,
-            ),
-        },
+        Cmd::Memory { cmd } => memory_cmd(cmd, cli.dry_run, &cwd, ctx),
 
         // Before `run` looks anything up: which flags are whose is a question
         // about the command line, and answering it after resolving an adapter
@@ -805,6 +519,303 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             argv.extend(args.iter().cloned());
             cmd::session::run(&cwd, &argv, session::Start::Fresh, cli.staging(), ctx)
         }
+    }
+}
+
+/// `omh s <verb>`: one session's verbs, on the session the prefix or
+/// `--session` named.
+fn sessions_cmd(
+    cmd: &SessionsCmd,
+    session: Option<&str>,
+    staging: container::Staging,
+    cwd: &std::path::Path,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    match cmd {
+        // One source for which session a command acts on, now that the
+        // prefix and `--session` both land in `cli.session`. `rm` used to
+        // require its own positional and `diff` accepted either, which is
+        // how the same question came to have two answers.
+        SessionsCmd::Rm { yes } => {
+            let id = session
+                .context("which session? name it first:\n  omh s01 rm\n  omh s      lists them")?;
+            cmd::session::rm(
+                cwd,
+                id,
+                // Wrapped where the two bools are born, so no frame
+                // carries them side by side. Moving `Consent` to
+                // `may_remove` only pushed the swap up to `rm`; this is
+                // the boundary it was pushed to.
+                cmd::harvest::Consent::read(
+                    cmd::harvest::Forced(*yes),
+                    cmd::harvest::Interactive::of_stdin(),
+                ),
+                ctx,
+            )
+        }
+        SessionsCmd::Attach { editor } => {
+            cmd::session::attach(cwd, session, editor.as_deref(), ctx)
+        }
+        SessionsCmd::Resume { harness, args } => {
+            let paths = Paths::discover(cwd)?;
+            let session = cmd::harvest::existing_session(&paths, session)?;
+            // Where the name came from is kept, not flattened. It decides
+            // both what may be said about it and whether it has been
+            // checked: a name off the command line is the user's word and
+            // `Adapter::find` judges it, a name off the marker is omh's own
+            // record and `harness_of` has already refused anything that is
+            // not a harness name.
+            let (harness, from_record) = match harness {
+                Some(named) => {
+                    // Naming a harness the session did not run is a switch,
+                    // not a resume: an image is built per harness, so the
+                    // sandbox stops and starts on the other one, and the
+                    // record is rewritten so every later `resume` follows.
+                    // Both are wanted — running two harnesses against one
+                    // session is a feature — but the word says *rejoin*, so
+                    // the other meaning has to be said rather than assumed.
+                    if let session::Ran::Harness(before) =
+                        session::harness_of(&paths.runs(), &session.id)
+                    {
+                        if before.as_str() != named.as_str() {
+                            ctx.warn(&format!(
+                                "{} was running {}; resuming as {named} \
+                             restarts its sandbox and records {named}",
+                                session.id,
+                                out::untrusted(before.as_str())
+                            ));
+                        }
+                    }
+                    (named.clone(), false)
+                }
+                None => match session::harness_of(&paths.runs(), &session.id) {
+                    session::Ran::Harness(name) => (name.to_string(), true),
+                    // Refused, never guessed. `detect::preferred_harness`
+                    // would answer for a session it knows nothing about,
+                    // and the answer would be indistinguishable from a
+                    // right one — claude attached to a worktree an
+                    // afternoon of opencode built. Every session made
+                    // before this release is here, and so is every one
+                    // `omh s attach` created for an editor.
+                    session::Ran::NeverRecorded => anyhow::bail!(
+                        "omh has no record of a harness running in {id}, so \
+                     it cannot rejoin as one.\n  \
+                     omh {id} resume <harness>   rejoin it as that\n  \
+                     omh s                       what is here",
+                        id = session.id
+                    ),
+                    session::Ran::CouldNotTell(why) => anyhow::bail!(
+                        "omh recorded a harness for {id} and cannot read it \
+                     back: {why}\n  \
+                     omh {id} resume <harness>   rejoin it as that, \
+                     which rewrites the record",
+                        id = session.id
+                    ),
+                },
+            };
+            let mut argv = vec![harness.clone()];
+            argv.extend(args.iter().cloned());
+            let launched =
+                cmd::session::run(cwd, &argv, session::Start::Named(&session.id), staging, ctx);
+            // Said only when it is true. The record is what omh knows and
+            // the user does not, so a failure needs the provenance; a name
+            // they typed a second ago does not, and claiming omh recorded
+            // it is a statement about history omh cannot support — the
+            // inverse of the mistake this context was added to fix.
+            if from_record {
+                launched.with_context(|| {
+                    format!("{} recorded `{}`", session.id, out::untrusted(&harness))
+                })
+            } else {
+                launched
+            }
+        }
+        SessionsCmd::Down {} => cmd::session::down(
+            cwd,
+            session,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            ctx,
+        ),
+        // Absence of a session means every session; naming one scopes to
+        // it. No `--all`: the selector's absence already carries that.
+        SessionsCmd::Sync { base, down } => match session {
+            Some(id) => cmd::harvest::sync(cwd, id, base.as_deref(), *down, ctx),
+            None => cmd::harvest::sync_all(cwd, base.as_deref(), *down, ctx),
+        },
+        SessionsCmd::Log { turns } => cmd::harvest::log_cmd(cwd, session, *turns, ctx),
+        SessionsCmd::Diff {
+            checkpoint,
+            base,
+            patch,
+        } => cmd::harvest::diff(cwd, session, *checkpoint, base.as_deref(), *patch, ctx),
+        SessionsCmd::Commit {
+            message,
+            skip_carried,
+            keep,
+            edit,
+            force,
+            no_verify,
+        } => cmd::harvest::commit(
+            cwd,
+            session,
+            match keep.as_deref() {
+                Some(selection) => cmd::harvest::Landing::Keep {
+                    selection,
+                    edit: *edit,
+                },
+                None => cmd::harvest::Landing::Squash(message.as_deref()),
+            },
+            *skip_carried,
+            *force,
+            *no_verify,
+            ctx,
+        ),
+        SessionsCmd::Push { name, pr } => {
+            cmd::harvest::push(cwd, session, name.as_deref(), *pr, ctx)
+        }
+    }
+}
+
+/// `omh settings` and its verbs.
+fn settings_cmd(
+    cmd: &Option<SettingsCmd>,
+    dry_run: bool,
+    json: bool,
+    cwd: &std::path::Path,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    let paths = Paths::anywhere(cwd)?;
+    match cmd {
+        // At a terminal it is a screen, and anywhere else the report.
+        None if cmd::settings_tui::wanted(json, dry_run) => {
+            cmd::settings_tui::run(&paths, !ctx.palette.is_plain(), ctx)
+        }
+        None => cmd::settings_tui::show(&paths, ctx),
+        Some(SettingsCmd::Set { key, value, anyway }) => {
+            // One of omh's features: switched in `[omh]`, for the repos
+            // `init` seeds — never written as a bare key nothing reads.
+            if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
+                let reach = cmd::settings::Reach::named(config::Layer::Personal);
+                return cmd::settings::feature_switch(
+                    &paths,
+                    key,
+                    cmd::settings::on_or_off(key, value, &reach)?,
+                    reach,
+                    dry_run,
+                    ctx,
+                );
+            }
+            cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
+            // Both doors, for the reason the guard above exists: a
+            // check on one spelling of a write is a check somebody
+            // routes around by typing the other.
+            if key == "account" {
+                cmd::settings::check_account(&paths, value, ctx)?;
+            }
+            cmd::settings::set(
+                &paths,
+                key,
+                value,
+                cmd::settings::Reach::named(config::Layer::Personal),
+                *anyway,
+                dry_run,
+                ctx,
+            )
+        }
+        Some(SettingsCmd::Unset { key, harness }) => {
+            cmd::settings::only_account_is_per_harness(key, harness.as_deref())?;
+            if let cmd::settings::Names::AFeature = cmd::settings::names(&paths, key, ctx) {
+                return cmd::settings::feature_forget(
+                    &paths,
+                    key,
+                    cmd::settings::Reach::named(config::Layer::Personal),
+                    dry_run,
+                    ctx,
+                );
+            }
+            cmd::settings::no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
+            cmd::settings::unset(
+                &paths,
+                key,
+                harness.as_deref(),
+                cmd::settings::Reach::named(config::Layer::Personal),
+                dry_run,
+                ctx,
+            )
+        }
+        Some(SettingsCmd::Use {
+            capability,
+            name,
+            all,
+        }) => cmd::catalogue::defaults_use(&paths, capability, name.as_deref(), *all, dry_run, ctx),
+        Some(SettingsCmd::Unuse { capability, name }) => {
+            cmd::catalogue::defaults_unuse(&paths, capability, name, dry_run, ctx)
+        }
+        Some(SettingsCmd::Edit { capability, name }) => cmd::settings::edit(
+            &paths,
+            capability.as_deref(),
+            name.as_deref(),
+            config::Layer::Personal,
+            ctx,
+        ),
+        Some(SettingsCmd::Rm {
+            capability,
+            name,
+            yes,
+        }) => cmd::settings::rm(
+            &paths,
+            capability,
+            name,
+            cmd::harvest::Consent::read(
+                cmd::harvest::Forced(*yes),
+                cmd::harvest::Interactive::of_stdin(),
+            ),
+            dry_run,
+            ctx,
+        ),
+        Some(SettingsCmd::Mcp { cmd }) => cmd::mcp::mcp(&paths, cmd, dry_run, ctx),
+    }
+}
+
+/// `omh memory` and its verbs.
+fn memory_cmd(
+    cmd: &Option<MemoryCmd>,
+    dry_run: bool,
+    cwd: &std::path::Path,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    match cmd {
+        None => cmd::memory::memory_ls(cwd, ctx),
+        Some(MemoryCmd::Lint) => cmd::memory::memory_lint(cwd, ctx),
+        Some(MemoryCmd::Stale) => cmd::memory::memory_stale(cwd, ctx),
+        Some(MemoryCmd::Serve { notes }) => cmd::memory::memory_serve(notes.clone()),
+        Some(MemoryCmd::Rm { key, at }) => {
+            cmd::memory::memory_rm(cwd, key, at.as_deref(), dry_run, ctx)
+        }
+        Some(MemoryCmd::Remember {
+            expected,
+            observed,
+            evidence,
+            answers,
+            relates_to,
+            invalidated_by,
+            source,
+            if_exists,
+        }) => cmd::memory::memory_remember(
+            cwd,
+            memory::Remembered {
+                expected: expected.clone(),
+                observed: observed.clone(),
+                evidence: evidence.clone(),
+                answers: answers.clone(),
+                relates_to: relates_to.clone(),
+                invalidated_by: invalidated_by.clone(),
+                source: source.clone().unwrap_or_default(),
+                recorded: crate::date::today(),
+            },
+            *if_exists,
+            ctx,
+        ),
     }
 }
 
