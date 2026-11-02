@@ -347,19 +347,19 @@ fn kept_provider(
                 false => author_provider(
                     format,
                     &raw,
-                    &account_dir,
+                    account_dir,
                     &env,
                     settings_beside(format, file)?,
                 ),
-                true => author_provider(format, &raw, &account_dir, &|_| None, None).with_context(
-                    || {
+                true => {
+                    author_provider(format, &raw, account_dir, &|_| None, None).with_context(|| {
                         format!(
                             "it is under {}, which a session can write, so nothing in it is read \
                      from your environment — check it, copy it out, and name the copy",
                             paths.root.display()
                         )
-                    },
-                ),
+                    })
+                }
             }
             .with_context(|| format!("{}", file.display()))?;
             let doc =
@@ -377,13 +377,13 @@ fn kept_provider(
             Some(doc)
         }
         (None, true, Some(source), Some(format)) => {
-            let host = crate::adapter::expand_host(source, &home, &paths.repo);
+            let host = crate::adapter::expand_host(source, home, &paths.repo);
             let env = |k: &str| std::env::var(k).ok();
             match read_host_provider(format, &host)? {
                 Some((host, raw)) => author_provider(
                     format,
                     &raw,
-                    &account_dir,
+                    account_dir,
                     &env,
                     settings_beside(format, &host)?,
                 )
