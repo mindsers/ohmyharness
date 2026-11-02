@@ -66,6 +66,20 @@ login = "run `/login` inside omp, then exit"
 # used by nothing, and a phrase planted there did not reach the model. An empty
 # `PERSONALITY.md` is a line in omp's log at every start; the other masks omp
 # skips without a word.
+#
+# And `approval-cache.db`, where omp keeps the calls you allowed "always" in
+# its ask-and-remember mode, `tools.approvalMode: always-ask-cached`: in that
+# mode a call a kept grant covers runs without asking (`tools/approval.ts`,
+# `tools/approval-cache.ts`, v18.15.0). The mode is never carried from the
+# account; a session picks it, or a repo does in its own `.omp/config.yml`
+# (`config/settings.ts`). Measured in `tests/e2e`: a grant planted there let a
+# write through. Masked, the cache is an empty database with no table, which
+# omp reads as nothing remembered, and fails to save an "always" answer —
+# read in its source, since no run here can answer a prompt — so the next such
+# call asks again; "for this session" it keeps in memory, as before. Not a
+# per-session copy mounted over it: SQLite writes its journal beside the file
+# it opens, here into the account's directory every session shares (measured
+# with Node's SQLite in the session's base image).
 mask = [
   "$HOME/.omp/agent/AGENTS.md",
   "$HOME/.omp/agent/RULES.md",
@@ -80,6 +94,7 @@ mask = [
   "$HOME/.omp/agent/hooks/post/",
   "$HOME/.omp/agent/tools/",
   "$HOME/.omp/agent/extensions/",
+  "$HOME/.omp/agent/approval-cache.db",
 ]
 
 [token-probe]
