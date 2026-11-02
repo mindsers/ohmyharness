@@ -130,6 +130,8 @@ of the host's environment, commands or loopback, so:
 | `env_http_headers` | the same, into `http_headers` |
 | `env_key_instructions` | dropped |
 | `auth` (a command), `gateway_oauth`, `aws` | refused: a sandbox cannot run your command or read your AWS profile. Put the token the command produces in a provider file and name that |
+| `credential_file`, `project_id`, `location` | refused: a credential file is a path on your machine, and the other two are for Codex's own Google Cloud provider |
+| a table under one of Codex's own ids — `openai`, `amazon-bedrock`, `amazon-bedrock-runtime`, `gcp`, `ollama`, `lmstudio` | refused: Codex refuses to start with a provider of yours there, and its own Bedrock and Google Cloud ones sign in from your machine. Give yours another id. An `openai` table holding only `model_catalog_url` is kept |
 | a `base_url` on `127.0.0.1` or `localhost` | refused: in a sandbox that is the sandbox itself. Name an address it can reach — on Docker Desktop, `host.docker.internal` |
 
 A refusal keeps nothing. A file you write by hand is held to the same
@@ -183,11 +185,19 @@ not a file omh can copy, so the account holds the providers alone. An account
 that holds only providers counts as captured.
 
 **Only the providers are kept, in omp's own words.** `provider.yml` is a
-`models.yml`: `providers:` and nothing else, each provider's fields from omp's
-own list. Each launch renders it over the `models.yml` omp reads, read-only —
-`{}` when the account has none — so no session can change the providers later
-sessions use. With `models.yml` there, omp reads neither `models.yaml` nor
-`models.json`.
+`models.yml`: `providers:`, each provider's fields from omp's own list, and
+nothing else but the lists below. Each launch renders it over the
+`models.yml` omp reads, read-only — `{}` when the account has none — so no
+session can change the providers later sessions use. With `models.yml` there,
+omp reads neither `models.yaml` nor `models.json`.
+
+**And which of them a session uses.** `enabledProviders`, `disabledProviders`
+and `modelProviderOrder` are omp `config.yml` lists that choose among its
+providers. `omh account login omp` keeps them beside the providers — from the
+file it reads and the `config.yml` beside it, where omp reads them, the file's
+own first — and each session's `config.yml` starts from them. A session that changes one
+keeps its change across its relaunches, until the account's change; the
+account never takes it back.
 
 **What the host supplies is settled once, at `omh account login`:**
 
@@ -196,10 +206,12 @@ sessions use. With `models.yml` there, omp reads neither `models.yaml` nor
 | `apiKey: CORP_KEY`, or a header value naming a variable | reads it from the shell running `omh account login` and keeps its value, as omp would; a name in capitals that is unset is refused — omp would send it as the key |
 | an `apiKey` or a header value starting with `!` | refused: a sandbox cannot run your command. Put the value it prints in the file |
 | a `baseUrl`, a model's or a provider's, or a `remoteCompaction` endpoint on `127.0.0.1` or `localhost` | refused, as for Codex |
-| `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth` | refused in a provider file: they are `config.yml` keys — and not [preferences](#ompagentconfigyml-is-each-sessions-own), so one a session sets lasts that session |
+| `enabledProviders`, `disabledProviders`, `modelProviderOrder` | kept beside the providers, each a list of provider names |
+| `auth` | refused in a provider file: a `config.yml` key — and not a [preference](#ompagentconfigyml-is-each-sessions-own), so one a session sets lasts that session |
 
-A file under `~/.omh` is read with nothing from your environment, since a
-session could have written it: check it, copy it out, and name the copy.
+A file under `~/.omh` is read with nothing from your environment and nothing
+beside it, since a session could have written it: check it, copy it out, and
+name the copy.
 
 **The account's own `models.yml`.** omp read it straight from the account
 until now, and a launch that finds providers defined there — or in
@@ -637,10 +649,12 @@ copy of its own:
   colour-blind mode, symbols, the composer's shape — and `setupVersion`, which
   omp records once that wizard has run: without it, every session would start
   with the wizard;
-- **not kept:** everything else — extensions, tool and MCP settings,
-  `enabledProviders`, `disabledProviders`, `modelProviderOrder`, `auth`. They
-  last the session that wrote them. Your providers are the account's
-  [provider file](#omps-providers);
+- **not kept:** everything else — extensions, tool and MCP settings, `auth`.
+  They last the session that wrote them. Your providers, and the lists that
+  choose among them (`enabledProviders`, `disabledProviders`,
+  `modelProviderOrder`), are the account's [provider file](#omps-providers):
+  each session's copy starts from them, and a session's change to one lasts
+  that session;
 - **how:** the account's `config.yml` is a link to `/omh/prefs/config.yml`, and
   each session mounts its own copy there. omp resolves the link before it
   saves, and saves into the session's copy (`tests/e2e`: `omp config set`

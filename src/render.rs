@@ -765,13 +765,19 @@ const AFTER_TOOL: &str = "tool.execute.after";
 /// The catch-all. Fires for every message on the bus, hence the type test.
 const BUS: &str = "event";
 /// Every event opencode's bus carries, at the version `adapters/` pins
-/// (1.19.0): each `({type:"…"` its binary defines, dotted names only,
-/// measured 2026-11-01 with `grep -ao` over `opencode.exe` in omh's image.
+/// (1.19.5): each name its binary defines with a schema — `({type:"…",schema:`
+/// or `({type:"…",...spread,schema:` — dotted names only (`json` is an output
+/// format), read from `opencode.exe` in omh's image as Latin-1 and as UTF-16LE:
+/// 1.19.5 keeps part of its text in the second, which a `grep -ao` cannot see.
+/// Measured 2026-11-02; 1.19.0 defined the same names. A bare `({type:"…"`
+/// also matches what the TUI and its workers send each other (`popover.close`,
+/// `rpc.event`) and the request opencode sends a model (`response.create`),
+/// none of them on the bus.
 /// An event the adapter maps to the bus that is not here never fires — so it
 /// is refused as the adapter's, as omp's `Moment::of` refuses one. Measured
 /// again with each pin bump: `the_opencode_bus_was_measured_at_the_pin` fails
 /// until it is.
-const OPENCODE_BUS_MEASURED_AT: &str = "1.19.0";
+const OPENCODE_BUS_MEASURED_AT: &str = "1.19.5";
 const OPENCODE_BUS_EVENTS: &[&str] = &[
     "catalog.updated",
     "command.executed",
@@ -809,7 +815,6 @@ const OPENCODE_BUS_EVENTS: &[&str] = &[
     "question.v2.rejected",
     "question.v2.replied",
     "reference.updated",
-    "response.create",
     "server.connected",
     "session.compacted",
     "session.created",
@@ -1600,13 +1605,13 @@ const t = (hook, raw, word, env) => {
 // file another way: relative, `..`, `./`, a doubled slash.
 //
 // omp is followed step for step (`write.ts` and `tools/path-utils.ts` at
-// v18.10.4): a `[PATH]` or `[PATH#TAG]` hashline header is unwrapped; a URL its
+// v18.15.0): a `[PATH]` or `[PATH#TAG]` hashline header is unwrapped; a URL its
 // router handles is not a file here — `xd://mcp__<server>_<tool>` is how it
 // calls an MCP tool, and its `local:` writes stay in its own session
 // directory — and anything else goes through `expandPath`: a stray leading `:`
 // or `@`, a `file:` URL, and `~`, which is joined to the home directory
 // whatever follows it. A scheme the router does not handle, `a://`, is a path.
-const OMP_SCHEMES = new Set(["agent", "artifact", "attachment", "cfg", "conflict", "history", "issue", "local", "mcp", "memory", "omp", "pr", "proc", "rule", "security", "skill", "ssh", "vault", "xd"])
+const OMP_SCHEMES = new Set(["agent", "artifact", "attachment", "cfg", "conflict", "history", "issue", "local", "mcp", "memory", "mr", "omp", "out", "pr", "proc", "rule", "security", "skill", "ssh", "vault", "xd"])
 const omh_file = (f, omp) => {
   if (!f) return ""
   if (omp) {
@@ -3665,6 +3670,37 @@ mod tests {
         );
     }
 
+    /// `response.create` is a type opencode writes, not one its bus carries:
+    /// it is the request opencode sends a model's websocket
+    /// (`send(JSON.stringify({type:"response.create",…}))`), and nothing
+    /// defines it on the bus. A scan of every `({type:"…"` took it for an
+    /// event, so an adapter mapping to it was let through to never fire.
+    #[test]
+    fn a_type_opencode_sends_a_model_is_not_a_bus_event() {
+        let d = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(Path::new(ADAPTERS).join("opencode.toml")).unwrap();
+        assert_eq!(real.matches("\"session.idle\"").count(), 1);
+        std::fs::write(
+            d.path().join("opencode.toml"),
+            real.replace("\"session.idle\"", "\"response.create\""),
+        )
+        .unwrap();
+        let adapter = Adapter::find(d.path(), "opencode").unwrap();
+        let binding = adapter.supports(Capability::Hooks).unwrap();
+        let hooks = BTreeMap::from([(
+            "x".to_string(),
+            hook::Hook::parse(r#"{"on":"turn-end","run":"true"}"#, "h").unwrap(),
+        )]);
+        let err = match opencode_plugin(&hooks, binding, &adapter.tools, None) {
+            Ok(_) => panic!("a type opencode sends a model was rendered as a bus event"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("`response.create`, which is not an event opencode"),
+            "{err}"
+        );
+    }
+
     /// Every string the hook modules carry is written as a JavaScript
     /// literal, never with `{:?}`: Rust's debug syntax writes a NUL followed by
     /// a digit as `"\01"`, which strict-mode JavaScript refuses as a legacy
@@ -4854,6 +4890,49 @@ try {{
         assert!(said.contains(&tricky), "omp, `://` inside a path: {said}");
     }
 
+    /// omp 18.15.0's router took two schemes 18.10.4's did not: `out://`, the
+    /// reply shown to the user, and `mr://`, a merge request
+    /// (`internal-urls/router.ts`). Neither is a file, so a hook on edits
+    /// leaves a write to either alone; read as paths, they were `/work/out:/…`
+    /// to every guard, and a "no edits here" hook refused omp's replies.
+    #[test]
+    fn a_write_to_an_omp_reply_or_merge_request_is_not_an_edit() {
+        let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"saw $OMH_TOOL_FILE"}"#;
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/saw.json", hook);
+        let body = document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: None,
+                provider: None,
+            },
+        )
+        .unwrap()
+        .body;
+        let write = |path: &str| {
+            drive_omp(
+                &body,
+                "tool_call",
+                &format!(r#"{{ toolName: "write", input: {{ path: "{path}", content: "x" }} }}"#),
+            )
+        };
+        let here = std::env::current_dir().unwrap();
+        let said = write("reply.md");
+        assert!(
+            said.contains(&format!("saw {}/reply.md", here.display())),
+            "a file is still an edit: {said}"
+        );
+        for url in ["out://reply.md", "mr://42"] {
+            assert_eq!(write(url), "null", "{url} is not a file");
+        }
+    }
+
     /// One spelling of every path: a hook sees the file a call touches the way
     /// the harness will resolve it, so a guard matching `/work/.omh/*` cannot
     /// be walked past by writing the same path differently.
@@ -4861,7 +4940,7 @@ try {{
     /// A relative path is resolved against where the harness runs, and `.`,
     /// `..` and doubled slashes are collapsed — `pkg/../.omh/x` is `.omh/x`
     /// to the filesystem. omp also cleans a path before it resolves it
-    /// (`expandPath` in `tools/path-utils.ts` at v18.10.4): a stray leading
+    /// (`expandPath` in `tools/path-utils.ts` at v18.15.0): a stray leading
     /// `:` or `@`, a `file:` URL, a `~`. Its renderer does the same, so a
     /// `file:` URL naming `/work/.omh/x` is not taken for a URI omp would not
     /// open.

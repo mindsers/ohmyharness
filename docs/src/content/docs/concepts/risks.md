@@ -192,19 +192,25 @@ omp fetches credentials through, and `extensions` lists extensions it loads
 the account's is a link to the session's copy, and the account keeps only the
 keys the adapter declares as preferences — see
 [`~/.omp/agent/config.yml` is each session's own](/guides/accounts/#ompagentconfigyml-is-each-sessions-own).
+The three lists that choose among providers are kept in the account's
+provider file instead, where no session writes, and each session's copy
+starts from them.
 `tests/e2e` launches with an account whose shared file holds a setting that is
 not a preference beside the model, and asserts the turn runs on the model and
 omp reads the other setting as never set — red with the shared file as before.
 
 **Closed across sessions for instructions and modules** (10-18 §5.1). Each
-harness reads text for the model from its account at every start, and omp
-imports code from it too:
+harness reads text for the model from its account at every start, and some
+read their environment or start code from it too:
 - Claude Code: `~/.claude/CLAUDE.md`, the personal memory, and `rules/`;
-- Codex: `~/.codex/AGENTS.md`, the `AGENTS.override.md` it reads instead, and
-  `skills/`;
+- Codex: `~/.codex/AGENTS.md`, the `AGENTS.override.md` it reads instead,
+  `skills/`, and — measured again at 0.166.0 — the `.env` it loads into its
+  environment and the command rules in `rules/`;
 - omp: `AGENTS.md`, `RULES.md` and `SYSTEM.md` under `~/.omp/agent`, and every
   module in its `hooks/pre/`, `hooks/post/`, `tools/` and `extensions/` (read
-  in its binary, 18.10.4).
+  in its binary, 18.10.4); and, measured again at 18.15.0, `SYSTEM_TEMPLATE.md`,
+  `PERSONALITY.md`, `rules/`, the `.env` it loads, the servers `.mcp.json`
+  names and the modules `settings.json` names.
 
 Each is now hidden behind an empty read-only file or directory — omp's
 `hooks/pre/` holding only omh's own module — so what one session leaves there
@@ -212,7 +218,8 @@ reaches no other. `tests/e2e` plants each in the account, along with the places
 the harness does not read from (`skills/`, `agents/`, `commands/`, prompts and
 output styles), and asserts that no planted phrase reaches the model and no
 planted module leaves its marker. It is red with the account's own mounted, as
-before. Nothing omh does puts your own there: your personal memory reaches a
+before — but for omp's `settings.json`, whose module only a start by hand
+imported. Nothing omh does puts your own there: your personal memory reaches a
 session as a rule you import into your catalogue. The cost is that a session
 cannot write Claude's personal memory.
 

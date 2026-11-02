@@ -784,35 +784,51 @@ fn planted_server(s: &Session) {
 /// - instructions, rules and skills, each carrying an `E2E-PLANTED-<what>`
 ///   phrase: Claude's `CLAUDE.md`, `rules/`, and the places it does not read
 ///   them from (`skills/`, `agents/`, `commands/`, `output-styles/`); Codex's
-///   `AGENTS.md`, `AGENTS.override.md`, `skills/` and `prompts/`; omp's
-///   `AGENTS.md`, `RULES.md`, `SYSTEM.md` and its `skills/`, `agents/`,
+///   `AGENTS.md`, `AGENTS.override.md`, `skills/`, `prompts/`, and a rule in
+///   `rules/` forbidding `true` with the phrase as its reason; omp's
+///   `AGENTS.md`, `RULES.md`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`,
+///   `PERSONALITY.md`, `rules/`, `instructions/` and its `skills/`, `agents/`,
 ///   `commands/` and `prompts/`;
+/// - a `.env` for Codex and for omp, setting a variable the turn's shell
+///   prints to the phrase;
 /// - omp modules under `hooks/pre/`, `hooks/post/`, `tools/` and
-///   `extensions/`, which leave a marker when loaded.
+///   `extensions/`, one named in `settings.json`, and a server in
+///   `.mcp.json`, each leaving a marker when loaded or started.
 ///
 /// No planted phrase, of any name, reaches the model.
 fn account_plants(s: &Session) {
-    // A tool call, so a hook keyed to a tool has its moment.
-    let turn = s.turn("Run it.", &[(s.harness.shell)("true")]);
+    // Tool calls, so a hook keyed to a tool has its moment: one that prints a
+    // variable a planted `.env` sets, so it reaches the model too, and one a
+    // planted command rule would refuse.
+    let turn = s.turn(
+        "Run it.",
+        &[
+            (s.harness.shell)("echo env=$E2E_PLANTED_ENV"),
+            (s.harness.shell)("true"),
+        ],
+    );
     ran(&turn);
-    for ask in turn.asks() {
-        let seen = Turn::seen(ask);
-        let reached: std::collections::BTreeSet<&str> = seen
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-            .filter(|w| w.starts_with("E2E-PLANTED-"))
-            .collect();
-        assert!(
-            reached.is_empty(),
-            "left in the account, these reached the model: {reached:?}"
-        );
-    }
+    // Every plant that got through, gathered before anything is asserted, so
+    // one run names them all.
+    let reached: std::collections::BTreeSet<String> = turn
+        .asks()
+        .into_iter()
+        .flat_map(|ask| {
+            Turn::seen(ask)
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .filter(|w| w.starts_with("E2E-PLANTED-"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
     let marks = ok(
         &s.sh("ls /tmp/e2e-planted-module-* 2>/dev/null; true"),
         "ls",
     );
     assert!(
-        marks.trim().is_empty(),
-        "a module left in the account was loaded: {marks}"
+        reached.is_empty() && marks.trim().is_empty(),
+        "left in the account, these reached the model: {reached:?}; \
+         and these modules were loaded: {marks}"
     );
 }
 
@@ -903,6 +919,13 @@ fn omp_config(s: &Session) {
         ok(&s.sh(&get), &get).trim().to_string()
     };
     assert_eq!(get("todo.enabled"), "true", "omp read the dropped setting");
+    // The account's provider filters, in the session's copy and nowhere the
+    // account keeps preferences.
+    let seeded = std::fs::read_to_string(s.preferences("config.yml")).unwrap_or_default();
+    assert!(
+        seeded.contains("disabledProviders") && seeded.contains("lm-studio"),
+        "the account's provider filters did not reach the session: {seeded}"
+    );
     let link = || {
         ok(&s.sh("readlink ~/.omp/agent/config.yml"), "readlink")
             .trim()
@@ -926,7 +949,8 @@ fn omp_config(s: &Session) {
     assert!(
         kept.contains("fake/fake-model")
             && !kept.contains("todo")
-            && !kept.contains("showHardwareCursor"),
+            && !kept.contains("showHardwareCursor")
+            && !kept.contains("disabledProviders"),
         "the account kept: {kept}"
     );
 }

@@ -4,7 +4,7 @@ bin  = "codex"
 # Pinned like the other npm harnesses (see claude.toml). MAINTAINER: bump
 # `version` to the release under test — a wrong pin is caught by omh's own build
 # and `omh doctor`, not by `cargo test`.
-version = "0.162.1"
+version = "0.166.0"
 install = "npm install -g @openai/codex@{{version}}"
 
 # The whole config directory, not the token file: a bind-mounted *file* cannot
@@ -38,12 +38,23 @@ login = "choose `Sign in with Device Code` in Codex, then exit — or run `omh a
 # `AGENTS.override.md`, read instead of it when there, and `skills/`. Measured
 # in `tests/e2e`: a phrase planted in the override and in a skill reached the
 # model, and with only the override masked Codex fell back to `AGENTS.md`; one
-# planted in `prompts/` did not. `rules/` decides which commands need approval
-# and reaches no model, so nothing here measures it, and it is not masked.
+# planted in `prompts/` did not.
+#
+# Two more, measured the same way at 0.166.0. `.env`, which Codex loads into
+# its own environment at every start, bar `CODEX_*` (`load_dotenv`): a variable
+# planted there reached the model through the shell. And `rules/`, its command
+# rules: a rule's justification is the refusal the model reads when the rule
+# forbids a command, and that reached it. A rule that allows a command approves
+# it in every later session, and under `on-request`, Codex's default, is listed
+# to the model as well. Masked read-only, `rules/` cannot keep a "don't ask
+# again" either; under `danger-full-access` Codex asks only before a command it
+# deems dangerous.
 mask = [
   "$HOME/.codex/AGENTS.md",
   "$HOME/.codex/AGENTS.override.md",
   "$HOME/.codex/skills/",
+  "$HOME/.codex/.env",
+  "$HOME/.codex/rules/",
 ]
 
 # How this harness names the things an agent does, as its hooks see them —
@@ -275,15 +286,19 @@ mount = "link"
   "notice.model_migrations",
 ]
 
-# Notices Codex records once a prompt is dismissed, and its model-availability
-# bookkeeping. Not `notice.hide_full_access_warning`, which acknowledges a
-# consent and omh renders itself. Which of these Codex writes on a first start
-# on its own is not measured.
+# Notices Codex records once a prompt is dismissed, and its bookkeeping. Not
+# `notice.hide_full_access_warning`, which acknowledges a consent and omh
+# renders itself. A first start of the 0.166.0 TUI, left 20 seconds with no
+# input, wrote `tui.screen_reader_detection_done` and no notice [measured];
+# `notice.hide_gov_cloud_guidance`, new at 0.166.0, is written once its
+# GovCloud guidance has been shown (`tui/src/lib.rs`) [src].
 [preferences.quiet]
 "$HOME/.codex/config.toml" = [
   "tui.model_availability_nux",
+  "tui.screen_reader_detection_done",
   "notice.fast_default_opt_out",
   "notice.hide_rate_limit_model_nudge",
+  "notice.hide_gov_cloud_guidance",
   "notice.hide_gpt5_1_migration_prompt",
   'notice."hide_gpt-5.1-codex-max_migration_prompt"',
 ]

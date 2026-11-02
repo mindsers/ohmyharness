@@ -17788,6 +17788,80 @@ fn an_omp_accounts_settings_are_migrated_from_the_file_omp_reads_in_their_place(
     );
 }
 
+/// The filters that choose among omp's providers come with them, from the
+/// `config.yml` beside the models file read, where omp reads them — and
+/// nothing else of that file: the account keeps them beside its providers,
+/// and each session's `config.yml` starts from them.
+#[test]
+fn an_omp_import_keeps_the_provider_filters_beside_the_providers() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, true);
+    let agent = sb.home.join(".omp/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    std::fs::write(
+        agent.join("models.yml"),
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         apiKey: sk-corp\n    api: openai-completions\n",
+    )
+    .unwrap();
+    std::fs::write(
+        agent.join("config.yml"),
+        "modelRoles:\n  default: corp/m\nenabledProviders: [corp]\n\
+         disabledProviders: [ollama]\nshellCommandPrefix: x\n",
+    )
+    .unwrap();
+    let out = sb.omh(&["account", "login", "omp", "--import"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let said = printed(&out);
+    assert!(
+        said.contains("provider filters disabledProviders, enabledProviders kept beside them"),
+        "{said}"
+    );
+    let kept =
+        std::fs::read_to_string(sb.home.join(".omh/creds/omp/default/provider.yml")).unwrap();
+    assert!(
+        kept.contains("enabledProviders")
+            && kept.contains("disabledProviders")
+            && kept.contains("ollama")
+            && !kept.contains("shellCommandPrefix")
+            && !kept.contains("modelRoles"),
+        "{kept}"
+    );
+}
+
+/// A models file under `~/.omh` could be a session's, and so could the
+/// `config.yml` beside it: its providers are kept as named, and no filter
+/// is read from beside it.
+#[test]
+fn a_provider_under_omh_takes_no_filter_from_beside_it() {
+    let sb = sandbox();
+    repo_declaring_a_codex_server(&sb, true);
+    let agent = sb.home.join(".omh/creds/omp/default/.omp/agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    std::fs::write(
+        agent.join("models.yml"),
+        "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n    \
+         api: openai-completions\n",
+    )
+    .unwrap();
+    std::fs::write(agent.join("config.yml"), "disabledProviders: [ollama]\n").unwrap();
+    let models = agent.join("models.yml");
+    let out = sb.omh(&[
+        "account",
+        "login",
+        "omp",
+        "--provider",
+        models.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", printed(&out));
+    let kept =
+        std::fs::read_to_string(sb.home.join(".omh/creds/omp/default/provider.yml")).unwrap();
+    assert!(
+        kept.contains("corp") && !kept.contains("disabledProviders"),
+        "{kept}"
+    );
+}
+
 /// `omh account login omp --import` keeps the host's own providers even though omp's
 /// login is nothing omh can copy: the account holds its providers, and that is
 /// the capture — said as one, not as a login waiting to be confirmed.

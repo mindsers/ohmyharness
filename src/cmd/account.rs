@@ -207,90 +207,11 @@ pub(crate) fn login(
     }
     auth::prepare(&adapter, &account_dir, "/home/agent")?;
 
-    // The account's model provider, kept at its root where no session writes:
-    // from the file named, or with `--import` from the host's own config.
-    // Authored before any login, and independent of one.
+    // The account's model provider: authored before any login, and
+    // independent of one.
     let home = dirs::home_dir().context("no home directory")?;
     let format = adapter.provider.as_ref().map(|p| p.format);
-    let provided = match (provider, import, source, format) {
-        (Some(file), _, Some(_), Some(format)) => {
-            // Under `~/.omh`, it is read the way omh reads what a session
-            // could have written: a name at a time from `~/.omh` down, never
-            // through a link at any of them, and capped. It was
-            // `read_to_string`, which a session could steer with a link swapped
-            // in after the refusal that offered the file was printed — at the
-            // file, or at any directory above it. Anywhere else, it is yours,
-            // read as you named it.
-            let under = under_root(&paths.root, file)?;
-            let named = under.is_some();
-            let raw = match under {
-                Some((root, rel)) => {
-                    let rel = rel
-                        .to_str()
-                        .with_context(|| format!("{} is not UTF-8", file.display()))?;
-                    let raw = crate::held::read_under(&root, rel, 1 << 20)
-                        .with_context(|| format!("reading {}", file.display()))?;
-                    anyhow::ensure!(!raw.is_empty(), "{} is empty, or not there", file.display());
-                    raw
-                }
-                None => std::fs::read_to_string(file)
-                    .with_context(|| format!("reading {}", file.display()))?,
-            };
-            // A file under `~/.omh` — an account's own models file, which a
-            // launch's refusal offers to keep, or anything in a session's
-            // reach — could be a session's, so nothing is read from the
-            // environment for it, and a provider that would read it is
-            // refused.
-            //
-            // Where it was named decides as much as where it leads: a link
-            // under `~/.omh` is a session's to swap between the read above and
-            // any look at its target. And a path omh cannot resolve is not
-            // taken for one outside.
-            let leads = match (
-                std::fs::canonicalize(file),
-                std::fs::canonicalize(&paths.root),
-            ) {
-                (Ok(file), Ok(root)) => file.starts_with(root),
-                _ => true,
-            };
-            let ours = named || leads;
-            let env = |k: &str| std::env::var(k).ok();
-            let doc = match ours {
-                false => author_provider(format, &raw, &account_dir, &env),
-                true => author_provider(format, &raw, &account_dir, &|_| None).with_context(|| {
-                    format!(
-                        "it is under {}, which a session can write, so nothing in it is read \
-                         from your environment — check it, copy it out, and name the copy",
-                        paths.root.display()
-                    )
-                }),
-            }
-            .with_context(|| format!("{}", file.display()))?;
-            let doc =
-                doc.with_context(|| format!("{} defines no model provider", file.display()))?;
-            // Kept, and said where it came from: a successful adoption of a
-            // file a session could have written was silent.
-            if ours {
-                ctx.warn(&format!(
-                    "kept the providers in {} — it is under {}, where a session could have \
-                     written it: check them with `omh account` before you launch",
-                    file.display(),
-                    paths.root.display()
-                ));
-            }
-            Some(doc)
-        }
-        (None, true, Some(source), Some(format)) => {
-            let host = crate::adapter::expand_host(source, &home, &paths.repo);
-            let env = |k: &str| std::env::var(k).ok();
-            match read_host_provider(format, &host)? {
-                Some((host, raw)) => author_provider(format, &raw, &account_dir, &env)
-                    .with_context(|| format!("{}", host.display()))?,
-                None => None,
-            }
-        }
-        _ => None,
-    };
+    let provided = kept_provider(&paths, &adapter, provider, import, &home, &account_dir, ctx)?;
 
     // `--import` copies what the host already holds and starts nothing: a
     // login that cannot finish in a sandbox is the reason it exists. With a
@@ -341,18 +262,9 @@ pub(crate) fn login(
         let from: Vec<String> = from.iter().map(|p| p.display().to_string()).collect();
         action = action.note(format!("copied from {}", from.join(", ")));
     }
-    // By name: the values can be tokens.
     let providers: Vec<String> = provided.iter().flatten().cloned().collect();
-    if !providers.is_empty() {
-        action = action.note(format!(
-            "model provider {} kept in {}",
-            providers.join(", "),
-            account_dir
-                .join(crate::provider::file(format.context(
-                    "a provider was kept for a harness that takes none"
-                )?))
-                .display()
-        ));
+    if provided.is_some() {
+        action = provider_notes(action, &providers, format, &account_dir)?;
     }
     action = action.data(serde_json::json!({
         "harness": harness,
@@ -374,16 +286,159 @@ pub(crate) fn login(
     Ok(())
 }
 
+/// The account's model provider, kept at its root where no session writes:
+/// from the file named, or with `--import` from the host's own config — the
+/// names of the providers kept, or `None` when nothing was.
+fn kept_provider(
+    paths: &Paths,
+    adapter: &Adapter,
+    provider: Option<&std::path::Path>,
+    import: bool,
+    home: &std::path::Path,
+    account_dir: &std::path::Path,
+    ctx: &out::Ctx,
+) -> Result<Option<Vec<String>>> {
+    let source = adapter.provider.as_ref().map(|p| p.import.as_str());
+    let format = adapter.provider.as_ref().map(|p| p.format);
+    Ok(match (provider, import, source, format) {
+        (Some(file), _, Some(_), Some(format)) => {
+            // Under `~/.omh`, it is read the way omh reads what a session
+            // could have written: a name at a time from `~/.omh` down, never
+            // through a link at any of them, and capped. It was
+            // `read_to_string`, which a session could steer with a link swapped
+            // in after the refusal that offered the file was printed — at the
+            // file, or at any directory above it. Anywhere else, it is yours,
+            // read as you named it.
+            let under = under_root(&paths.root, file)?;
+            let named = under.is_some();
+            let raw = match under {
+                Some((root, rel)) => {
+                    let rel = rel
+                        .to_str()
+                        .with_context(|| format!("{} is not UTF-8", file.display()))?;
+                    let raw = crate::held::read_under(&root, rel, 1 << 20)
+                        .with_context(|| format!("reading {}", file.display()))?;
+                    anyhow::ensure!(!raw.is_empty(), "{} is empty, or not there", file.display());
+                    raw
+                }
+                None => std::fs::read_to_string(file)
+                    .with_context(|| format!("reading {}", file.display()))?,
+            };
+            // A file under `~/.omh` — an account's own models file, which a
+            // launch's refusal offers to keep, or anything in a session's
+            // reach — could be a session's, so nothing is read from the
+            // environment for it, and a provider that would read it is
+            // refused.
+            //
+            // Where it was named decides as much as where it leads: a link
+            // under `~/.omh` is a session's to swap between the read above and
+            // any look at its target. And a path omh cannot resolve is not
+            // taken for one outside.
+            let leads = match (
+                std::fs::canonicalize(file),
+                std::fs::canonicalize(&paths.root),
+            ) {
+                (Ok(file), Ok(root)) => file.starts_with(root),
+                _ => true,
+            };
+            let ours = named || leads;
+            let env = |k: &str| std::env::var(k).ok();
+            let doc = match ours {
+                false => author_provider(
+                    format,
+                    &raw,
+                    account_dir,
+                    &env,
+                    settings_beside(format, file)?,
+                ),
+                true => {
+                    author_provider(format, &raw, account_dir, &|_| None, None).with_context(|| {
+                        format!(
+                            "it is under {}, which a session can write, so nothing in it is read \
+                     from your environment — check it, copy it out, and name the copy",
+                            paths.root.display()
+                        )
+                    })
+                }
+            }
+            .with_context(|| format!("{}", file.display()))?;
+            let doc =
+                doc.with_context(|| format!("{} defines no model provider", file.display()))?;
+            // Kept, and said where it came from: a successful adoption of a
+            // file a session could have written was silent.
+            if ours {
+                ctx.warn(&format!(
+                    "kept the providers in {} — it is under {}, where a session could have \
+                 written it: check them with `omh account` before you launch",
+                    file.display(),
+                    paths.root.display()
+                ));
+            }
+            Some(doc)
+        }
+        (None, true, Some(source), Some(format)) => {
+            let host = crate::adapter::expand_host(source, home, &paths.repo);
+            let env = |k: &str| std::env::var(k).ok();
+            match read_host_provider(format, &host)? {
+                Some((host, raw)) => author_provider(
+                    format,
+                    &raw,
+                    account_dir,
+                    &env,
+                    settings_beside(format, &host)?,
+                )
+                .with_context(|| format!("{}", host.display()))?,
+                None => None,
+            }
+        }
+        _ => None,
+    })
+}
+
+/// What of a provider the account kept, said: its providers by name — the
+/// values can be tokens — and, for omp, the filters beside them.
+fn provider_notes(
+    mut action: crate::report::Action,
+    providers: &[String],
+    format: Option<ProviderFormat>,
+    account_dir: &std::path::Path,
+) -> Result<crate::report::Action> {
+    let format = format.context("a provider was kept for a harness that takes none")?;
+    if !providers.is_empty() {
+        action = action.note(format!(
+            "model provider {} kept in {}",
+            providers.join(", "),
+            account_dir.join(crate::provider::file(format)).display()
+        ));
+    }
+    if format == ProviderFormat::OmpModels {
+        let kept = crate::provider::omp::read(account_dir)?
+            .map(|doc| crate::provider::omp::filters(&doc))
+            .unwrap_or_default();
+        if !kept.is_empty() {
+            let names: Vec<&str> = kept.keys().map(String::as_str).collect();
+            action = action.note(format!(
+                "provider filters {} kept beside them — each session's config.yml starts from \
+                 them",
+                names.join(", ")
+            ));
+        }
+    }
+    Ok(action)
+}
+
 /// The provider a harness config `raw` defines — Codex's tables, omp's
 /// `models.yml` — resolved for a sandbox and written as the account's
 /// provider file: the names of the providers it holds, or `None` when `raw`
 /// defines none. Environment variables it reads are read here, once, from
-/// `env`.
+/// `env`. `settings`, for omp, is the `config.yml` beside `raw`, whose
+/// provider filters come with the providers.
 fn author_provider(
     format: ProviderFormat,
     raw: &str,
     account_dir: &std::path::Path,
     env: &dyn Fn(&str) -> Option<String>,
+    settings: Option<String>,
 ) -> Result<Option<Vec<String>>> {
     match format {
         ProviderFormat::CodexConfig => {
@@ -394,13 +449,32 @@ fn author_provider(
             Ok(Some(crate::provider::codex::names(&doc)))
         }
         ProviderFormat::OmpModels => {
-            let Some(doc) = crate::provider::omp::from_models_config(raw, env)? else {
+            let Some(mut doc) = crate::provider::omp::from_models_config(raw, env)? else {
                 return Ok(None);
             };
+            if let Some(settings) = &settings {
+                crate::provider::omp::with_filters_from(&mut doc, settings)
+                    .context("the config.yml beside it")?;
+            }
             crate::provider::omp::write(account_dir, &doc)?;
             Ok(Some(crate::provider::omp::names(&doc)))
         }
     }
+}
+
+/// The `config.yml` beside a models file — or the `config.yaml` omp reads
+/// where that is absent — where omp reads its provider filters. `None` when
+/// there is neither.
+fn settings_beside(format: ProviderFormat, models: &std::path::Path) -> Result<Option<String>> {
+    if format != ProviderFormat::OmpModels {
+        return Ok(None);
+    }
+    for name in ["config.yml", "config.yaml"] {
+        if let Some(raw) = crate::fsx::read_or_absent(&models.with_file_name(name))? {
+            return Ok(Some(raw));
+        }
+    }
+    Ok(None)
 }
 
 /// The host's own provider config, where the harness reads it — for omp, the

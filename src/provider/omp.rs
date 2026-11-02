@@ -9,8 +9,10 @@
 //! at the account root, which no mount reaches, and omh renders them into the
 //! `models.yml` a session reads, mounted read-only — `{}` when there are none.
 //!
-//! **In omp's own schema, held to it.** The file is a `models.yml`:
-//! `providers:` and nothing else, each provider's fields from omp's own list.
+//! **In omp's own schema, held to it.** The file is a `models.yml` —
+//! `providers:`, each provider's fields from omp's own list — beside the three
+//! `config.yml` lists that choose among providers ([`FILTERS`]), and nothing
+//! else.
 //! omp resolves a provider's `apiKey` and every `headers` value — the
 //! provider's own, a model's, a `modelOverrides` entry's — at each request: a
 //! value starting with `!` is a command, and any other is first looked up as an
@@ -20,7 +22,8 @@
 //!
 //! The fields are `ProviderConfigSchema`'s at the pinned tag
 //! (`packages/coding-agent/src/config/models-config-schema-bundle.ts`,
-//! `v18.10.4`), and the resolution is `resolve-config-value.ts`'s.
+//! `v18.15.0`), the filters `config/model-settings.ts`'s, and the resolution
+//! is `resolve-config-value.ts`'s.
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
@@ -54,15 +57,21 @@ const FIELDS: &[&str] = &[
     "transport",
 ];
 
-/// `config.yml` keys that choose among providers, which omp reads from
-/// `config.yml` and never from `models.yml` — and never preferences either
-/// (`adapter::NEVER`), so one a session sets lasts that session.
-const SELECTION: &[&str] = &[
+/// `config.yml` keys that choose among the providers omp has — which it may
+/// use, which never, and in what order — each a list of names. omp reads them
+/// from `config.yml`, never from `models.yml`, and they are never preferences
+/// (`adapter::NEVER`): the provider file keeps them beside the providers, and
+/// each session's `config.yml` is seeded with them (`super::rests`), so one a
+/// session changes lasts that session.
+pub const FILTERS: &[&str] = &[
     "enabledProviders",
     "disabledProviders",
     "modelProviderOrder",
-    "auth",
 ];
+
+/// The other `config.yml` key that chooses among providers: refused in a
+/// provider file, which the render would drop it from.
+const SELECTION: &[&str] = &["auth"];
 
 /// The fields of a `remoteCompaction` table that hold an address.
 const ENDPOINTS: &[&str] = &["endpoint", "v2Endpoint", "streamingEndpoint"];
@@ -76,13 +85,19 @@ pub fn validate(doc: &Value) -> Result<()> {
     };
     for key in top.keys() {
         anyhow::ensure!(
-            key == "providers",
-            "`{key}` {} — a provider file holds `providers:` only",
+            key == "providers" || FILTERS.contains(&key.as_str()),
+            "`{key}` {} — a provider file holds `providers:`, and {}, only",
             match SELECTION.contains(&key.as_str()) {
                 true => "is a key of omp's config.yml, not of its models.yml",
                 false => "is not a key of omp's models.yml",
-            }
+            },
+            FILTERS.join(", ")
         );
+    }
+    for key in FILTERS {
+        if let Some(value) = top.get(*key) {
+            names_list(key, value)?;
+        }
     }
     let Some(providers) = top.get("providers").filter(|p| !p.is_null()) else {
         return Ok(());
@@ -258,6 +273,40 @@ fn escape(name: &str) -> String {
     name.replace('~', "~0").replace('/', "~1")
 }
 
+/// Check `value`, `key`'s, is a list of provider names.
+fn names_list(key: &str, value: &Value) -> Result<()> {
+    let names = value.as_array().filter(|v| v.iter().all(Value::is_string));
+    anyhow::ensure!(names.is_some(), "`{key}` is not a list of provider names");
+    Ok(())
+}
+
+/// The [`FILTERS`] `doc` holds.
+pub fn filters(doc: &Value) -> Map<String, Value> {
+    FILTERS
+        .iter()
+        .filter_map(|k| doc.get(*k).map(|v| ((*k).to_string(), v.clone())))
+        .collect()
+}
+
+/// Add to `doc` the [`FILTERS`] of an omp `config.yml`, `raw`, that `doc`
+/// does not hold itself; nothing else of it is read. One left empty (`~`) is
+/// not set.
+pub fn with_filters_from(doc: &mut Value, raw: &str) -> Result<()> {
+    let config = crate::doc::parse_yaml(raw)?;
+    if !doc.is_object() {
+        *doc = Value::Object(Map::new());
+    }
+    let top = doc.as_object_mut().expect("made an object above");
+    for key in FILTERS {
+        let Some(value) = config.get(*key).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        names_list(key, value)?;
+        top.entry(*key).or_insert_with(|| value.clone());
+    }
+    Ok(())
+}
+
 /// The account's provider file, checked — `None` when it has none.
 pub fn read(account_dir: &Path) -> Result<Option<Value>> {
     super::read_checked(account_dir, FILE, crate::doc::parse_yaml, validate)
@@ -272,12 +321,22 @@ pub fn from_models_config(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Option<Value>> {
     let config = crate::doc::parse_yaml(raw)?;
+    let kept = filters(&config);
     let providers = match config.get("providers") {
-        None | Some(Value::Null) => return Ok(None),
-        Some(Value::Object(p)) if p.is_empty() => return Ok(None),
-        Some(p) => p.clone(),
+        None | Some(Value::Null) => None,
+        Some(Value::Object(p)) if p.is_empty() => None,
+        Some(p) => Some(p.clone()),
     };
-    let mut doc = Value::Object(Map::from_iter([("providers".to_string(), providers)]));
+    if providers.is_none() && kept.is_empty() {
+        return Ok(None);
+    }
+    let mut doc = Value::Object(
+        providers
+            .into_iter()
+            .map(|p| ("providers".to_string(), p))
+            .collect(),
+    );
+    doc.as_object_mut().expect("an object").extend(kept);
     for (shown, ptr) in resolved_at(&doc)? {
         let Some(slot) = doc.pointer_mut(&ptr) else {
             continue;
@@ -491,25 +550,88 @@ mod tests {
         validate(&crate::doc::parse_yaml(FAKE).unwrap()).unwrap();
         validate(&json!({})).unwrap();
         validate(&Value::Null).unwrap();
-        // The selection keys are config.yml's; a file holding one would say a
-        // thing the render drops.
-        for key in [
-            "enabledProviders",
-            "disabledProviders",
-            "modelProviderOrder",
-            "auth",
-        ] {
-            let e = validate(&json!({key: ["x"], "providers": {}})).unwrap_err();
-            let e = format!("{e:#}");
-            assert!(
-                e.contains(&format!("`{key}`")) && e.contains("config.yml"),
-                "{key}: {e}"
-            );
-        }
+        // `auth` is config.yml's, and a file holding it would say a thing the
+        // render drops. The three filters were refused the same way until the
+        // provider file carried them into each session's config.yml
+        // (`a_provider_file_holds_the_filters_that_choose_among_providers`).
+        let e = validate(&json!({"auth": ["x"], "providers": {}})).unwrap_err();
+        let e = format!("{e:#}");
+        assert!(e.contains("`auth`") && e.contains("config.yml"), "{e}");
         let e = validate(&json!({"hooks": {}})).unwrap_err();
         assert!(format!("{e:#}").contains("`hooks`"), "{e:#}");
         let e = validate(&json!(["providers"])).unwrap_err();
         assert!(format!("{e:#}").contains("mapping"), "{e:#}");
+    }
+
+    /// Which of the providers omp has a session may use is the account's to
+    /// say, beside the providers: the three `config.yml` keys that choose
+    /// among them, each a list of names.
+    #[test]
+    fn a_provider_file_holds_the_filters_that_choose_among_providers() {
+        let doc = json!({
+            "providers": {},
+            "enabledProviders": ["corp"],
+            "disabledProviders": ["ollama"],
+            "modelProviderOrder": ["corp", "anthropic"],
+        });
+        validate(&doc).unwrap();
+        assert_eq!(
+            Value::Object(filters(&doc)),
+            json!({
+                "enabledProviders": ["corp"],
+                "disabledProviders": ["ollama"],
+                "modelProviderOrder": ["corp", "anthropic"],
+            })
+        );
+        validate(&json!({"disabledProviders": ["ollama"]})).unwrap();
+        for bad in [json!("ollama"), json!([1]), json!({"ollama": true})] {
+            let e = format!(
+                "{:#}",
+                validate(&json!({"disabledProviders": bad})).unwrap_err()
+            );
+            assert!(
+                e.contains("`disabledProviders` is not a list of provider names"),
+                "{bad}: {e}"
+            );
+        }
+        // And the render, the models.yml a session reads, holds none of them.
+        assert_eq!(
+            crate::doc::parse_yaml(&render(Some(&doc)).unwrap()).unwrap(),
+            json!({})
+        );
+    }
+
+    /// An import keeps the filters the file it reads holds — a provider file
+    /// omh wrote, or ejected — and those the `config.yml` beside a models
+    /// file holds, where omp reads them; the file's own come first. Nothing
+    /// else of that `config.yml` is read.
+    #[test]
+    fn an_import_keeps_the_filters_beside_the_providers() {
+        let raw = "providers:\n  corp:\n    baseUrl: https://llm.example.invalid/v1\n\
+                   disabledProviders: [ollama]\n";
+        let doc = from_models_config(raw, &no_env).unwrap().unwrap();
+        assert_eq!(doc["disabledProviders"], json!(["ollama"]));
+
+        let config = "modelRoles:\n  default: corp/m\nenabledProviders: [corp]\n\
+                      disabledProviders: [lm-studio]\nshellCommandPrefix: x\n";
+        let mut doc = from_models_config(raw, &no_env).unwrap().unwrap();
+        with_filters_from(&mut doc, config).unwrap();
+        assert_eq!(
+            doc,
+            json!({
+                "providers": {"corp": {"baseUrl": "https://llm.example.invalid/v1"}},
+                "disabledProviders": ["ollama"],
+                "enabledProviders": ["corp"],
+            })
+        );
+        let e = format!(
+            "{:#}",
+            with_filters_from(&mut doc, "modelProviderOrder: corp\n").unwrap_err()
+        );
+        assert!(
+            e.contains("`modelProviderOrder` is not a list of provider names"),
+            "{e}"
+        );
     }
 
     #[test]

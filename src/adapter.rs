@@ -342,6 +342,12 @@ pub struct Declared {
 }
 
 impl Declared {
+    /// The account's own file, relative to the account directory — and to the
+    /// home, where the harness reads it.
+    pub fn account_rel(&self) -> &str {
+        self.path.trim_start_matches("$HOME/")
+    }
+
     /// Every key kept, asked about or not.
     pub fn all(&self) -> impl Iterator<Item = &KeyPath> {
         self.keys.iter().chain(&self.quiet)
@@ -501,6 +507,7 @@ pub const NEVER: &[(&str, &[&str])] = &[
             "enabledPlugins",
             "extraKnownMarketplaces",
             "diffTool",
+            "sshHostCommands",
             "autoConnectIde",
             "autoInstallIdeExtension",
             "claudeInChromeDefaultEnabled",
@@ -3263,6 +3270,7 @@ render = "concat"
             ("file", CREDS, file("\"attribution\""), "`attribution` is never a preference"),
             ("file", CREDS, file("\"statusLine\""), "`statusLine` is never a preference"),
             ("file", CREDS, file("\"disableAllHooks\""), "`disableAllHooks` is never a preference"),
+            ("file", CREDS, file("\"sshHostCommands\""), "`sshHostCommands` is never a preference"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"projects\"]".to_string(), "`projects` is never a preference"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/.claude.json\" = [\"mcpServers\"]".to_string(), "`mcpServers` is never a preference"),
             ("file", CREDS, "[preferences.files]\n\"$HOME/.claude/x.ini\" = [\"model\"]".to_string(), "only TOML, JSON and YAML"),

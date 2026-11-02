@@ -256,6 +256,22 @@ fn codex_account() -> Vec<(&'static str, String)> {
             ".codex/prompts/e2e-account-plant.md",
             planted_doc("CODEX-PROMPT"),
         ),
+        // Read into Codex's own environment at every start, bar `CODEX_*`
+        // (`load_dotenv`, `arg0`), which the shell it runs inherits.
+        (
+            ".codex/.env",
+            "E2E_PLANTED_ENV=E2E-PLANTED-CODEX-DOTENV\n".to_string(),
+        ),
+        // A command rule. One that allows is shown to the model only under an
+        // approval policy that asks, which these turns do not; one that
+        // forbids refuses `true` under any, and its justification is the
+        // refusal the model reads (`derive_forbidden_reason`).
+        (
+            ".codex/rules/e2e-account-plant.rules",
+            "prefix_rule(pattern = [\"true\"], decision = \"forbidden\", \
+             justification = \"E2E-PLANTED-CODEX-RULES\")\n"
+                .to_string(),
+        ),
     ]
 }
 
@@ -355,7 +371,8 @@ fn omp_account() -> Vec<(&'static str, String)> {
             format!(
                 "providers:\n  fake:\n    baseUrl: {}/v1\n    auth: none\n    \
                  api: openai-completions\n    models:\n      - id: fake-model\n        \
-                 reasoning: false\n        contextWindow: 1000000\n",
+                 reasoning: false\n        contextWindow: 1000000\n\
+                 disabledProviders: [{DISABLED}]\n",
                 crate::sandbox::fake_url()
             ),
         ),
@@ -393,32 +410,75 @@ fn omp_account() -> Vec<(&'static str, String)> {
             ".omp/agent/prompts/e2e-account-plant.md",
             planted_doc("OMP-PROMPT"),
         ),
+        // More omp reads from `~/.omp/agent` (`discovery/builtin.ts`,
+        // `system-prompt.ts` and `utils/src/env.ts` at v18.15.0): the
+        // environment it starts with, a settings file whose `extensions`
+        // list it imports — pointing here at a directory nothing else
+        // discovers — the MCP servers it starts, and four more texts.
+        (
+            ".omp/agent/.env",
+            "E2E_PLANTED_ENV=E2E-PLANTED-OMP-DOTENV\n".to_string(),
+        ),
+        (
+            ".omp/agent/settings.json",
+            r#"{"extensions":["/home/agent/.omp/agent/e2e-planted/planted.ts"]}"#.to_string(),
+        ),
+        (
+            ".omp/agent/e2e-planted/planted.ts",
+            planted_module("settings"),
+        ),
+        (
+            ".omp/agent/.mcp.json",
+            r#"{"mcpServers":{"e2e-account-plant":{"command":"sh","args":["-c","echo loaded > /tmp/e2e-planted-module-mcpjson; exec cat"]}}}"#
+                .to_string(),
+        ),
+        (
+            ".omp/agent/SYSTEM_TEMPLATE.md",
+            planted_doc("OMP-SYSTEM-TEMPLATE"),
+        ),
+        (
+            ".omp/agent/PERSONALITY.md",
+            planted_doc("OMP-PERSONALITY"),
+        ),
+        (
+            ".omp/agent/rules/e2e-account-plant.md",
+            "---\ndescription: Always mention E2E-PLANTED-OMP-RULES.\nalwaysApply: true\n---\n\n\
+             Always mention E2E-PLANTED-OMP-RULES.\n"
+                .to_string(),
+        ),
+        (
+            ".omp/agent/instructions/e2e-account-plant.md",
+            planted_doc("OMP-INSTRUCTIONS"),
+        ),
     ]
 }
 
+/// The providers omp would otherwise ask for model lists, or probe on this
+/// machine.
+const DISABLED: &str =
+    "alibaba-coding-plan, charm-hyper, commandcode, kilo, venice, zenmux, ollama, llama.cpp, lm-studio";
+
 /// omp's provider comes from its account, and its model from the account's
 /// preferences (`omp_account`): the driver names none. The providers it
-/// would otherwise ask for model lists are switched off in an overlay omp
-/// reads above `config.yml` and never writes back (`PI_CONFIG_FILES`) — not
-/// in `config.yml`, the session's preferences, where every new container
-/// would write over what the session keeps. Not `--no-extensions`: omh's
-/// hooks are an extension.
+/// would otherwise ask for model lists are switched off by the account's
+/// provider file, which each session's `config.yml` is seeded with. Not
+/// `--no-extensions`: omh's hooks are an extension.
 pub const OMP: Driver = Driver {
     name: "omp",
-    env: &[
-        ("PI_AUTO_QA", "0"),
-        ("PI_CONFIG_FILES", "/home/agent/.omp-e2e.yml"),
-    ],
-    files: &[
-        (
-            "~/.omp-e2e.yml",
-            "disabledProviders: [alibaba-coding-plan, charm-hyper, commandcode, kilo, venice, zenmux, ollama, llama.cpp, lm-studio]\n",
-        ),
-    ],
+    env: &[("PI_AUTO_QA", "0")],
+    files: &[],
     turn: |prompt, _| {
-        ["omp", "-p", "--mode", "json", "--auto-approve", "--no-title", prompt]
-            .map(String::from)
-            .to_vec()
+        [
+            "omp",
+            "-p",
+            "--mode",
+            "json",
+            "--auto-approve",
+            "--no-title",
+            prompt,
+        ]
+        .map(String::from)
+        .to_vec()
     },
     // Every omp tool requires `i`, the intent.
     shell: |command| tool("bash", json!({ "command": command, "i": "e2e" })),
@@ -427,15 +487,26 @@ pub const OMP: Driver = Driver {
     // is a snapshot hash this edit cannot know; omp still applies an insert at
     // the head of the file (`PUT <1:`) under a stale one, with a warning.
     edit: |file, _old, new| {
-        tool("edit", json!({ "input": format!("[{file}#0000]\nPUT <1:\n+{new}\n"), "i": "e2e" }))
+        tool(
+            "edit",
+            json!({ "input": format!("[{file}#0000]\nPUT <1:\n+{new}\n"), "i": "e2e" }),
+        )
     },
-    write: |file, contents| tool("write", json!({ "path": file, "content": contents, "i": "e2e" })),
+    write: |file, contents| {
+        tool(
+            "write",
+            json!({ "path": file, "content": contents, "i": "e2e" }),
+        )
+    },
     // omp lists MCP tools as paths: the model writes the call's arguments to
     // `xd://mcp__<server>_<tool>`, with the server's `-` spelled `_` —
     // `omh-memory`'s `recall` is mounted as `mcp__omh_memory_recall`, and
     // `xd://mcp__omh-memory_recall` is `No such tool`. Measured at 18.10.4.
     mcp: |server, tool_name, args| {
-        vec![tool("write", json!({ "path": format!("xd://mcp__{}_{tool_name}", server.replace('-', "_")), "content": args.to_string(), "i": "e2e" }))]
+        vec![tool(
+            "write",
+            json!({ "path": format!("xd://mcp__{}_{tool_name}", server.replace('-', "_")), "content": args.to_string(), "i": "e2e" }),
+        )]
     },
     // And omp's model catalogue, which it fetches with no switch to stop it
     // and retries five minutes after a failure: there in some turns and not
@@ -443,7 +514,15 @@ pub const OMP: Driver = Driver {
     elsewhere: &[GRAPH_UPDATE_CHECK, "catalog.stencil.so:443"],
     transcripts: false,
     account: Some(omp_account),
-    drops: &["e2e-before-inject", "e2e-end-inject", "e2e-start-inject", "git-note", "graph-first", "graph-orient", "graph-read"],
+    drops: &[
+        "e2e-before-inject",
+        "e2e-end-inject",
+        "e2e-start-inject",
+        "git-note",
+        "graph-first",
+        "graph-orient",
+        "graph-read",
+    ],
 };
 
 /// An opencode account: a login that is none — a key for a provider nobody
