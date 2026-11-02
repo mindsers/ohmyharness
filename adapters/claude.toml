@@ -31,6 +31,11 @@ login   = "run `/login` inside Claude Code, then exit"
 # `output-styles/` did not. Nothing omh does puts the user's own there:
 # `--import` copies the token alone, and the host's personal memory reaches a
 # session as a rule imported into the catalogue, never through the account.
+#
+# Not masked: `dev-mods` entries are a session's own, and Claude Code drops one
+# naming another session's folder [bin, 2.1.316]; a plugin left in `plugins/`
+# loads once settings enable it [docs], and `enabledPlugins` is never a
+# preference.
 mask    = ["$HOME/.claude/CLAUDE.md", "$HOME/.claude/rules/"]
 
 # How this harness names the things an agent does. Adapter-level rather than
@@ -46,6 +51,11 @@ mask    = ["$HOME/.claude/CLAUDE.md", "$HOME/.claude/rules/"]
 # `MultiEdit` is no longer a tool either. It stays in the spelling because
 # `omh import hooks` reads matchers back through it, and a matcher someone wrote
 # against an older release still names it.
+#
+# Not `Bash|Monitor`: since 2.1.314 a hook matching `Bash` also runs before a
+# shell command the Monitor tool starts, and can block it, but not approve or
+# rewrite it [docs, CHANGELOG]. Whether an `after-tool` hook on the shell runs
+# after one is not measured.
 [tools]
 edit   = "Edit|Write|MultiEdit"
 read   = "Read"
