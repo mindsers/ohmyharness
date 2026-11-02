@@ -110,12 +110,13 @@ What is writable is a short list, and it grew:
 | the sandbox's own repository | see [below](#the-agent-has-git-and-it-is-not-yours) |
 | each file `carry_in` hands over | so the agent can edit config it was given |
 | the directory the harness writes its transcript to | it is what `omh sNN` reads to say what the agent did |
+| with an account, the session's own copies of the harness's preference files | a change made there lasts that session, and reaches the account only through the [review](/guides/accounts/#the-review) |
 | the code graph and the local note store | two caches outside `/work` |
 
 **Nothing else is**, and tests assert the set by name — how many there are and
-which guest path each is, with credentials in a test of their own — rather than
-asserting a list of mount strings, so adding one is a decision somebody has to
-make on purpose.
+which guest path each is, with credentials in a test of their own, and with an
+account where each one comes from — rather than asserting a list of mount
+strings, so adding one is a decision somebody has to make on purpose.
 
 ### Worktrees live outside the repo
 

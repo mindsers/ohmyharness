@@ -15,7 +15,7 @@ hero:
 ---
 
 :::caution[Early project]
-omh is at `0.15.0`. Claude Code on Docker is the path people have done real work
+omh is at `0.16.0`. Claude Code on Docker is the path people have done real work
 through; the other harnesses and runtimes pass `omh doctor` but have not been
 driven for real. The [roadmap](/project/roadmap/) says what comes next.
 :::
@@ -76,20 +76,23 @@ is kept beside the source rather than here:
 [the sandbox's repository becomes a remote](https://github.com/mindsers/ohmyharness/blob/main/docs/design/sandbox-remote.md)
 — proposed, not built.
 
-## What's new in 0.15
+## What's new in 0.16
 
-- **Your catalogue on a screen.** At a terminal, `omh settings` shows your
-  defaults and every rule, skill, server, command, subagent and hook, changes
-  them in place, and says what a new repo gets. Each change is the command line
-  you would have typed. See [`omh settings`](/reference/commands/#omh-settings).
-- **The host stops running what the sandbox wrote.** Host-side git, note and
-  transcript reads, and hooks resolved inside the agent's worktree no longer run
-  or follow anything the agent left. See [risks](/concepts/risks/).
-- **Fewer things that failed in silence.** Session removal, launches, `sync` and
-  `attach` stop losing work or editing your files without saying so, and a
-  checkout whose name has a space or an accent can launch.
-- **Every harness at its latest release**, and `cargo install omh` builds on the
-  Rust omh declares.
+- **Each session has its own preferences.** A session starts from its own copy
+  of the harness's preference files, and a review at its end asks which changes
+  the account keeps for the next one. A model provider of your own is a file the
+  account keeps. See [accounts](/guides/accounts/#your-preferences-from-one-session-to-the-next).
+- **Logging in is `omh account login`**, where it was `auth`. `omh account`
+  lists your accounts and what each keeps; `omh account forget` removes a kept
+  preference. omh's own MCP servers are named `omh-codegraph` and `omh-memory`.
+  See [`omh account`](/reference/commands/#omh-account).
+- **A session is held to less.** No `sudo` and nothing that becomes root, no ssh
+  agent forwarded in, no account file one session leaves loading in the next,
+  and nothing on the host read through a link a session made. See
+  [risks](/concepts/risks/).
+- **Failures that said nothing now say so**, from unreadable settings to a
+  launch waiting on a review in another terminal.
+- **Every harness at its latest release.** Building omh needs Rust 1.88.
 
 Earlier releases are on [GitHub](https://github.com/mindsers/ohmyharness/releases).
 
