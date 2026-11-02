@@ -21,9 +21,10 @@ it. In rough order of how much they matter:
 
 - **A mount that is writable and should not be.** The invariant is that nothing
   beyond a named set — the worktree, credentials, carried files, the sandbox's
-  own git repository, the directory the harness writes its transcript to, and
-  two caches — is writable from inside the sandbox. A stray `rw` is the difference between a sandbox and a
-  suggestion.
+  own git repository, the directory the harness writes its transcript to, the
+  session's own copies of the harness's preference files, and two caches — is
+  writable from inside the sandbox. A stray `rw` is the difference between a
+  sandbox and a suggestion.
 - **Credentials reaching somewhere they should not** — mounted outside the path
   the harness reads, exposed to another session, or captured into the wrong
   account. Note that an account name is required to be a single path component
@@ -56,7 +57,8 @@ rests on the difference between an unverified claim and a disclosed gap:
 
 - The **code graph store is shared across sessions of one repo**, so one session
   can query another's graph. Mitigated, not prevented.
-- **`.claude.json` is a file mount that cannot be atomically replaced.**
+- **A session's `.claude.json` is a file mount that cannot be atomically
+  replaced.**
 - The **egress allowlist is designed, not wired.** Assume a session has network
   access.
 - Only **Docker** has been driven for real work. The `sbx` backend was measured
@@ -64,6 +66,6 @@ rests on the difference between an unverified claim and a disclosed gap:
 
 ## Supported versions
 
-The latest release is supported, and only that one: `0.15.0` today. Fixes land
+The latest release is supported, and only that one: `0.16.0` today. Fixes land
 on `main` and reach you in the next tag — there are no backport branches before
 1.0, because one maintainer cannot honestly promise to keep two lines patched.

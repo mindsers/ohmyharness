@@ -13,7 +13,7 @@ $ omh s01 attach        # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.15.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.16.0`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -22,7 +22,62 @@ architecture is built for and not yet a thing anybody has done.
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
 
-**`0.15.0` puts your catalogue on a screen.** At a terminal, `omh settings`
+**`0.16.0` gives each session its own preferences, and the account keeps
+only what you choose.** A harness used to write its settings into the account
+every later session reads, so a server, a hook or an instruction one session
+added loaded in the next. Now each session starts from its own copy of the
+harness's preference files — Claude's `~/.claude.json` and `settings.json`,
+Codex's `config.toml`, omp's `config.yml`, opencode's state directory — and
+when it ends, a [review](https://docs.ohmyharness.sh/guides/accounts/#the-review)
+asks which changes to keep: a model, a theme, a thinking level. What you keep
+seeds the next session, and nothing else reaches the account. A model provider
+of your own is a file the account keeps: `omh account login codex --provider`
+or `omh account login omp --provider`, or `--import` from the host. omp's
+provider filters travel with its providers. The first Codex or omp launch on
+an existing account migrates its file, keeps the old one beside it, and names
+what it kept and what it dropped.
+
+**Breaking: logging in is `omh account login` now, where it was `auth`**,
+with the same flags, and the old line is refused with the new one named.
+`omh account` lists your accounts and what each keeps, and `omh account forget`
+removes one kept preference. omh's own MCP servers are `omh-codegraph` and
+`omh-memory` now, generated with their features and never part of your
+catalogue: an allowlist naming `mcp__codegraph__…` needs the new names, and
+`omh upgrade` takes the old copies out of `~/.omh/mcp.json`. Claude's commits
+and pull requests in a session carry no attribution.
+
+**A session is held to less.**
+- `sudo` no longer works inside a session, and `no-new-privileges` is on, so
+  nothing there becomes root. A package a session needs belongs in its image.
+- An editor attaching to a session no longer forwards your ssh agent or X11
+  into it.
+- The launch line names the account. A repo whose committed settings pick one
+  warns at every launch, until you set it locally with the command it prints.
+- Each harness reads some files from the shared account at every start. omh
+  hides them, so an instruction file, a module or Claude's personal memory one
+  session leaves there no longer loads in the next.
+- A session loads only what its launch staged: claude.ai connectors are off, and
+  a repo's `.codex/config.toml` hooks and servers do not load.
+- The host reads nothing a session can reach through a link, and never waits on
+  a pipe one planted. A `carry_in` directory holding a link stops the launch,
+  and no git omh runs over the agent's files runs its hooks.
+- Every value omh writes into a shell, a Dockerfile or JavaScript is quoted. The
+  base image is pinned by digest, and each release tarball carries a build
+  attestation and its third-party notices.
+
+**Failures that said nothing now say so.** Settings omh could not read answered
+every key as unset, and a launch went ahead on that. A directory listing
+dropped entries it could not read. `prune` and the image reaper removed what
+they could not see. `rm` counted the agent's work before stopping its
+container. A launch hung behind a review waiting in another terminal. Each now
+stops or says why.
+
+Every pin moved — Claude Code 2.1.316, Codex 0.166.0, oh-my-pi 18.15.0,
+opencode 1.19.5 — and what omh relies on was measured again at each. Every
+image rebuilds and every running session restarts once, on its next launch,
+and the graph UI's port moves once. Building omh needs Rust 1.88.
+
+**0.15.0 put your catalogue on a screen.** At a terminal, `omh settings`
 is a screen over `~/.omh`: your defaults, then a page per kind of entry —
 rules, skills, servers, commands, subagents, hooks. Set and unset a default,
 open or create an entry in `$EDITOR`, add or remove a server, import from a
@@ -56,8 +111,7 @@ Every pin moved — Claude Code 2.1.300, Codex 0.162.1, oh-my-pi 18.10.4,
 opencode 1.19.0 — so each harness image rebuilds on its first launch.
 `omh upgrade` now asks again which of a repo's provides apply before it builds.
 The docs are a site, at [docs.ohmyharness.sh](https://docs.ohmyharness.sh).
-And `cargo install omh` builds 0.15.0 on Rust 1.85; `main` has since moved
-the floor to 1.88.
+And `cargo install omh` built 0.15.0 on Rust 1.85.
 
 **0.14.1 fixed three things nobody could see.** No editor could attach to
 any session — sshd dropped every connection before authentication, because
@@ -653,9 +707,9 @@ whether anything reads it. That gap is what `doctor` closes.
 | **Other harnesses** | `opencode`, `omp` and `codex` pass `doctor`, but only `claude` has been driven for real work. Codex's hooks and transcripts were measured against a stub model, not a logged-in session. Codex's own sandbox cannot start inside omh's container, so omh turns it off and the container is the sandbox, as it is for every harness. |
 
 Known rough edges: the graph store is shared across sessions of one repo, so an
-agent can query another session's graph (mitigated, not prevented);
-`.claude.json` is a file mount that cannot be atomically replaced; `omh sNN rm`
-keeps a session branch whenever omh cannot prove trunk already holds its work,
+agent can query another session's graph (mitigated, not prevented); a
+session's `.claude.json` is a file mount that cannot be atomically replaced;
+`omh sNN rm` keeps a session branch whenever omh cannot prove trunk already holds its work,
 so a squash it could not match leaves a branch behind and says so; upgrading to 0.8.0 leaves
 the old `omh-cache-<name>` volume and `omh-<name>` network behind and nothing
 reports them (`docker volume ls | grep omh-cache-` finds them); and `omh s`
