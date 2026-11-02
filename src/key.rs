@@ -15,14 +15,16 @@ use crate::config::Layer;
 /// What a value for this key looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
-    /// One word or phrase.
-    Text,
+    /// A captured login's name, or one per harness as `<harness>:<name>`:
+    /// `account`'s shape, written as a string or a table. A shape of its own
+    /// because every reader of it has to know that, and asked the name to.
+    Account,
     /// A TOML array of paths.
     Paths,
     /// One path on the host.
     ///
-    /// Distinct from `Text` because `omh why` is where somebody finds out what
-    /// a key wants, and "one word or phrase" is the wrong answer about a
+    /// A shape of its own because `omh why` is where somebody finds out what
+    /// a key wants, and "one word or phrase" was the wrong answer about a
     /// filename. `carry_in` already earned `Paths` for the plural case; this
     /// is the singular one.
     Path,
@@ -89,9 +91,9 @@ impl Key {
 
 /// Every key omh reads.
 ///
-/// Six, and the scan below is what keeps it six: they are string literals at
-/// their call sites, so a seventh added to the code and not to this table
-/// would otherwise be discovered by whoever committed a token.
+/// The scan below is what keeps this list whole: the keys are string literals
+/// at their call sites, so one added to the code and not to this table would
+/// otherwise be discovered by whoever committed a token.
 pub const KEYS: &[Key] = &[
     // The only path by which a secret reaches the agent — `src/carry.rs` says
     // so, and so does the comment `init` writes into every new settings file.
@@ -113,7 +115,7 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "account",
         does: "Which captured login a session is launched with, by name.",
-        shape: Shape::Text,
+        shape: Shape::Account,
         secret: Secret::No,
         unset: "the only login captured",
     },
@@ -351,7 +353,7 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                 .find_map(|p| crate::carry::validate_pattern(p).err())
                 .map(|e| format!("{e:#}"))
         }
-        Shape::Text => None,
+        Shape::Account => None,
     }
 }
 

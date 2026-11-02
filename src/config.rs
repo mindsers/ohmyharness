@@ -153,10 +153,22 @@ impl std::fmt::Display for Layer {
 /// The repo's two layers only. Your `~/.omh/settings.toml` is a template for
 /// new repos, not a layer beneath this one — see [`Layer::SETTINGS`].
 pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
+    Ok(resolve(
+        layered(paths)?
+            .into_iter()
+            .map(|(key, value, layer)| (key, repr(&value), layer))
+            .collect(),
+    ))
+}
+
+/// Every setting each of this repo's layers declares, in layer order, as the
+/// TOML value it is — tables left out, since a table is configuration *for*
+/// something rather than a setting with a value.
+fn layered(paths: &Paths) -> Result<Vec<(String, toml::Value, Layer)>> {
     let mut found = Vec::new();
     for layer in Layer::SETTINGS {
         let path = layer.file(paths);
-        let Some(raw) = read_layer(&path)? else {
+        let Some(raw) = crate::fsx::read_or_absent(&path)? else {
             continue;
         };
         let table: toml::Table =
@@ -169,10 +181,20 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
             if value.is_table() {
                 continue;
             }
-            found.push((key, repr(&value), layer));
+            found.push((key, value, layer));
         }
     }
-    Ok(resolve(found))
+    Ok(found)
+}
+
+/// The value the last layer declaring `key` gives it: the one [`policy`]
+/// resolves to, before it is turned into text.
+fn winning<'a>(found: &'a [(String, toml::Value, Layer)], key: &str) -> Option<&'a toml::Value> {
+    found
+        .iter()
+        .rev()
+        .find(|(k, ..)| k == key)
+        .map(|(_, v, _)| v)
 }
 
 /// The account a launch of `harness` is configured with, if any.
@@ -395,24 +417,6 @@ pub fn unset_account(paths: &Paths, harness: Option<&str>, layer: Layer) -> Resu
     Ok(changed)
 }
 
-/// Read a layer's file, distinguishing "this layer declares nothing" from
-/// "this layer could not be read".
-///
-/// `let Ok(..) else { continue }` conflated them, and the second case is
-/// unrecoverable from the outside: `chmod 000` on `mcp.json` made `omh why`
-/// answer "not installed here" about an installed server and advise `omh init`
-/// — which does nothing, because `write_if_absent` sees the file exists. A
-/// closed loop, exit 0, no error anywhere.
-fn read_layer(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => Ok(Some(raw)),
-        // Absent is a normal, expected state: most layers declare most things
-        // not at all.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
-}
-
 /// Every hook across all layers, resolved with provenance.
 ///
 /// Reported the same way as [`servers`] — `omh why` treats a server and a hook
@@ -465,7 +469,7 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
     // omh's servers are part of omh, never of your catalogue — a copy an
     // earlier omh seeded here is one `omh upgrade` takes out, not one of yours.
     let omhs = crate::base::server_names()?;
-    if let Some(raw) = read_layer(&path)? {
+    if let Some(raw) = crate::fsx::read_or_absent(&path)? {
         let doc: serde_json::Value =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         if let Some(servers) = doc.get("mcpServers").and_then(|v| v.as_object()) {
@@ -498,7 +502,7 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
 pub fn omhs_server_copies(paths: &Paths) -> Result<Vec<Setting>> {
     let omhs = crate::base::server_names()?;
     let path = mcp_path(paths);
-    let Some(raw) = read_layer(&path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(&path)? else {
         return Ok(Vec::new());
     };
     let doc: serde_json::Value =
@@ -726,7 +730,7 @@ pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Re
 /// would go on looking like one.
 pub fn values(paths: &Paths, layer: Layer) -> Result<BTreeMap<String, String>> {
     let path = layer.file(paths);
-    let Some(raw) = read_layer(&path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(&path)? else {
         return Ok(BTreeMap::new());
     };
     let table: toml::Table =
@@ -1077,7 +1081,7 @@ fn edit_layer(
 /// to take every `[omh]` switch and every `[mcp.<name>.env]` token with it, and
 /// print success.
 pub fn read_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
-    let Some(raw) = read_layer(path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(path)? else {
         return Ok(toml_edit::DocumentMut::new());
     };
     raw.parse()
@@ -1176,7 +1180,7 @@ pub fn remove_own_servers(
     dry_run: bool,
 ) -> Result<Vec<Removed>> {
     let path = mcp_path(paths);
-    let Some(raw) = read_layer(&path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(&path)? else {
         return Ok(Vec::new());
     };
     let mut doc: serde_json::Value =
@@ -1312,7 +1316,7 @@ pub fn mcp_path(paths: &Paths) -> PathBuf {
 /// hand" guard is built on `all.get(&name)`, so an empty map classifies every
 /// incoming server as new and overwrites without `--replace`.
 fn read_servers(path: &Path) -> Result<BTreeMap<String, Server>> {
-    let Some(raw) = read_layer(path)? else {
+    let Some(raw) = crate::fsx::read_or_absent(path)? else {
         return Ok(BTreeMap::new());
     };
     crate::servers::parse(Render::McpJson, &raw)
@@ -1334,8 +1338,8 @@ fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> 
 /// list reads as nothing here, as it always has — `omh doctor`'s `carry_in` row
 /// is where that is said, through [`policy_list_checked`].
 pub fn policy_list(paths: &Paths, key: &str) -> Result<Vec<String>> {
-    let settings = policy(paths).context("reading this repo's settings")?;
-    Ok(list_of(&settings, key).unwrap_or_default())
+    let found = layered(paths).context("reading this repo's settings")?;
+    Ok(list_of(winning(&found, key), key).unwrap_or_default())
 }
 
 /// The same read, with the one failure that is worth a word kept separate
@@ -1358,31 +1362,28 @@ pub fn policy_list(paths: &Paths, key: &str) -> Result<Vec<String>> {
 pub fn policy_list_checked(paths: &Paths, key: &str) -> Result<Vec<String>, String> {
     // Unreadable is not undeclared: it was `.ok()`, and `omh doctor` said
     // there was nothing to carry about settings it never read.
-    let settings = policy(paths)
+    let found = layered(paths)
         .map_err(|e| format!("omh could not read the settings that would declare {key}: {e:#}"))?;
-    list_of(&settings, key)
+    list_of(winning(&found, key), key)
 }
 
-/// `key` among `settings`, as a list of strings.
-fn list_of(settings: &[Setting], key: &str) -> Result<Vec<String>, String> {
-    let Some(repr) = settings.iter().find(|s| s.key == key) else {
+/// `key`'s value, as a list of strings. Read from the value itself: it was
+/// read from the text `policy` turns it into, parsed back as TOML, so a
+/// string — `.env`, which is not TOML on its own — was refused as
+/// "unreadable" rather than as the string it is.
+fn list_of(value: Option<&toml::Value>, key: &str) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
         return Ok(Vec::new());
     };
-    let parsed = toml::from_str::<toml::Table>(&format!("v = {}", repr.value))
-        .ok()
-        .and_then(|t| t.get("v").cloned());
-    match parsed.as_ref().and_then(|v| v.as_array()) {
+    match value.as_array() {
         Some(a) => Ok(a
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect()),
         None => Err(format!(
             "{key} must be a list of strings, and this one is {}: {}",
-            match parsed.as_ref() {
-                Some(v) => v.type_str(),
-                None => "unreadable",
-            },
-            repr.value
+            value.type_str(),
+            repr(value)
         )),
     }
 }
@@ -2571,5 +2572,293 @@ mod tests {
         settings(&paths, Layer::Personal, "carry_in = [\".env\"]");
         settings(&paths, Layer::Local, "carry_in = [\".env.local\"]");
         assert_eq!(policy_list(&paths, "carry_in").unwrap(), vec![".env.local"]);
+    }
+
+    /// What the readers answered when the matrix was written, captured from
+    /// them rather than typed.
+    const EXPECTED: &str = r#"== absent
+policy: 
+values: {}
+account_from: None
+read_provision: {}
+read_table omh: {}
+resolve: off={} provision={} mcp_env={}
+policy_list_checked carry_in: []
+policy_value runtime: None
+== empty
+policy: 
+values: {}
+account_from: None
+read_provision: {}
+read_table omh: {}
+resolve: off={} provision={} mcp_env={}
+policy_list_checked carry_in: []
+policy_value runtime: None
+== scalars
+policy: carry_in=[".env", "certs/"]@shared[] idle_timeout=30@shared[] persistence=true@shared[] runtime=podman@shared[]
+values: {"carry_in": "[\".env\", \"certs/\"]", "idle_timeout": "30", "persistence": "true", "runtime": "podman"}
+account_from: None
+read_provision: {}
+read_table omh: {}
+resolve: off={} provision={} mcp_env={}
+policy_list_checked carry_in: [".env", "certs/"]
+policy_value runtime: Some("podman")
+== account as a name
+policy: account=work@shared[]
+values: {"account": "work"}
+account_from: Some(("work", Shared))
+read_provision: {}
+read_table omh: {}
+resolve: off={} provision={} mcp_env={}
+policy_list_checked carry_in: []
+policy_value runtime: None
+== account as a table
+policy: 
+values: {"account": "mine · codex:work"}
+account_from: Some(("work", Shared))
+read_provision: {}
+read_table omh: {}
+resolve: off={} provision={} mcp_env={}
+policy_list_checked carry_in: []
+policy_value runtime: None
+== a feature switch
+policy: 
+values: {"[omh]": ""}
+account_from: None
+read_provision: {}
+read_table omh: {"codegraph": false}
+resolve: off={"codegraph"} provision={} mcp_env={}
+policy_list_checked carry_in: []
+policy_value runtime: None
+== a feature switch that is a string
+policy: 
+values: {"[omh]": ""}
+account_from: None
+read_provision: {}
+read_table omh: ERR <tmp>/repo/.omh/settings.toml: `[omh] codegraph` is not true or false — omh will not read a table it cannot read all of
+resolve: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 2, column 13
+  |
+2 | codegraph = "false"
+  |             ^^^^^^^
+invalid type: string "false", expected a boolean
+
+policy_list_checked carry_in: []
+policy_value runtime: None
+== a provide that is a string
+policy: 
+values: {"[provision]": ""}
+account_from: None
+read_provision: ERR <tmp>/repo/.omh/settings.toml: `[provision] rust/cargo` is not true or false — omh will not rewrite a table it cannot read
+read_table omh: {}
+resolve: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 2, column 16
+  |
+2 | "rust/cargo" = "yes"
+  |                ^^^^^
+invalid type: string "yes", expected a boolean
+
+policy_list_checked carry_in: []
+policy_value runtime: None
+== an inline provision
+policy: 
+values: {"[provision]": ""}
+account_from: None
+read_provision: {"rust/cargo": false}
+read_table omh: {}
+resolve: off={} provision={"rust/cargo": false} mcp_env={}
+policy_list_checked carry_in: []
+policy_value runtime: None
+== the retired toolchain table
+policy: 
+values: {"[toolchain]": ""}
+account_from: None
+read_provision: {}
+read_table omh: {}
+resolve: ERR <tmp>/repo/.omh/settings.toml: `[toolchain]` was removed. omh now provisions your stack's toolchain and measures the image it built, so a hook whose program is missing is held back by name without anything on file — and starts running again by itself once the sandbox has it. Delete the table. If what you want is a provide left out, say so with `[provision] "<stack>/<name>" = false`.
+policy_list_checked carry_in: []
+policy_value runtime: None
+== a list written as a string
+policy: carry_in=.env@shared[]
+values: {"carry_in": ".env"}
+account_from: None
+read_provision: {}
+read_table omh: {}
+resolve: off={} provision={} mcp_env={}
+policy_list_checked carry_in: ERR carry_in must be a list of strings, and this one is string: .env
+policy_value runtime: None
+== not TOML
+policy: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+values: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+account_from: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+read_provision: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+read_table omh: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+resolve: ERR parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+policy_list_checked carry_in: ERR omh could not read the settings that would declare carry_in: parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+policy_value runtime: ERR reading this repo's settings: parsing <tmp>/repo/.omh/settings.toml: TOML parse error at line 1, column 11
+  |
+1 | runtime = 
+  |           ^
+string values must be quoted, expected literal string
+
+== two layers
+policy: runtime=podman@local[Shared]
+values: {"runtime": "docker"}
+account_from: None
+read_provision: {}
+read_table omh: {}
+resolve: off={} provision={} mcp_env={}
+policy_list_checked carry_in: []
+policy_value runtime: Some("podman")
+"#;
+
+    /// Every reader of the settings layers, over one matrix of what a layer can
+    /// hold, with what each answered — values and refusals alike, error text
+    /// included. Written before the readers moved onto one parser, to pin what
+    /// they say now: the two parsers word a refusal differently, and every
+    /// such difference is a decision, never an accident.
+    #[test]
+    fn every_settings_reader_answers_as_it_did() {
+        let manifest = crate::base::Manifest::load_dir(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/base"
+        )))
+        .unwrap();
+        let cases: &[(&str, Option<&str>, Option<&str>)] = &[
+            ("absent", None, None),
+            ("empty", Some(""), None),
+            (
+                "scalars",
+                Some("runtime = \"podman\"\nidle_timeout = 30\npersistence = true\ncarry_in = [\".env\", \"certs/\"]\n"),
+                None,
+            ),
+            ("account as a name", Some("account = \"work\"\n"), None),
+            ("account as a table", Some("[account]\ndefault = \"mine\"\ncodex = \"work\"\n"), None),
+            ("a feature switch", Some("[omh]\ncodegraph = false\n"), None),
+            ("a feature switch that is a string", Some("[omh]\ncodegraph = \"false\"\n"), None),
+            ("a provide that is a string", Some("[provision]\n\"rust/cargo\" = \"yes\"\n"), None),
+            ("an inline provision", Some("provision = { \"rust/cargo\" = false }\n"), None),
+            ("the retired toolchain table", Some("[toolchain]\ncargo = \"skip\"\n"), None),
+            ("a list written as a string", Some("carry_in = \".env\"\n"), None),
+            ("not TOML", Some("runtime = \n"), None),
+            ("two layers", Some("runtime = \"docker\"\n"), Some("runtime = \"podman\"\n")),
+        ];
+        let mut out = String::new();
+        for (name, shared, local) in cases {
+            let (d, paths) = fixture();
+            let tmp = d.path().display().to_string();
+            if let Some(body) = shared {
+                settings(&paths, Layer::Shared, body);
+            }
+            if let Some(body) = local {
+                settings(&paths, Layer::Local, body);
+            }
+            let said = |r: Result<String, String>| match r {
+                Ok(v) => v,
+                Err(e) => format!("ERR {}", e.replace(&tmp, "<tmp>")),
+            };
+            let err = |e: anyhow::Error| format!("{e:#}");
+            out.push_str(&format!("== {name}\n"));
+            out.push_str(&format!(
+                "policy: {}\n",
+                said(policy(&paths).map_err(err).map(|s| {
+                    s.iter()
+                        .map(|s| format!("{}={}@{}{:?}", s.key, s.value, s.layer, s.shadows))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }))
+            ));
+            out.push_str(&format!(
+                "values: {}\n",
+                said(
+                    values(&paths, Layer::Shared)
+                        .map_err(err)
+                        .map(|v| format!("{v:?}"))
+                )
+            ));
+            out.push_str(&format!(
+                "account_from: {}\n",
+                said(
+                    account_from(&paths, "codex")
+                        .map_err(err)
+                        .map(|v| format!("{v:?}"))
+                )
+            ));
+            out.push_str(&format!(
+                "read_provision: {}\n",
+                said(
+                    read_provision(&paths, Layer::Shared)
+                        .map_err(err)
+                        .map(|v| format!("{v:?}"))
+                )
+            ));
+            out.push_str(&format!(
+                "read_table omh: {}\n",
+                said(
+                    read_table(&paths, Layer::Shared, OMH)
+                        .map_err(err)
+                        .map(|v| format!("{v:?}"))
+                )
+            ));
+            out.push_str(&format!(
+                "resolve: {}\n",
+                said(
+                    crate::settings::resolve(&paths, &manifest)
+                        .map_err(err)
+                        .map(|r| {
+                            format!(
+                                "off={:?} provision={:?} mcp_env={:?}",
+                                r.off, r.provision, r.mcp_env
+                            )
+                        })
+                )
+            ));
+            out.push_str(&format!(
+                "policy_list_checked carry_in: {}\n",
+                said(policy_list_checked(&paths, "carry_in").map(|v| format!("{v:?}")))
+            ));
+            out.push_str(&format!(
+                "policy_value runtime: {}\n",
+                said(
+                    policy_value(&paths, "runtime")
+                        .map_err(err)
+                        .map(|v| format!("{v:?}"))
+                )
+            ));
+        }
+        assert_eq!(out, EXPECTED, "\n{out}");
     }
 }
