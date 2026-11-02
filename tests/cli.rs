@@ -8767,9 +8767,13 @@ impl Sandbox {
             // a shell gives a program it starts. Without it `/dev/tty` names
             // the terminal the *suite* runs in. Taken through stdout, which is
             // the terminal whatever stdin is.
+            //
+            // A cast, not `.into()`: `ioctl`'s request and `TIOCSCTTY` are one
+            // type on Linux and two on macOS, so each clippy refuses one form.
+            #[allow(clippy::cast_lossless)]
             unsafe {
                 command.pre_exec(|| {
-                    if libc::setsid() < 0 || libc::ioctl(1, libc::TIOCSCTTY.into(), 0) < 0 {
+                    if libc::setsid() < 0 || libc::ioctl(1, libc::TIOCSCTTY as _, 0) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
