@@ -221,7 +221,7 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     let preferred = adapter
         .preferences
         .iter()
-        .flat_map(|p| p.mounted_files())
+        .flat_map(super::adapter::Preferences::mounted_files)
         .map(|path| (path, Point::File));
     let bound = adapter.capabilities.values().map(|b| match b.render {
         crate::adapter::Render::Dir => (&b.path, Point::Dir),
@@ -1121,10 +1121,7 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, Paths) {
         let d = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: d.path().join("home"),
-            repo: d.path().join("repo"),
-        };
+        let paths = Paths::at(d.path());
         (d, paths)
     }
 

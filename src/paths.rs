@@ -562,6 +562,19 @@ impl Paths {
     }
 }
 
+/// The fixture most tests of omh's state build: `~/.omh` at `dir/home` and the
+/// checkout at `dir/repo`.
+#[cfg(test)]
+impl Paths {
+    pub(crate) fn at(dir: impl AsRef<Path>) -> Paths {
+        let dir = dir.as_ref();
+        Paths {
+            root: dir.join("home"),
+            repo: dir.join("repo"),
+        }
+    }
+}
+
 /// The name an account directory answers to in `omh account`: the last
 /// component of `creds/<harness>/<name>`, the directory `auth::dir` builds
 /// from that name.
@@ -1198,7 +1211,7 @@ mod tests {
         .unwrap();
         match super::attribution_of(&root, stale, super::Backfill::Record) {
             super::Attribution::Unknown(why) => {
-                assert!(why.contains("moved") || why.contains("api-"), "{why}")
+                assert!(why.contains("moved") || why.contains("api-"), "{why}");
             }
             other => panic!("a moved checkout is not this id's owner: {other:?}"),
         }
@@ -1308,7 +1321,7 @@ mod tests {
                 assert!(
                     why.contains("/mnt/api") && why.contains("host is down"),
                     "{why}"
-                )
+                );
             }
             other => panic!("could not tell is not gone: {other:?}"),
         }
@@ -1323,10 +1336,7 @@ mod tests {
     /// An empty `~/.omh` and an empty checkout, under one temporary directory.
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         Fixture { _dir: dir, paths }
     }
 

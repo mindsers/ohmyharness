@@ -2919,7 +2919,11 @@ render = "concat"
                 )
             })
             .collect();
-        let owned = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let owned = |keys: &[&str]| {
+            keys.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             got,
             vec![
@@ -3134,7 +3138,11 @@ render = "concat"
                 )
             })
             .collect();
-        let owned = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let owned = |keys: &[&str]| {
+            keys.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             got,
             vec![

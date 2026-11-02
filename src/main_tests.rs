@@ -1482,7 +1482,7 @@ fn a_command_list_is_scannable_and_none_of_it_is_markdown() {
             for text in [sub.get_about(), sub.get_long_about()]
                 .into_iter()
                 .flatten()
-                .map(|t| t.to_string())
+                .map(std::string::ToString::to_string)
             {
                 if text.contains("**") || text.contains("*`") {
                     marked.push(format!("{here}: {text}"));
@@ -2320,10 +2320,7 @@ fn a_harness_flag_is_still_not_omh_naming_the_session_twice() {
 #[test]
 fn the_log_reads_the_named_sessions_own_sandbox() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(&paths.repo).unwrap();
     let git = |args: &[&str]| {
         let out = Command::new("git")
@@ -4124,10 +4121,7 @@ fn the_session_fixtures_leave_nothing_behind() {
 /// A repository, a session, and a sandbox holding two checkpoints.
 fn a_session_with_two_checkpoints() -> (tempfile::TempDir, Paths, Session, shadow::Shadow) {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(&paths.repo).unwrap();
     for args in [
         vec!["init", "-q", "-b", "main"],
@@ -4182,10 +4176,7 @@ fn a_session_with_two_checkpoints() -> (tempfile::TempDir, Paths, Session, shado
 #[test]
 fn a_selection_naming_work_the_branch_already_has_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(&paths.repo).unwrap();
     for args in [
         vec!["init", "-q", "-b", "main"],
@@ -4260,10 +4251,7 @@ fn a_selection_naming_work_the_branch_already_has_is_refused() {
 #[test]
 fn a_sandbox_repository_with_no_record_of_its_start_is_not_an_empty_session() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(&paths.repo).unwrap();
     for args in [
         vec!["init", "-q", "-b", "main"],
@@ -4312,10 +4300,7 @@ fn a_sandbox_repository_with_no_record_of_its_start_is_not_an_empty_session() {
 #[test]
 fn resolved_reads_the_manifest_and_this_repos_settings() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     let write = |p: std::path::PathBuf, body: &str| {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
@@ -4602,10 +4587,7 @@ fn a_provide_somebody_opted_out_of_is_not_installed() {
 #[test]
 fn a_repo_that_provisions_runs_a_different_image() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(paths.stacks()).unwrap();
     std::fs::create_dir_all(&paths.repo).unwrap();
     std::fs::write(paths.repo.join("package.json"), "{}").unwrap();
@@ -5043,10 +5025,7 @@ fn only_what_was_provisioned_owes_a_program() {
 #[test]
 fn a_stacks_directory_omh_cannot_read_is_reported_rather_than_read_as_empty() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(paths.stacks()).unwrap();
     std::fs::create_dir_all(&paths.repo).unwrap();
     std::fs::write(paths.stacks().join("rust.toml"), "this is not toml {{{").unwrap();
@@ -5070,10 +5049,7 @@ fn a_stacks_directory_omh_cannot_read_is_reported_rather_than_read_as_empty() {
 #[test]
 fn the_resolution_is_read_and_written_in_the_committed_layer() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     let write = |layer: config::Layer, body: &str| {
         let f = layer.file(&paths);
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -5177,10 +5153,7 @@ fn a_sandbox(tag: &str, owed: &[&str]) -> provision::Sandbox {
 }
 
 fn measurement_fixture(dir: &std::path::Path) -> (Paths, Adapter) {
-    let paths = Paths {
-        root: dir.join("home"),
-        repo: dir.join("repo"),
-    };
+    let paths = Paths::at(dir);
     std::fs::create_dir_all(&paths.repo).unwrap();
     let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
     (paths, adapter)
@@ -5448,10 +5421,7 @@ fn fixture_policy() -> settings::RepoPolicy {
 #[test]
 fn the_layer_a_sandbox_names_is_the_layer_its_recipe_builds() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     provisioned_fixture(&paths);
     // **With a certificate set**, because that is the dimension this guard
     // was blind to. It hardcoded `None` on both sides, so reverting either
@@ -5512,10 +5482,7 @@ fn the_layer_a_sandbox_names_is_the_layer_its_recipe_builds() {
 #[test]
 fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     provisioned_fixture(&paths);
     let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
     let repo = fixture_policy();
@@ -6849,7 +6816,10 @@ fn the_globals_stepped_over_with_a_value_are_the_ones_clap_declares() {
         })
         .collect();
     declared.sort();
-    let mut listed: Vec<String> = cli::TAKES_A_VALUE.iter().map(|s| s.to_string()).collect();
+    let mut listed: Vec<String> = cli::TAKES_A_VALUE
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     listed.sort();
     assert_eq!(listed, declared);
 }
@@ -7372,7 +7342,7 @@ fn the_global_flags_describe_what_every_command_does_with_them() {
         cmd.get_arguments()
             .find(|a| a.get_id().as_str() == id)
             .and_then(|a| a.get_help())
-            .map(|h| h.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_else(|| panic!("--{id} has no help"))
     };
     for (flag, stale) in [
@@ -7588,10 +7558,7 @@ fn a_command_that_hands_you_a_program_has_no_json_to_print() {
 fn a_session_forked_from_a_trunk_with_files() -> (tempfile::TempDir, Paths, Session, shadow::Shadow)
 {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(&paths.repo).unwrap();
     std::fs::write(paths.repo.join("kept.rs"), "fn kept() {}\n").unwrap();
     std::fs::write(paths.repo.join("doomed.rs"), "fn doomed() {}\n").unwrap();
@@ -7980,10 +7947,7 @@ fn the_users_own_exclude_rules_survive_a_launch() {
 
 /// A `Paths` under a throwaway home, with the repo initialised.
 fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     std::fs::create_dir_all(&paths.repo).unwrap();
     paths
 }
@@ -9213,10 +9177,7 @@ fn no_message_breaks_a_line_without_a_backslash() {
 #[test]
 fn a_gitignore_omh_cannot_read_as_text_keeps_every_byte() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     let ignore = paths.repo.join(".omh/.gitignore");
     std::fs::create_dir_all(ignore.parent().unwrap()).unwrap();
     let mine: &[u8] = b"secret.env\nlegacy-\xff\xfe\n";
@@ -9250,10 +9211,7 @@ fn a_gitignore_omh_cannot_read_is_refused_and_left_alone() {
         return; // root reads through 0o000: nothing here would be tested
     }
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     let ignore = paths.repo.join(".omh/.gitignore");
     std::fs::create_dir_all(ignore.parent().unwrap()).unwrap();
     std::fs::write(&ignore, "secret.env\n").unwrap();
@@ -9349,10 +9307,7 @@ fn no_directory_listing_is_flattened() {
 #[test]
 fn a_gitignore_that_is_a_link_is_never_written_through() {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: dir.path().join("home"),
-        repo: dir.path().join("repo"),
-    };
+    let paths = Paths::at(dir.path());
     let outside = dir.path().join("bashrc");
     std::fs::write(&outside, "export PATH\n").unwrap();
     std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
@@ -9496,10 +9451,7 @@ fn no_message_spells_a_worktree_git_by_hand() {
 #[test]
 fn why_account_says_it_takes_a_login_or_one_per_harness() {
     let d = tempfile::tempdir().unwrap();
-    let paths = Paths {
-        root: d.path().join("home"),
-        repo: d.path().join("repo"),
-    };
+    let paths = Paths::at(d.path());
     let account = key::describes("account").unwrap();
     let text = cmd::inspect::why_a_key(&paths, account);
     assert!(text.contains("<harness>:<name>"), "{text}");

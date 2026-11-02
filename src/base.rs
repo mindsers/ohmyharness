@@ -182,7 +182,7 @@ pub(crate) fn assert_measured_states_its_case(label: &str, measured: &[Measured]
         // goes wrong on a schedule and is then edited by whoever it blocks,
         // which is how a guard becomes a formality.
         assert!(
-            crate::date::days_from_civil(day[0] as i64, day[1] as i64, day[2] as i64)
+            crate::date::days_from_civil(i64::from(day[0]), i64::from(day[1]), i64::from(day[2]))
                 <= crate::date::today_in_days(),
             "{label}: measured {} has not happened yet",
             m.on
@@ -1330,7 +1330,7 @@ mod tests {
                 // used to pass exactly one, which made that indistinguishable
                 // from a rule that checks them all.
                 let refused = std::panic::catch_unwind(|| {
-                    assert_measured_states_its_case("x", &[a_measurement("2026-08-14"), m])
+                    assert_measured_states_its_case("x", &[a_measurement("2026-08-14"), m]);
                 })
                 .err()
                 .map(|e| {

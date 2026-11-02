@@ -857,7 +857,7 @@ fn upgrade_takes_omhs_servers_out_of_your_catalogue() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    taken.sort();
+    taken.sort_unstable();
     assert_eq!(taken, ["codegraph", "omh-memory"], "{report}");
 
     let out = sb.omh(&["upgrade"]);
@@ -977,7 +977,7 @@ fn committed_notes_are_named_as_no_longer_read() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        said.contains(".omh/notes") && said.contains("1"),
+        said.contains(".omh/notes") && said.contains('1'),
         "omh says what it is no longer reading, and how much of it: {said}"
     );
     assert!(
@@ -1004,7 +1004,7 @@ fn a_store_under_the_old_path_moves_itself() {
         String::from_utf8_lossy(&out.stderr)
     );
     let printed = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(printed.contains("a"), "the note is in the store: {printed}");
+    assert!(printed.contains('a'), "the note is in the store: {printed}");
     assert!(
         sb.store().join("a.md").exists(),
         "and the file itself is under the new path"
@@ -8767,6 +8767,10 @@ impl Sandbox {
             // a shell gives a program it starts. Without it `/dev/tty` names
             // the terminal the *suite* runs in. Taken through stdout, which is
             // the terminal whatever stdin is.
+            //
+            // A cast, not `.into()`: `ioctl`'s request and `TIOCSCTTY` are one
+            // type on Linux and two on macOS, so each clippy refuses one form.
+            #[allow(clippy::cast_lossless)]
             unsafe {
                 command.pre_exec(|| {
                     if libc::setsid() < 0 || libc::ioctl(1, libc::TIOCSCTTY as _, 0) < 0 {
@@ -15277,7 +15281,7 @@ fn eject_writes_nothing_on_a_dry_run() {
     assert!(
         !out.exists() || std::fs::read_dir(&out).into_iter().flatten().count() == 0,
         "a dry run wrote files: {:?}",
-        std::fs::read_dir(&out).map(|d| d.count())
+        std::fs::read_dir(&out).map(std::iter::Iterator::count)
     );
 }
 
@@ -19058,7 +19062,7 @@ fn surface_under(bin: &std::path::Path, path: &[&str], out: &mut Surface) {
                         }
                     }
                 }
-                subs.push(first.to_string())
+                subs.push(first.to_string());
             }
             "options" => {
                 let mut long: Option<String> = None;

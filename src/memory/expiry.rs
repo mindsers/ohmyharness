@@ -506,10 +506,7 @@ mod tests {
 
     fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::paths::Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = crate::paths::Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = crate::paths::Paths::at(dir.path());
         std::fs::create_dir_all(&paths.repo).unwrap();
         for (name, body) in files {
             let p = paths.repo.join(name);
@@ -527,7 +524,7 @@ mod tests {
             kind: crate::memory::Kind::Surprise,
             source: "session s01, claude".into(),
             recorded: "2026-08-07".into(),
-            invalidated_by: trigger.map(|t| t.into()),
+            invalidated_by: trigger.map(std::convert::Into::into),
             body: String::new(),
             path: std::path::PathBuf::from("k.md"),
         }

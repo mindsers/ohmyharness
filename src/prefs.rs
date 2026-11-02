@@ -219,7 +219,7 @@ pub fn dotted(key: &KeyPath) -> String {
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
             match bare {
                 true => s.clone(),
-                false => format!("{:?}", s),
+                false => format!("{s:?}"),
             }
         })
         .collect::<Vec<_>>()

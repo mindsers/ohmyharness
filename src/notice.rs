@@ -572,10 +572,7 @@ mod tests {
 
     fn fixture(files: &[(&str, &str)]) -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         for (name, body) in files {
             let p = paths.repo.join(name);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();

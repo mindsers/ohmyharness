@@ -213,7 +213,7 @@ pub fn parse_foreign(format: Render, raw: &str) -> Result<Foreign> {
                         if entry
                             .get("command")
                             .and_then(serde_json::Value::as_array)
-                            .is_none_or(|c| c.is_empty()) =>
+                            .is_none_or(std::vec::Vec::is_empty) =>
                     {
                         out.left.insert(name.clone(), NO_COMMAND.into());
                     }

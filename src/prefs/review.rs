@@ -371,7 +371,7 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
         let asked = all == Some('r') || (all == Some('k') && conflict && !item.conflict);
         decided[n] = match (all, &mut answers) {
             (Some('d'), _) => Decision::Drop,
-            (Some('k') | Some('r'), Answers::Ask { input, out }) if asked => {
+            (Some('k' | 'r'), Answers::Ask { input, out }) if asked => {
                 let (choices, keep_key) = match conflict {
                     true => ("[m]ine  [t]heirs", 'm'),
                     false => ("[k]eep  [d]rop", 'k'),
@@ -384,7 +384,7 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
                     None => Decision::Leave,
                 }
             }
-            (Some('k') | Some('r'), _) => Decision::Keep,
+            (Some('k' | 'r'), _) => Decision::Keep,
             _ => Decision::Leave,
         };
         apply(&mut read, &mut kept, item, decided[n]);
@@ -828,7 +828,7 @@ mod tests {
             said.contains("s01 and s02 changed 3 claude preferences on account `work`:")
                 && said.contains(r#"s01  model    "a"      →  "b""#)
                 && said.contains(r#"s02  model    "a"      →  "c""#)
-                && said.contains(r#"s02  verbose  (unset)  →  true"#)
+                && said.contains(r"s02  verbose  (unset)  →  true")
                 && said.contains(r#"s02  model    "b"      →  "c"   (another session kept "b" since this one started)   [m]ine  [t]heirs"#),
             "{said}"
         );

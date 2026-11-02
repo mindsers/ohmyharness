@@ -1143,39 +1143,30 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
         Cmd::Settings { cmd } => match cmd {
             // Opens `$EDITOR`; there is no preview of what a person will type.
             Some(SettingsCmd::Edit { .. }) => false,
-            None
-            | Some(SettingsCmd::Set { .. })
-            | Some(SettingsCmd::Unset { .. })
-            | Some(SettingsCmd::Use { .. })
-            | Some(SettingsCmd::Unuse { .. })
-            | Some(SettingsCmd::Rm { .. })
-            | Some(SettingsCmd::Mcp { .. }) => true,
+            None |
+Some(SettingsCmd::Set { .. } | SettingsCmd::Unset { .. } | SettingsCmd::Use {
+.. } | SettingsCmd::Unuse { .. } | SettingsCmd::Rm { .. } | SettingsCmd::Mcp {
+.. }) => true,
         },
         Cmd::Memory { cmd } => match cmd {
             Some(MemoryCmd::Rm { .. }) => true,
             // Read-only, a wire protocol, or writes whose preview is the
             // write: `remember` derives its key from the note, so showing
             // the key means computing the note.
-            None
-            | Some(MemoryCmd::Remember { .. })
-            | Some(MemoryCmd::Serve { .. })
-            | Some(MemoryCmd::Stale)
-            | Some(MemoryCmd::Lint) => false,
+            None |
+Some(MemoryCmd::Remember { .. } | MemoryCmd::Serve { .. } | MemoryCmd::Stale |
+MemoryCmd::Lint) => false,
         },
         Cmd::Sessions { cmd } => match cmd {
             Some(SessionsCmd::Resume { .. }) => true,
             // The listing is its own dry run; the rest stop containers,
             // replant commits and delete worktrees, and each would have to
             // compute what it *would* do before it could show it.
-            None
-            | Some(SessionsCmd::Attach { .. })
-            | Some(SessionsCmd::Down { .. })
-            | Some(SessionsCmd::Sync { .. })
-            | Some(SessionsCmd::Log { .. })
-            | Some(SessionsCmd::Diff { .. })
-            | Some(SessionsCmd::Commit { .. })
-            | Some(SessionsCmd::Push { .. })
-            | Some(SessionsCmd::Rm { .. }) => false,
+            None |
+Some(SessionsCmd::Attach { .. } | SessionsCmd::Down { .. } |
+SessionsCmd::Sync { .. } | SessionsCmd::Log { .. } | SessionsCmd::Diff { .. }
+| SessionsCmd::Commit { .. } | SessionsCmd::Push { .. } | SessionsCmd::Rm { ..
+}) => false,
         },
         // Read-only: the command *is* its own dry run, so there is nothing to
         // withhold and nothing to describe. Refusing says that, where accepting
@@ -1217,35 +1208,41 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
         Cmd::Sessions { cmd } => match cmd {
             Some(SessionsCmd::Resume { .. }) => false,
             None
-            | Some(SessionsCmd::Attach { .. })
-            | Some(SessionsCmd::Down { .. })
-            | Some(SessionsCmd::Sync { .. })
-            | Some(SessionsCmd::Log { .. })
-            | Some(SessionsCmd::Diff { .. })
-            | Some(SessionsCmd::Commit { .. })
-            | Some(SessionsCmd::Push { .. })
-            | Some(SessionsCmd::Rm { .. }) => true,
+            | Some(
+                SessionsCmd::Attach { .. }
+                | SessionsCmd::Down { .. }
+                | SessionsCmd::Sync { .. }
+                | SessionsCmd::Log { .. }
+                | SessionsCmd::Diff { .. }
+                | SessionsCmd::Commit { .. }
+                | SessionsCmd::Push { .. }
+                | SessionsCmd::Rm { .. },
+            ) => true,
         },
         Cmd::Settings { cmd } => match cmd {
             Some(SettingsCmd::Edit { .. }) => false,
             None
-            | Some(SettingsCmd::Set { .. })
-            | Some(SettingsCmd::Unset { .. })
-            | Some(SettingsCmd::Use { .. })
-            | Some(SettingsCmd::Unuse { .. })
-            | Some(SettingsCmd::Rm { .. })
-            | Some(SettingsCmd::Mcp { .. }) => true,
+            | Some(
+                SettingsCmd::Set { .. }
+                | SettingsCmd::Unset { .. }
+                | SettingsCmd::Use { .. }
+                | SettingsCmd::Unuse { .. }
+                | SettingsCmd::Rm { .. }
+                | SettingsCmd::Mcp { .. },
+            ) => true,
         },
         Cmd::Account { cmd } => match cmd {
-            None | Some(AccountCmd::Login { .. }) | Some(AccountCmd::Forget { .. }) => true,
+            None | Some(AccountCmd::Login { .. } | AccountCmd::Forget { .. }) => true,
         },
         Cmd::Memory { cmd } => match cmd {
             Some(MemoryCmd::Serve { .. }) => false,
             None
-            | Some(MemoryCmd::Remember { .. })
-            | Some(MemoryCmd::Stale)
-            | Some(MemoryCmd::Lint)
-            | Some(MemoryCmd::Rm { .. }) => true,
+            | Some(
+                MemoryCmd::Remember { .. }
+                | MemoryCmd::Stale
+                | MemoryCmd::Lint
+                | MemoryCmd::Rm { .. },
+            ) => true,
         },
         Cmd::Init
         | Cmd::Prune { .. }

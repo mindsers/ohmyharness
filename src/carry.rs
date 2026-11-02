@@ -637,7 +637,7 @@ mod tests {
     }
 
     fn carry(repo: &Path, wt: &Path, list: &[&str]) -> Vec<Carried> {
-        let owned: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+        let owned: Vec<String> = list.iter().map(std::string::ToString::to_string).collect();
         apply(repo, wt, &owned).unwrap()
     }
 

@@ -514,10 +514,7 @@ mod tests {
 
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let worktree = dir.path().join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
         Fx {

@@ -338,7 +338,13 @@ pub fn free_space(at: &std::path::Path) -> Result<u64, String> {
     // asks about an empty `ps` and answers the other way, for the other
     // reason: there, nothing is a legitimate listing; here, nothing is a
     // filesystem declining to say.
-    match stat.f_bavail as u64 * stat.f_frsize as u64 {
+    //
+    // A cast, not `u64::from`: `f_bavail` is a `u32` on macOS and a `u64` on
+    // Linux, so `from` is a useless conversion on one and the cast lossless on
+    // the other, and each clippy refuses one of them.
+    #[allow(clippy::cast_lossless)]
+    let available = stat.f_bavail as u64;
+    match available * stat.f_frsize as u64 {
         0 => Err(format!(
             "the filesystem holding {} does not report free space",
             at.display()
@@ -2920,8 +2926,11 @@ mod tests {
     /// `Leftovers` for a test, in the order the fields read.
     fn seen(found: &[&str], unchecked: &[&str]) -> crate::leftovers::Leftovers {
         crate::leftovers::Leftovers {
-            found: found.iter().map(|s| s.to_string()).collect(),
-            unchecked: unchecked.iter().map(|s| s.to_string()).collect(),
+            found: found.iter().map(std::string::ToString::to_string).collect(),
+            unchecked: unchecked
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 
@@ -2937,7 +2946,7 @@ mod tests {
         use crate::paths::Attribution;
         let names: Vec<String> = ["omh-cache-a", "omh-cache-b", "omh-cache-c", "omh-cache-d"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let split = attributed(&names, &|n| match n {
             "omh-cache-a" => Attribution::Gone("/gone/api".into()),
@@ -3385,10 +3394,7 @@ mod tests {
 
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -3598,10 +3604,7 @@ mod tests {
     #[test]
     fn a_source_omh_could_not_read_is_an_error_not_a_check_that_demands_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -3647,10 +3650,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -3697,10 +3697,7 @@ mod tests {
     #[test]
     fn a_hooks_layer_omh_could_not_render_is_an_error_too() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -4396,7 +4393,7 @@ mod tests {
             guest: stub.path().to_path_buf(),
             expect: Expect::Loaded {
                 command: "harness list".into(),
-                names: names.iter().map(|n| n.to_string()).collect(),
+                names: names.iter().map(std::string::ToString::to_string).collect(),
                 ready: "Connected".into(),
             },
             dir: true,
@@ -4612,7 +4609,7 @@ mod tests {
             let adapter = Adapter::find(Path::new(ADAPTERS), name).unwrap();
             match start_check(&adapter).expect {
                 Expect::Starts { command } => {
-                    assert_eq!(command, format!("{} --version", adapter.bin))
+                    assert_eq!(command, format!("{} --version", adapter.bin));
                 }
                 other => panic!("{name}: {other:?}"),
             }
@@ -4809,10 +4806,7 @@ mod tests {
     /// from the one `settings::resolve` actually reads in production.
     fn audit_fixture() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         for kind in ["base", "adapters", "hooks", "stacks"] {
             let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(kind);
             let dst = paths.root.join(kind);
@@ -4842,10 +4836,7 @@ mod tests {
     #[test]
     fn this_repos_shipped_catalogue_audits_clean() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         std::fs::create_dir_all(paths.repo.join(".git")).unwrap();
         let shipped = Path::new(env!("CARGO_MANIFEST_DIR"));
         for kind in ["base", "adapters", "hooks", "stacks"] {

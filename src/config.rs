@@ -885,7 +885,7 @@ pub fn list_in(
 pub fn not_a_kind(table: &str, kind: &str) -> String {
     let near = crate::adapter::Capability::ALL
         .iter()
-        .map(|c| c.key())
+        .map(super::adapter::Capability::key)
         .find(|k| k.strip_suffix('s') == Some(kind));
     match near {
         Some(k) => format!("[{table}] {kind}, which is not a kind — did you mean `{k}`?"),
@@ -1409,10 +1409,7 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         (dir, paths)
     }
 
@@ -2169,7 +2166,7 @@ mod tests {
             .iter()
             .map(|r| (r.name.as_str(), r.feature.as_str(), r.differs))
             .collect();
-        by_name.sort();
+        by_name.sort_unstable();
         assert_eq!(
             by_name,
             [

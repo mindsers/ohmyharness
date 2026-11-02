@@ -265,7 +265,7 @@ fn a_file_two_sessions_are_both_changing_is_named_with_both() {
             .map(|(id, paths)| {
                 (
                     id.to_string(),
-                    paths.iter().map(|p| p.to_string()).collect(),
+                    paths.iter().map(std::string::ToString::to_string).collect(),
                 )
             })
             .collect()
@@ -676,7 +676,7 @@ fn work_the_log_cannot_show_is_said_and_the_harvest_is_not_offered() {
             (|log: &mut Log| log.read.unreachable = 3) as fn(&mut Log),
         ),
         ("a lost replay point", |log: &mut Log| {
-            log.read.replay_point_lost = true
+            log.read.replay_point_lost = true;
         }),
     ] {
         let mut log = a_log();

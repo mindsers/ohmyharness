@@ -3046,7 +3046,7 @@ fn show_args(what: crate::git::What, id: &str, colour: &str) -> Vec<String> {
         id,
     ]
     .iter()
-    .map(|a| a.to_string())
+    .map(std::string::ToString::to_string)
     .collect()
 }
 
@@ -3137,7 +3137,7 @@ fn guarded(args: &[&str]) -> Vec<String> {
 /// does: the files are the agent's in both. `add` takes no such flag; see
 /// `NO_NESTED_STATUS`.
 pub(crate) fn out_of_nested(args: &[&str]) -> Vec<String> {
-    let mut out: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let mut out: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
     if matches!(args.first(), Some(&"status" | &"diff")) {
         out.insert(1, "--ignore-submodules=dirty".to_string());
     }

@@ -1925,7 +1925,7 @@ pub fn parse_hooks(
         residue.push(hook::Dropped {
             name: what.to_string(),
             wanted,
-        })
+        });
     };
 
     for (theirs, entries) in &doc.hooks {
@@ -2169,7 +2169,7 @@ mod tests {
     fn server(command: &str, args: &[&str]) -> Server {
         Server {
             command: command.into(),
-            args: args.iter().map(|a| a.to_string()).collect(),
+            args: args.iter().map(std::string::ToString::to_string).collect(),
             env: BTreeMap::from([("PATH".into(), "/planted".into())]),
         }
     }
@@ -4622,7 +4622,7 @@ try {{
             "dropped: {:?}",
             doc.dropped
                 .iter()
-                .map(|d| d.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
         );
     }
@@ -4949,7 +4949,7 @@ try {{
                     &opencode_doc,
                     "tool.execute.before",
                     r#"{ tool: "write" }"#,
-                    &format!(r#"{{ args: {{ filePath: {f:?} }} }}"#),
+                    &format!(r"{{ args: {{ filePath: {f:?} }} }}"),
                 );
                 if !said.contains(&want) {
                     wrong.push(format!("opencode {f}: {said}"));
@@ -5804,7 +5804,7 @@ try {{
         // Restore before the assertion so a failure cannot leave the temp dir
         // undeletable.
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(err.to_string().contains("h"), "must name the path: {err}");
+        assert!(err.to_string().contains('h'), "must name the path: {err}");
     }
 
     #[test]
@@ -5993,7 +5993,10 @@ try {{
             2,
             "one was overwritten by the other: {imported:?} {residue:?}"
         );
-        let commands: BTreeSet<&str> = imported.values().map(|h| h.does()).collect();
+        let commands: BTreeSet<&str> = imported
+            .values()
+            .map(super::super::hook::Hook::does)
+            .collect();
         assert_eq!(commands.len(), 2, "and they are the two that were written");
     }
 

@@ -464,7 +464,7 @@ impl Session {
         let args: Vec<String> = if matches!(self.branch_exists(repo), Ok(true)) {
             ["worktree", "add", &path, &branch]
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect()
         } else {
             // Explicit base: without it git branches from whatever HEAD is,
@@ -1241,8 +1241,12 @@ impl Session {
             );
             let unstage: Vec<String> = ["reset", "-q", "--"]
                 .iter()
-                .map(|s| s.to_string())
-                .chain(from_your_checkout.iter().map(|p| p.to_string()))
+                .map(std::string::ToString::to_string)
+                .chain(
+                    from_your_checkout
+                        .iter()
+                        .map(std::string::ToString::to_string),
+                )
                 .collect();
             git_owned_in(&self.worktree, &unstage)?;
         }
@@ -1494,15 +1498,19 @@ fn rules_pathspec() -> Vec<String> {
 fn unstage_rules_args() -> Vec<String> {
     ["reset", "-q", "--"]
         .iter()
-        .map(|s| s.to_string())
-        .chain(crate::carry::STAGED_RULES.iter().map(|n| n.to_string()))
+        .map(std::string::ToString::to_string)
+        .chain(
+            crate::carry::STAGED_RULES
+                .iter()
+                .map(std::string::ToString::to_string),
+        )
         .collect()
 }
 
 fn status_args() -> Vec<String> {
     ["status", "--porcelain", "-z", "-uall", "--"]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .chain(rules_pathspec())
         .collect()
 }
@@ -1972,7 +1980,7 @@ impl Session {
         })?;
         match out.status.code() {
             // 2 is `--check`'s answer, not its failure.
-            Some(0) | Some(2) => Ok(String::from_utf8_lossy(&out.stdout)
+            Some(0 | 2) => Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter(|line| !line.is_empty())
                 .map(crate::out::untrusted)
@@ -2078,7 +2086,7 @@ fn pointers_in(worktree: &Path, index: Option<&Path>) -> Result<Vec<String>> {
 fn everything_but_pointers(worktree: &Path, index: Option<&Path>) -> Result<Vec<String>> {
     Ok(["add", "-A", "--", "."]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .chain(
             pointers_in(worktree, index)?
                 .iter()
@@ -4206,7 +4214,7 @@ mod tests {
 
         let mut got = s.changed().unwrap();
         got.sort();
-        let mut want: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        let mut want: Vec<String> = names.iter().map(std::string::ToString::to_string).collect();
         want.sort();
         assert_eq!(
             got, want,

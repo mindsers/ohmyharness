@@ -1162,7 +1162,7 @@ fn the_env_mask_reads_a_line_as_words_does() {
             "the cursor would drift"
         );
         assert!(
-            !masked.chars().any(|c| c.is_lowercase()),
+            !masked.chars().any(char::is_lowercase),
             "`{line}` is drawn as `{masked}`"
         );
     }
@@ -1170,7 +1170,7 @@ fn the_env_mask_reads_a_line_as_words_does() {
     for line in ["K=q\\", "K=\"q z", "K='q"] {
         let masked = masked_env(&line.chars().collect::<Vec<_>>());
         assert!(
-            !masked.chars().any(|c| c.is_lowercase()),
+            !masked.chars().any(char::is_lowercase),
             "`{line}` → `{masked}`"
         );
     }
@@ -1882,7 +1882,7 @@ fn a_value_already_there_is_replaced_by_typing() {
         app.key(code(KeyCode::Enter)),
         Next::Run(Act::Set {
             key: "idle_timeout".into(),
-            value: "".into()
+            value: String::new()
         }),
         "backspace takes the whole of it"
     );
@@ -2356,9 +2356,7 @@ fn a_key_never_writes_without_being_asked_to() {
             match app.key(*key) {
                 Next::Stay
                 | Next::Preview(Act::Remove { .. })
-                | Next::Run(Act::Unset { .. })
-                | Next::Run(Act::Edit { .. })
-                | Next::Run(Act::EditDefaults) => {}
+                | Next::Run(Act::Unset { .. } | Act::Edit { .. } | Act::EditDefaults) => {}
                 other => panic!("{key:?} on page {page} did {other:?}"),
             }
         }

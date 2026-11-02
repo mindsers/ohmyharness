@@ -449,7 +449,12 @@ fn run_all(app: &mut App, exe: &std::path::Path, lines: &[Vec<String>]) -> bool 
 /// differently — `--env` swallowed as a server argument, say — would be a
 /// screen that does something other than what it shows.
 pub(crate) fn argv(act: &Act) -> Vec<String> {
-    let s = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+    let s = |words: &[&str]| {
+        words
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+    };
     match act {
         Act::Set { key, value } => s(&["settings", "set", "--", key, value]),
         Act::SetAnyway { key, value } => s(&["settings", "set", "--anyway", "--", key, value]),
@@ -1036,9 +1041,12 @@ fn defaults(paths: &Paths, adapters: &Result<Vec<Adapter>>) -> Section {
         let mut warning = None;
         let mut fallback = k.unset.to_string();
         let edit = match (k.name, &k.shape) {
-            (_, key::Shape::Choice(allowed)) => {
-                Edit::Choice(allowed.iter().map(|a| a.to_string()).collect())
-            }
+            (_, key::Shape::Choice(allowed)) => Edit::Choice(
+                allowed
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+            ),
             // The logins omh has captured, by name and by one harness's — and
             // only those, since a launch takes nothing else: `another…` let a
             // name be typed, which was for `codex:work`, and that is here.
@@ -1567,7 +1575,7 @@ fn describe(cap: Capability, path: &std::path::Path) -> Described {
                 let tools = h
                     .tools
                     .iter()
-                    .map(|t| t.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
                 let on = match tools.is_empty() {
@@ -2012,7 +2020,7 @@ mod tests {
                 if key == "carry_in" && value == "[\".env\", \"a b\"]"
         ));
         assert!(matches!(
-            parsed(&Act::Set { key: "runtime".into(), value: "".into() }),
+            parsed(&Act::Set { key: "runtime".into(), value: String::new() }),
             Cmd::Settings { cmd: Some(SettingsCmd::Set { value, .. }) } if value.is_empty()
         ));
         // A value that looks like a flag is still the value — `--help` worst
@@ -2123,7 +2131,10 @@ mod tests {
             // `--env` first, where clap would take it for the flag if nothing
             // said the arguments had begun.
             args: vec!["--env".into(), "-y".into(), "--".into(), "x y".into()],
-            env: vec![("TOKEN".into(), "a=b".into()), ("MODE".into(), "".into())],
+            env: vec![
+                ("TOKEN".into(), "a=b".into()),
+                ("MODE".into(), String::new()),
+            ],
         };
         match parsed(&add) {
             Cmd::Settings {
@@ -2839,7 +2850,12 @@ mod tests {
             match k.shape {
                 key::Shape::Choice(allowed) => assert_eq!(
                     row.edit,
-                    Edit::Choice(allowed.iter().map(|a| a.to_string()).collect()),
+                    Edit::Choice(
+                        allowed
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect()
+                    ),
                     "{}",
                     k.name
                 ),
@@ -3421,7 +3437,11 @@ mod tests {
         buffer
             .content()
             .chunks(120)
-            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .map(|row| {
+                row.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -90,7 +90,11 @@ pub(crate) fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             key: s.key,
             value: s.value,
             layer: s.layer.to_string(),
-            shadows: s.shadows.iter().map(|l| l.to_string()).collect(),
+            shadows: s
+                .shadows
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         })
         .collect();
 
@@ -99,7 +103,7 @@ pub(crate) fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         .iter()
         .map(|e| e.feature.as_str())
         .collect();
-    names.sort();
+    names.sort_unstable();
     names.dedup();
     let features = names
         .into_iter()
@@ -823,8 +827,7 @@ pub(crate) fn set(
                 .unwrap_or_else(|| ".".into());
             anyhow::bail!(
                 "nothing in omh reads `{key}`{meant} Nothing was written. For a key only a \
-                 newer omh reads:\n  {}",
-                again
+                 newer omh reads:\n  {again}"
             );
         }
         None => ctx.warn(&format!(
@@ -835,8 +838,7 @@ pub(crate) fn set(
                 if !anyway {
                     anyhow::bail!(
                         "{quarrel}. Nothing was written. For a value only a newer omh \
-                         reads:\n  {}",
-                        again
+                         reads:\n  {again}"
                     );
                 }
                 ctx.warn(&format!("{quarrel} — written anyway"));
@@ -1515,10 +1517,11 @@ pub(crate) fn rm(
             source.display()
         ),
         Some(path) if path.is_dir() && !path.is_symlink() => {
-            std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?
+            std::fs::remove_dir_all(path)
+                .with_context(|| format!("removing {}", path.display()))?;
         }
         Some(path) => {
-            std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?
+            std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
         }
     }
     ctx.say(
@@ -1716,7 +1719,7 @@ pub(crate) fn capability_from(key: &str) -> Result<adapter::Capability> {
             "servers" | "server" => Some("mcp"),
             _ => adapter::Capability::ALL
                 .iter()
-                .map(|c| c.key())
+                .map(super::super::adapter::Capability::key)
                 .find(|k| k.strip_suffix('s') == Some(key)),
         };
         format!(

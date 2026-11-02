@@ -1805,10 +1805,7 @@ mod tests {
     /// The repo:  one hook, which is the only content a project may declare.
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            root: dir.path().join("home"),
-            repo: dir.path().join("repo"),
-        };
+        let paths = Paths::at(dir.path());
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -3625,7 +3622,8 @@ mod tests {
                 )
                 .unwrap();
                 selects(&fx, table);
-                let decided = decided_with(off.iter().map(|f| f.to_string()).collect());
+                let decided =
+                    decided_with(off.iter().map(std::string::ToString::to_string).collect());
                 let p = plan_with(&fx, adapter, decided);
 
                 let mut want: Vec<(Option<String>, Vec<String>)> = handed(&p, adapter)
@@ -4437,7 +4435,7 @@ mod tests {
     fn the_use_list_is_the_rules_order() {
         let fx = fixture();
         let write = |name: &str, body: &str| {
-            std::fs::write(fx.paths.root.join("rules").join(name), body).unwrap()
+            std::fs::write(fx.paths.root.join("rules").join(name), body).unwrap();
         };
         write("apple.md", "APPLE RULE");
         write("zebra.md", "ZEBRA RULE");

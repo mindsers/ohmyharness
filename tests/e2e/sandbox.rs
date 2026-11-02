@@ -44,7 +44,9 @@ impl Session {
         // recipe changed removed each other's images: `No such image` on
         // whichever came last. The turns, after, run side by side.
         static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _one = STARTING.lock().unwrap_or_else(|e| e.into_inner());
+        let _one = STARTING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let repo = dir.path().join("repo");
@@ -503,7 +505,7 @@ impl Turn {
             match (m["type"].as_str(), m["role"].as_str()) {
                 // Responses: a call's output is an item of its own.
                 (Some(t), _) if t.ends_with("_call_output") || t == "tool_search_output" => {
-                    out.push(m.clone())
+                    out.push(m.clone());
                 }
                 // Chat Completions: a message from the `tool` role.
                 (_, Some("tool")) => out.push(m["content"].clone()),

@@ -913,7 +913,7 @@ impl Ctx {
             ("cmd/session.rs", "rm", 245),
             ("cmd/session.rs", "run", 319),
             ("cmd/session.rs", "sessions_ls", 273),
-            ("cmd/settings_tui.rs", "defaults", 212),
+            ("cmd/settings_tui.rs", "defaults", 215),
             ("cmd/upgrade.rs", "upgrade_cmd", 203),
             ("container.rs", "plan", 277),
             ("main.rs", "dispatch", 212),

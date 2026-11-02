@@ -506,7 +506,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // one.
     let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let stacks = stack::detected(&stack_defs, &paths.repo);
-    let names: Vec<String> = adapters.to_vec();
+    let names: Vec<String> = adapters.clone();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h));
 
     // What a repo holds: settings, memory configuration, and hooks. No skills,
@@ -820,13 +820,13 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             // Backgrounded: init returns now and the first launch waits only if
             // this has not finished.
             Ok(_) => {
-                summary.graph = Some(format!("indexing in background → {}", paths.cache_volume()))
+                summary.graph = Some(format!("indexing in background → {}", paths.cache_volume()));
             }
             Err(e) => summary.graph = Some(format!("could not start indexing: {e:#}")),
         }
     }
 
-    summary.base_set = manifest.version.to_string();
+    summary.base_set = manifest.version.clone();
     summary.rationale = manifest
         .rationale()
         .into_iter()
