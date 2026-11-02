@@ -371,7 +371,8 @@ fn omp_account() -> Vec<(&'static str, String)> {
             format!(
                 "providers:\n  fake:\n    baseUrl: {}/v1\n    auth: none\n    \
                  api: openai-completions\n    models:\n      - id: fake-model\n        \
-                 reasoning: false\n        contextWindow: 1000000\n",
+                 reasoning: false\n        contextWindow: 1000000\n\
+                 disabledProviders: [{DISABLED}]\n",
                 crate::sandbox::fake_url()
             ),
         ),
@@ -452,29 +453,32 @@ fn omp_account() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The providers omp would otherwise ask for model lists, or probe on this
+/// machine.
+const DISABLED: &str =
+    "alibaba-coding-plan, charm-hyper, commandcode, kilo, venice, zenmux, ollama, llama.cpp, lm-studio";
+
 /// omp's provider comes from its account, and its model from the account's
 /// preferences (`omp_account`): the driver names none. The providers it
-/// would otherwise ask for model lists are switched off in an overlay omp
-/// reads above `config.yml` and never writes back (`PI_CONFIG_FILES`) — not
-/// in `config.yml`, the session's preferences, where every new container
-/// would write over what the session keeps. Not `--no-extensions`: omh's
-/// hooks are an extension.
+/// would otherwise ask for model lists are switched off by the account's
+/// provider file too, which each session's `config.yml` is seeded with. Not
+/// `--no-extensions`: omh's hooks are an extension.
 pub const OMP: Driver = Driver {
     name: "omp",
-    env: &[
-        ("PI_AUTO_QA", "0"),
-        ("PI_CONFIG_FILES", "/home/agent/.omp-e2e.yml"),
-    ],
-    files: &[
-        (
-            "~/.omp-e2e.yml",
-            "disabledProviders: [alibaba-coding-plan, charm-hyper, commandcode, kilo, venice, zenmux, ollama, llama.cpp, lm-studio]\n",
-        ),
-    ],
+    env: &[("PI_AUTO_QA", "0")],
+    files: &[],
     turn: |prompt, _| {
-        ["omp", "-p", "--mode", "json", "--auto-approve", "--no-title", prompt]
-            .map(String::from)
-            .to_vec()
+        [
+            "omp",
+            "-p",
+            "--mode",
+            "json",
+            "--auto-approve",
+            "--no-title",
+            prompt,
+        ]
+        .map(String::from)
+        .to_vec()
     },
     // Every omp tool requires `i`, the intent.
     shell: |command| tool("bash", json!({ "command": command, "i": "e2e" })),
@@ -483,15 +487,26 @@ pub const OMP: Driver = Driver {
     // is a snapshot hash this edit cannot know; omp still applies an insert at
     // the head of the file (`PUT <1:`) under a stale one, with a warning.
     edit: |file, _old, new| {
-        tool("edit", json!({ "input": format!("[{file}#0000]\nPUT <1:\n+{new}\n"), "i": "e2e" }))
+        tool(
+            "edit",
+            json!({ "input": format!("[{file}#0000]\nPUT <1:\n+{new}\n"), "i": "e2e" }),
+        )
     },
-    write: |file, contents| tool("write", json!({ "path": file, "content": contents, "i": "e2e" })),
+    write: |file, contents| {
+        tool(
+            "write",
+            json!({ "path": file, "content": contents, "i": "e2e" }),
+        )
+    },
     // omp lists MCP tools as paths: the model writes the call's arguments to
     // `xd://mcp__<server>_<tool>`, with the server's `-` spelled `_` —
     // `omh-memory`'s `recall` is mounted as `mcp__omh_memory_recall`, and
     // `xd://mcp__omh-memory_recall` is `No such tool`. Measured at 18.10.4.
     mcp: |server, tool_name, args| {
-        vec![tool("write", json!({ "path": format!("xd://mcp__{}_{tool_name}", server.replace('-', "_")), "content": args.to_string(), "i": "e2e" }))]
+        vec![tool(
+            "write",
+            json!({ "path": format!("xd://mcp__{}_{tool_name}", server.replace('-', "_")), "content": args.to_string(), "i": "e2e" }),
+        )]
     },
     // And omp's model catalogue, which it fetches with no switch to stop it
     // and retries five minutes after a failure: there in some turns and not
@@ -499,7 +514,15 @@ pub const OMP: Driver = Driver {
     elsewhere: &[GRAPH_UPDATE_CHECK, "catalog.stencil.so:443"],
     transcripts: false,
     account: Some(omp_account),
-    drops: &["e2e-before-inject", "e2e-end-inject", "e2e-start-inject", "git-note", "graph-first", "graph-orient", "graph-read"],
+    drops: &[
+        "e2e-before-inject",
+        "e2e-end-inject",
+        "e2e-start-inject",
+        "git-note",
+        "graph-first",
+        "graph-orient",
+        "graph-read",
+    ],
 };
 
 /// An opencode account: a login that is none — a key for a provider nobody

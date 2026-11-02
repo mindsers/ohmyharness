@@ -247,10 +247,12 @@ pub(crate) fn session_up(
         Some(account) => crate::prefs::check(adapter, account)?.map(|p| (p, account.clone())),
         None => None,
     };
-    let rests = match (&prefs, seeds.as_mut()) {
-        (Some((prefs, _)), Some(seeds)) => seeds.take(&prefs.copies()),
-        _ => std::collections::BTreeMap::new(),
-    };
+    let rests = rests(
+        adapter,
+        prefs.as_ref().map(|(p, _)| p),
+        seeds.as_mut(),
+        opts.account_dir.as_deref(),
+    )?;
     let account_dir = opts.account_dir.clone();
     let plan = container::plan(paths, catalogue, adapter, session, &[], opts)?;
     plan.validate_for(backend)?;
@@ -1841,6 +1843,30 @@ pub(crate) fn say_hooks(paths: &Paths, ctx: &out::Ctx) -> Option<notice::Record>
             None
         }
     }
+}
+
+/// What a session's preferences copies hold beside the account's
+/// preferences, by account path: the account files its policy copies that
+/// are preferences files too, taken out of `seeds` (`auth::seeds`), and what
+/// the account's provider file seeds — omp's filters. One function for a
+/// launch and doctor's probe, which must not start from different copies.
+pub(crate) fn rests(
+    adapter: &Adapter,
+    prefs: Option<&crate::prefs::Account>,
+    seeds: Option<&mut auth::Seeds>,
+    account: Option<&std::path::Path>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let Some(prefs) = prefs else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let mut rests = match seeds {
+        Some(seeds) => seeds.take(&prefs.copies()),
+        None => std::collections::BTreeMap::new(),
+    };
+    if let Some(account) = account {
+        rests.extend(crate::provider::rests(adapter, account)?);
+    }
+    Ok(rests)
 }
 
 /// Say what this repo is not using from your catalogue, and what it named that

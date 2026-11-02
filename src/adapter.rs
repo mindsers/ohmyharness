@@ -342,6 +342,12 @@ pub struct Declared {
 }
 
 impl Declared {
+    /// The account's own file, relative to the account directory — and to the
+    /// home, where the harness reads it.
+    pub fn account_rel(&self) -> &str {
+        self.path.trim_start_matches("$HOME/")
+    }
+
     /// Every key kept, asked about or not.
     pub fn all(&self) -> impl Iterator<Item = &KeyPath> {
         self.keys.iter().chain(&self.quiet)

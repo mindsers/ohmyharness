@@ -919,6 +919,13 @@ fn omp_config(s: &Session) {
         ok(&s.sh(&get), &get).trim().to_string()
     };
     assert_eq!(get("todo.enabled"), "true", "omp read the dropped setting");
+    // The account's provider filters, in the session's copy and nowhere the
+    // account keeps preferences.
+    let seeded = std::fs::read_to_string(s.preferences("config.yml")).unwrap_or_default();
+    assert!(
+        seeded.contains("disabledProviders") && seeded.contains("lm-studio"),
+        "the account's provider filters did not reach the session: {seeded}"
+    );
     let link = || {
         ok(&s.sh("readlink ~/.omp/agent/config.yml"), "readlink")
             .trim()
@@ -942,7 +949,8 @@ fn omp_config(s: &Session) {
     assert!(
         kept.contains("fake/fake-model")
             && !kept.contains("todo")
-            && !kept.contains("showHardwareCursor"),
+            && !kept.contains("showHardwareCursor")
+            && !kept.contains("disabledProviders"),
         "the account kept: {kept}"
     );
 }

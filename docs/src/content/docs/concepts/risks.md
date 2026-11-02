@@ -192,6 +192,9 @@ omp fetches credentials through, and `extensions` lists extensions it loads
 the account's is a link to the session's copy, and the account keeps only the
 keys the adapter declares as preferences — see
 [`~/.omp/agent/config.yml` is each session's own](/guides/accounts/#ompagentconfigyml-is-each-sessions-own).
+The three lists that choose among providers are kept in the account's
+provider file instead, where no session writes, and each session's copy
+starts from them.
 `tests/e2e` launches with an account whose shared file holds a setting that is
 not a preference beside the model, and asserts the turn runs on the model and
 omp reads the other setting as never set — red with the shared file as before.

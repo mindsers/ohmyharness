@@ -906,9 +906,8 @@ impl Ctx {
         const LIMIT: usize = 200;
         const LONG: &[(&str, &str, usize)] = &[
             ("adapter.rs", "check_preferences", 200),
-            ("cmd/account.rs", "login", 200),
             ("cmd/init.rs", "init", 437),
-            ("cmd/inspect.rs", "doctor_cmd", 492),
+            ("cmd/inspect.rs", "doctor_cmd", 490),
             ("cmd/session.rs", "attach", 215),
             ("cmd/session.rs", "rm", 245),
             ("cmd/session.rs", "run", 319),

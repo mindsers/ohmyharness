@@ -257,12 +257,6 @@ pub fn live(home: &Home) -> PathBuf {
     home.path().join("live")
 }
 
-/// The account's own file, relative to the account directory — and to the
-/// home, where the harness reads it.
-pub fn account_rel(d: &Declared) -> &str {
-    d.path.trim_start_matches("$HOME/")
-}
-
 /// Where the account's file links to.
 fn target(d: &Declared) -> PathBuf {
     Path::new(GUEST).join(&d.name)
@@ -480,7 +474,7 @@ fn check_link(
     declared: &Declared,
     marked: bool,
 ) -> Result<(State, Doc)> {
-    let rel = account_rel(declared);
+    let rel = declared.account_rel();
     let shown = account.join(rel);
     let found = hold_parent(account, rel, false)?;
     let entry = match &found {
@@ -589,7 +583,7 @@ fn check_file(account: &Path, declared: &Declared) -> Result<(State, Doc)> {
     if let Some(kept) = kept_if_any(account, declared)? {
         return Ok((State::Ready, kept));
     }
-    let rel = account_rel(declared);
+    let rel = declared.account_rel();
     let shown = account.join(rel);
     let own = match hold_parent(account, rel, false)? {
         Some((dir, leaf)) => read_raw(&dir, leaf)
@@ -682,7 +676,7 @@ impl Account {
             true => self
                 .files
                 .iter()
-                .map(|f| account_rel(&f.declared).to_string())
+                .map(|f| f.declared.account_rel().to_string())
                 .collect(),
             false => Vec::new(),
         }
@@ -726,7 +720,7 @@ impl Account {
                 State::Relink { found } => Some(format!(
                     "{} is {found}, not the link omh laid — the next launch links it again and \
                      keeps nothing in it",
-                    self.dir.join(account_rel(&f.declared)).display()
+                    self.dir.join(f.declared.account_rel()).display()
                 )),
                 State::Import => Some(format!(
                     "{}'s {} preferences on this account are kept apart from the next launch — \
@@ -812,7 +806,7 @@ impl Account {
         }
         let mut notes = Vec::new();
         for f in &self.files {
-            let rel = account_rel(&f.declared);
+            let rel = f.declared.account_rel();
             let (dir, leaf) = make_parent(&self.dir, rel)?;
             let name = OsStr::new(&f.declared.name);
             match &f.state {
@@ -907,12 +901,12 @@ impl Account {
         let this = self.dir.display().to_string();
         let mut rest_of = BTreeMap::new();
         for f in &self.files {
-            let rest = match rests.get(account_rel(&f.declared)) {
+            let rest = match rests.get(f.declared.account_rel()) {
                 Some(body) => Format::Json.parse(body.as_bytes())?,
                 None => Doc::new(),
             };
             let rest = compose(&rest, &Doc::new(), f.declared.all());
-            let digest = match rests.contains_key(account_rel(&f.declared)) {
+            let digest = match rests.contains_key(f.declared.account_rel()) {
                 true => Some(format!(
                     "{:016x}",
                     crate::hash::fnv1a_64(&Format::Json.render(&rest)?)

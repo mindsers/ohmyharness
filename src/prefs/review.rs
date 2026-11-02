@@ -45,7 +45,7 @@ pub fn unreviewed(adapter: &Adapter, home: &Home) -> Result<Vec<String>> {
     }
     let mut out = Vec::new();
     for d in prefs.declared() {
-        let side = Side::read(home, d)?;
+        let side = Side::read(home, d, adapter)?;
         out.extend(side.changed().map(dotted));
     }
     Ok(out)
@@ -61,10 +61,14 @@ struct Side {
     /// The file is a copy of an account file, whose other keys are the
     /// harness's bookkeeping and never the session's to keep or name.
     copy: bool,
+    /// What the account's provider file seeds the file with beside its
+    /// preferences — omp's filters (`provider::seeded`): the account's, and
+    /// never named as the session's. The file's other keys still are.
+    seeded: Vec<KeyPath>,
 }
 
 impl Side {
-    fn read(home: &Home, declared: Declared) -> Result<Side> {
+    fn read(home: &Home, declared: Declared, adapter: &Adapter) -> Result<Side> {
         let root = home.path();
         let name = OsStr::new(&declared.name);
         let format = declared.format();
@@ -83,12 +87,17 @@ impl Side {
                 )
             })?
             .unwrap_or_default();
+        let seeded = match crate::provider::seeded(adapter) {
+            Some((d, keys)) if d.path == declared.path => keys,
+            _ => Vec::new(),
+        };
         Ok(Side {
             base: own("base")?,
             reviewed: own("reviewed")?,
             live,
-            copy: root.join(REST).join(name).is_file(),
+            copy: seeded.is_empty() && root.join(REST).join(name).is_file(),
             declared,
+            seeded,
         })
     }
 
@@ -193,7 +202,7 @@ pub fn review(adapter: &Adapter, sittings: &[Sitting], mut answers: Answers) -> 
         let sides: Result<Vec<Side>> = prefs
             .declared()
             .into_iter()
-            .map(|d| Side::read(&s.home, d))
+            .map(|d| Side::read(&s.home, d, adapter))
             .collect();
         match sides {
             Ok(sides) => read.push((i, sides)),
@@ -476,7 +485,7 @@ fn not_preferences(sides: &[Side]) -> Vec<String> {
         .iter()
         .filter(|s| !s.copy)
         .flat_map(|s| {
-            let keys: Vec<&KeyPath> = s.declared.all().collect();
+            let keys: Vec<&KeyPath> = s.declared.all().chain(&s.seeded).collect();
             undeclared(&s.live, &keys)
         })
         .collect()
@@ -1070,6 +1079,56 @@ mod tests {
                 "dropped 1 claude preference: s01 copyOnSelect".to_string(),
                 "s01: not kept, not preferences: hooks".to_string(),
             ]
+        );
+    }
+
+    /// What the account's provider file seeds a session's `config.yml` with
+    /// beside its preferences — omp's provider filters — is the account's,
+    /// and never named as what the session wrote; anything else the session
+    /// set there that is not a preference still is.
+    #[test]
+    fn a_filter_the_provider_seeded_is_never_named_and_the_sessions_own_keys_are() {
+        let omp = Adapter::find(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters"),
+            "omp",
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let account = root.path().join("creds/omp/work");
+        std::fs::create_dir_all(account.join("preferences")).unwrap();
+        std::fs::write(
+            account.join("preferences/config.yml"),
+            "modelRoles:\n  default: a/b\n",
+        )
+        .unwrap();
+        std::fs::write(
+            account.join(crate::provider::omp::FILE),
+            "providers: {}\ndisabledProviders: [ollama]\n",
+        )
+        .unwrap();
+        let home = Home::Kept(root.path().join("run/repo/s01/.preferences/omp"));
+        let rests = crate::provider::rests(&omp, &account).unwrap();
+        super::super::check(&omp, &account)
+            .unwrap()
+            .unwrap()
+            .seed(&omp, &home, &rests, false)
+            .unwrap();
+        let copy = super::super::live(&home).join("config.yml");
+        let seeded = std::fs::read_to_string(&copy).unwrap();
+        assert!(seeded.contains("ollama"), "{seeded}");
+        std::fs::write(
+            &copy,
+            "modelRoles:\n  default: a/b\ndisabledProviders: [ollama]\nshellCommandPrefix: x\n",
+        )
+        .unwrap();
+        let sitting = Sitting {
+            id: "s01".into(),
+            home,
+        };
+        let outcome = review(&omp, std::slice::from_ref(&sitting), Answers::DropAll).unwrap();
+        assert_eq!(
+            outcome.notes,
+            vec!["s01: not kept, not preferences: shellCommandPrefix".to_string()]
         );
     }
 }

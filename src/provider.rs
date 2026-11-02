@@ -48,6 +48,62 @@ fn write_private(account_dir: &Path, name: &str, body: &[u8]) -> Result<()> {
         .with_context(|| format!("writing {}", path.display()))
 }
 
+/// The preferences file a harness's provider file seeds, and the keys it
+/// seeds there: omp's `config.yml`, beside the `models.yml` its providers
+/// render over, where omp reads [`omp::FILTERS`]. `None` for a harness whose
+/// provider seeds nothing — Codex's rides in its System layer.
+pub fn seeded(
+    adapter: &crate::adapter::Adapter,
+) -> Option<(crate::adapter::Declared, Vec<crate::adapter::KeyPath>)> {
+    let provider = adapter.provider.as_ref()?;
+    match provider.format {
+        crate::adapter::ProviderFormat::CodexConfig => None,
+        crate::adapter::ProviderFormat::OmpModels => {
+            let beside = format!(
+                "{}/config.yml",
+                provider.path.as_deref()?.rsplit_once('/')?.0
+            );
+            let declared = adapter
+                .preferences
+                .as_ref()?
+                .declared()
+                .into_iter()
+                .find(|d| d.path == beside)?;
+            let keys = omp::FILTERS
+                .iter()
+                .map(|k| crate::adapter::key_path(k).expect("a filter is one key"))
+                .collect();
+            Some((declared, keys))
+        }
+    }
+}
+
+/// What the account's provider file puts in a session's preferences copy
+/// beside its preferences, as `prefs::Account::seed` takes it: the copy's
+/// account path to the document. A session's copy is the account's
+/// preferences around this, and a relaunch keeps the session's own until it
+/// changes. Empty for a harness or an account with nothing to seed.
+pub fn rests(
+    adapter: &crate::adapter::Adapter,
+    account_dir: &Path,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some((declared, _)) = seeded(adapter) else {
+        return Ok(out);
+    };
+    let Some(doc) = omp::read(account_dir)? else {
+        return Ok(out);
+    };
+    let filters = omp::filters(&doc);
+    if !filters.is_empty() {
+        out.insert(
+            declared.account_rel().to_string(),
+            serde_json::to_string_pretty(&serde_json::Value::Object(filters))?,
+        );
+    }
+    Ok(out)
+}
+
 /// Whether `url` names this machine — which, in a sandbox, is the sandbox.
 pub(crate) fn loopback(url: &str) -> bool {
     let lower = host(url).to_ascii_lowercase();
@@ -92,5 +148,53 @@ pub(crate) fn redacted_url(url: &str) -> String {
     match rest.rsplit_once('@') {
         Some((_, after)) => format!("{scheme}://<redacted>@{after}{query}"),
         None => format!("{scheme}://{rest}{query}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter(name: &str) -> crate::adapter::Adapter {
+        crate::adapter::Adapter::find(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters"),
+            name,
+        )
+        .unwrap()
+    }
+
+    /// omp's filters reach a session as the rest of the `config.yml` its
+    /// preferences are kept in — keyed as `prefs::Account::seed` looks a
+    /// rest up, or the seed would pass them over without a word.
+    #[test]
+    fn omps_filters_are_the_rest_of_its_preferences_file() {
+        let omp = adapter("omp");
+        let (declared, keys) = seeded(&omp).expect("omp's provider seeds its config.yml");
+        assert_eq!(declared.path, "$HOME/.omp/agent/config.yml");
+        assert_eq!(
+            keys,
+            omp::FILTERS
+                .iter()
+                .map(|k| crate::adapter::key_path(k).unwrap())
+                .collect::<Vec<_>>()
+        );
+        let d = tempfile::tempdir().unwrap();
+        assert!(rests(&omp, d.path()).unwrap().is_empty());
+        std::fs::write(d.path().join(omp::FILE), "providers: {}\n").unwrap();
+        assert!(rests(&omp, d.path()).unwrap().is_empty());
+        std::fs::write(
+            d.path().join(omp::FILE),
+            "providers: {}\ndisabledProviders: [ollama]\n",
+        )
+        .unwrap();
+        let got = rests(&omp, d.path()).unwrap();
+        let body = &got[declared.account_rel()];
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            serde_json::json!({"disabledProviders": ["ollama"]})
+        );
+        assert_eq!(got.len(), 1);
+        // Codex's provider rides in its System layer and seeds nothing.
+        assert!(seeded(&adapter("codex")).is_none());
     }
 }

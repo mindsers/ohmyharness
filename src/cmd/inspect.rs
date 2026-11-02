@@ -498,10 +498,8 @@ pub(crate) fn doctor_cmd(
             Some(account_dir) => auth::seeds(&adapter, account_dir)?,
             None => None,
         };
-        let rests = match (&prefs, seeds.as_mut()) {
-            (Some(prefs), Some(seeds)) => seeds.take(&prefs.copies()),
-            _ => std::collections::BTreeMap::new(),
-        };
+        let rests =
+            super::session::rests(&adapter, prefs.as_ref(), seeds.as_mut(), account.as_deref())?;
         crate::cmd::session::say_selection(&paths, &catalogue, &opts.repo, ctx);
         let mut plan = container::plan(&paths, &catalogue, &adapter, &session, &[], opts)?;
         crate::cmd::session::say_rules(&plan, ctx);
