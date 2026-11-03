@@ -229,8 +229,11 @@ in `agent.db`, in the account, which a session can write. Unlike an approval thi
 reaches a session in `yolo`: a row left in one session ran in the next.
 `tests/e2e` leaves one and is red without the check. The `omp` a session starts
 is now a script around the release binary, which deletes such a row and names its
-provider before omp starts, and does not start omp when it cannot look. A key
-that is only a key is left alone. The cost is that a `!` key you stored yourself
+provider before omp starts, and does not start omp when it cannot look. A session
+can write the database's schema as well as its rows, so the same test tries a
+trigger that stops the delete, one that writes the row back, the table renamed in
+capitals, a key stored as bytes, and a view in the table's place. A key that is
+only a key is left alone. The cost is that a `!` key you stored yourself
 is removed too; omh already refuses one in a provider file. The line naming the
 provider goes to stderr, and omp's screen may draw over it.
 
