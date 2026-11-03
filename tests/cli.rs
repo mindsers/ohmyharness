@@ -927,6 +927,136 @@ fn a_catalogue_upgrade_cannot_read_stops_it_before_any_write() {
     );
 }
 
+/// **Every edit an upgrade replaces is still somewhere, under the name it
+/// says.** A second edit went to `.yours` too, over the first.
+#[test]
+fn an_upgrade_keeps_every_edit_under_the_name_it_says() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    let upgrade = || {
+        let out = sb.omh(&["upgrade"]);
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{said}");
+        said
+    };
+    upgrade();
+    let adapter = sb.home.join(".omh/adapters/claude.toml");
+    let shipped = std::fs::read_to_string(&adapter).unwrap();
+
+    for (edit, name) in [
+        ("# my first edit\n", "claude.toml.yours"),
+        ("# my second edit\n", "claude.toml.yours.1"),
+    ] {
+        let mine = format!("{shipped}{edit}");
+        std::fs::write(&adapter, &mine).unwrap();
+        let said = upgrade();
+        assert!(
+            said.lines()
+                .any(|l| l.contains("your edit is saved as") && l.ends_with(name)),
+            "names {name}: {said}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sb.home.join(".omh/adapters").join(name)).unwrap(),
+            mine
+        );
+        assert_eq!(std::fs::read_to_string(&adapter).unwrap(), shipped);
+    }
+}
+
+/// **A file omh wrote and nobody touched is replaced without a word.** It was
+/// reported as "yours saved as", to somebody who had never opened it. Stands in
+/// for a later release by recording other bytes as what omh wrote.
+#[test]
+fn an_upgrade_says_nothing_of_a_copy_nobody_edited() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    assert!(sb.omh(&["upgrade"]).status.success());
+    let adapter = sb.home.join(".omh/adapters/claude.toml");
+    let shipped = std::fs::read_to_string(&adapter).unwrap();
+    let record = sb.home.join(".omh/adapters/.shipped");
+    let mut was: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    let older = "# what an older omh shipped\n";
+    let digest = older.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    was["claude.toml"] = format!("{digest:016x}").into();
+    std::fs::write(&record, was.to_string()).unwrap();
+    std::fs::write(&adapter, older).unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert!(!said.contains("saved as"), "nothing was saved: {said}");
+    assert_eq!(std::fs::read_to_string(&adapter).unwrap(), shipped);
+    assert!(!sb.home.join(".omh/adapters/claude.toml.yours").exists());
+}
+
+/// **With no record it cannot tell, and says that.** Every install from before
+/// the record is here once. Calling the file "your edit" claims what omh does
+/// not know.
+#[test]
+fn an_upgrade_with_no_record_keeps_the_file_and_says_it_cannot_tell() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    let adapter = sb.home.join(".omh/adapters/claude.toml");
+    let mine = format!(
+        "{}# an edit, or an older omh's copy\n",
+        std::fs::read_to_string(&adapter).unwrap()
+    );
+    std::fs::write(&adapter, &mine).unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.lines().any(|l| l.contains("no record")
+            && !l.contains("your edit")
+            && l.ends_with("claude.toml.yours")),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.home.join(".omh/adapters/claude.toml.yours")).unwrap(),
+        mine
+    );
+}
+
+/// What a saved catalogue is called reaches the line about it, since it need
+/// not be the first free name.
+#[test]
+fn an_upgrade_names_the_copy_of_the_catalogue_it_kept() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let _log = sb.fake_docker();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.1.0\n").unwrap();
+    std::fs::write(sb.home.join(".omh/mcp.json.yours"), "{}").unwrap();
+    let catalogue = r#"{"mcpServers":{"memory":{"command":"edited"}}}"#;
+    std::fs::write(sb.home.join(".omh/mcp.json"), catalogue).unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.lines()
+            .any(|l| l.contains("`memory`") && l.contains("mcp.json.yours.1")),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.home.join(".omh/mcp.json.yours.1")).unwrap(),
+        catalogue
+    );
+}
+
 /// Notes committed under `<repo>/.omh/notes` are not read, and omh says so
 /// rather than leaving somebody to wonder where their store went.
 ///
