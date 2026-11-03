@@ -206,20 +206,36 @@ pub trait Runtime: std::fmt::Debug {
 /// without the capability every connection died there — so no editor could
 /// attach to any session, on either Debian base, and omh reported it as the
 /// editor failing to open.
+///
+/// **These are the entrypoint's and sshd's, not the agent's.** They bound what
+/// the session's root processes may hold; a process the agent runs is `agent`,
+/// under `no-new-privileges`, and holds none of them (`tests/e2e`).
+///
+/// Each was taken out in turn and the container-backed suite and one harness's
+/// end-to-end run put through, on Linux, 2026-11-03. What broke is said below;
+/// where nothing did, that is said too, with why it stays.
 pub const SESSION_CAPS: &[&str] = &[
     // sshd dropping to `agent` for a login, and to its own privilege-separation
-    // user before authentication.
+    // user before authentication. Without either, ssh does not get in.
     "SETUID",
     "SETGID",
-    // The entrypoint's `chmod`/`chown` on files the bind mounts land with host
-    // ownership, and `install -o root` for the host key.
+    // The entrypoint's `chown` of `.ssh` and `install -o root` for the host
+    // key, which reads a key with host ownership. Without either, the
+    // entrypoint stops and there is no session at all.
     "CHOWN",
-    "FOWNER",
     "DAC_OVERRIDE",
-    // sshd signals its own children; `omh down` and the idle reaper stop
-    // processes the agent left running.
+    // The entrypoint's `chmod` of a `.ssh` another user owns. None of omh's own
+    // images holds one, so nothing broke without it; a repo's stack layer can,
+    // and root's `chmod` of it without this is refused, which stops the
+    // entrypoint.
+    "FOWNER",
+    // sshd's root process signalling its unprivileged children. Nothing broke
+    // without it, and nothing here exercises a connection that ends that way,
+    // so that is no evidence it is unused.
     "KILL",
-    // sshd binds 22.
+    // sshd binds 22. Nothing broke without it on Docker, which opens every port
+    // to every user in a container (`ip_unprivileged_port_start` is 0, measured).
+    // Kept for podman, not measured.
     "NET_BIND_SERVICE",
     // sshd's pre-auth privilege separation chroots to `/run/sshd`. Without it
     // the handshake is dropped with `chroot("/run/sshd"): Operation not

@@ -446,7 +446,10 @@ reads `NoNewPrivs` from both.
 **What remains.** The image keeps the grant for the `sbx` kit contract, whose
 launch is not wired yet. The capabilities sshd needs as root — `SETUID`,
 `SETGID`, `CHOWN`, `FOWNER`, `DAC_OVERRIDE` among them — stay in the session's
-set, so a compromised sshd is still root with them.
+set, so a compromised sshd is still root with them. A process the agent runs
+holds none of them: `tests/e2e` reads it from `/proc`. `KILL` and
+`NET_BIND_SERVICE` stay too, though nothing broke without them on Docker on Linux;
+`src/runtime.rs` says why for each.
 
 ### 4. `carry_in` is read from a committed layer
 

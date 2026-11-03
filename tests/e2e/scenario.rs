@@ -130,6 +130,10 @@ const SCENARIOS: &[Scenario] = &[
         run: omp_approvals,
     },
     Scenario {
+        name: "a process the agent runs holds no capability",
+        run: agent_holds_no_capability,
+    },
+    Scenario {
         name: "omh doctor passes in the session's repo",
         run: doctor,
     },
@@ -1395,6 +1399,34 @@ db.close();"#;
             && crate::sandbox::text(&refused).contains("Read-only file system"),
         "a session wrote the account's approval cache: {}",
         crate::sandbox::text(&refused)
+    );
+}
+
+/// The capabilities a session keeps are for its entrypoint and sshd. A process
+/// the agent runs holds none, so they are not the agent's to use.
+fn agent_holds_no_capability(s: &Session) {
+    let status = ok(
+        &s.sh("grep -E '^Cap(Prm|Eff):' /proc/self/status"),
+        "reading",
+    );
+    let held: Vec<&str> = status
+        .lines()
+        .filter(|l| {
+            l.split_whitespace()
+                .nth(1)
+                .is_none_or(|v| v.bytes().any(|b| b != b'0'))
+        })
+        .collect();
+    assert!(
+        held.is_empty(),
+        "an agent process holds capabilities: {status}"
+    );
+    let root = ok(&s.sh("grep '^CapEff:' /proc/1/status"), "reading");
+    assert!(
+        root.split_whitespace()
+            .nth(1)
+            .is_some_and(|v| v.bytes().any(|b| b != b'0')),
+        "the session's root process holds nothing, so this reads the wrong thing: {root}"
     );
 }
 
