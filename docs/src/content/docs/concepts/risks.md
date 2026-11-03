@@ -803,7 +803,8 @@ likely to kill the project, and it is not a technical one.
   generated with their features now, but a `~/.omh/mcp.json` written before
   holds copies of them. Nothing reads those, `omh why` names them as not read,
   and `omh upgrade` takes them out — keeping the file as it was in
-  `mcp.json.yours` when a copy was not what omh ships now.
+  `mcp.json.yours`, or the next free name, when a copy was not what omh ships
+  now.
 - **`omh why` answers about one repo.** It reads the layers resolved
   for the current repo, so the same entry can legitimately answer differently in
   two checkouts. That is correct and occasionally surprising.

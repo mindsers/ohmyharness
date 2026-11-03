@@ -1781,6 +1781,8 @@ because = "cargo is how a rust project is built and tested"
         let d = dir_with(&[
             ("rust.toml", MINIMAL),
             ("rust.toml.yours", "this is not toml at all {{{"),
+            ("rust.toml.yours.1", "nor is the one after it {{{"),
+            (".shipped", "and the record is not a stack {{{"),
             ("notes.md", "nor is this"),
         ]);
         let found = load_dir(d.path()).unwrap();

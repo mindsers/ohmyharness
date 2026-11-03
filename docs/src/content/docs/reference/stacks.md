@@ -41,7 +41,8 @@ A stack is read from one of two directories.
 **The shipped ones are omh's, and it replaces them.** They are refreshed from
 the binary, so that a fix to one reaches everybody in a release. An edit you
 made is not thrown away — it is saved beside the file as `<name>.toml.yours`,
-and omh says so — but it is not read either. A stack that is wrong is a pull
+or `.yours.1` and on when an earlier edit holds that name, and omh says so — but
+it is not read either. A stack that is wrong is a pull
 request, not a local patch: fixing Elixir on one laptop leaves it broken for
 every other Elixir user.
 

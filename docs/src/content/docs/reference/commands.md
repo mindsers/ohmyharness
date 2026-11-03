@@ -279,8 +279,12 @@ too, when the repo changes what it needs — a new lockfile, a second ecosystem 
 because it is the command that looks at that again. It:
 
 1. refreshes the managed catalogue from the binary — adapters, the base set,
-   editors, stacks, hooks, markers — keeping anything you edited as `.yours`,
-   just as `init` does. omh's own servers are generated at launch now, so a
+   editors, stacks, hooks, markers — just as `init` does. A file you edited is
+   kept beside it as `.yours`, or `.yours.1` and on when an earlier edit holds
+   that name, and omh names it. A file omh wrote and nobody touched is replaced
+   without a word. An install from before omh kept a record of what it wrote
+   gets a copy of any file that differs, once, since omh cannot tell which it
+   is. omh's own servers are generated at launch now, so a
    copy an earlier omh seeded into `~/.omh/mcp.json` — under the name it has or
    the one it had, `codegraph`, `memory` — is taken out, and named on stderr,
    `--json` or not, with a word when it was an edit of yours;
