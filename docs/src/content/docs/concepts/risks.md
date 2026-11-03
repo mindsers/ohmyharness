@@ -223,6 +223,20 @@ imported. Nothing omh does puts your own there: your personal memory reaches a
 session as a rule you import into your catalogue. The cost is that a session
 cannot write Claude's personal memory.
 
+**Closed across sessions for a command stored as a login in omp.** An API key in
+omp's logins that starts with `!` runs through a shell, and the logins are rows
+in `agent.db`, in the account, which a session can write. Unlike an approval this
+reaches a session in `yolo`: a row left in one session ran in the next.
+`tests/e2e` leaves one and is red without the check. The `omp` a session starts
+is now a script around the release binary, which deletes such a row and names its
+provider before omp starts, and does not start omp when it cannot look. A session
+can write the database's schema as well as its rows, so the same test tries a
+trigger that stops the delete, one that writes the row back, the table renamed in
+capitals, a key stored as bytes, and a view in the table's place. A key that is
+only a key is left alone. The cost is that a `!` key you stored yourself
+is removed too; omh already refuses one in a provider file. The line naming the
+provider goes to stderr, and omp's screen may draw over it.
+
 **Closed across sessions for omp's remembered approvals.** A session runs omp
 in `yolo`, its default, which asks about nothing: the sandbox is the boundary.
 This concerns only a session that opted out into ask-and-remember,
@@ -249,11 +263,9 @@ session's own.
 - an enterprise account's cloud bundle composes above omh's requirements: its
   allowlist is the union of both, and an organisation's
   `allow_managed_hooks_only = false` wins over omh's (read in Codex's source);
-- omp's logins, `agent.db` in the account: an API key stored there that
-  starts with `!` runs through `/bin/sh` the way one in `models.yml` did (read
-  in omp's source, `ai/src/auth/cascade.ts`; not measured) — code one session
-  leaves runs in the next. The database holds the logins themselves, so it
-  cannot be masked; it needs a check of its keys that omh does not make;
+- omp's logins while omp is running: two sessions on one account at once can
+  still race the check above, because omp re-reads its logins at each request
+  (read in omp's source). Only omp could close that;
 - omp's plugins, discovered from the same directory as its modules (read in
   its binary): not measured, not masked;
 - Codex's `~/.codex/rules/`, which decides which commands need approval rather

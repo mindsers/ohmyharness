@@ -130,6 +130,10 @@ const SCENARIOS: &[Scenario] = &[
         run: omp_approvals,
     },
     Scenario {
+        name: "a command stored as a key in omp's logins does not run in the next session",
+        run: omp_stored_keys,
+    },
+    Scenario {
         name: "omh doctor passes in the session's repo",
         run: doctor,
     },
@@ -1395,6 +1399,232 @@ db.close();"#;
             && crate::sandbox::text(&refused).contains("Read-only file system"),
         "a session wrote the account's approval cache: {}",
         crate::sandbox::text(&refused)
+    );
+}
+
+/// omp runs a key that starts with `!` (`ai/src/auth/cascade.ts`,
+/// `config/resolve-config-value.ts`), and its logins are rows in `agent.db`, in
+/// the account every session of it shares. So a session could leave a row that
+/// ran in the next, whatever mode either was in. It is left here from inside
+/// the session, as one would, for the provider this turn asks a key for and for
+/// two it only looks at.
+///
+/// The next start of omp finds the rows gone, says which, runs none of them,
+/// and leaves a key that is only a key.
+///
+/// A session writes the schema as freely as the rows, so the rest is what it
+/// could do to the database around such a row: a trigger that stops the delete
+/// or writes the row back, the table spelled in capitals, which is the same
+/// table to omp, and the key stored as bytes. And a database the check cannot
+/// trust stops omp: unreadable, or with something else where the table belongs.
+///
+/// Only for omp.
+fn omp_stored_keys(s: &Session) {
+    if s.harness.name != "omp" {
+        return;
+    }
+    const MARK: &str = "/tmp/e2e-stored-key-ran";
+    const COMMAND: &str = r#"{"key":"!touch /tmp/e2e-stored-key-ran; echo e2e","source":"login"}"#;
+    let logins = |program: &str| {
+        s.sh(&format!(
+            "node --no-warnings - <<'EOF'\n\
+             const db = new (require(\"node:sqlite\").DatabaseSync)(process.env.HOME + \"/.omp/agent/agent.db\");\n\
+             const add = (provider, data) => db.prepare(\"INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, 'api_key', ?)\").run(provider, data);\n\
+             const command = {COMMAND:?};\n\
+             {program}\n\
+             db.close();\nEOF\n"
+        ))
+    };
+    let read_back = || {
+        ok(
+            &logins(
+                "for (const row of db.prepare(\"SELECT provider, data FROM auth_credentials\").all()) console.log(row.provider, String(row.data));",
+            ),
+            "reading omp's logins back",
+        )
+    };
+    let clear = || {
+        ok(
+            &logins("db.prepare(\"DELETE FROM auth_credentials WHERE provider LIKE 'e2e-%' OR provider IN ('fake', 'anthropic', 'openai')\").run();"),
+            "clearing omp's logins",
+        )
+    };
+    let _ = s.sh(&format!("rm -f {MARK}"));
+    ok(
+        &s.turn("Say hello.", &[]).out,
+        "a turn, so omp has made its database",
+    );
+
+    ok(
+        &logins(
+            "for (const provider of [\"fake\", \"anthropic\", \"openai\"]) add(provider, command);\n\
+             add(\"e2e-plain\", JSON.stringify({ key: \"e2e-only-a-key\", source: \"login\" }));",
+        ),
+        "leaving a key in omp's logins",
+    );
+    let turn = s.turn("Say hello.", &[]);
+    let ran_it = s.sh(&format!("test -e {MARK}")).status.success();
+    let _ = s.sh(&format!("rm -f {MARK}"));
+    let left = read_back();
+    clear();
+    ran(&turn);
+    assert!(
+        !ran_it,
+        "a key left in omp's logins ran as a command: {}",
+        turn.printed()
+    );
+    assert!(
+        !left.contains("e2e-stored-key-ran") && left.contains("e2e-only-a-key"),
+        "the rows that run a command go, and a plain key stays: {left}"
+    );
+    let said = String::from_utf8_lossy(&turn.out.stderr);
+    for provider in ["fake", "anthropic", "openai"] {
+        assert!(
+            said.lines()
+                .any(|l| l.contains("removed the login for") && l.contains(provider)),
+            "omp's logins lost {provider} without a word: {said}"
+        );
+    }
+    assert!(
+        !said.contains("e2e-plain"),
+        "and a plain key is not mentioned: {said}"
+    );
+
+    for (how, around, undo) in [
+        (
+            "a trigger that stops the delete",
+            "CREATE TRIGGER e2e_keep BEFORE DELETE ON auth_credentials BEGIN SELECT RAISE(IGNORE); END;",
+            "DROP TRIGGER IF EXISTS e2e_keep;",
+        ),
+        (
+            "a trigger that writes the row back",
+            "CREATE TRIGGER e2e_back AFTER DELETE ON auth_credentials BEGIN \
+             INSERT INTO auth_credentials (provider, credential_type, data) \
+             VALUES (old.provider, old.credential_type, old.data); END;",
+            "DROP TRIGGER IF EXISTS e2e_back;",
+        ),
+        (
+            "the table spelled in capitals",
+            "ALTER TABLE auth_credentials RENAME TO e2e_t; ALTER TABLE e2e_t RENAME TO AUTH_CREDENTIALS;",
+            "ALTER TABLE AUTH_CREDENTIALS RENAME TO e2e_t; ALTER TABLE e2e_t RENAME TO auth_credentials;",
+        ),
+    ] {
+        ok(
+            &logins(&format!("add(\"fake\", command);\ndb.exec({around:?});")),
+            how,
+        );
+        let turn = s.turn("Say hello.", &[]);
+        let ran_it = s.sh(&format!("test -e {MARK}")).status.success();
+        let _ = s.sh(&format!("rm -f {MARK}"));
+        ok(&logins(&format!("db.exec({undo:?});")), how);
+        let left = read_back();
+        clear();
+        assert!(
+            !ran_it && !left.contains("e2e-stored-key-ran"),
+            "with {how}, the key ran or stayed: {left}; {}",
+            turn.printed()
+        );
+    }
+
+    ok(
+        &logins("add(\"e2e-bytes\", Buffer.from(command));"),
+        "leaving a key as bytes",
+    );
+    let _ = s.sh("omp --version");
+    let left = read_back();
+    clear();
+    assert!(
+        !left.contains("e2e-bytes"),
+        "a key stored as bytes stayed: {left}"
+    );
+
+    // The check drops omp's own triggers with any other. omp makes them again
+    // when it opens its logins, which a turn does and `--version` does not.
+    ran(&s.turn("Say hello.", &[]));
+    let triggers = ok(
+        &logins("console.log(db.prepare(\"SELECT count(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name = 'auth_change_revision_auth_credentials_insert'\").get().n);"),
+        "reading omp's own triggers",
+    );
+    assert_eq!(
+        triggers.trim(),
+        "1",
+        "omp did not get back the trigger the check dropped"
+    );
+
+    // Something else where the table belongs. It would answer a read and take
+    // no delete, so it is not to be read and trusted.
+    ok(
+        &logins(
+            "db.exec(\"ALTER TABLE auth_credentials RENAME TO e2e_t; CREATE VIEW auth_credentials AS SELECT * FROM e2e_t;\");",
+        ),
+        "putting a view where the table belongs",
+    );
+    let blind = s.sh("omp --version");
+    ok(
+        &logins("db.exec(\"DROP VIEW auth_credentials; ALTER TABLE e2e_t RENAME TO auth_credentials;\");"),
+        "putting the table back",
+    );
+    assert!(
+        !blind.status.success()
+            && crate::sandbox::text(&blind).contains("could not check this account"),
+        "a view in place of the logins let omp start: {}",
+        crate::sandbox::text(&blind)
+    );
+
+    // A row the check found and could not take: the table rebuilt so that its
+    // id is no key. And a trigger whose name is a statement, which goes no
+    // further than the name: it is not run, and omp does not start.
+    for (how, around, undo) in [
+        (
+            "a row with no id to delete it by",
+            "ALTER TABLE auth_credentials RENAME TO e2e_t; \
+             CREATE TABLE auth_credentials (id, provider, credential_type, data); \
+             INSERT INTO auth_credentials VALUES (NULL, 'fake', 'api_key', '{COMMAND}');",
+            "DROP TABLE auth_credentials; ALTER TABLE e2e_t RENAME TO auth_credentials;",
+        ),
+        (
+            "a trigger named as a statement",
+            "CREATE TRIGGER \"e2e_a; CREATE TABLE e2e_ran (a)\" AFTER DELETE ON auth_credentials BEGIN SELECT 1; END; \
+             CREATE TRIGGER e2e_a AFTER DELETE ON auth_credentials BEGIN SELECT 1; END;",
+            "DROP TRIGGER IF EXISTS e2e_a; DROP TRIGGER IF EXISTS \"e2e_a; CREATE TABLE e2e_ran (a)\";",
+        ),
+    ] {
+        let around = around.replace("{COMMAND}", COMMAND);
+        ok(&logins(&format!("db.exec({around:?});")), how);
+        let blind = s.sh("omp --version");
+        ok(&logins(&format!("db.exec({undo:?});")), how);
+        let ran_sql = ok(
+            &logins("console.log(db.prepare(\"SELECT count(*) AS n FROM sqlite_master WHERE name = 'e2e_ran'\").get().n);"),
+            how,
+        );
+        assert!(
+            !blind.status.success()
+                && crate::sandbox::text(&blind).contains("could not check this account")
+                && ran_sql.trim() == "0",
+            "with {how}, omp started or the name ran: {}",
+            crate::sandbox::text(&blind)
+        );
+    }
+
+    // A database the check cannot read is not a database with nothing in it.
+    // Nothing else starts omp here, so moving it aside is safe.
+    ok(
+        &s.sh(
+            "cd ~/.omp/agent && mkdir -p /tmp/e2e-kept && mv agent.db* /tmp/e2e-kept/ && \
+             echo not-a-database-at-all > agent.db",
+        ),
+        "putting something unreadable in omp's place",
+    );
+    let blind = s.sh("omp --version");
+    ok(
+        &s.sh("cd ~/.omp/agent && rm -f agent.db* && mv /tmp/e2e-kept/agent.db* ."),
+        "putting omp's logins back",
+    );
+    assert!(
+        !blind.status.success()
+            && crate::sandbox::text(&blind).contains("could not check this account"),
+        "a check that could not look let omp start: {}",
+        crate::sandbox::text(&blind)
     );
 }
 
