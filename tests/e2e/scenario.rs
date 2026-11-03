@@ -1584,8 +1584,8 @@ fn omp_stored_keys(s: &Session) {
         ),
         (
             "a trigger named as a statement",
-            "CREATE TRIGGER e2e_a AFTER DELETE ON auth_credentials BEGIN SELECT 1; END; \
-             CREATE TRIGGER \"e2e_a; CREATE TABLE e2e_ran (a)\" AFTER DELETE ON auth_credentials BEGIN SELECT 1; END;",
+            "CREATE TRIGGER \"e2e_a; CREATE TABLE e2e_ran (a)\" AFTER DELETE ON auth_credentials BEGIN SELECT 1; END; \
+             CREATE TRIGGER e2e_a AFTER DELETE ON auth_credentials BEGIN SELECT 1; END;",
             "DROP TRIGGER IF EXISTS e2e_a; DROP TRIGGER IF EXISTS \"e2e_a; CREATE TABLE e2e_ran (a)\";",
         ),
     ] {
