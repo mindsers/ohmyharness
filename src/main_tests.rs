@@ -6678,6 +6678,150 @@ fn an_edit_omh_cannot_read_as_text_is_still_backed_up() {
     );
 }
 
+/// **An edit the last refresh saved is still there after the next one.**
+///
+/// `.yours` was written whatever was already at that name, so the next release
+/// to change the file found omh's own older copy, took it for an edit, and
+/// wrote it over the edit it had saved: `the_file_it_replaces_is_kept_verbatim`
+/// held for one refresh and no further. Measured on a real upgrade, with the
+/// edit gone from every file under `adapters/`.
+#[test]
+fn a_saved_edit_survives_the_refreshes_after_it() {
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("adapters");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mine = "name = \"mine, edited\"\n";
+    std::fs::write(dest.join("claude.toml"), mine).unwrap();
+    cmd::init::install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
+
+    let next = "name = \"edited again\"\n";
+    std::fs::write(dest.join("claude.toml"), next).unwrap();
+    cmd::init::install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dest.join("claude.toml.yours")).unwrap(),
+        mine,
+        "the edit the first refresh saved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("claude.toml.yours.1")).unwrap(),
+        next,
+        "and the one the second did, under the next free name"
+    );
+}
+
+/// The same bytes are one file, not a new name at every refresh.
+#[test]
+fn the_same_edit_is_saved_once() {
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("adapters");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mine = "name = \"mine, edited\"\n";
+    for _ in 0..2 {
+        std::fs::write(dest.join("claude.toml"), mine).unwrap();
+        cmd::init::install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(dest.join("claude.toml.yours")).unwrap(),
+        mine
+    );
+    assert!(!dest.join("claude.toml.yours.1").exists());
+}
+
+/// The record of a file: what omh wrote there, as its digest.
+fn recorded(dest: &std::path::Path, name: &str, wrote: &[u8]) {
+    let digest = format!("{:016x}", crate::hash::fnv1a_64(wrote));
+    std::fs::write(
+        dest.join(".shipped"),
+        serde_json::json!({ name: digest }).to_string(),
+    )
+    .unwrap();
+}
+
+/// **A copy omh wrote is nobody's edit.** A release that changes a file found
+/// the last release's copy there and saved it as `.yours`, and said "yours", to
+/// somebody who never opened it.
+#[test]
+fn a_copy_omh_wrote_is_replaced_and_nothing_is_saved() {
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("adapters");
+    std::fs::create_dir_all(&dest).unwrap();
+    let older = b"name = \"what an older omh shipped\"\n";
+    std::fs::write(dest.join("claude.toml"), older).unwrap();
+    recorded(&dest, "claude.toml", older);
+
+    cmd::init::install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
+
+    assert_ne!(std::fs::read(dest.join("claude.toml")).unwrap(), older);
+    assert!(
+        !dest.join("claude.toml.yours").exists(),
+        "there was no edit to keep"
+    );
+}
+
+/// And the record is only that: bytes it does not describe are an edit.
+#[test]
+fn an_edit_of_a_copy_omh_wrote_is_saved() {
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("adapters");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mine = "name = \"edited after omh wrote it\"\n";
+    std::fs::write(dest.join("claude.toml"), mine).unwrap();
+    recorded(&dest, "claude.toml", b"name = \"what an older omh shipped\"\n");
+
+    cmd::init::install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dest.join("claude.toml.yours")).unwrap(),
+        mine
+    );
+}
+
+/// A refresh records what it wrote, for every file of every kind: the next
+/// release has nothing else to tell its own old copy from an edit with.
+#[test]
+fn a_refresh_records_every_file_it_wrote() {
+    for kind in bundled::ALL {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join(kind.dir());
+        cmd::init::install_bundled(&dest, kind, &out::Ctx::plain()).unwrap();
+        let record: BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(dest.join(".shipped")).unwrap()).unwrap();
+        for file in kind.files() {
+            assert_eq!(
+                record.get(file.name),
+                Some(&format!(
+                    "{:016x}",
+                    crate::hash::fnv1a_64(file.contents.as_bytes())
+                )),
+                "{}/{}",
+                kind.dir(),
+                file.name
+            );
+        }
+    }
+}
+
+/// A record that does not parse answers "cannot tell", and what that costs is
+/// a copy nobody needed. Read as "nothing here was edited" it would cost an
+/// edit.
+#[test]
+fn a_record_that_does_not_parse_costs_a_copy_not_an_edit() {
+    let d = tempfile::tempdir().unwrap();
+    let dest = d.path().join("adapters");
+    std::fs::create_dir_all(&dest).unwrap();
+    let mine = "name = \"mine, edited\"\n";
+    std::fs::write(dest.join("claude.toml"), mine).unwrap();
+    std::fs::write(dest.join(".shipped"), "this is not a record {{{").unwrap();
+
+    cmd::init::install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dest.join("claude.toml.yours")).unwrap(),
+        mine
+    );
+}
+
 /// Definitions you add yourself are yours; omh only manages its own.
 #[test]
 fn definitions_omh_does_not_ship_are_left_alone() {

@@ -1202,6 +1202,7 @@ pub fn remove_own_servers(
                     name: name.clone(),
                     feature: entry.feature.clone(),
                     differs: held.as_ref() != ships.get(&entry.name),
+                    saved_as: None,
                 });
             }
         }
@@ -1255,6 +1256,9 @@ pub struct Removed {
     /// It was not what omh ships now, so the file as it was is in
     /// `mcp.json.yours`.
     pub differs: bool,
+    /// The name the file as it was is under. `None` when nothing was saved,
+    /// and on a preview, which saves nothing.
+    pub saved_as: Option<String>,
 }
 
 pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
@@ -2187,6 +2191,30 @@ mod tests {
                 .is_empty(),
             "nothing the second time"
         );
+    }
+
+    /// A catalogue saved earlier stays: it is somebody's servers, and the rule
+    /// every managed file follows is that a copy is never written over.
+    #[test]
+    fn taking_omhs_servers_out_writes_over_no_earlier_copy() {
+        let (_d, paths) = fixture();
+        let manifest = crate::base::Manifest::shipped().unwrap();
+        let earlier = r#"{"mcpServers":{"saved":{"command":"s"}}}"#;
+        std::fs::write(paths.root.join("mcp.json.yours"), earlier).unwrap();
+        let body = r#"{"mcpServers":{"memory":{"command":"edited"}}}"#;
+        seed(&paths, Layer::Personal, "mcp.json", body);
+
+        let removed = remove_own_servers(&paths, &manifest, false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(paths.root.join("mcp.json.yours")).unwrap(),
+            earlier
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.root.join("mcp.json.yours.1")).unwrap(),
+            body
+        );
+        assert_eq!(removed[0].saved_as.as_deref(), Some("mcp.json.yours.1"));
     }
 
     #[test]
