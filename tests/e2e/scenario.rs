@@ -1461,13 +1461,34 @@ db.close();"#;
     for provider in ["fake", "anthropic", "openai"] {
         assert!(
             said.lines()
-                .any(|l| l.contains("omp's logins") && l.contains(provider)),
+                .any(|l| l.contains("removed the login for") && l.contains(provider)),
             "omp's logins lost {provider} without a word: {said}"
         );
     }
     assert!(
         !said.contains("e2e-plain"),
         "and a plain key is not mentioned: {said}"
+    );
+
+    // A database the check cannot read is not a database with nothing in it.
+    // Nothing else starts omp here, so moving it aside is safe.
+    ok(
+        &s.sh(
+            "cd ~/.omp/agent && mkdir -p /tmp/e2e-kept && mv agent.db* /tmp/e2e-kept/ && \
+             echo not-a-database-at-all > agent.db",
+        ),
+        "putting something unreadable in omp's place",
+    );
+    let blind = s.sh("omp --version");
+    ok(
+        &s.sh("cd ~/.omp/agent && rm -f agent.db* && mv /tmp/e2e-kept/agent.db* ."),
+        "putting omp's logins back",
+    );
+    assert!(
+        !blind.status.success()
+            && crate::sandbox::text(&blind).contains("could not check this account"),
+        "a check that could not look let omp start: {}",
+        crate::sandbox::text(&blind)
     );
 }
 
