@@ -126,6 +126,10 @@ const SCENARIOS: &[Scenario] = &[
         run: omp_models,
     },
     Scenario {
+        name: "a call omp was told to allow always in one session is asked about in the next",
+        run: omp_approvals,
+    },
+    Scenario {
         name: "omh doctor passes in the session's repo",
         run: doctor,
     },
@@ -1324,6 +1328,74 @@ fn omp_models(s: &Session) {
     for file in ["models.yaml", "models.json"] {
         let _ = s.sh(&format!("rm -f ~/.omp/agent/{file}"));
     }
+}
+
+/// omp keeps the calls you allow "always" in `approval-cache.db`, in the
+/// account every session shares (`tools/approval-cache.ts`, v18.15.0), and in
+/// its ask-and-remember mode, `always-ask-cached`, lets every call a kept
+/// grant covers through without asking. This session builds a grant, in
+/// omp's own schema, for writing any file in `/work`; writes it over the
+/// account's cache; and the account's cache is then replaced by it from
+/// outside, as a session before this one could have left it. A turn in that
+/// mode writing a file in `/work` is asked about all the same — with no
+/// terminal to ask at, refused — and the session's own write was refused.
+///
+/// Checked in that order, so a run with the account's cache in reach shows
+/// the file written on the planted grant, not only the cache written.
+///
+/// Only for omp.
+fn omp_approvals(s: &Session) {
+    if s.harness.name != "omp" {
+        return;
+    }
+    // `record`'s table, and `approvalGrantKey`'s key: a write grant on the
+    // folder `/work/` covers every file directly in it.
+    const GRANT: &str = r#"const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync("/tmp/e2e-grants.db");
+db.exec("CREATE TABLE grants (key TEXT PRIMARY KEY, tool TEXT NOT NULL, approved_at TEXT NOT NULL)");
+db.prepare("INSERT INTO grants VALUES (?, ?, ?)").run("write\u0000/work/", "write", new Date().toISOString());
+db.close();"#;
+    ok(
+        &s.sh(&format!(
+            "rm -f /tmp/e2e-grants.db && node - <<'EOF'\n{GRANT}\nEOF\n"
+        )),
+        "building a grant",
+    );
+    let refused = s.sh("cat /tmp/e2e-grants.db > ~/.omp/agent/approval-cache.db");
+    let grants = s.sh("cat /tmp/e2e-grants.db");
+    assert!(grants.status.success(), "reading the grant back");
+    std::fs::write(
+        s.account().join(".omp/agent/approval-cache.db"),
+        &grants.stdout,
+    )
+    .unwrap();
+
+    let file = "e2e-approved.txt";
+    let turn = s.turn_with(
+        "Write it.",
+        &[(s.harness.write)(file, "approved\n")],
+        |argv| {
+            argv.retain(|a| a != "--auto-approve");
+            argv.splice(
+                1..1,
+                ["--approval-mode", "always-ask-cached"].map(String::from),
+            );
+        },
+    );
+    let written = s.read(file).is_some();
+    let _ = s.sh(&format!("rm -f /work/{file}"));
+    ran(&turn);
+    assert!(
+        !written && told(&turn, "requires approval but no interactive UI available"),
+        "a grant left in the account let the write through: {}",
+        turn.printed()
+    );
+    assert!(
+        !refused.status.success()
+            && crate::sandbox::text(&refused).contains("Read-only file system"),
+        "a session wrote the account's approval cache: {}",
+        crate::sandbox::text(&refused)
+    );
 }
 
 /// `omh doctor` for this harness, in the repo the session runs on: the same

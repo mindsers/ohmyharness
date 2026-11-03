@@ -223,6 +223,19 @@ imported. Nothing omh does puts your own there: your personal memory reaches a
 session as a rule you import into your catalogue. The cost is that a session
 cannot write Claude's personal memory.
 
+**Closed across sessions for omp's remembered approvals.** A session runs omp
+in `yolo`, its default, which asks about nothing: the sandbox is the boundary.
+This concerns only a session that opted out into ask-and-remember,
+`tools.approvalMode: always-ask-cached`, where omp runs without asking any call
+a grant in `~/.omp/agent/approval-cache.db` covers, and that file was in the
+account. The mode never comes from the account: a session picks it, or a repo
+does in its own `.omp/config.yml` (read in omp's source, 18.15.0). The file is
+now hidden behind an empty read-only one, so omp finds nothing remembered.
+`tests/e2e` plants a grant for writing in `/work` and asserts that a write
+there is still asked about. It is red with the account's own file mounted, as
+before. The cost is that an answer of "always" is not kept, so the next such
+call asks again; "for this session" works as before.
+
 The capabilities omh mounts into the account — skills, commands, subagents —
 are omh's whether your catalogue carries them or not: one it does not carry is
 an empty read-only directory, rather than whatever a session left in the
