@@ -1538,6 +1538,9 @@ fn omp_stored_keys(s: &Session) {
         "a key stored as bytes stayed: {left}"
     );
 
+    // The check drops omp's own triggers with any other. omp makes them again
+    // when it opens its logins, which a turn does and `--version` does not.
+    ran(&s.turn("Say hello.", &[]));
     let triggers = ok(
         &logins("console.log(db.prepare(\"SELECT count(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name = 'auth_change_revision_auth_credentials_insert'\").get().n);"),
         "reading omp's own triggers",
