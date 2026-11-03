@@ -1169,9 +1169,9 @@ pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
 ///
 /// **Nothing is lost.** A copy that differs from what omh ships now — an
 /// argument an older omh shipped, or a server of yours under a name omh holds
-/// — leaves the file as it was saved as `mcp.json.yours`, the rule every
-/// managed file follows. Who made the difference omh cannot know, and the
-/// answer does not guess.
+/// — leaves the file as it was saved as `mcp.json.yours`, or the next free name
+/// after it, the rule every managed file follows. Who made the difference omh
+/// cannot know, and the answer does not guess.
 ///
 /// `dry_run` answers the same and writes nothing.
 pub fn remove_own_servers(
@@ -1216,9 +1216,10 @@ pub fn remove_own_servers(
         .with_context(|| format!("reading {}", path.display()))?
         .permissions();
     if removed.iter().any(|r| r.differs) {
-        let backup = path.with_file_name("mcp.json.yours");
-        write_like(&backup, raw.as_bytes(), &like)
-            .with_context(|| format!("saving your catalogue as {}", backup.display()))?;
+        let saved = crate::fsx::keep_yours(&path, raw.as_bytes())?;
+        for server in removed.iter_mut().filter(|r| r.differs) {
+            server.saved_as = Some(saved.clone());
+        }
     }
     let written = path.with_file_name(".mcp.json.omh-new");
     write_like(
@@ -1253,8 +1254,7 @@ pub struct Removed {
     pub name: String,
     /// The feature whose server it is.
     pub feature: String,
-    /// It was not what omh ships now, so the file as it was is in
-    /// `mcp.json.yours`.
+    /// It was not what omh ships now, so the file as it was is kept.
     pub differs: bool,
     /// The name the file as it was is under. `None` when nothing was saved,
     /// and on a preview, which saves nothing.
@@ -2199,10 +2199,10 @@ mod tests {
     fn taking_omhs_servers_out_writes_over_no_earlier_copy() {
         let (_d, paths) = fixture();
         let manifest = crate::base::Manifest::shipped().unwrap();
-        let earlier = r#"{"mcpServers":{"saved":{"command":"s"}}}"#;
-        std::fs::write(paths.root.join("mcp.json.yours"), earlier).unwrap();
         let body = r#"{"mcpServers":{"memory":{"command":"edited"}}}"#;
         seed(&paths, Layer::Personal, "mcp.json", body);
+        let earlier = r#"{"mcpServers":{"saved":{"command":"s"}}}"#;
+        std::fs::write(paths.root.join("mcp.json.yours"), earlier).unwrap();
 
         let removed = remove_own_servers(&paths, &manifest, false).unwrap();
 

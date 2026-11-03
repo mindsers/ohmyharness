@@ -1125,16 +1125,14 @@ pub(crate) struct Refreshed {
 pub(crate) fn say_what_was_taken_out(taken_out: &[config::Removed], preview: bool, ctx: &out::Ctx) {
     let verb = if preview { "would take" } else { "took" };
     for server in taken_out {
-        let kept = match (server.differs, preview) {
-            (true, false) => {
-                " It was not what omh ships now, so your catalogue as it was is saved as \
-                 mcp.json.yours."
+        let kept = match (&server.saved_as, server.differs) {
+            (Some(saved), _) => {
+                format!(" It was not what omh ships now, so your catalogue as it was is saved as {saved}.")
             }
-            (true, true) => {
-                " It is not what omh ships now, so your catalogue as it is would be saved \
-                 as mcp.json.yours."
-            }
-            (false, _) => "",
+            (None, true) => " It is not what omh ships now, so your catalogue as it is would be \
+                 saved beside it, as mcp.json.yours or the next free name."
+                .to_string(),
+            (None, false) => String::new(),
         };
         ctx.warn(&format!(
             "{verb} the `{name}` server out of your catalogue — the name is omh's: the \
@@ -1253,6 +1251,29 @@ pub(crate) fn ask_all(
     Ok((asked, answers))
 }
 
+/// What omh last wrote to each managed file of a directory, by digest, in that
+/// directory. No extension: everything that reads these directories goes by
+/// one, so nothing takes the record for an adapter or a hook.
+const SHIPPED_RECORD: &str = ".shipped";
+
+/// A managed file's digest in the record. FNV, which does not resist an
+/// adversary and has no need to: nothing in a session can write these
+/// directories, and a chance collision is one edit read as omh's own.
+fn shipped_digest(bytes: &[u8]) -> String {
+    format!("{:016x}", crate::hash::fnv1a_64(bytes))
+}
+
+/// The record in `dest`. Empty when there is none, or when it does not parse:
+/// both answer "cannot tell", and what that costs is a copy nobody needed.
+/// Only an unreadable one is an error.
+fn read_shipped_record(
+    dest: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    Ok(crate::fsx::read_or_absent(&dest.join(SHIPPED_RECORD))?
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default())
+}
+
 /// Copy definitions that ship with omh into `~/.omh`.
 ///
 /// Bundled files are **managed**: `init` writes them on a first run and
@@ -1260,6 +1281,12 @@ pub(crate) fn ask_all(
 /// people who already ran it once. The one that mattered was a wrong credential
 /// path, which made `omh account login` capture nothing while reporting success.
 /// Definitions you add yourself are left alone.
+///
+/// **What it replaces.** Bytes omh wrote are nobody's edit, and it knows them by
+/// the record it leaves in the directory ([`SHIPPED_RECORD`]). Anything else is
+/// kept by [`crate::fsx::keep_yours`] and named on stderr. With no record for a
+/// file, which is every install from before there was one, omh cannot tell an
+/// edit from its own older copy: it keeps the file and says it cannot tell.
 ///
 /// The contents come from [`bundled`], embedded at compile time. Reading them
 /// from the source tree instead is what made a released binary install nothing
@@ -1271,6 +1298,8 @@ pub(crate) fn install_bundled(
 ) -> Result<Vec<String>> {
     std::fs::create_dir_all(dest)
         .with_context(|| format!("creating {} for the bundled {}", dest.display(), kind.dir()))?;
+    let wrote_before = read_shipped_record(dest)?;
+    let mut wrote_now = std::collections::BTreeMap::new();
     for &bundled::File { name, contents } in kind.files() {
         let target = dest.join(name);
 
@@ -1295,18 +1324,33 @@ pub(crate) fn install_bundled(
             // `rust-test.toml.yours` while the line below said
             // `rust-test.json.yours`, and somebody looking where omh told them
             // to look would conclude their edit had been thrown away.
-            let backup = target.with_file_name(format!("{name}.yours"));
-            std::fs::write(&backup, &existing)
-                .with_context(|| format!("saving your {name} as {}", backup.display()))?;
-            // stderr: this is a warning about data, and stdout is the report.
-            ctx.warn(&format!(
-                "replaced {} — yours saved as {name}.yours",
-                target.display()
-            ));
+            let recorded = wrote_before.get(name);
+            if recorded != Some(&shipped_digest(&existing)) {
+                let saved = crate::fsx::keep_yours(&target, &existing)?;
+                // stderr: this is a warning about data, and stdout is the report.
+                ctx.warn(&match recorded {
+                    Some(_) => format!(
+                        "replaced {} — your edit is saved as {saved}",
+                        target.display()
+                    ),
+                    None => format!(
+                        "replaced {} — it is not what this omh ships, and omh has no record \
+                         of writing it, so it may be an edit of yours. Saved as {saved}",
+                        target.display()
+                    ),
+                });
+            }
         }
         std::fs::write(&target, contents)
             .with_context(|| format!("writing {}", target.display()))?;
+        wrote_now.insert(name.to_string(), shipped_digest(contents.as_bytes()));
     }
+    // Last, so that a refresh that stopped halfway still has the record of what
+    // it had not reached. A file already written reads as what this omh ships,
+    // which needs no record.
+    let record = dest.join(SHIPPED_RECORD);
+    std::fs::write(&record, serde_json::to_string_pretty(&wrote_now)? + "\n")
+        .with_context(|| format!("writing {}", record.display()))?;
 
     // Not `.flatten()`. An unreadable entry here would be dropped from the
     // list omh then prints as `harnesses N (...)` and hands to

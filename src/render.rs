@@ -6247,6 +6247,11 @@ try {{
                 "rust-test.json.yours",
                 "{\"on\":\"turn-end\",\"run\":\"cargo t\"}",
             ),
+            (
+                "rust-test.json.yours.1",
+                "{\"on\":\"turn-end\",\"run\":\"cargo t\"}",
+            ),
+            (".shipped", "{\"rust-test.json\":\"0000000000000000\"}"),
         ]]);
         let got = declared_stacks(&dirs).unwrap();
         assert_eq!(

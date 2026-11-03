@@ -6767,7 +6767,11 @@ fn an_edit_of_a_copy_omh_wrote_is_saved() {
     std::fs::create_dir_all(&dest).unwrap();
     let mine = "name = \"edited after omh wrote it\"\n";
     std::fs::write(dest.join("claude.toml"), mine).unwrap();
-    recorded(&dest, "claude.toml", b"name = \"what an older omh shipped\"\n");
+    recorded(
+        &dest,
+        "claude.toml",
+        b"name = \"what an older omh shipped\"\n",
+    );
 
     cmd::init::install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
 
@@ -6820,6 +6824,46 @@ fn a_record_that_does_not_parse_costs_a_copy_not_an_edit() {
         std::fs::read_to_string(dest.join("claude.toml.yours")).unwrap(),
         mine
     );
+}
+
+/// **What a refresh leaves beside a file is not read as one.** Every reader of
+/// these directories goes by the extension, and a numbered copy and the record
+/// each have another. A `.toml` of the same garbage is what shows each reader
+/// would have refused them: it is the same file under a name it does read.
+#[test]
+fn what_a_refresh_leaves_beside_a_file_is_not_read_as_a_definition() {
+    type Reader = fn(&std::path::Path) -> anyhow::Result<()>;
+    let readers: [(bundled::Shipped, Reader); 4] = [
+        (bundled::Shipped::Adapters, |d| {
+            Adapter::load_dir(d).map(|_| ())
+        }),
+        (bundled::Shipped::Editors, |d| {
+            crate::editor::Editor::load_dir(d).map(|_| ())
+        }),
+        (bundled::Shipped::Base, |d| {
+            crate::base::Manifest::load_dir(d).map(|_| ())
+        }),
+        (bundled::Shipped::Stacks, |d| {
+            crate::stack::load_dir(d).map(|_| ())
+        }),
+    ];
+    for (kind, read) in readers {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join(kind.dir());
+        cmd::init::install_bundled(&dest, kind, &out::Ctx::plain()).unwrap();
+        let first = kind.files()[0].name;
+        for beside in [
+            format!("{first}.yours"),
+            format!("{first}.yours.1"),
+            ".shipped".to_string(),
+        ] {
+            std::fs::write(dest.join(beside), "not a definition {{{").unwrap();
+        }
+        read(&dest).unwrap_or_else(|e| panic!("{}: {e:#}", kind.dir()));
+
+        std::fs::write(dest.join("zzz.toml"), "not a definition {{{").unwrap();
+        assert!(read(&dest).is_err(), "{}: reads a .toml", kind.dir());
+    }
 }
 
 /// Definitions you add yourself are yours; omh only manages its own.
