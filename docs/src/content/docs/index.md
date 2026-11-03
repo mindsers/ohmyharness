@@ -15,7 +15,7 @@ hero:
 ---
 
 :::caution[Early project]
-omh is at `0.16.0`. Claude Code on Docker is the path people have done real work
+omh is at `0.16.1`. Claude Code on Docker is the path people have done real work
 through; the other harnesses and runtimes pass `omh doctor` but have not been
 driven for real. The [roadmap](/project/roadmap/) says what comes next.
 :::
@@ -93,6 +93,9 @@ is kept beside the source rather than here:
 - **Failures that said nothing now say so**, from unreadable settings to a
   launch waiting on a review in another terminal.
 - **Every harness at its latest release.** Building omh needs Rust 1.88.
+- **0.16.1 hides omp's approval cache from sessions.** A session that opted out
+  of `yolo` into `always-ask-cached` no longer trusts a grant another session
+  left in the account. See [risks](/concepts/risks/).
 
 Earlier releases are on [GitHub](https://github.com/mindsers/ohmyharness/releases).
 
