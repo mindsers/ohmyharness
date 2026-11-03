@@ -148,6 +148,8 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "a command stored as a key in omp's logins does not run in the next session",
         run: omp_stored_keys,
+    },
+    Scenario {
         name: "a process the agent runs holds no capability",
         run: agent_holds_no_capability,
     },
@@ -1809,6 +1811,9 @@ fn omp_stored_keys(s: &Session) {
             && crate::sandbox::text(&blind).contains("could not check this account"),
         "a check that could not look let omp start: {}",
         crate::sandbox::text(&blind)
+    );
+}
+
 /// The capabilities a session keeps are for its entrypoint and sshd. A process
 /// the agent runs holds none, so they are not the agent's to use.
 fn agent_holds_no_capability(s: &Session) {
