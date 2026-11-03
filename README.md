@@ -13,7 +13,7 @@ $ omh s01 attach        # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.16.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.16.1`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -22,8 +22,17 @@ architecture is built for and not yet a thing anybody has done.
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
 
-**`0.16.0` gives each session its own preferences, and the account keeps
-only what you choose.** A harness used to write its settings into the account
+**`0.16.1` hides omp's approval cache from sessions.** A session runs omp in
+`yolo`, its default, which asks about nothing, and that has not changed. A
+session that opted out into `tools.approvalMode: always-ask-cached` kept its
+grants in `~/.omp/agent/approval-cache.db`, in the account, so a grant one
+session left let a later session's call through without asking. The file is
+hidden now, so such a session asks: an answer of "always" is no longer kept, and
+"for this session" works as before. `omh upgrade` applies it, and a running
+session restarts once, on its next launch.
+
+**0.16.0 gave each session its own preferences, and the account kept only
+what you chose.** A harness used to write its settings into the account
 every later session reads, so a server, a hook or an instruction one session
 added loaded in the next. Now each session starts from its own copy of the
 harness's preference files — Claude's `~/.claude.json` and `settings.json`,
