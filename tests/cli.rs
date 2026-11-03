@@ -157,10 +157,34 @@ impl Drop for Sandbox {
                 .args(["network", "rm", &network])
                 .output();
         }
-        for volume in named(&["volume", "ls", "--format", "{{.Name}}"]) {
+        // Round again until the volume has stayed gone. `omh init` starts the
+        // graph index in the background and does not wait for it, and its
+        // container carries no name of omh's: while it runs the volume will not
+        // go, and `docker run` can still be about to make it.
+        let volume = format!("omh-cache-{id}");
+        let mut gone_for = 0;
+        for _ in 0..30 {
+            let holding = Command::new("docker")
+                .args(["ps", "-aq", "--filter", &format!("volume={volume}")])
+                .output();
+            if let Ok(holding) = holding {
+                for container in String::from_utf8_lossy(&holding.stdout).split_whitespace() {
+                    let _ = Command::new("docker")
+                        .args(["rm", "-f", container])
+                        .output();
+                }
+            }
             let _ = Command::new("docker")
                 .args(["volume", "rm", "-f", &volume])
                 .output();
+            gone_for = match named(&["volume", "ls", "--format", "{{.Name}}"]).is_empty() {
+                true => gone_for + 1,
+                false => 0,
+            };
+            if gone_for == 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
 }
@@ -1055,6 +1079,40 @@ fn an_upgrade_names_the_copy_of_the_catalogue_it_kept() {
         std::fs::read_to_string(sb.home.join(".omh/mcp.json.yours.1")).unwrap(),
         catalogue
     );
+}
+
+/// **Nothing a real sandbox starts outlives it.** `omh init` starts the graph
+/// index in the background and does not wait for it, and a sandbox dropped while
+/// that ran failed to remove the volume, which then stayed: 12 of them from one
+/// run of this file, and 510 on a developer's daemon before anyone counted.
+///
+/// `#[ignore]`d because it reaches a real daemon.
+#[test]
+#[ignore]
+fn a_real_sandbox_leaves_no_volume_behind() {
+    let sb = real_sandbox();
+    sb.git_init();
+    assert!(sb.omh(&["init"]).status.success(), "init must set it up");
+    let info = sb.omh(&["info", "--repo", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    let volume = format!("omh-cache-{}", doc["repo_id"].as_str().unwrap());
+    drop(sb);
+
+    // Whatever the index still had running has had its chance to finish, or to
+    // create the volume again, by the time this looks.
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    let listed = Command::new("docker")
+        .args(["volume", "ls", "--format", "{{.Name}}"])
+        .output()
+        .unwrap();
+    let left = String::from_utf8_lossy(&listed.stdout);
+    let stayed = left.lines().any(|name| name == volume);
+    if stayed {
+        let _ = Command::new("docker")
+            .args(["volume", "rm", "-f", &volume])
+            .output();
+    }
+    assert!(!stayed, "{volume} outlived the sandbox that made it");
 }
 
 /// Notes committed under `<repo>/.omh/notes` are not read, and omh says so
