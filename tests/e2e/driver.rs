@@ -390,6 +390,21 @@ fn omp_account() -> Vec<(&'static str, String)> {
             ".omp/agent/extensions/planted.ts",
             planted_module("extensions"),
         ),
+        // A plugin, complete: its package named in the root's `package.json`,
+        // and its manifest naming the module. `omp_plugins` shows omp loads it.
+        (
+            ".omp/agent/plugins/package.json",
+            r#"{"dependencies":{"e2e-plant":"1.0.0"}}"#.to_string(),
+        ),
+        (
+            ".omp/agent/plugins/node_modules/e2e-plant/package.json",
+            r#"{"name":"e2e-plant","version":"1.0.0","omp":{"extensions":["./planted.js"]}}"#
+                .to_string(),
+        ),
+        (
+            ".omp/agent/plugins/node_modules/e2e-plant/planted.js",
+            planted_module("plugin"),
+        ),
         // And the text omp reads from the same directory.
         (".omp/agent/AGENTS.md", planted_doc("OMP-AGENTS")),
         (".omp/agent/RULES.md", planted_doc("OMP-RULES")),

@@ -114,6 +114,10 @@ const SCENARIOS: &[Scenario] = &[
         run: account_plants,
     },
     Scenario {
+        name: "a plugin one session leaves does not load in the next",
+        run: omp_plugins,
+    },
+    Scenario {
         name: "the session's ~/.omp/agent/config.yml is its own, migrated from the account's",
         run: omp_config,
     },
@@ -834,6 +838,45 @@ fn account_plants(s: &Session) {
         "left in the account, these reached the model: {reached:?}; \
          and these modules were loaded: {marks}"
     );
+}
+
+/// omp's plugins are not a way from one session to the next: it reads them
+/// from `~/.omp/plugins` (`getPluginsDir`, 18.15.0), and the account is
+/// `~/.omp/agent` alone. `plugins/installer.ts` names `~/.omp/agent/plugins`,
+/// and nothing imports it.
+///
+/// The plugin `driver::omp_account` leaves in the account is not loaded, which
+/// `account_plants` asserts of every turn. The same files at the root omp reads
+/// are, so that was a plugin omp would have run. And that root is on no mount:
+/// what a session leaves there is not in the account.
+///
+/// Only for omp.
+fn omp_plugins(s: &Session) {
+    if s.harness.name != "omp" {
+        return;
+    }
+    const MARK: &str = "/tmp/e2e-planted-module-plugin";
+    let unloaded = s.turn("Say hello.", &[]);
+    ran(&unloaded);
+    assert!(
+        !s.sh(&format!("test -e {MARK}")).status.success(),
+        "a plugin left in the account was loaded"
+    );
+
+    ok(
+        &s.sh("cp -R ~/.omp/agent/plugins ~/.omp/plugins"),
+        "putting the plugin where omp reads them",
+    );
+    let turn = s.turn("Say hello.", &[]);
+    let loaded = s.sh(&format!("test -e {MARK}")).status.success();
+    let in_the_account = s.account().join(".omp/plugins").exists();
+    let _ = s.sh(&format!("rm -rf ~/.omp/plugins {MARK}"));
+    ran(&turn);
+    assert!(
+        loaded,
+        "omp did not load the plugin from its own root, so the plant proves nothing"
+    );
+    assert!(!in_the_account, "omp's plugin root reached the account");
 }
 
 /// The account's shared `config.toml` held the model beside a planted
