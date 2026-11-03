@@ -224,6 +224,12 @@ Nothing omh does puts your own there: your personal memory reaches a
 session as a rule you import into your catalogue. The cost is that a session
 cannot write Claude's personal memory.
 
+**omp's plugins are not a way between sessions.** omp reads them from
+`~/.omp/plugins` (read in its source, 18.15.0), and the account is `~/.omp/agent`
+alone, so what a session leaves there stays in its container. `tests/e2e` leaves a
+complete plugin in the account, which omp does not load, and shows omp loading the
+same files from `~/.omp/plugins`, so it was a plugin omp would have run.
+
 **Closed across sessions for a command stored as a login in omp.** An API key in
 omp's logins that starts with `!` runs through a shell, and the logins are rows
 in `agent.db`, in the account, which a session can write. Unlike an approval this
@@ -267,10 +273,6 @@ session's own.
 - omp's logins while omp is running: two sessions on one account at once can
   still race the check above, because omp re-reads its logins at each request
   (read in omp's source). Only omp could close that;
-- omp's plugins, discovered from the same directory as its modules (read in
-  its binary): not measured, not masked;
-- Codex's `~/.codex/rules/`, which decides which commands need approval rather
-  than reaching the model, so nothing here measures it: not masked;
 - omp's model cache between two sessions running at once on one account:
   omh removes it only when a session starts.
 
