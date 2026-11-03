@@ -1571,6 +1571,41 @@ fn omp_stored_keys(s: &Session) {
         crate::sandbox::text(&blind)
     );
 
+    // A row the check found and could not take: the table rebuilt so that its
+    // id is no key. And a trigger whose name is a statement, which goes no
+    // further than the name: it is not run, and omp does not start.
+    for (how, around, undo) in [
+        (
+            "a row with no id to delete it by",
+            "ALTER TABLE auth_credentials RENAME TO e2e_t; \
+             CREATE TABLE auth_credentials (id, provider, credential_type, data); \
+             INSERT INTO auth_credentials VALUES (NULL, 'fake', 'api_key', '{COMMAND}');",
+            "DROP TABLE auth_credentials; ALTER TABLE e2e_t RENAME TO auth_credentials;",
+        ),
+        (
+            "a trigger named as a statement",
+            "CREATE TRIGGER e2e_a AFTER DELETE ON auth_credentials BEGIN SELECT 1; END; \
+             CREATE TRIGGER \"e2e_a; CREATE TABLE e2e_ran (a)\" AFTER DELETE ON auth_credentials BEGIN SELECT 1; END;",
+            "DROP TRIGGER IF EXISTS e2e_a; DROP TRIGGER IF EXISTS \"e2e_a; CREATE TABLE e2e_ran (a)\";",
+        ),
+    ] {
+        let around = around.replace("{COMMAND}", COMMAND);
+        ok(&logins(&format!("db.exec({around:?});")), how);
+        let blind = s.sh("omp --version");
+        ok(&logins(&format!("db.exec({undo:?});")), how);
+        let ran_sql = ok(
+            &logins("console.log(db.prepare(\"SELECT count(*) AS n FROM sqlite_master WHERE name = 'e2e_ran'\").get().n);"),
+            how,
+        );
+        assert!(
+            !blind.status.success()
+                && crate::sandbox::text(&blind).contains("could not check this account")
+                && ran_sql.trim() == "0",
+            "with {how}, omp started or the name ran: {}",
+            crate::sandbox::text(&blind)
+        );
+    }
+
     // A database the check cannot read is not a database with nothing in it.
     // Nothing else starts omp here, so moving it aside is safe.
     ok(
