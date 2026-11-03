@@ -54,8 +54,8 @@ mask    = ["$HOME/.claude/CLAUDE.md", "$HOME/.claude/rules/"]
 #
 # Not `Bash|Monitor`: since 2.1.314 a hook matching `Bash` also runs on a shell
 # command the Monitor tool starts, and can block it or ask, but not approve or
-# rewrite it [docs, CHANGELOG]. Whether an `after-tool` hook on the shell sees
-# one is not measured.
+# rewrite it [docs, CHANGELOG]. An `after-tool` hook on the shell does not see
+# one [e2e, 2.1.316].
 [tools]
 edit   = "Edit|Write|MultiEdit"
 read   = "Read"

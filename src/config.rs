@@ -1169,9 +1169,9 @@ pub fn held_server(paths: &Paths, name: &str) -> Result<Option<Server>> {
 ///
 /// **Nothing is lost.** A copy that differs from what omh ships now — an
 /// argument an older omh shipped, or a server of yours under a name omh holds
-/// — leaves the file as it was saved as `mcp.json.yours`, the rule every
-/// managed file follows. Who made the difference omh cannot know, and the
-/// answer does not guess.
+/// — leaves the file as it was saved as `mcp.json.yours`, or the next free name
+/// after it, the rule every managed file follows. Who made the difference omh
+/// cannot know, and the answer does not guess.
 ///
 /// `dry_run` answers the same and writes nothing.
 pub fn remove_own_servers(
@@ -1202,6 +1202,7 @@ pub fn remove_own_servers(
                     name: name.clone(),
                     feature: entry.feature.clone(),
                     differs: held.as_ref() != ships.get(&entry.name),
+                    saved_as: None,
                 });
             }
         }
@@ -1215,9 +1216,10 @@ pub fn remove_own_servers(
         .with_context(|| format!("reading {}", path.display()))?
         .permissions();
     if removed.iter().any(|r| r.differs) {
-        let backup = path.with_file_name("mcp.json.yours");
-        write_like(&backup, raw.as_bytes(), &like)
-            .with_context(|| format!("saving your catalogue as {}", backup.display()))?;
+        let saved = crate::fsx::keep_yours(&path, raw.as_bytes())?;
+        for server in removed.iter_mut().filter(|r| r.differs) {
+            server.saved_as = Some(saved.clone());
+        }
     }
     let written = path.with_file_name(".mcp.json.omh-new");
     write_like(
@@ -1252,9 +1254,11 @@ pub struct Removed {
     pub name: String,
     /// The feature whose server it is.
     pub feature: String,
-    /// It was not what omh ships now, so the file as it was is in
-    /// `mcp.json.yours`.
+    /// It was not what omh ships now, so the file as it was is kept.
     pub differs: bool,
+    /// The name the file as it was is under. `None` when nothing was saved,
+    /// and on a preview, which saves nothing.
+    pub saved_as: Option<String>,
 }
 
 pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
@@ -2187,6 +2191,30 @@ mod tests {
                 .is_empty(),
             "nothing the second time"
         );
+    }
+
+    /// A catalogue saved earlier stays: it is somebody's servers, and the rule
+    /// every managed file follows is that a copy is never written over.
+    #[test]
+    fn taking_omhs_servers_out_writes_over_no_earlier_copy() {
+        let (_d, paths) = fixture();
+        let manifest = crate::base::Manifest::shipped().unwrap();
+        let body = r#"{"mcpServers":{"memory":{"command":"edited"}}}"#;
+        seed(&paths, Layer::Personal, "mcp.json", body);
+        let earlier = r#"{"mcpServers":{"saved":{"command":"s"}}}"#;
+        std::fs::write(paths.root.join("mcp.json.yours"), earlier).unwrap();
+
+        let removed = remove_own_servers(&paths, &manifest, false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(paths.root.join("mcp.json.yours")).unwrap(),
+            earlier
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.root.join("mcp.json.yours.1")).unwrap(),
+            body
+        );
+        assert_eq!(removed[0].saved_as.as_deref(), Some("mcp.json.yours.1"));
     }
 
     #[test]

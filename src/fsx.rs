@@ -48,6 +48,62 @@ pub(crate) fn read_or_absent(path: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// Keep `bytes`, what `path` held, beside it, and answer the name they are
+/// under: `<name>.yours`, or `<name>.yours.1` and on when that is taken.
+///
+/// **Never over an earlier one.** A `.yours` is the only copy of somebody's
+/// edit. It was written whatever was there, so the next release to change the
+/// file took omh's own older copy for an edit and wrote it over the real one.
+/// `create_new` is the check: it fails on anything at that name, a link
+/// included, and between looking and writing nothing can arrive.
+///
+/// The same bytes are the same copy, so a refresh that finds the same edit
+/// again answers the name it is already under. A copy omh cannot read is not
+/// known to be the same, and takes the next name.
+///
+/// With `path`'s permissions, set before a byte is written: `mcp.json` holds
+/// tokens, and one made private does not come back readable to all.
+pub(crate) fn keep_yours(path: &Path, bytes: &[u8]) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::io::Write as _;
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name to keep", path.display()))?
+        .to_string_lossy();
+    let like = std::fs::metadata(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .permissions();
+    let mut taken = 0_u32;
+    loop {
+        let saved = match taken {
+            0 => format!("{name}.yours"),
+            n => format!("{name}.yours.{n}"),
+        };
+        let at = path.with_file_name(&saved);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&at)
+        {
+            Ok(mut file) => {
+                file.set_permissions(like)
+                    .and_then(|()| file.write_all(bytes))
+                    .with_context(|| format!("saving {name} as {}", at.display()))?;
+                return Ok(saved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read(&at).is_ok_and(|held| held == bytes) {
+                    return Ok(saved);
+                }
+                taken += 1;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("saving {name} as {}", at.display()));
+            }
+        }
+    }
+}
+
 /// `dir`'s entries, or `None` when there is no directory at all. Only
 /// `NotFound` is absence: a directory omh could not read is an error naming
 /// it, never one that holds nothing.

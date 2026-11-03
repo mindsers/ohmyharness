@@ -78,6 +78,22 @@ const SCENARIOS: &[Scenario] = &[
         run: every_event,
     },
     Scenario {
+        name: "a shell hook sees a command Claude's Monitor starts before it runs, not after",
+        run: claude_monitor,
+    },
+    Scenario {
+        name: "a module settings.json names is not imported at a terminal either",
+        run: omp_at_a_terminal,
+    },
+    Scenario {
+        name: "opencode's own save from its screen lands in the session's copy",
+        run: opencode_own_save,
+    },
+    Scenario {
+        name: "a plugin's server does not start under omh's requirements",
+        run: codex_plugin_servers,
+    },
+    Scenario {
         name: "the memory server keeps what the model remembers, for the next turn",
         run: memory_round_trip,
     },
@@ -132,6 +148,10 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "a call omp was told to allow always in one session is asked about in the next",
         run: omp_approvals,
+    },
+    Scenario {
+        name: "a command stored as a key in omp's logins does not run in the next session",
+        run: omp_stored_keys,
     },
     Scenario {
         name: "omh doctor passes in the session's repo",
@@ -207,6 +227,14 @@ const SEED: &[(&str, &str)] = &[
     (
         ".omh/hooks/e2e-after-inject.json",
         r#"{"on":"after-tool","tools":["shell"],"when":"[ \"$OMH_TOOL_COMMAND\" = 'echo e2e-hooks' ]","inject":"E2E-AFTER-INJECT"}"#,
+    ),
+    (
+        ".omh/hooks/e2e-monitor-before.json",
+        r#"{"on":"before-tool","tools":["shell"],"when":"[ \"$OMH_TOOL_COMMAND\" = 'echo x >> /tmp/e2e-monitor-ran' ]","run":"echo x >> /tmp/e2e-monitor-before"}"#,
+    ),
+    (
+        ".omh/hooks/e2e-monitor-after.json",
+        r#"{"on":"after-tool","tools":["shell"],"when":"[ \"$OMH_TOOL_COMMAND\" = 'echo x >> /tmp/e2e-monitor-ran' ]","run":"echo x >> /tmp/e2e-monitor-after"}"#,
     ),
     (
         ".omh/hooks/e2e-end-run.json",
@@ -594,6 +622,164 @@ fn every_event(s: &Session) {
         s.harness.name,
         s.launched,
         turn.printed()
+    );
+}
+
+/// omp imports the modules its `settings.json` names when it is started at a
+/// terminal, and not in a scripted turn, for a reason not found. So
+/// `account_plants`, whose turns are scripted, cannot speak for that mask. This
+/// starts omp at a terminal, where it would be imported.
+///
+/// Only for omp.
+fn omp_at_a_terminal(s: &Session) {
+    if s.harness.name != "omp" {
+        return;
+    }
+    let screen = s.at_a_terminal("omp", "Tip:", &["\\0003", "\\0003"]);
+    let marks = ok(
+        &s.sh("ls /tmp/e2e-planted-module-* 2>/dev/null; true"),
+        "ls",
+    );
+    assert!(
+        !screen.stdout.is_empty(),
+        "omp drew nothing at a terminal, so this proves nothing: {}",
+        crate::sandbox::text(&screen)
+    );
+    assert!(
+        marks.trim().is_empty(),
+        "started at a terminal, omp loaded these from the account: {marks}"
+    );
+}
+
+/// opencode saves `kv.json` only from its screen, so no scripted turn reaches
+/// that save. Picking a theme there lands in the session's own copy, which is
+/// what a review reads, and nothing reaches the account.
+///
+/// Only for opencode.
+fn opencode_own_save(s: &Session) {
+    if s.harness.name != "opencode" {
+        return;
+    }
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+    let before = read(s.preferences("kv.json"));
+    let store = read(s.account().join("preferences/kv.json"));
+    let screen = s.at_a_terminal(
+        "opencode",
+        "Ask anything",
+        &[
+            "/", "t", "h", "e", "m", "e", "\\r", "\\0033[B", "\\0033[B", "\\r", "\\0003", "\\0003",
+        ],
+    );
+    let after = read(s.preferences("kv.json"));
+    std::fs::write(s.preferences("kv.json"), &before).unwrap();
+    assert!(
+        after != before && after.contains("\"theme\""),
+        "opencode's own save did not reach the session's copy: before {before:?}, \
+         after {after:?}; {}",
+        crate::sandbox::text(&screen)
+            .chars()
+            .take(600)
+            .collect::<String>()
+    );
+    assert_eq!(
+        read(s.account().join("preferences/kv.json")),
+        store,
+        "the save reached the account"
+    );
+}
+
+/// A plugin holds its servers to `requirements.toml`, and omh's names none for
+/// any plugin but one that does not exist (`render::NO_PLUGIN`), so no plugin's
+/// server starts. Codex's driver turns plugins off, so every other turn is
+/// silent on it: this one turns them on, for a plugin left in the account and
+/// enabled in the session's own config.
+///
+/// The plugin's skill reaches the model, so the plugin did load. Its server
+/// does not start, and its tools are not offered.
+///
+/// Only for Codex.
+fn codex_plugin_servers(s: &Session) {
+    if s.harness.name != "codex" {
+        return;
+    }
+    const PLUGIN: &str = "~/.codex/plugins/cache/e2e/e2e-plant/1.0.0";
+    const MARK: &str = "/tmp/e2e-plugin-server-ran";
+    ok(
+        &s.sh(&format!(
+            "mkdir -p {PLUGIN}/.codex-plugin {PLUGIN}/skills/e2e-plant-skill && \
+             printf '%s' '{{\"name\":\"e2e-plant\",\"version\":\"1.0.0\",\"description\":\"e2e\"}}' > {PLUGIN}/.codex-plugin/plugin.json && \
+             printf '%s' '{{\"mcpServers\":{{\"e2e-plugin\":{{\"command\":\"sh\",\"args\":[\"-c\",\"touch {MARK}\"]}}}}}}' > {PLUGIN}/.mcp.json && \
+             printf '%s' '---\nname: e2e-plant-skill\ndescription: The e2e plugin loaded.\n---\n\nE2E-PLUGIN-SKILL\n' > {PLUGIN}/skills/e2e-plant-skill/SKILL.md && \
+             cp ~/.codex/config.toml /tmp/e2e-config-kept && \
+             printf '\n[plugins.\"e2e-plant@e2e\"]\nenabled = true\n' >> ~/.codex/config.toml"
+        )),
+        "leaving a plugin",
+    );
+    let turn = s.turn_with("Say hello.", &[], |argv| {
+        for arg in argv.iter_mut() {
+            if arg == "features.plugins=false" {
+                *arg = "features.plugins=true".to_string();
+            }
+        }
+    });
+    let started = s.sh(&format!("test -e {MARK}")).status.success();
+    ok(
+        &s.sh(&format!(
+            "cat /tmp/e2e-config-kept > ~/.codex/config.toml; rm -rf ~/.codex/plugins/cache/e2e {MARK}"
+        )),
+        "taking the plugin out",
+    );
+    ran(&turn);
+    let seen = Turn::seen(turn.asks()[0]);
+    assert!(
+        seen.contains("e2e-plant-skill"),
+        "the plugin did not load, so this proves nothing: {}",
+        turn.printed()
+    );
+    assert!(
+        !started && !seen.contains("e2e-plugin"),
+        "a plugin's server started or was offered: started {started}; {}",
+        turn.printed()
+    );
+}
+
+/// Claude's Monitor tool starts a shell command that isn't a `Bash` call. Since
+/// 2.1.314 a `before-tool` hook on the shell sees it all the same [CHANGELOG],
+/// and an `after-tool` hook does not: a hook that formats or checks after every
+/// command misses this one. The adapter's `[tools]` says so.
+///
+/// Pinned, so an upgrade that changes either says so. The command is what the
+/// hooks match on, and it leaves a file, so the turn did run it.
+///
+/// Only for Claude.
+fn claude_monitor(s: &Session) {
+    if s.harness.name != "claude" {
+        return;
+    }
+    let before = lines(s, "/tmp/e2e-monitor-before");
+    let after = lines(s, "/tmp/e2e-monitor-after");
+    let turn = s.turn(
+        "Watch it.",
+        &[serde_json::json!({ "tool": { "name": "Monitor", "args": {
+            "description": "e2e", "timeout_ms": 5000,
+            "command": "echo x >> /tmp/e2e-monitor-ran"
+        } } })],
+    );
+    ran(&turn);
+    assert!(
+        lines(s, "/tmp/e2e-monitor-ran") > 0,
+        "the Monitor call did not run its command, so this proves nothing: {}",
+        turn.printed()
+    );
+    assert_eq!(
+        lines(s, "/tmp/e2e-monitor-before"),
+        before + 1,
+        "a before-tool hook on the shell should see the command"
+    );
+    assert_eq!(
+        lines(s, "/tmp/e2e-monitor-after"),
+        after,
+        "an after-tool hook on the shell sees the command now: say so in [tools]"
     );
 }
 
@@ -1438,6 +1624,232 @@ db.close();"#;
             && crate::sandbox::text(&refused).contains("Read-only file system"),
         "a session wrote the account's approval cache: {}",
         crate::sandbox::text(&refused)
+    );
+}
+
+/// omp runs a key that starts with `!` (`ai/src/auth/cascade.ts`,
+/// `config/resolve-config-value.ts`), and its logins are rows in `agent.db`, in
+/// the account every session of it shares. So a session could leave a row that
+/// ran in the next, whatever mode either was in. It is left here from inside
+/// the session, as one would, for the provider this turn asks a key for and for
+/// two it only looks at.
+///
+/// The next start of omp finds the rows gone, says which, runs none of them,
+/// and leaves a key that is only a key.
+///
+/// A session writes the schema as freely as the rows, so the rest is what it
+/// could do to the database around such a row: a trigger that stops the delete
+/// or writes the row back, the table spelled in capitals, which is the same
+/// table to omp, and the key stored as bytes. And a database the check cannot
+/// trust stops omp: unreadable, or with something else where the table belongs.
+///
+/// Only for omp.
+fn omp_stored_keys(s: &Session) {
+    if s.harness.name != "omp" {
+        return;
+    }
+    const MARK: &str = "/tmp/e2e-stored-key-ran";
+    const COMMAND: &str = r#"{"key":"!touch /tmp/e2e-stored-key-ran; echo e2e","source":"login"}"#;
+    let logins = |program: &str| {
+        s.sh(&format!(
+            "node --no-warnings - <<'EOF'\n\
+             const db = new (require(\"node:sqlite\").DatabaseSync)(process.env.HOME + \"/.omp/agent/agent.db\");\n\
+             const add = (provider, data) => db.prepare(\"INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, 'api_key', ?)\").run(provider, data);\n\
+             const command = {COMMAND:?};\n\
+             {program}\n\
+             db.close();\nEOF\n"
+        ))
+    };
+    let read_back = || {
+        ok(
+            &logins(
+                "for (const row of db.prepare(\"SELECT provider, data FROM auth_credentials\").all()) console.log(row.provider, String(row.data));",
+            ),
+            "reading omp's logins back",
+        )
+    };
+    let clear = || {
+        ok(
+            &logins("db.prepare(\"DELETE FROM auth_credentials WHERE provider LIKE 'e2e-%' OR provider IN ('fake', 'anthropic', 'openai')\").run();"),
+            "clearing omp's logins",
+        )
+    };
+    let _ = s.sh(&format!("rm -f {MARK}"));
+    ok(
+        &s.turn("Say hello.", &[]).out,
+        "a turn, so omp has made its database",
+    );
+
+    ok(
+        &logins(
+            "for (const provider of [\"fake\", \"anthropic\", \"openai\"]) add(provider, command);\n\
+             add(\"e2e-plain\", JSON.stringify({ key: \"e2e-only-a-key\", source: \"login\" }));",
+        ),
+        "leaving a key in omp's logins",
+    );
+    let turn = s.turn("Say hello.", &[]);
+    let ran_it = s.sh(&format!("test -e {MARK}")).status.success();
+    let _ = s.sh(&format!("rm -f {MARK}"));
+    let left = read_back();
+    clear();
+    ran(&turn);
+    assert!(
+        !ran_it,
+        "a key left in omp's logins ran as a command: {}",
+        turn.printed()
+    );
+    assert!(
+        !left.contains("e2e-stored-key-ran") && left.contains("e2e-only-a-key"),
+        "the rows that run a command go, and a plain key stays: {left}"
+    );
+    let said = String::from_utf8_lossy(&turn.out.stderr);
+    for provider in ["fake", "anthropic", "openai"] {
+        assert!(
+            said.lines()
+                .any(|l| l.contains("removed the login for") && l.contains(provider)),
+            "omp's logins lost {provider} without a word: {said}"
+        );
+    }
+    assert!(
+        !said.contains("e2e-plain"),
+        "and a plain key is not mentioned: {said}"
+    );
+
+    for (how, around, undo) in [
+        (
+            "a trigger that stops the delete",
+            "CREATE TRIGGER e2e_keep BEFORE DELETE ON auth_credentials BEGIN SELECT RAISE(IGNORE); END;",
+            "DROP TRIGGER IF EXISTS e2e_keep;",
+        ),
+        (
+            "a trigger that writes the row back",
+            "CREATE TRIGGER e2e_back AFTER DELETE ON auth_credentials BEGIN \
+             INSERT INTO auth_credentials (provider, credential_type, data) \
+             VALUES (old.provider, old.credential_type, old.data); END;",
+            "DROP TRIGGER IF EXISTS e2e_back;",
+        ),
+        (
+            "the table spelled in capitals",
+            "ALTER TABLE auth_credentials RENAME TO e2e_t; ALTER TABLE e2e_t RENAME TO AUTH_CREDENTIALS;",
+            "ALTER TABLE AUTH_CREDENTIALS RENAME TO e2e_t; ALTER TABLE e2e_t RENAME TO auth_credentials;",
+        ),
+    ] {
+        ok(
+            &logins(&format!("add(\"fake\", command);\ndb.exec({around:?});")),
+            how,
+        );
+        let turn = s.turn("Say hello.", &[]);
+        let ran_it = s.sh(&format!("test -e {MARK}")).status.success();
+        let _ = s.sh(&format!("rm -f {MARK}"));
+        ok(&logins(&format!("db.exec({undo:?});")), how);
+        let left = read_back();
+        clear();
+        assert!(
+            !ran_it && !left.contains("e2e-stored-key-ran"),
+            "with {how}, the key ran or stayed: {left}; {}",
+            turn.printed()
+        );
+    }
+
+    ok(
+        &logins("add(\"e2e-bytes\", Buffer.from(command));"),
+        "leaving a key as bytes",
+    );
+    let _ = s.sh("omp --version");
+    let left = read_back();
+    clear();
+    assert!(
+        !left.contains("e2e-bytes"),
+        "a key stored as bytes stayed: {left}"
+    );
+
+    // The check drops omp's own triggers with any other. omp makes them again
+    // when it opens its logins, which a turn does and `--version` does not.
+    ran(&s.turn("Say hello.", &[]));
+    let triggers = ok(
+        &logins("console.log(db.prepare(\"SELECT count(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name = 'auth_change_revision_auth_credentials_insert'\").get().n);"),
+        "reading omp's own triggers",
+    );
+    assert_eq!(
+        triggers.trim(),
+        "1",
+        "omp did not get back the trigger the check dropped"
+    );
+
+    // Something else where the table belongs. It would answer a read and take
+    // no delete, so it is not to be read and trusted.
+    ok(
+        &logins(
+            "db.exec(\"ALTER TABLE auth_credentials RENAME TO e2e_t; CREATE VIEW auth_credentials AS SELECT * FROM e2e_t;\");",
+        ),
+        "putting a view where the table belongs",
+    );
+    let blind = s.sh("omp --version");
+    ok(
+        &logins("db.exec(\"DROP VIEW auth_credentials; ALTER TABLE e2e_t RENAME TO auth_credentials;\");"),
+        "putting the table back",
+    );
+    assert!(
+        !blind.status.success()
+            && crate::sandbox::text(&blind).contains("could not check this account"),
+        "a view in place of the logins let omp start: {}",
+        crate::sandbox::text(&blind)
+    );
+
+    // A row the check found and could not take: the table rebuilt so that its
+    // id is no key. And a trigger whose name is a statement, which goes no
+    // further than the name: it is not run, and omp does not start.
+    for (how, around, undo) in [
+        (
+            "a row with no id to delete it by",
+            "ALTER TABLE auth_credentials RENAME TO e2e_t; \
+             CREATE TABLE auth_credentials (id, provider, credential_type, data); \
+             INSERT INTO auth_credentials VALUES (NULL, 'fake', 'api_key', '{COMMAND}');",
+            "DROP TABLE auth_credentials; ALTER TABLE e2e_t RENAME TO auth_credentials;",
+        ),
+        (
+            "a trigger named as a statement",
+            "CREATE TRIGGER \"e2e_a; CREATE TABLE e2e_ran (a)\" AFTER DELETE ON auth_credentials BEGIN SELECT 1; END; \
+             CREATE TRIGGER e2e_a AFTER DELETE ON auth_credentials BEGIN SELECT 1; END;",
+            "DROP TRIGGER IF EXISTS e2e_a; DROP TRIGGER IF EXISTS \"e2e_a; CREATE TABLE e2e_ran (a)\";",
+        ),
+    ] {
+        let around = around.replace("{COMMAND}", COMMAND);
+        ok(&logins(&format!("db.exec({around:?});")), how);
+        let blind = s.sh("omp --version");
+        ok(&logins(&format!("db.exec({undo:?});")), how);
+        let ran_sql = ok(
+            &logins("console.log(db.prepare(\"SELECT count(*) AS n FROM sqlite_master WHERE name = 'e2e_ran'\").get().n);"),
+            how,
+        );
+        assert!(
+            !blind.status.success()
+                && crate::sandbox::text(&blind).contains("could not check this account")
+                && ran_sql.trim() == "0",
+            "with {how}, omp started or the name ran: {}",
+            crate::sandbox::text(&blind)
+        );
+    }
+
+    // A database the check cannot read is not a database with nothing in it.
+    // Nothing else starts omp here, so moving it aside is safe.
+    ok(
+        &s.sh(
+            "cd ~/.omp/agent && mkdir -p /tmp/e2e-kept && mv agent.db* /tmp/e2e-kept/ && \
+             echo not-a-database-at-all > agent.db",
+        ),
+        "putting something unreadable in omp's place",
+    );
+    let blind = s.sh("omp --version");
+    ok(
+        &s.sh("cd ~/.omp/agent && rm -f agent.db* && mv /tmp/e2e-kept/agent.db* ."),
+        "putting omp's logins back",
+    );
+    assert!(
+        !blind.status.success()
+            && crate::sandbox::text(&blind).contains("could not check this account"),
+        "a check that could not look let omp start: {}",
+        crate::sandbox::text(&blind)
     );
 }
 
