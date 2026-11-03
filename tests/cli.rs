@@ -157,10 +157,34 @@ impl Drop for Sandbox {
                 .args(["network", "rm", &network])
                 .output();
         }
-        for volume in named(&["volume", "ls", "--format", "{{.Name}}"]) {
+        // Round again until the volume has stayed gone. `omh init` starts the
+        // graph index in the background and does not wait for it, and its
+        // container carries no name of omh's: while it runs the volume will not
+        // go, and `docker run` can still be about to make it.
+        let volume = format!("omh-cache-{id}");
+        let mut gone_for = 0;
+        for _ in 0..30 {
+            let holding = Command::new("docker")
+                .args(["ps", "-aq", "--filter", &format!("volume={volume}")])
+                .output();
+            if let Ok(holding) = holding {
+                for container in String::from_utf8_lossy(&holding.stdout).split_whitespace() {
+                    let _ = Command::new("docker")
+                        .args(["rm", "-f", container])
+                        .output();
+                }
+            }
             let _ = Command::new("docker")
                 .args(["volume", "rm", "-f", &volume])
                 .output();
+            gone_for = match named(&["volume", "ls", "--format", "{{.Name}}"]).is_empty() {
+                true => gone_for + 1,
+                false => 0,
+            };
+            if gone_for == 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
 }
