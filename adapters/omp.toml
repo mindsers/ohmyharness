@@ -61,7 +61,8 @@ login = "run `/login` inside omp, then exit"
 # `settings.json` names modules omp imports, in its `extensions` list, and its
 # discovery reads the file as settings too. A module planted there was imported
 # when omp was started by hand in the e2e session, and not by the scripted turn,
-# for a reason not found. `mcp.json`, without the dot, is omh's own (below),
+# for a reason not found, so `tests/e2e` starts one at a terminal too and is red
+# without this mask. `mcp.json`, without the dot, is omh's own (below),
 # and masked in a session with no server. `instructions/` is discovered and
 # used by nothing, and a phrase planted there did not reach the model. An empty
 # `PERSONALITY.md` is a line in omp's log at every start; the other masks omp

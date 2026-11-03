@@ -78,6 +78,22 @@ const SCENARIOS: &[Scenario] = &[
         run: every_event,
     },
     Scenario {
+        name: "a shell hook sees a command Claude's Monitor starts before it runs, not after",
+        run: claude_monitor,
+    },
+    Scenario {
+        name: "a module settings.json names is not imported at a terminal either",
+        run: omp_at_a_terminal,
+    },
+    Scenario {
+        name: "opencode's own save from its screen lands in the session's copy",
+        run: opencode_own_save,
+    },
+    Scenario {
+        name: "a plugin's server does not start under omh's requirements",
+        run: codex_plugin_servers,
+    },
+    Scenario {
         name: "the memory server keeps what the model remembers, for the next turn",
         run: memory_round_trip,
     },
@@ -203,6 +219,14 @@ const SEED: &[(&str, &str)] = &[
     (
         ".omh/hooks/e2e-after-inject.json",
         r#"{"on":"after-tool","tools":["shell"],"when":"[ \"$OMH_TOOL_COMMAND\" = 'echo e2e-hooks' ]","inject":"E2E-AFTER-INJECT"}"#,
+    ),
+    (
+        ".omh/hooks/e2e-monitor-before.json",
+        r#"{"on":"before-tool","tools":["shell"],"when":"[ \"$OMH_TOOL_COMMAND\" = 'echo x >> /tmp/e2e-monitor-ran' ]","run":"echo x >> /tmp/e2e-monitor-before"}"#,
+    ),
+    (
+        ".omh/hooks/e2e-monitor-after.json",
+        r#"{"on":"after-tool","tools":["shell"],"when":"[ \"$OMH_TOOL_COMMAND\" = 'echo x >> /tmp/e2e-monitor-ran' ]","run":"echo x >> /tmp/e2e-monitor-after"}"#,
     ),
     (
         ".omh/hooks/e2e-end-run.json",
@@ -590,6 +614,164 @@ fn every_event(s: &Session) {
         s.harness.name,
         s.launched,
         turn.printed()
+    );
+}
+
+/// omp imports the modules its `settings.json` names when it is started at a
+/// terminal, and not in a scripted turn, for a reason not found. So
+/// `account_plants`, whose turns are scripted, cannot speak for that mask. This
+/// starts omp at a terminal, where it would be imported.
+///
+/// Only for omp.
+fn omp_at_a_terminal(s: &Session) {
+    if s.harness.name != "omp" {
+        return;
+    }
+    let screen = s.at_a_terminal("omp", "Tip:", &["\\0003", "\\0003"]);
+    let marks = ok(
+        &s.sh("ls /tmp/e2e-planted-module-* 2>/dev/null; true"),
+        "ls",
+    );
+    assert!(
+        !screen.stdout.is_empty(),
+        "omp drew nothing at a terminal, so this proves nothing: {}",
+        crate::sandbox::text(&screen)
+    );
+    assert!(
+        marks.trim().is_empty(),
+        "started at a terminal, omp loaded these from the account: {marks}"
+    );
+}
+
+/// opencode saves `kv.json` only from its screen, so no scripted turn reaches
+/// that save. Picking a theme there lands in the session's own copy, which is
+/// what a review reads, and nothing reaches the account.
+///
+/// Only for opencode.
+fn opencode_own_save(s: &Session) {
+    if s.harness.name != "opencode" {
+        return;
+    }
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+    let before = read(s.preferences("kv.json"));
+    let store = read(s.account().join("preferences/kv.json"));
+    let screen = s.at_a_terminal(
+        "opencode",
+        "Ask anything",
+        &[
+            "/", "t", "h", "e", "m", "e", "\\r", "\\0033[B", "\\0033[B", "\\r", "\\0003", "\\0003",
+        ],
+    );
+    let after = read(s.preferences("kv.json"));
+    std::fs::write(s.preferences("kv.json"), &before).unwrap();
+    assert!(
+        after != before && after.contains("\"theme\""),
+        "opencode's own save did not reach the session's copy: before {before:?}, \
+         after {after:?}; {}",
+        crate::sandbox::text(&screen)
+            .chars()
+            .take(600)
+            .collect::<String>()
+    );
+    assert_eq!(
+        read(s.account().join("preferences/kv.json")),
+        store,
+        "the save reached the account"
+    );
+}
+
+/// A plugin holds its servers to `requirements.toml`, and omh's names none for
+/// any plugin but one that does not exist (`render::NO_PLUGIN`), so no plugin's
+/// server starts. Codex's driver turns plugins off, so every other turn is
+/// silent on it: this one turns them on, for a plugin left in the account and
+/// enabled in the session's own config.
+///
+/// The plugin's skill reaches the model, so the plugin did load. Its server
+/// does not start, and its tools are not offered.
+///
+/// Only for Codex.
+fn codex_plugin_servers(s: &Session) {
+    if s.harness.name != "codex" {
+        return;
+    }
+    const PLUGIN: &str = "~/.codex/plugins/cache/e2e/e2e-plant/1.0.0";
+    const MARK: &str = "/tmp/e2e-plugin-server-ran";
+    ok(
+        &s.sh(&format!(
+            "mkdir -p {PLUGIN}/.codex-plugin {PLUGIN}/skills/e2e-plant-skill && \
+             printf '%s' '{{\"name\":\"e2e-plant\",\"version\":\"1.0.0\",\"description\":\"e2e\"}}' > {PLUGIN}/.codex-plugin/plugin.json && \
+             printf '%s' '{{\"mcpServers\":{{\"e2e-plugin\":{{\"command\":\"sh\",\"args\":[\"-c\",\"touch {MARK}\"]}}}}}}' > {PLUGIN}/.mcp.json && \
+             printf '%s' '---\nname: e2e-plant-skill\ndescription: The e2e plugin loaded.\n---\n\nE2E-PLUGIN-SKILL\n' > {PLUGIN}/skills/e2e-plant-skill/SKILL.md && \
+             cp ~/.codex/config.toml /tmp/e2e-config-kept && \
+             printf '\n[plugins.\"e2e-plant@e2e\"]\nenabled = true\n' >> ~/.codex/config.toml"
+        )),
+        "leaving a plugin",
+    );
+    let turn = s.turn_with("Say hello.", &[], |argv| {
+        for arg in argv.iter_mut() {
+            if arg == "features.plugins=false" {
+                *arg = "features.plugins=true".to_string();
+            }
+        }
+    });
+    let started = s.sh(&format!("test -e {MARK}")).status.success();
+    ok(
+        &s.sh(&format!(
+            "cat /tmp/e2e-config-kept > ~/.codex/config.toml; rm -rf ~/.codex/plugins/cache/e2e {MARK}"
+        )),
+        "taking the plugin out",
+    );
+    ran(&turn);
+    let seen = Turn::seen(turn.asks()[0]);
+    assert!(
+        seen.contains("e2e-plant-skill"),
+        "the plugin did not load, so this proves nothing: {}",
+        turn.printed()
+    );
+    assert!(
+        !started && !seen.contains("e2e-plugin"),
+        "a plugin's server started or was offered: started {started}; {}",
+        turn.printed()
+    );
+}
+
+/// Claude's Monitor tool starts a shell command that isn't a `Bash` call. Since
+/// 2.1.314 a `before-tool` hook on the shell sees it all the same [CHANGELOG],
+/// and an `after-tool` hook does not: a hook that formats or checks after every
+/// command misses this one. The adapter's `[tools]` says so.
+///
+/// Pinned, so an upgrade that changes either says so. The command is what the
+/// hooks match on, and it leaves a file, so the turn did run it.
+///
+/// Only for Claude.
+fn claude_monitor(s: &Session) {
+    if s.harness.name != "claude" {
+        return;
+    }
+    let before = lines(s, "/tmp/e2e-monitor-before");
+    let after = lines(s, "/tmp/e2e-monitor-after");
+    let turn = s.turn(
+        "Watch it.",
+        &[serde_json::json!({ "tool": { "name": "Monitor", "args": {
+            "description": "e2e", "timeout_ms": 5000,
+            "command": "echo x >> /tmp/e2e-monitor-ran"
+        } } })],
+    );
+    ran(&turn);
+    assert!(
+        lines(s, "/tmp/e2e-monitor-ran") > 0,
+        "the Monitor call did not run its command, so this proves nothing: {}",
+        turn.printed()
+    );
+    assert_eq!(
+        lines(s, "/tmp/e2e-monitor-before"),
+        before + 1,
+        "a before-tool hook on the shell should see the command"
+    );
+    assert_eq!(
+        lines(s, "/tmp/e2e-monitor-after"),
+        after,
+        "an after-tool hook on the shell sees the command now: say so in [tools]"
     );
 }
 

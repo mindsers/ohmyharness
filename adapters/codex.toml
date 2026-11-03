@@ -224,8 +224,9 @@ template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{
 # ChatGPT tokens [src]. The `omh-none` plugin entry holds every plugin's servers
 # to a list of their own, empty for any plugin not named
 # (`filter_plugin_mcp_servers_by_requirements` in
-# `codex-rs/core/src/config/mod.rs`) [src] — the e2e driver turns plugins off,
-# so nothing runs it. Never a `[hooks]` table: a requirements `managed_dir`
+# `codex-rs/core/src/config/mod.rs`) [src]: a plugin's skill loads and its server
+# does not start [e2e, in the one turn with plugins on; the driver's others turn
+# them off]. Never a `[hooks]` table: a requirements `managed_dir`
 # that differs from another layer's is a composition error, and Codex refuses
 # to start [src].
 #

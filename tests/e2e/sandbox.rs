@@ -382,6 +382,28 @@ impl Session {
         self.exec(&[], &["sh".into(), "-c".into(), command.into()])
     }
 
+    /// `command` at a terminal in the session, and what it drew: `script` makes
+    /// the terminal, at a size a screen can draw on. Each of `keys` is typed a
+    /// moment after the last, in `printf %b`'s spelling, one at a time, since a
+    /// screen takes several at once for a paste. What a harness does only on a
+    /// screen has no other way in. Cut off by `timeout` if it has not gone by
+    /// then.
+    ///
+    /// Typing starts once the screen has drawn `ready`. A key sent before that
+    /// is lost, and what is left of a slash command is a prompt to the model.
+    pub fn at_a_terminal(&self, command: &str, ready: &str, keys: &[&str]) -> Output {
+        const SCREEN: &str = "/tmp/e2e-screen";
+        let typed: String = keys
+            .iter()
+            .map(|key| format!("printf '%b' '{key}'; sleep 1; "))
+            .collect();
+        self.sh(&format!(
+            "rm -f {SCREEN}; (i=0; until grep -aq '{ready}' {SCREEN} 2>/dev/null || [ $i -ge 30 ]; \
+             do sleep 1; i=$((i + 1)); done; sleep 2; {typed}) | TERM=xterm-256color timeout 60 \
+             script -qfec 'stty rows 40 cols 120; exec {command}' {SCREEN} >/dev/null; cat {SCREEN}"
+        ))
+    }
+
     /// A file in the worktree, as the agent left it.
     pub fn read(&self, file: &str) -> Option<String> {
         std::fs::read_to_string(self.worktree().join(file)).ok()

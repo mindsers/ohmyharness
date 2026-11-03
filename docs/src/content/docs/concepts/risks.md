@@ -218,8 +218,9 @@ reaches no other. `tests/e2e` plants each in the account, along with the places
 the harness does not read from (`skills/`, `agents/`, `commands/`, prompts and
 output styles), and asserts that no planted phrase reaches the model and no
 planted module leaves its marker. It is red with the account's own mounted, as
-before — but for omp's `settings.json`, whose module only a start by hand
-imported. Nothing omh does puts your own there: your personal memory reaches a
+before. omp's `settings.json` needs omp started at a terminal, since a scripted
+turn does not import what it names, so `tests/e2e` starts one that way too.
+Nothing omh does puts your own there: your personal memory reaches a
 session as a rule you import into your catalogue. The cost is that a session
 cannot write Claude's personal memory.
 
