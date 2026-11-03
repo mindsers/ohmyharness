@@ -130,6 +130,10 @@ const SCENARIOS: &[Scenario] = &[
         run: omp_approvals,
     },
     Scenario {
+        name: "a command stored as a key in omp's logins does not run in the next session",
+        run: omp_stored_keys,
+    },
+    Scenario {
         name: "omh doctor passes in the session's repo",
         run: doctor,
     },
@@ -1395,6 +1399,75 @@ db.close();"#;
             && crate::sandbox::text(&refused).contains("Read-only file system"),
         "a session wrote the account's approval cache: {}",
         crate::sandbox::text(&refused)
+    );
+}
+
+/// omp runs a key that starts with `!` (`ai/src/auth/cascade.ts`,
+/// `config/resolve-config-value.ts`), and its logins are rows in `agent.db`, in
+/// the account every session of it shares. So a session could leave a row that
+/// ran in the next, whatever mode either was in. It is left here from inside
+/// the session, as one would, for the provider this turn asks a key for and for
+/// two it only looks at.
+///
+/// The next start of omp finds the rows gone, says which, runs none of them,
+/// and leaves a key that is only a key.
+///
+/// Only for omp.
+fn omp_stored_keys(s: &Session) {
+    if s.harness.name != "omp" {
+        return;
+    }
+    const MARK: &str = "/tmp/e2e-stored-key-ran";
+    const PLANT: &str = r#"const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.env.HOME + "/.omp/agent/agent.db");
+const add = db.prepare("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, 'api_key', ?)");
+const command = JSON.stringify({ key: "!touch /tmp/e2e-stored-key-ran; echo e2e", source: "login" });
+for (const provider of ["fake", "anthropic", "openai"]) add.run(provider, command);
+add.run("e2e-plain", JSON.stringify({ key: "e2e-only-a-key", source: "login" }));
+db.close();"#;
+    const LEFT: &str = r#"const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(process.env.HOME + "/.omp/agent/agent.db");
+for (const row of db.prepare("SELECT provider, data FROM auth_credentials").all()) console.log(row.provider, row.data);
+db.prepare("DELETE FROM auth_credentials WHERE provider IN ('fake', 'anthropic', 'openai', 'e2e-plain')").run();
+db.close();"#;
+    let _ = s.sh(&format!("rm -f {MARK}"));
+    ok(
+        &s.turn("Say hello.", &[]).out,
+        "a turn, so omp has made its database",
+    );
+    ok(
+        &s.sh(&format!("node - <<'EOF'\n{PLANT}\nEOF\n")),
+        "leaving a key in omp's logins",
+    );
+
+    let turn = s.turn("Say hello.", &[]);
+    let ran_it = s.sh(&format!("test -e {MARK}")).status.success();
+    let _ = s.sh(&format!("rm -f {MARK}"));
+    let left = ok(
+        &s.sh(&format!("node - <<'EOF'\n{LEFT}\nEOF\n")),
+        "reading omp's logins back",
+    );
+    ran(&turn);
+    assert!(
+        !ran_it,
+        "a key left in omp's logins ran as a command: {}",
+        turn.printed()
+    );
+    assert!(
+        !left.contains("e2e-stored-key-ran") && left.contains("e2e-only-a-key"),
+        "the rows that run a command go, and a plain key stays: {left}"
+    );
+    let said = String::from_utf8_lossy(&turn.out.stderr);
+    for provider in ["fake", "anthropic", "openai"] {
+        assert!(
+            said.lines()
+                .any(|l| l.contains("omp's logins") && l.contains(provider)),
+            "omp's logins lost {provider} without a word: {said}"
+        );
+    }
+    assert!(
+        !said.contains("e2e-plain"),
+        "and a plain key is not mentioned: {said}"
     );
 }
 
