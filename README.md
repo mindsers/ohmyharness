@@ -13,7 +13,7 @@ $ omh s01 attach        # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.16.1`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.16.2`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -22,7 +22,26 @@ architecture is built for and not yet a thing anybody has done.
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
 
-**`0.16.1` hides omp's approval cache from sessions.** A session runs omp in
+**`0.16.2` keeps every edit `omh upgrade` replaces, and stops a command stored
+as an omp login from running in the next session.** `omh upgrade` saved a file
+it replaced as `.yours`, over whatever was there, so the next release to change
+that file wrote omh's own older copy over the edit it had saved. A saved copy is
+never written over now: a second edit goes to `.yours.1`, and the line names the
+file. omh also records what it wrote, so a file nobody edited is replaced without
+a word instead of being called yours. The first upgrade from 0.16.1 has no record
+yet, so it keeps a copy of each managed file this release changed —
+`claude.toml`, `codex.toml` and `omp.toml` — and says it cannot tell whether you
+edited it.
+
+An API key in omp's logins that starts with `!` runs through a shell, and the
+logins are in the account every session shares and can write, so a key one
+session left ran in the next, in `yolo` too. Every start of omp now goes through
+a check that deletes such a login, names its provider, and does not start omp
+when it cannot look. A `!` key you stored yourself goes too. Two sessions on one
+account at the same time can still race it. `omh upgrade` rebuilds the omp image,
+and a running session restarts once, on its next launch.
+
+**0.16.1 hid omp's approval cache from sessions.** A session runs omp in
 `yolo`, its default, which asks about nothing, and that has not changed. A
 session that opted out into `tools.approvalMode: always-ask-cached` kept its
 grants in `~/.omp/agent/approval-cache.db`, in the account, so a grant one
