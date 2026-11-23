@@ -126,7 +126,7 @@ jobs:
         with:
           fetch-depth: 0 # each page shows when it last changed, read from git
       - name: install node and pnpm, at the versions docs/mise.toml pins
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
         with:
           working_directory: docs
       - name: install the site's dependencies, exactly as locked
@@ -176,4 +176,4 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: check every crate in the lock
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
